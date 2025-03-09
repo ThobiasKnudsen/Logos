@@ -86,7 +86,7 @@ void _debug_CrashFunction(int sig, siginfo_t *info, void *context) {
 
 __attribute__((constructor(101)))
 void debug_Init() {
-	debug_data.all_allocs = malloc(256*sizeof(AllocTracking));
+	debug_data.all_allocs = calloc(256, sizeof(AllocTracking));
 	if (debug_data.all_allocs == NULL) {
 		printf("ERROR | debug_data.all_allocs = malloc(2048*sizeof(DebugData));\n");
 		exit(EXIT_FAILURE);
@@ -96,13 +96,11 @@ void debug_Init() {
     debug_data.all_allocs_count = 0;
     debug_data.start_time_ms = (unsigned int)(clock() * 1000 / CLOCKS_PER_SEC);
 
-    debug_data.code_location = malloc(2048 * sizeof(char));
+    debug_data.code_location = calloc(2048, sizeof(char));
     if (debug_data.code_location == NULL) {
 		printf("ERROR | debug_data.code_location = malloc(2048 * sizeof(char));\n");
 		exit(EXIT_FAILURE);
     }
-
-	memset(debug_data.code_location, 0, 2048 * sizeof(char));
     debug_data.code_location_size = 2048;
 
 
@@ -130,51 +128,46 @@ void debug_Printf(
 	unsigned int current_time = (unsigned int)(clock() * 1000 / CLOCKS_PER_SEC);
 	printf("%dms %s %s:%ld | %s", current_time-debug_data.start_time_ms, debug_data.code_location, file, line, message);
 }
-void* debug_Malloc(
-	size_t size, 
-	size_t line, 
-	const char* file) 
-{
-	while (debug_data.all_allocs_count >= debug_data.all_allocs_size) {
-		debug_data.all_allocs_size *= 2;
-		void* tmp = realloc(debug_data.all_allocs, debug_data.all_allocs_size * sizeof(AllocTracking));
-		if (!tmp) {
-			fprintf(stderr, "ERROR | Allocation failed at %s:%zu during realloc.\n", file, line);
-			exit(EXIT_FAILURE);
-		}
-		debug_data.all_allocs = tmp;
-	}
+void* debug_Malloc(size_t size, size_t line, const char* file) {
+    // Expand allocation tracking array if necessary.
+    while (debug_data.all_allocs_count >= debug_data.all_allocs_size) {
+        size_t old_size = debug_data.all_allocs_size;
+        debug_data.all_allocs_size *= 2;
+        void* tmp = realloc(debug_data.all_allocs, debug_data.all_allocs_size * sizeof(AllocTracking));
+        if (!tmp) {
+            fprintf(stderr, "ERROR | Allocation failed at %s:%zu during realloc.\n", file, line);
+            exit(EXIT_FAILURE);
+        }
+        // Zero-initialize the newly allocated portion so that file pointers start as NULL.
+        memset((char*)tmp + old_size * sizeof(AllocTracking), 0,
+               (debug_data.all_allocs_size - old_size) * sizeof(AllocTracking));
+        debug_data.all_allocs = tmp;
+    }
 
-	void* tmp = malloc(size);
-	if (!tmp) {
-		fprintf(stderr, "ERROR | Allocation failed at %s:%zu during malloc.\n", file, line);
-		exit(EXIT_FAILURE);
-	}
+    // Allocate the requested memory.
+    void* ptr = malloc(size);
+    if (!ptr) {
+        fprintf(stderr, "ERROR | Allocation failed at %s:%zu during malloc.\n", file, line);
+        exit(EXIT_FAILURE);
+    }
 
-	debug_data.all_allocs[debug_data.all_allocs_count].ptr = tmp;
-	debug_data.all_allocs[debug_data.all_allocs_count].size_bytes = size;
-	debug_data.all_allocs[debug_data.all_allocs_count].line = line;
+    // Record the allocation.
+    AllocTracking* current = &debug_data.all_allocs[debug_data.all_allocs_count];
+    current->ptr = ptr;
+    current->size_bytes = size;
+    current->line = line;
 
-	size_t string_length = strlen(debug_data.code_location) + strlen(file) + 2;
-	if (!debug_data.all_allocs[debug_data.all_allocs_count].file) {
-		debug_data.all_allocs[debug_data.all_allocs_count].file = malloc(string_length);
-		if (!debug_data.all_allocs[debug_data.all_allocs_count].file) {
-			fprintf(stderr, "ERROR | debug.h debug_Malloc debug_data.all_allocs[debug_data.all_allocs_count].file=malloc(byte_size);\n");
-			exit(EXIT_FAILURE);
-		}
-	}
-	else {
-		tmp = realloc(debug_data.all_allocs[debug_data.all_allocs_count].file, string_length);
-		if (!tmp) {
-			fprintf(stderr, "ERROR | debug.h debug_Malloc tmp=realloc(debug_data.all_allocs[debug_data.all_allocs_count].file,byte_size);\n");
-			exit(EXIT_FAILURE);
-		}
-		debug_data.all_allocs[debug_data.all_allocs_count].file = tmp;
-	}
-	sprintf(debug_data.all_allocs[debug_data.all_allocs_count].file, "%s %s", debug_data.code_location, file);
+    size_t string_length = strlen(debug_data.code_location) + strlen(file) + 2;
+    // Instead of reallocating a possibly uninitialized pointer, always allocate new space.
+    current->file = malloc(string_length);
+    if (!current->file) {
+        fprintf(stderr, "ERROR | debug_Malloc failed to allocate file string at %s:%zu\n", file, line);
+        exit(EXIT_FAILURE);
+    }
+    sprintf(current->file, "%s %s", debug_data.code_location, file);
 
-	debug_data.all_allocs_count++;
-	return debug_data.all_allocs[debug_data.all_allocs_count-1].ptr; // -1 because it is itterated once
+    debug_data.all_allocs_count++;
+    return ptr;
 }
 void* debug_Realloc(
 	void* ptr, 

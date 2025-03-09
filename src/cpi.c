@@ -109,18 +109,18 @@ typedef struct CPI_Shader {
 #if defined(DEBUG)
 	long long   					id;
 #endif
-    void*                           p_glsl_code;
+    char*                           p_glsl_code;
     void*                           p_spv_code;
     unsigned int                    spv_code_size;
     unsigned int                    glsl_code_size;
     const char*  					entrypoint;
 
-	char*  							shaderc_compiler_path;
+	int  							shaderc_compiler_index;
     shaderc_shader_kind             shader_kind;
 
     SpvReflectShaderModule          reflect_shader_module;
 
-	char*   						gpu_device_path;
+	int   							gpu_device_index;
     SDL_GPUShader*    				p_sdl_shader;
 } CPI_Shader;
 
@@ -128,8 +128,8 @@ typedef struct CPI_GraphicsPipeline {
 #if defined(DEBUG)
 	long long   					id;
 #endif
-	char*  							vertex_shader_path;
-	char* 							fragment_shader_path;
+	int  							vertex_shader_index;
+	int 							fragment_shader_index;
 	SDL_GPUGraphicsPipeline* 		p_sdl_pipeline;
 } CPI_GraphicsPipeline;
 
@@ -190,7 +190,7 @@ static Type cpi_graphics_pipeline_type;
 static Type cpi_computerpipeline_type;
 static Type cpi_shader_type;
 
-static Vec g_vec = {0};
+static Vec* g_vec = NULL;
 #ifdef DEBUG
 	SDL_Mutex*  			g_unique_id_mutex = NULL;
 	unsigned long long  	g_unique_id = 0;
@@ -209,14 +209,15 @@ void cpi_Initialize()
 		DEBUG_ASSERT(!g_unique_id_mutex, "not NULL pointer");
 		DEBUG_SCOPE(g_unique_id_mutex = SDL_CreateMutex());
 	#endif
-	DEBUG_SCOPE(g_vec = vec_Create(NULL, vec_type));
+	DEBUG_SCOPE(g_vec = alloc(NULL, sizeof(Vec)));
+	DEBUG_SCOPE(*g_vec = vec_Create(NULL, vec_type));
 
 	// You have to set the types that needs to be destroyed first, first
-	DEBUG_SCOPE(cpi_window_type = type_Create("CPI_Window", sizeof(CPI_Window), cpi_Window_Destructor));
-	DEBUG_SCOPE(cpi_shaderc_compiler_type = type_Create("CPI_ShadercCompiler", sizeof(CPI_ShadercCompiler), cpi_ShadercCompiler_Destructor));
-	DEBUG_SCOPE(cpi_shader_type = type_Create("CPI_Shader", sizeof(CPI_Shader), cpi_Shader_Destructor));
-	DEBUG_SCOPE(cpi_graphics_pipeline_type = type_Create("CPI_GraphicsPipeline", sizeof(CPI_GraphicsPipeline), cpi_GraphicsPipeline_Destructor));
-	DEBUG_SCOPE(cpi_gpu_device_type = type_Create("CPI_GPUDevice", sizeof(CPI_GPUDevice), cpi_GPUDevice_Destructor));
+	DEBUG_SCOPE(cpi_window_type = type_Create_Safe("CPI_Window", sizeof(CPI_Window), cpi_Window_Destructor));
+	DEBUG_SCOPE(cpi_shaderc_compiler_type = type_Create_Safe("CPI_ShadercCompiler", sizeof(CPI_ShadercCompiler), cpi_ShadercCompiler_Destructor));
+	DEBUG_SCOPE(cpi_shader_type = type_Create_Safe("CPI_Shader", sizeof(CPI_Shader), cpi_Shader_Destructor));
+	DEBUG_SCOPE(cpi_graphics_pipeline_type = type_Create_Safe("CPI_GraphicsPipeline", sizeof(CPI_GraphicsPipeline), cpi_GraphicsPipeline_Destructor));
+	DEBUG_SCOPE(cpi_gpu_device_type = type_Create_Safe("CPI_GPUDevice", sizeof(CPI_GPUDevice), cpi_GPUDevice_Destructor));
 
 	DEBUG_SCOPE(bool result = SDL_Init(SDL_INIT_VIDEO));
 	DEBUG_ASSERT(result, "ERROR: failed to initialize SDL3: %s", SDL_GetError());
@@ -227,42 +228,38 @@ void cpi_Initialize()
 // ===============================================================================================================
 // Window
 // ===============================================================================================================
-char* cpi_Window_Create(
+int cpi_Window_Create(
 	unsigned int width,
 	unsigned int height,
 	const char* title)
 {
 	DEBUG_ASSERT(title, "title is NULL");
-	DEBUG_SCOPE(int window_vec_index = vec_UpsertIndexOfFirstVecWithType_SafeWrite(&g_vec, cpi_window_type))
-	DEBUG_SCOPE(Vec* p_window_vec = vec_GetAtVaArgs_LockWrite(&g_vec, 1, window_vec_index));
-	DEBUG_ASSERT(vec_IsValid_UnsafeRead(p_window_vec), "window vec is not valid");
-	DEBUG_SCOPE(int window_index = vec_UpsertIndexOfNullElement_SafeWrite(p_window_vec));
-	DEBUG_SCOPE(CPI_Window* p_window = (CPI_Window*)vec_GetAtVaArgs_LockWrite(p_window_vec, 1, window_index));
+	Vec** pp_vec = vec_MoveStart(g_vec);
+	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_vec));
+	DEBUG_SCOPE(int window_vec_index = vec_UpsertVecWithType_UnsafeWrite(*pp_vec, cpi_window_type));
+	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_vec));
+	DEBUG_SCOPE(vec_MoveToIndex(pp_vec, window_vec_index, cpi_window_type));
+	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_vec));
+	DEBUG_SCOPE(int window_index = vec_UpsertNullElement_UnsafeWrite(*pp_vec, cpi_window_type));
+	DEBUG_SCOPE(CPI_Window* p_window = (CPI_Window*)vec_GetElement_UnsafeRead(*pp_vec, window_index, cpi_window_type));
 	DEBUG_ASSERT(p_window, "NULL pointer");
 	DEBUG_ASSERT(!p_window->p_sdl_window, "INTERNAL ERROR: sdl window should be NULL");
 	DEBUG_SCOPE(p_window->p_sdl_window = SDL_CreateWindow(title, width, height, SDL_WINDOW_RESIZABLE));
 	DEBUG_ASSERT(p_window->p_sdl_window, "ERROR: failed to create window: %s", SDL_GetError());
-
 	#ifdef DEBUG
 		SDL_LockMutex(g_unique_id_mutex);
 		p_window->id = g_unique_id++;
 		SDL_UnlockMutex(g_unique_id_mutex);
 	#endif
+	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_vec));
+	DEBUG_SCOPE(vec_MoveEnd(pp_vec));
 
-	DEBUG_SCOPE(ASSERT(p_window == vec_GetAtVaArgs_UnlockWrite(p_window_vec, 1, window_index), "unlocked write for wrong element"));
-	DEBUG_SCOPE(ASSERT(p_window_vec == vec_GetAtVaArgs_UnlockWrite(&g_vec, 1, window_vec_index), "unlocked write for wrong element"));
-
-    DEBUG_SCOPE(char* return_path = vec_Path_FromVaArgs(2, window_vec_index, window_index));
-    DEBUG_SCOPE(ASSERT(vec_IsValidAtPath_SafeRead(&g_vec, cpi_window_type, return_path), "newly created path is not valid")); 
     printf("SUCCESSFULLY created window\n");
-	return return_path;
+	return window_index;
 }
 void cpi_Window_Show(
-	char* window_path) 
+	int window_index) 
 {
-	vec_LockRead(&g_vec);
-	vec_Print_UnsafeRead(&g_vec, 0, 1);
-	vec_UnlockRead(&g_vec);
 	SDL_Event event;
     bool quit = false;
     while (!quit) {
@@ -289,51 +286,53 @@ void cpi_Window_Destructor(void* p_void) {
 	memset(p_window, 0, sizeof(CPI_Window));
 }
 void cpi_Window_Destroy(
-	char** p_window_path)
+	int* p_window_index)
 {
-	DEBUG_ASSERT(p_window_path, "NULL pointer");
-	DEBUG_ASSERT(vec_IsValidAtPath_SafeRead(&g_vec, cpi_window_type, *p_window_path), "UNVALID WINDOW HANDLE");
-	DEBUG_SCOPE(CPI_Window* p_window = vec_GetAtPath_LockWrite(&g_vec, *p_window_path));
+	DEBUG_ASSERT(p_window_index, "NULL pointer");
+	DEBUG_SCOPE(Vec** pp_vec = vec_MoveStart(g_vec));
+	DEBUG_SCOPE(int window_vec_index = vec_GetVecWithType_UnsafeRead(*pp_vec, cpi_window_type));
+	DEBUG_SCOPE(vec_MoveToIndex(pp_vec, window_vec_index, cpi_window_type));
+	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_vec));
+	DEBUG_SCOPE(CPI_Window* p_window = (CPI_Window*)vec_GetElement_UnsafeRead(*pp_vec, *p_window_index, cpi_window_type));
 	DEBUG_SCOPE(cpi_Window_Destructor(p_window));
-	DEBUG_SCOPE(ASSERT(p_window == vec_GetAtPath_UnlockWrite(&g_vec, *p_window_path), "unlocked write for wrong element"));
-	DEBUG_SCOPE(free(*p_window_path));
-	*p_window_path = NULL;
+	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_vec));
+	DEBUG_SCOPE(vec_MoveEnd(pp_vec));
+	*p_window_index = 0;
 	printf("SUCCESSFULLY destroyed window\n");
 }
 
 // ===============================================================================================================
 // Shaderc Compiler
 // ===============================================================================================================
-char* cpi_ShadercCompiler_GetPath() 
+int cpi_ShadercCompiler_GetIndex() 
 {
 	DEBUG_SCOPE(SDL_ThreadID this_thread_id = SDL_GetCurrentThreadID());
+	printf("?====================================================================================\n");
+
 
 	// Check if a shaderc compiler already exists for this thread
-	DEBUG_SCOPE(unsigned short shaderc_compiler_vec_index = vec_UpsertIndexOfFirstVecWithType_SafeWrite(&g_vec, cpi_shaderc_compiler_type));
-	DEBUG_SCOPE(Vec* p_sub_vec = vec_GetAtVaArgs_LockRead(&g_vec, 1, shaderc_compiler_vec_index));
-	DEBUG_ASSERT(p_sub_vec, "NULL pointer");
-	DEBUG_SCOPE(unsigned int count = vec_GetCount_UnsafeRead(p_sub_vec));
-	DEBUG_SCOPE(ASSERT(p_sub_vec == vec_GetAtVaArgs_UnlockRead(&g_vec, 1, shaderc_compiler_vec_index), "unlocked read for wrong element"));
+	DEBUG_SCOPE(Vec** pp_vec = vec_MoveStart(g_vec));
+	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_vec));
+	DEBUG_SCOPE(int shaderc_compiler_vec_index = vec_UpsertVecWithType_UnsafeWrite(*pp_vec, cpi_shaderc_compiler_type));
+	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_vec));
+	DEBUG_SCOPE(vec_MoveToIndex(pp_vec, shaderc_compiler_vec_index, cpi_shaderc_compiler_type));
+	DEBUG_SCOPE(unsigned int count = vec_GetCount_UnsafeRead(*pp_vec));
 	if (count >= 1) {
-		DEBUG_SCOPE(CPI_ShadercCompiler* p_compiler = vec_GetAtVaArgs_LockWrite(&g_vec, 2, shaderc_compiler_vec_index, 0));
-		DEBUG_ASSERT(p_compiler, "NULL pointer");
 		for (unsigned short i = 0; i < count; ++i) {
+			DEBUG_SCOPE(CPI_ShadercCompiler* p_compiler = (CPI_ShadercCompiler*)vec_GetElement_UnsafeRead(*pp_vec, i, cpi_shaderc_compiler_type));
 			if (p_compiler[i].thread_id == this_thread_id) {
-				DEBUG_SCOPE(ASSERT(p_compiler == vec_GetAtVaArgs_UnlockWrite(&g_vec, 2, shaderc_compiler_vec_index, 0), "unlocked write for wrong element\n"));
-				DEBUG_SCOPE(char* path = vec_Path_FromVaArgs(2, shaderc_compiler_vec_index, i));
-				DEBUG_ASSERT(vec_IsValidAtPath_SafeRead(&g_vec, cpi_shaderc_compiler_type, path), "path is invalid");
-				return path;
+				DEBUG_SCOPE(vec_MoveEnd(pp_vec));
+				return i;
 			}
 		}
-		DEBUG_SCOPE(ASSERT(p_compiler == vec_GetAtVaArgs_UnlockWrite(&g_vec, 2, shaderc_compiler_vec_index, 0), "unlocked write for wrong element\n"));
 	}
 		
 	// at this point a shaderc compiler doesn't exist for this thread so the following will create it
-	DEBUG_SCOPE(Vec* p_shaderc_compiler_vec = vec_GetAtVaArgs_LockWrite(&g_vec, 1, shaderc_compiler_vec_index));
-	DEBUG_ASSERT(vec_IsValid_UnsafeRead(p_shaderc_compiler_vec), "window vec is not valid");
-	DEBUG_SCOPE(int shaderc_compiler_index = vec_UpsertIndexOfNullElement_SafeWrite(p_shaderc_compiler_vec));
-	DEBUG_SCOPE(CPI_ShadercCompiler* p_compiler = (CPI_ShadercCompiler*)vec_GetAtVaArgs_LockWrite(p_shaderc_compiler_vec, 1, shaderc_compiler_index));
-	DEBUG_ASSERT(p_compiler, "NULL pointer");
+	DEBUG_SCOPE(vec_MoveToIndex(pp_vec, -1, vec_type));
+	DEBUG_SCOPE(vec_MoveToIndex(pp_vec, shaderc_compiler_vec_index, cpi_shaderc_compiler_type));
+	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_vec));
+	DEBUG_SCOPE(int shaderc_compiler_index = vec_UpsertNullElement_UnsafeWrite(*pp_vec, cpi_shaderc_compiler_type));
+	DEBUG_SCOPE(CPI_ShadercCompiler* p_compiler = (CPI_ShadercCompiler*)vec_GetElement_UnsafeRead(*pp_vec, shaderc_compiler_index, cpi_shaderc_compiler_type));
 	p_compiler->thread_id = this_thread_id;
     DEBUG_SCOPE(p_compiler->shaderc_compiler = shaderc_compiler_initialize());
     DEBUG_ASSERT(p_compiler->shaderc_compiler, "failed to initialize\n ");
@@ -345,12 +344,11 @@ char* cpi_ShadercCompiler_GetPath()
     #else 
     	DEBUG_ASSERT(false, "OS not supported yet\n");
     #endif
-    DEBUG_SCOPE(ASSERT(p_compiler == vec_GetAtVaArgs_UnlockWrite(p_shaderc_compiler_vec, 1, shaderc_compiler_index), "unlocked write for wrong element\n"));
-    DEBUG_SCOPE(ASSERT(p_compiler == vec_GetAtVaArgs_UnlockWrite(&g_vec,				 1, shaderc_compiler_vec_index), "unlocked write for wrong element\n"));
-    DEBUG_SCOPE(char* return_path = vec_Path_FromVaArgs(2, shaderc_compiler_vec_index, shaderc_compiler_index));
-    DEBUG_SCOPE(ASSERT(vec_IsValidAtPath_SafeRead(&g_vec, cpi_shaderc_compiler_type, return_path), "newly created shaderc compiler path is not valid"));
+	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_vec));
+
+    DEBUG_SCOPE(vec_MoveEnd(pp_vec));
     printf("SUCCESSFULLY created shaderc compiler\n");
-    return return_path;
+    return shaderc_compiler_index;
 }
 void cpi_ShadercCompiler_Destructor(void* p_void) {
 	CPI_ShadercCompiler* p_shaderc_compiler = (CPI_ShadercCompiler*)p_void;
@@ -366,38 +364,42 @@ void cpi_ShadercCompiler_Destructor(void* p_void) {
     shaderc_compile_options_release(p_shaderc_compiler->shaderc_options);
     memset(p_shaderc_compiler, 0, sizeof(CPI_ShadercCompiler));
 }
-void cpi_ShadercCompiler_Destroy(char** p_shaderc_compiler_path) {
-    ASSERT(p_shaderc_compiler_path, "NULL pointer");
-    ASSERT(vec_IsValidAtPath_SafeRead(&g_vec, cpi_shaderc_compiler_type, *p_shaderc_compiler_path), "*p_shaderc_compiler_path is not valid");
-
-    DEBUG_SCOPE(CPI_ShadercCompiler* p_compiler = (CPI_ShadercCompiler*)vec_GetAtPath_LockWrite(&g_vec, *p_shaderc_compiler_path));
-
+void cpi_ShadercCompiler_Destroy(int* p_shaderc_compiler_index) {
+    DEBUG_SCOPE(ASSERT(p_shaderc_compiler_index, "NULL pointer"));
+    DEBUG_SCOPE(Vec** pp_vec = vec_MoveStart(g_vec));
+    DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_vec));
+    DEBUG_SCOPE(int shaderc_compiler_vec_index = vec_GetVecWithType_UnsafeRead(*pp_vec, cpi_shaderc_compiler_type));
+    DEBUG_SCOPE(CPI_ShadercCompiler* p_compiler = (CPI_ShadercCompiler*)vec_GetElement_UnsafeRead(*pp_vec, *p_shaderc_compiler_index, cpi_shaderc_compiler_type));
     DEBUG_SCOPE(cpi_ShadercCompiler_Destructor(p_compiler));
-
-    DEBUG_ASSERT(p_compiler == vec_GetAtPath_UnlockWrite(&g_vec, *p_shaderc_compiler_path), "unlocked write for wrong element");
-
-    free(*p_shaderc_compiler_path);
-    *p_shaderc_compiler_path = NULL;
+    DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_vec));
+   	DEBUG_SCOPE(vec_MoveEnd(pp_vec));
+    *p_shaderc_compiler_index = 0;
 }
 
 // ===============================================================================================================
 // GPUDevice
 // ===============================================================================================================
-char* cpi_GPUDevice_Create() 
+int cpi_GPUDevice_Create() 
 {
-	DEBUG_SCOPE(int gpu_device_vec_index = vec_UpsertIndexOfFirstVecWithType_SafeWrite(&g_vec, cpi_gpu_device_type));
-	DEBUG_SCOPE(Vec* p_gpu_device_vec = vec_GetAtVaArgs_LockWrite(&g_vec, 1, gpu_device_vec_index));
-	DEBUG_ASSERT(vec_IsValid_UnsafeRead(p_gpu_device_vec), "window vec is not valid");
-	DEBUG_SCOPE(int gpu_device_index = vec_UpsertIndexOfNullElement_SafeWrite(p_gpu_device_vec));
-	DEBUG_SCOPE(CPI_GPUDevice* p_gpu_device = vec_GetAtVaArgs_LockWrite(p_gpu_device_vec, 1, gpu_device_index));
+	ASSERT(vec_IsValid_UnsafeRead(g_vec), "invlaid vec");
+	DEBUG_SCOPE(Vec** pp_vec = vec_MoveStart(g_vec));
+	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_vec));
+	DEBUG_SCOPE(int gpu_device_vec_index = vec_UpsertVecWithType_UnsafeWrite(*pp_vec, cpi_gpu_device_type));
+	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_vec));
+	DEBUG_SCOPE(vec_MoveToIndex(pp_vec, gpu_device_vec_index, cpi_gpu_device_type));
+	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_vec));
+	DEBUG_SCOPE(int gpu_device_index = vec_UpsertNullElement_UnsafeWrite(*pp_vec, cpi_gpu_device_type));
+	DEBUG_SCOPE(CPI_GPUDevice* p_gpu_device = (CPI_GPUDevice*)vec_GetElement_UnsafeRead(*pp_vec, gpu_device_index, cpi_gpu_device_type));
 
 	DEBUG_ASSERT(!p_gpu_device->p_gpu_device, "pointer should be NULL");
 
 	#ifdef __linux__
 		#ifdef DEBUG
 			DEBUG_SCOPE(p_gpu_device->p_gpu_device = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV, true, NULL));
+			printf("GPU Backend: %s\n", SDL_GetGPUDeviceDriver(p_gpu_device->p_gpu_device)); 
 		#else 
 			DEBUG_SCOPE(p_gpu_device->p_gpu_device = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV, false, NULL));
+			printf("GPU Backend: %s\n", SDL_GetGPUDeviceDriver(p_gpu_device->p_gpu_device)); 
 		#endif // LCPI_DEBUG
 	#elif defined(_WIN64)
 		DEBUG_ASSERT(false, "windows 64-bit is not supported yet\n");
@@ -421,13 +423,11 @@ char* cpi_GPUDevice_Create()
 		p_gpu_device->id = g_unique_id++;
 		SDL_UnlockMutex(g_unique_id_mutex);
 	#endif 
-	DEBUG_SCOPE(ASSERT(p_gpu_device == vec_GetAtVaArgs_UnlockWrite(p_gpu_device_vec, 1, gpu_device_index), "unlocked write for wrong element\n"));
-	DEBUG_SCOPE(ASSERT(p_gpu_device_vec == vec_GetAtVaArgs_UnlockWrite(&g_vec, 1, gpu_device_vec_index), "unlocked write for wrong element\n"));
+	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_vec));
+	DEBUG_SCOPE(vec_MoveEnd(pp_vec));
 
-	DEBUG_SCOPE(char* return_path = vec_Path_FromVaArgs(2, gpu_device_vec_index, gpu_device_index));
-	DEBUG_SCOPE(ASSERT(vec_IsValidAtPath_SafeRead(&g_vec, cpi_gpu_device_type, return_path), "newly created path is not valid"));
 	printf("SUCCESSFULLY created gpu device\n");
-	return return_path;
+	return gpu_device_index;
 }
 void cpi_GPUDevice_Destructor(void* p_void) {
 	CPI_GPUDevice* p_gpu_device = (CPI_GPUDevice*)p_void;
@@ -444,16 +444,17 @@ void cpi_GPUDevice_Destructor(void* p_void) {
 	DEBUG_SCOPE(SDL_DestroyGPUDevice(p_gpu_device->p_gpu_device));
 	memset(p_gpu_device, 0, sizeof(CPI_GPUDevice));
 }
-void cpi_GPUDevice_Destroy(char** p_gpu_device_path) {
-	DEBUG_ASSERT(p_gpu_device_path, "NULL pointer");
-	DEBUG_ASSERT(vec_IsValidAtPath_SafeRead(&g_vec, cpi_gpu_device_type, *p_gpu_device_path), "gpu device path is invalid");
-
-    DEBUG_SCOPE(CPI_GPUDevice* p_gpu_device = (CPI_GPUDevice*)vec_GetAtPath_LockWrite(&g_vec, *p_gpu_device_path));
+void cpi_GPUDevice_Destroy(int* p_gpu_device_index) {
+	DEBUG_ASSERT(p_gpu_device_index, "NULL pointer");
+	DEBUG_SCOPE(Vec** pp_vec = vec_MoveStart(g_vec));
+	DEBUG_SCOPE(int gpu_device_vec_index = vec_GetVecWithType_UnsafeRead(*pp_vec, cpi_gpu_device_type));
+	DEBUG_SCOPE(vec_MoveToIndex(pp_vec, gpu_device_vec_index, cpi_gpu_device_type));
+	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_vec));
+    DEBUG_SCOPE(CPI_GPUDevice* p_gpu_device = (CPI_GPUDevice*)vec_GetElement_UnsafeRead(*pp_vec, *p_gpu_device_index, cpi_gpu_device_type));
     DEBUG_SCOPE(cpi_GPUDevice_Destructor(p_gpu_device->p_gpu_device));
-    DEBUG_ASSERT(p_gpu_device == vec_GetAtPath_UnlockWrite(&g_vec, *p_gpu_device_path), "unlocked write for wrong element");
-
-    free(*p_gpu_device_path);
-    *p_gpu_device_path = NULL;
+	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_vec));
+    DEBUG_SCOPE(vec_MoveEnd(pp_vec));
+    *p_gpu_device_index = 0;
 }
 
 // ===============================================================================================================
@@ -463,6 +464,10 @@ unsigned long long _cpi_Shader_ReadFile(
 	const char* filename,
 	char** const dst_buffer)
 {
+	DEBUG_ASSERT(filename, "NULL pointer");
+	DEBUG_ASSERT(dst_buffer, "NULL pointer");
+	DEBUG_ASSERT(!(*dst_buffer), "not NULL pointer");
+
     FILE* file = fopen(filename, "rb");
     if (!file) {
         DEBUG_ASSERT(false, "Failed to open shader source file '%s'\n", filename);
@@ -597,14 +602,17 @@ void _cpi_Shader_PrintAttributeDescriptions(
     }
 }
 SDL_GPUVertexAttribute* _cpi_Shader_Create_VertexInputAttribDesc(
-	const char* vertex_shader_path,
+	int vertex_shader_index,
 	unsigned int* p_attribute_count, 
 	unsigned int* p_binding_stride) 
 {
 	DEBUG_ASSERT(p_attribute_count, "NULL pointer");
 	DEBUG_ASSERT(p_binding_stride, "NULL pointer");
-	DEBUG_SCOPE(CPI_Shader* p_shader = vec_GetAtPath_LockRead(&g_vec, vertex_shader_path));
-	DEBUG_ASSERT(p_shader, "NULL pointer");
+
+	DEBUG_SCOPE(Vec** pp_vec = vec_MoveStart(g_vec));
+	DEBUG_SCOPE(int vertex_shader_vec_index = vec_GetVecWithType_UnsafeRead(*pp_vec, cpi_shader_type));
+	DEBUG_SCOPE(vec_MoveToIndex(pp_vec, vertex_shader_vec_index, cpi_shader_type));
+	DEBUG_SCOPE(CPI_Shader* p_shader = (CPI_Shader*)vec_GetElement_UnsafeRead(*pp_vec, vertex_shader_index, cpi_shader_type));
     DEBUG_ASSERT(p_shader->reflect_shader_module.shader_stage == SPV_REFLECT_SHADER_STAGE_VERTEX_BIT, "Provided shader is not a vertex shader\n");
 
     // Enumerate input variables
@@ -617,7 +625,7 @@ SDL_GPUVertexAttribute* _cpi_Shader_Create_VertexInputAttribDesc(
 
     DEBUG_SCOPE(result = spvReflectEnumerateInputVariables(&p_shader->reflect_shader_module, &input_var_count, input_vars));
     DEBUG_ASSERT(result == SPV_REFLECT_RESULT_SUCCESS, "Failed to get input variables\n");
-    DEBUG_SCOPE(ASSERT(p_shader == vec_GetAtPath_UnlockRead(&g_vec, vertex_shader_path), "unlocked read for wrong element\n"));
+    DEBUG_SCOPE(vec_MoveEnd(pp_vec));
 
     // Create an array to hold SDL_GPUVertexAttribute
     DEBUG_SCOPE(SDL_GPUVertexAttribute* attribute_descriptions = alloc(NULL, input_var_count * sizeof(SDL_GPUVertexAttribute)));
@@ -676,14 +684,13 @@ SDL_GPUVertexAttribute* _cpi_Shader_Create_VertexInputAttribDesc(
 
     return attribute_descriptions;  
 }
-char* cpi_Shader_CreateFromGlslFile(
-	char* device_path,
+int cpi_Shader_CreateFromGlslFile(
+	int gpu_device_index,
 	const char* glsl_file_path, 
 	const char* entrypoint,
 	shaderc_shader_kind shader_kind, 
 	bool enable_debug) 
 {
-	DEBUG_ASSERT(vec_IsValidAtPath_SafeRead(&g_vec, cpi_gpu_device_type, device_path), "path is invalid\n");
 	DEBUG_ASSERT(glsl_file_path, "NULL pointer");
 	DEBUG_ASSERT(entrypoint, "NULL pointer");
 	DEBUG_ASSERT(shader_kind == shaderc_vertex_shader ||
@@ -691,35 +698,31 @@ char* cpi_Shader_CreateFromGlslFile(
   				 shader_kind == shaderc_compute_shader,
   				"shader kind is not supported");
 
-	DEBUG_SCOPE(int shader_vec_index = vec_UpsertIndexOfNullElement_SafeWrite(&g_vec));
-	DEBUG_SCOPE(Vec* p_shader_vec = (Vec*)vec_GetAtVaArgs_LockRead(&g_vec, 1, shader_vec_index));
-	DEBUG_SCOPE(int shader_index = vec_UpsertIndexOfFirstVecWithType_SafeWrite(p_shader_vec, cpi_shader_type));
-	DEBUG_SCOPE(ASSERT(p_shader_vec == vec_GetAtVaArgs_UnlockRead(&g_vec, 1, shader_vec_index), "unlocked read for wrong element"));
-
 	CPI_Shader shader = {0};
 	shader.entrypoint = entrypoint;
 	shader.shader_kind = shader_kind;
 
 	// get shaderc compiler path
 	{
-		DEBUG_SCOPE(char* shaderc_compiler_path = cpi_ShadercCompiler_GetPath());
-		DEBUG_SCOPE(DEBUG_ASSERT(vec_IsValidAtPath_SafeRead(&g_vec, cpi_shaderc_compiler_type, shaderc_compiler_path), "shaderc compiler path is invalid\n"));
-		shader.shaderc_compiler_path = shaderc_compiler_path;
+		DEBUG_SCOPE(int shaderc_compiler_index = cpi_ShadercCompiler_GetIndex());
+		shader.shaderc_compiler_index = shaderc_compiler_index;
 	}
+
+	DEBUG_SCOPE(Vec** pp_vec = vec_MoveStart(g_vec));
 
 	// spv code compilation
 	{
-		char* p_glsl_code = NULL;
-	    DEBUG_SCOPE(unsigned long long glsl_code_size = _cpi_Shader_ReadFile(glsl_file_path, &p_glsl_code));
-	    DEBUG_ASSERT(p_glsl_code, "NULL pointer");
-	    DEBUG_SCOPE(CPI_ShadercCompiler* p_shaderc_compiler = vec_GetAtPath_LockRead(&g_vec, shader.shaderc_compiler_path))
-	    DEBUG_ASSERT(p_shaderc_compiler, "NULL pointer");
-	   	DEBUG_SCOPE(shaderc_compilation_result_t result = shaderc_compile_into_spv(p_shaderc_compiler->shaderc_compiler, p_glsl_code, glsl_code_size, shader_kind, glsl_file_path, "main", p_shaderc_compiler->shaderc_options));
-	   	DEBUG_SCOPE(ASSERT(p_shaderc_compiler == vec_GetAtPath_UnlockRead(&g_vec, shader.shaderc_compiler_path), "unlocked read for wrong element\n"));
+	    DEBUG_ASSERT(!shader.p_glsl_code, "not NULL pointer");
+	    DEBUG_SCOPE(unsigned long long glsl_code_size = _cpi_Shader_ReadFile(glsl_file_path, &shader.p_glsl_code));
+	    DEBUG_ASSERT(shader.p_glsl_code, "NULL pointer");
+	    DEBUG_SCOPE(int shaderc_compiler_vec_index = vec_GetVecWithType_UnsafeRead(*pp_vec, cpi_shaderc_compiler_type));
+	    DEBUG_SCOPE(vec_MoveToIndex(pp_vec, shaderc_compiler_vec_index, cpi_shaderc_compiler_type));
+	    DEBUG_SCOPE(CPI_ShadercCompiler* p_shaderc_compiler = (CPI_ShadercCompiler*)vec_GetElement_UnsafeRead(*pp_vec, shader.shaderc_compiler_index, cpi_shaderc_compiler_type));
+	   	DEBUG_SCOPE(shaderc_compilation_result_t result = shaderc_compile_into_spv(p_shaderc_compiler->shaderc_compiler, shader.p_glsl_code, glsl_code_size, shader_kind, glsl_file_path, "main", p_shaderc_compiler->shaderc_options));
+	   	DEBUG_SCOPE(vec_MoveToIndex(pp_vec, -1, vec_type));
 	    DEBUG_ASSERT(shaderc_result_get_compilation_status(result) == shaderc_compilation_status_success, "Shader compilation error in '%s':\n%s\n", glsl_file_path, shaderc_result_get_error_message(result));
 		DEBUG_SCOPE(shader.spv_code_size = shaderc_result_get_length(result));
 	    DEBUG_SCOPE(shader.p_spv_code = alloc(NULL, shader.spv_code_size));
-	    DEBUG_ASSERT(shader.p_spv_code, "Failed to allocate memory for SPIR-V code");
 	    DEBUG_SCOPE(memcpy(shader.p_spv_code, shaderc_result_get_bytes(result), shader.spv_code_size));
 	    DEBUG_SCOPE(shaderc_result_release(result));
 	}
@@ -736,7 +739,7 @@ char* cpi_Shader_CreateFromGlslFile(
 
 	// get gpu device path
 	{
-		shader.gpu_device_path = device_path;
+		shader.gpu_device_index = gpu_device_index;
 	}
 
 	// SDL shader 
@@ -755,13 +758,18 @@ char* cpi_Shader_CreateFromGlslFile(
 		        .props = 0  // Assuming no special properties
 		    };
 		    
-			DEBUG_SCOPE(CPI_GPUDevice* p_gpu_device = vec_GetAtPath_LockRead(&g_vec, shader.gpu_device_path));
+
+	    	DEBUG_SCOPE(int gpu_device_vec_index = vec_GetVecWithType_UnsafeRead(*pp_vec, cpi_gpu_device_type));
+	    	DEBUG_SCOPE(vec_MoveToIndex(pp_vec, gpu_device_vec_index, cpi_gpu_device_type));
+	    	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_vec));
+			DEBUG_SCOPE(CPI_GPUDevice* p_gpu_device = (CPI_GPUDevice*)vec_GetElement_UnsafeRead(*pp_vec, shader.gpu_device_index, cpi_gpu_device_type));
 			DEBUG_ASSERT(p_gpu_device, "NULL pointer");
 			DEBUG_ASSERT(p_gpu_device->p_gpu_device, "NULL pointer");
 			SDL_ShaderCross_GraphicsShaderMetadata metadata;
 		    DEBUG_SCOPE(shader.p_sdl_shader = SDL_ShaderCross_CompileGraphicsShaderFromSPIRV(p_gpu_device->p_gpu_device, &shader_info, &metadata));
 		    DEBUG_ASSERT(shader.p_sdl_shader, "Failed to compile Shader from SPIR-V. %s\n", SDL_GetError());
-			DEBUG_SCOPE(ASSERT(p_gpu_device == vec_GetAtPath_UnlockRead(&g_vec, shader.gpu_device_path), "unlocked read for wrong element"));
+		    DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_vec));
+	    	DEBUG_SCOPE(vec_MoveToIndex(pp_vec, -1, vec_type));
 		} 
 		// compute shader. there is no sdl shader for compute. its integrated directly into the pipeline
 		else {
@@ -775,20 +783,24 @@ char* cpi_Shader_CreateFromGlslFile(
 		SDL_UnlockMutex(g_unique_id_mutex);
 	#endif 
 
-	DEBUG_SCOPE(CPI_Shader* p_shader = vec_GetAtVaArgs_LockWrite(&g_vec, 2, shader_vec_index, shader_index));
+	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_vec));
+	DEBUG_SCOPE(int shader_vec_index = vec_UpsertVecWithType_UnsafeWrite(*pp_vec, cpi_shader_type));
+	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_vec));
+	DEBUG_SCOPE(vec_MoveToIndex(pp_vec, shader_vec_index, cpi_shader_type));
+	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_vec));
+	DEBUG_SCOPE(int shader_index = vec_UpsertNullElement_UnsafeWrite(*pp_vec, cpi_shader_type));
+	DEBUG_SCOPE(CPI_Shader* p_shader = (CPI_Shader*)vec_GetElement_UnsafeRead(*pp_vec, shader_index, cpi_shader_type));
 	DEBUG_ASSERT(p_shader, "NULL pointer");
 	memcpy(p_shader, &shader, sizeof(CPI_Shader));
-	DEBUG_SCOPE(ASSERT(p_shader == vec_GetAtVaArgs_UnlockWrite(&g_vec, 2, shader_vec_index, shader_index), ""));
+	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_vec));
+	DEBUG_SCOPE(vec_MoveEnd(pp_vec));
 
-	DEBUG_SCOPE(char* return_path = vec_Path_FromVaArgs(2, shader_vec_index, shader_index));
-	DEBUG_SCOPE(ASSERT(vec_IsValidAtPath_SafeRead(&g_vec, cpi_shader_type, return_path), "newly created path is invalid"));
 	printf("SUCCESSFULLY created shader\n");
-    return return_path;
+    return shader_index;
 }
 void cpi_Shader_Destructor(void* p_void) {
     CPI_Shader* p_shader = (CPI_Shader*)p_void;
     DEBUG_ASSERT(p_shader, "NULL pointer");
-    DEBUG_ASSERT(p_shader->gpu_device_path, "NULL pointer");
 
     bool is_null = true;
 	for (int i = 0; i < sizeof(CPI_ShadercCompiler); ++i) {
@@ -798,51 +810,69 @@ void cpi_Shader_Destructor(void* p_void) {
 	}
 	ASSERT(!is_null, "shaderc compiler is null");
 
-    if (p_shader->p_glsl_code) {free(p_shader->p_glsl_code);}
+    if (p_shader->p_glsl_code) {
+    	debug_PrintMemory();
+    	printf("p_glsl_code = %p\n", p_shader->p_glsl_code);
+
+    	vec_Print_UnsafeRead(g_vec, 3);
+
+		int* indices = NULL;
+		size_t count = 0;
+		DEBUG_SCOPE(bool uhh = vec_MatchElement_SafeRead(g_vec, (unsigned char*)p_shader, sizeof(CPI_Shader), &indices, &count));
+		if (uhh) {
+			printf("found p_shader");
+		} else {
+			printf("didnt find p_shader\n");
+		}
+    	free(p_shader->p_glsl_code);
+    }
     if (p_shader->p_spv_code) {free(p_shader->p_spv_code);}
 
     DEBUG_SCOPE(spvReflectDestroyShaderModule(&p_shader->reflect_shader_module));
-    DEBUG_ASSERT(vec_IsValidAtPath_SafeRead(&g_vec, cpi_gpu_device_type, p_shader->gpu_device_path), "path is not valid");
-    DEBUG_SCOPE(CPI_GPUDevice* p_gpu_device = vec_GetAtPath_LockRead(&g_vec, p_shader->gpu_device_path));
+
+    DEBUG_SCOPE(Vec** pp_vec = vec_MoveStart(g_vec));
+    DEBUG_SCOPE(int gpu_device_vec_index = vec_GetVecWithType_UnsafeRead(*pp_vec, cpi_gpu_device_type));
+    DEBUG_SCOPE(vec_MoveToIndex(pp_vec, gpu_device_vec_index, cpi_gpu_device_type));
+    DEBUG_SCOPE(CPI_GPUDevice* p_gpu_device = (CPI_GPUDevice*)vec_GetElement_UnsafeRead(*pp_vec, p_shader->gpu_device_index, cpi_gpu_device_type));
 	DEBUG_ASSERT(p_gpu_device, "NULL pointer");
 	DEBUG_ASSERT(p_gpu_device->p_gpu_device, "NULL pointer");
     DEBUG_SCOPE(SDL_ReleaseGPUShader(p_gpu_device->p_gpu_device, p_shader->p_sdl_shader));
-    DEBUG_SCOPE(ASSERT(p_gpu_device == vec_GetAtPath_UnlockRead(&g_vec, p_shader->gpu_device_path), "unlock read for wrong element\n"));
+    DEBUG_SCOPE(vec_MoveToIndex(pp_vec, -1, vec_type));
     memset(p_shader, 0, sizeof(CPI_Shader));
 }
-void cpi_Shader_Destroy(char** p_shader_path) {
-    DEBUG_ASSERT(p_shader_path, "NULL pointer");
-    DEBUG_ASSERT(vec_IsValidAtPath_SafeRead(&g_vec, cpi_shader_type, *p_shader_path), "shader path is invalid");
-	DEBUG_SCOPE(CPI_Shader* p_shader = vec_GetAtPath_LockWrite(&g_vec, *p_shader_path));
-
+void cpi_Shader_Destroy(int* p_shader_index) {
+    DEBUG_ASSERT(p_shader_index, "NULL pointer");
+    DEBUG_SCOPE(Vec** pp_vec = vec_MoveStart(g_vec));
+    DEBUG_SCOPE(int shader_vec_index = vec_GetVecWithType_UnsafeRead(*pp_vec, cpi_shader_type));
+    DEBUG_SCOPE(vec_MoveToIndex(pp_vec, shader_vec_index, cpi_shader_type));
+	DEBUG_SCOPE(CPI_Shader* p_shader = (CPI_Shader*)vec_GetElement_UnsafeRead(*pp_vec, *p_shader_index, cpi_shader_type));
 	DEBUG_SCOPE(cpi_Shader_Destructor(p_shader));
-
-    DEBUG_SCOPE(ASSERT(p_shader == vec_GetAtPath_UnlockWrite(&g_vec, *p_shader_path), "unlock write for wrong element\n"));
-    DEBUG_SCOPE(free(*p_shader_path));
-    *p_shader_path = NULL;
+    DEBUG_SCOPE(vec_MoveEnd(pp_vec));
+    *p_shader_index = -1;
 }
 
 // ===============================================================================================================
 // Graphics Pipeline
 // ===============================================================================================================
-char* cpi_GraphicsPipeline_Create(
-    char* vertex_shader_path,
-    char* fragment_shader_path,
+int cpi_GraphicsPipeline_Create(
+    int vertex_shader_index,
+    int fragment_shader_index,
     bool enable_debug)
 {
-	DEBUG_ASSERT(vec_IsValidAtPath_SafeRead(&g_vec, cpi_shader_type, vertex_shader_path), "vertex_shader path is not valid");
-	DEBUG_ASSERT(vec_IsValidAtPath_SafeRead(&g_vec, cpi_shader_type, fragment_shader_path), "fragmetn_shader path is not valid");
 
-	DEBUG_SCOPE(CPI_Shader* p_vertex_shader = vec_GetAtPath_LockRead(&g_vec, vertex_shader_path));
-	DEBUG_SCOPE(CPI_Shader* p_fragment_shader = vec_GetAtPath_LockRead(&g_vec, fragment_shader_path));
+	DEBUG_SCOPE(Vec** pp_shader_vec = vec_MoveStart(g_vec));
+	DEBUG_SCOPE(int shader_vec_index = vec_GetVecWithType_UnsafeRead(*pp_shader_vec, cpi_shader_type));
+	DEBUG_SCOPE(vec_MoveToIndex(pp_shader_vec, shader_vec_index, cpi_shader_type));
+	DEBUG_SCOPE(CPI_Shader* p_vertex_shader = (CPI_Shader*)vec_GetElement_UnsafeRead(*pp_shader_vec, vertex_shader_index, cpi_shader_type));
+	DEBUG_SCOPE(CPI_Shader* p_fragment_shader = (CPI_Shader*)vec_GetElement_UnsafeRead(*pp_shader_vec, fragment_shader_index, cpi_shader_type));
 
-	DEBUG_ASSERT(strcmp(p_vertex_shader->gpu_device_path, p_fragment_shader->gpu_device_path) == 0,"shaders does not contain the same gpu device\n");
-	char* gpu_device_path = p_vertex_shader->gpu_device_path;
+	DEBUG_ASSERT(p_vertex_shader->gpu_device_index == p_fragment_shader->gpu_device_index,"shaders does not contain the same gpu device\n");
+	int gpu_device_index = p_vertex_shader->gpu_device_index;
 
 	// 1. Vertex Input State
 	unsigned int vertex_attributes_count;
 	unsigned int vertex_binding_stride;
-	DEBUG_SCOPE(SDL_GPUVertexAttribute* vertex_attributes = _cpi_Shader_Create_VertexInputAttribDesc(vertex_shader_path, &vertex_attributes_count, &vertex_binding_stride));
+	DEBUG_SCOPE(SDL_GPUVertexAttribute* vertex_attributes = _cpi_Shader_Create_VertexInputAttribDesc(vertex_shader_index, &vertex_attributes_count, &vertex_binding_stride));
 
 	SDL_GPUVertexInputState vertex_input_state = {
 	    .vertex_buffer_descriptions = (SDL_GPUVertexBufferDescription[]) {
@@ -943,36 +973,36 @@ char* cpi_GraphicsPipeline_Create(
 	    .target_info = target_info,
 	    .props = 0
 	};
-
-	DEBUG_SCOPE(CPI_GPUDevice* p_gpu_device = vec_GetAtPath_LockRead(&g_vec, gpu_device_path));
+	
+	DEBUG_SCOPE(Vec** pp_gpu_device_vec = vec_MoveStart(g_vec));
+	DEBUG_SCOPE(int gpu_device_vec_index = vec_GetVecWithType_UnsafeRead(*pp_gpu_device_vec, cpi_gpu_device_type));
+	DEBUG_SCOPE(vec_MoveToIndex(pp_gpu_device_vec, gpu_device_vec_index, cpi_gpu_device_type));
+	DEBUG_SCOPE(CPI_GPUDevice* p_gpu_device = (CPI_GPUDevice*)vec_GetElement_UnsafeRead(*pp_gpu_device_vec, gpu_device_index, cpi_gpu_device_type));
 	DEBUG_ASSERT(p_gpu_device, "NULL pointer\n");
 	DEBUG_ASSERT(p_gpu_device->p_gpu_device, "NULL pointer\n");
 
 	CPI_GraphicsPipeline pipeline = {0};
-    pipeline.vertex_shader_path = vertex_shader_path;
-    pipeline.fragment_shader_path = fragment_shader_path;
-
+    pipeline.vertex_shader_index = vertex_shader_index;
+    pipeline.fragment_shader_index = fragment_shader_index;
 	DEBUG_SCOPE(pipeline.p_sdl_pipeline = SDL_CreateGPUGraphicsPipeline(p_gpu_device->p_gpu_device, &pipeline_create_info));
 	DEBUG_ASSERT(pipeline.p_sdl_pipeline, "Failed to create SDL3 graphics pipeline: %s\n", SDL_GetError());
-	DEBUG_SCOPE(ASSERT(p_gpu_device == 		vec_GetAtPath_UnlockRead(&g_vec, gpu_device_path), "unlock read for wrong element\n"));
-	DEBUG_SCOPE(ASSERT(p_fragment_shader == vec_GetAtPath_UnlockRead(&g_vec, fragment_shader_path), "unlock read for wrong element\n"));
-	DEBUG_SCOPE(ASSERT(p_vertex_shader == 	vec_GetAtPath_UnlockRead(&g_vec, vertex_shader_path), "unlock read for wrong element\n"));
+	DEBUG_SCOPE(vec_MoveEnd(pp_shader_vec));
+	DEBUG_SCOPE(vec_MoveEnd(pp_gpu_device_vec));
 
-
-	DEBUG_SCOPE(int pipeline_vec_index = vec_UpsertIndexOfFirstVecWithType_SafeWrite(&g_vec, cpi_graphics_pipeline_type));
-	DEBUG_SCOPE(Vec* p_pipeline_vec = vec_GetAtVaArgs_LockRead(&g_vec, 1, pipeline_vec_index));
-	DEBUG_SCOPE(int pipeline_index = vec_UpsertIndexOfNullElement_SafeWrite(p_pipeline_vec));
-	DEBUG_SCOPE(ASSERT(p_pipeline_vec == vec_GetAtVaArgs_UnlockRead(&g_vec, 1, pipeline_vec_index), "unlocked read for wrong element"));
-	DEBUG_SCOPE(CPI_GraphicsPipeline* p_pipeline = vec_GetAtVaArgs_LockWrite(&g_vec, 2, pipeline_vec_index, pipeline_index));
-
+	DEBUG_SCOPE(Vec** pp_pipeline_vec = vec_MoveStart(g_vec));
+	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_pipeline_vec));
+	DEBUG_SCOPE(int pipeline_vec_index = vec_UpsertVecWithType_UnsafeWrite(*pp_pipeline_vec, cpi_graphics_pipeline_type));
+	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_pipeline_vec));
+	DEBUG_SCOPE(vec_MoveToIndex(pp_pipeline_vec, pipeline_vec_index, cpi_graphics_pipeline_type));
+	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_pipeline_vec));
+	DEBUG_SCOPE(int pipeline_index = vec_UpsertNullElement_UnsafeWrite(*pp_pipeline_vec, cpi_graphics_pipeline_type));
+	DEBUG_SCOPE(CPI_GraphicsPipeline* p_pipeline = (CPI_GraphicsPipeline*)vec_GetElement_UnsafeRead(*pp_pipeline_vec, pipeline_index, cpi_graphics_pipeline_type));
 	DEBUG_SCOPE(memcpy(p_pipeline, &pipeline, sizeof(CPI_GraphicsPipeline)));
-	DEBUG_SCOPE(ASSERT(p_pipeline == vec_GetAtVaArgs_UnlockWrite(&g_vec, 2, pipeline_vec_index, pipeline_index), "unlocked write for wrong element\n"));
+	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_pipeline_vec));
+	DEBUG_SCOPE(vec_MoveEnd(pp_pipeline_vec));
 
-    DEBUG_SCOPE(char* return_path = vec_Path_FromVaArgs(2, pipeline_vec_index, pipeline_index));
-    DEBUG_SCOPE(ASSERT(vec_IsValidAtPath_SafeRead(&g_vec, cpi_graphics_pipeline_type, return_path), "newly created path is not valid")); 
-
-    printf("Graphics Pipeline created successfully.");
-    return return_path;
+    printf("Graphics Pipeline created successfully.\n");
+    return pipeline_index;
 }
 void cpi_GraphicsPipeline_Destructor(
 	void* p_void)
@@ -980,26 +1010,36 @@ void cpi_GraphicsPipeline_Destructor(
 	CPI_GraphicsPipeline* p_graphics_pipeline = (CPI_GraphicsPipeline*)p_void;
 	DEBUG_ASSERT(p_graphics_pipeline, "NULL pointer");
 
-	DEBUG_SCOPE(CPI_Shader* p_vertex_shader = vec_GetAtPath_LockRead(&g_vec, p_graphics_pipeline->vertex_shader_path));
-	DEBUG_ASSERT(vec_IsValidAtPath_SafeRead(&g_vec, cpi_gpu_device_type, p_vertex_shader->gpu_device_path), "gpu device path is invlaid");
-	DEBUG_SCOPE(CPI_GPUDevice* p_gpu_device = vec_GetAtPath_LockRead(&g_vec, p_vertex_shader->gpu_device_path));
+	DEBUG_SCOPE(Vec** pp_shader_vec = vec_MoveStart(g_vec));
+	DEBUG_SCOPE(int shader_vec_index = vec_GetVecWithType_UnsafeRead(*pp_shader_vec, cpi_shader_type));
+	DEBUG_SCOPE(vec_MoveToIndex(pp_shader_vec, shader_vec_index, cpi_shader_type));
+	DEBUG_SCOPE(CPI_Shader* p_vertex_shader = (CPI_Shader*)vec_GetElement_UnsafeRead(*pp_shader_vec, p_graphics_pipeline->vertex_shader_index, cpi_shader_type));
+
+	DEBUG_SCOPE(Vec** pp_gpu_device_vec = vec_MoveStart(g_vec));
+	DEBUG_SCOPE(int gpu_device_vec_index = vec_GetVecWithType_UnsafeRead(*pp_gpu_device_vec, cpi_gpu_device_type));
+	DEBUG_SCOPE(vec_MoveToIndex(pp_gpu_device_vec, gpu_device_vec_index, cpi_gpu_device_type));
+	DEBUG_SCOPE(CPI_GPUDevice* p_gpu_device = (CPI_GPUDevice*)vec_GetElement_UnsafeRead(*pp_gpu_device_vec, p_vertex_shader->gpu_device_index, cpi_gpu_device_type));
 	DEBUG_ASSERT(p_gpu_device->p_gpu_device, "NULL pointer\n");
 
-	DEBUG_SCOPE(SDL_ReleaseGPUGraphicsPipeline(p_gpu_device->p_gpu_device, p_graphics_pipeline->p_sdl_pipeline));
+	DEBUG_SCOPE(SDL_ReleaseGPUGraphicsPipeline(p_gpu_device->p_gpu_device, p_graphics_pipeline->p_sdl_pipeline));	
+	DEBUG_SCOPE(memset(p_graphics_pipeline, 0, sizeof(CPI_GraphicsPipeline)));
 
-	DEBUG_SCOPE(ASSERT(p_gpu_device == vec_GetAtPath_UnlockRead(&g_vec, p_vertex_shader->gpu_device_path), "unlocked read for wrong element\n"));
-	DEBUG_SCOPE(ASSERT(p_vertex_shader == vec_GetAtPath_UnlockRead(&g_vec, p_graphics_pipeline->vertex_shader_path), "unlocked read for wrong element\n"));
+	DEBUG_SCOPE(vec_MoveEnd(pp_shader_vec));
+	DEBUG_SCOPE(vec_MoveEnd(pp_gpu_device_vec));
 }
 void cpi_GraphicsPipeline_Destroy(
-	char** p_graphics_pipeline_path)
+	int* p_graphics_pipeline_index)
 {
-	DEBUG_ASSERT(p_graphics_pipeline_path, "NULL pointer");
-	DEBUG_ASSERT(vec_IsValidAtPath_SafeRead(&g_vec, cpi_graphics_pipeline_type, *p_graphics_pipeline_path), "graphics pipeline path is invlaid");
-	DEBUG_SCOPE(CPI_GraphicsPipeline* p_pipeline = vec_GetAtPath_LockWrite(&g_vec, *p_graphics_pipeline_path));
+	DEBUG_ASSERT(p_graphics_pipeline_index, "NULL pointer");
+	DEBUG_SCOPE(Vec** pp_vec = vec_MoveStart(g_vec));
+	DEBUG_SCOPE(int gpu_graphics_pipeline_index = vec_GetVecWithType_UnsafeRead(*pp_vec, cpi_graphics_pipeline_type));
+	DEBUG_SCOPE(vec_MoveToIndex(pp_vec, gpu_graphics_pipeline_index, cpi_graphics_pipeline_type));
+	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_vec));
 
+	DEBUG_SCOPE(CPI_GraphicsPipeline* p_pipeline = (CPI_GraphicsPipeline*)vec_GetElement_UnsafeRead(*pp_vec, *p_graphics_pipeline_index, cpi_graphics_pipeline_type));
 	DEBUG_SCOPE(cpi_GraphicsPipeline_Destructor(p_pipeline));
-	DEBUG_SCOPE(memset(p_pipeline, 0, sizeof(CPI_GraphicsPipeline)));
 
-	DEBUG_SCOPE(ASSERT(p_pipeline == vec_GetAtPath_UnlockWrite(&g_vec, *p_graphics_pipeline_path), "unlocked write for wrong element"));
-	*p_graphics_pipeline_path = NULL;
+	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_vec));
+	DEBUG_SCOPE(vec_MoveEnd(pp_vec));
+	*p_graphics_pipeline_index = 0;
 }

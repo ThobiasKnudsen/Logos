@@ -3,42 +3,38 @@
 
 #include "type.h"
 #include <stdbool.h>
-#include <SDL3/SDL.h>
 #include <stdarg.h>
+#include <SDL3/SDL.h>
 
-// 48 bytes
+
+// ================================================================================================================================
+// Whenever you have a Vec* this class assumes that all parent Vecs are read locked
+// ================================================================================================================================
+
+// 64 bytes
 typedef struct Vec Vec;
 struct Vec {
-#ifdef DEBUG 
-	SDL_Mutex*  	p_debug_mutex;
-#endif 
-	SDL_Mutex* 		p_write_mutex;
-	SDL_Mutex* 		p_read_mutex;
-	Vec*   			p_parent;
-	unsigned char* 	p_data;
-	unsigned short  reading_count;
-	unsigned short 	element_size;
-	unsigned short	element_type;
-	unsigned short  this_type;
-	unsigned int  	count;
-	unsigned int  	capacity;
+	SDL_Mutex*  		p_internal_lock;
+	SDL_RWLock* 		p_rw_lock;
+	SDL_Mutex* 			p_read_lock;
+	Vec*   				p_parent;
+	unsigned char* 		p_data;
+	unsigned char  		reading_count;
+	unsigned char  		writing_locks;
+	Type				type;
+	unsigned int  		count;
+	unsigned int  		capacity;
 }; 
-
-typedef struct Vec_CreateInfo {
-	Vec* 			p_parent;
-	unsigned short 	element_size;
-	unsigned short	element_type;
-	unsigned short  this_type;
-} Vec_CreateInfo;
 
 extern Type vec_type;
 
 // ================================================================================================================================
 // Fundamental 
 // ================================================================================================================================
-void  				vec_Initialize(
-						Vec* p_vec,
-						Vec_CreateInfo* p_vec_create_info);
+void 				vec_Initialize(
+						Vec* p_vec, 
+						Vec* p_parent, 
+						Type type);
 Vec 				vec_Create(
 						Vec* p_parent,
 						Type type);
@@ -55,16 +51,14 @@ bool 				vec_IsNullAtVaArgs_SafeRead(
 						size_t n_args, 
 						...);
 void 				vec_Print_UnsafeRead(
-						Vec* p_vec, 
-						const unsigned int n_spaces, 
-						const unsigned int n_layers);
-unsigned int   		vec_GetReadingLocksCount(
-						Vec* p_vec);
-bool 				vec_TryGetReadingLocksCount(
 						Vec* p_vec,
-						unsigned int* const p_count);
-bool   				vec_IsWriteLocked(
-						Vec* p_vec);
+						unsigned int n_layers);
+bool 				vec_MatchElement_SafeRead(
+        				Vec* p_vec, 
+        				unsigned char* p_data, 
+        				size_t data_size, 
+        				int** const pp_return_indices, 
+        				size_t* const p_return_indices_count);
 
 // ================================================================================================================================
 // Custom concurrency
@@ -77,160 +71,119 @@ void    			vec_UnlockRead(
 						Vec* p_vec);
 void    			vec_UnlockWrite(
 						Vec* p_vec);
+void 				vec_SwitchReadToWrite(
+						Vec* p_vec);
+void 				vec_SwitchWriteToRead(
+						Vec* p_vec);
+unsigned short   	vec_GetReadingLocksCount(
+						Vec* p_vec);
+bool   				vec_IsWriteLocked(
+						Vec* p_vec);
 
 // ================================================================================================================================
-// IsValid Locking
+// IsValid
 // ================================================================================================================================
+bool 				vec_IsValid_SafeRead(
+						Vec* p_vec);
 bool 				vec_IsValid_UnsafeRead(
 						Vec* p_vec);
 bool 				vec_IsValidAtVaArgs_SafeRead(
-						Vec* p_root_vec, 
+						Vec* p_vec, 
 						Type type, 
 						size_t n_args, 
 						...);
 bool 				vec_IsValidAtPath_SafeRead(
-						Vec* p_root_vec,  
+						Vec* p_vec,  
 						Type type, 
 						const char* path);
 
 // ================================================================================================================================
-// Get Locking
+// MoveTo
+//
+// These functions traverse a hierarchy of Vec objects with thread-safe read locks.
+// When moving forward (parent to child), each intermediate Vec is locked, but the final Vec remains unlocked, letting you decide its lock state.
+// When moving backward (child to parent), they unlock the parent Vecs as you go, so by the time you return to the starting Vec, all locks are released.
+// For simplicity and safety, use only one Vec pointer per thread to avoid complex lock management.
+// This also enforce index sequence rules: a positive index moves to a child, a negative index to a parent, and a positive index cannot immediately precede a negative one. 
 // ================================================================================================================================
-void* 				vec_GetAtIndices_LockRead(
-						Vec* p_root_vec,
+Vec** 				vec_MoveStart(
+						Vec* p_vec);
+void 				vec_MoveEnd(
+						Vec** pp_vec);
+void 				vec_MoveToIndex(
+						Vec** pp_vec,
+						int index,
+						Type type);
+void 				vec_MoveToIndices(
+						Vec** pp_vec,
 						size_t indices_count, 
 						const int* p_indices);
-void* 				vec_GetAtIndices_LockWrite(
-						Vec* p_root_vec,
-						size_t indices_count, 
-						const int* p_indices);
-void* 				vec_GetAtVaArgs_LockRead(
-						Vec* p_root_vec,	
+void 				vec_MoveToVaArgs(
+						Vec** pp_vec,
 						size_t n_args, 
 						...);
-void* 				vec_GetAtVaArgs_LockWrite(
-						Vec* p_root_vec,
-						size_t n_args, 
-						...);
-void* 				vec_GetAtPath_LockRead(
-						Vec* p_root_vec,
-						const char* path);
-void* 				vec_GetAtPath_LockWrite(
-						Vec* p_root_vec,
+void 				vec_MoveToPath(
+						Vec** pp_vec,
 						const char* path);
 
 // ================================================================================================================================
-// UpsertIndexOfNullElement Locking
+// UpsertVecWithType…_SafeWrite
 // ================================================================================================================================
-int 				vec_UpsertIndexOfNullElement_SafeWrite(
-						Vec* p_vec);
-        
-// ================================================================================================================================
-// GetIndexOfFirstVecWithType Locking
-// ================================================================================================================================
-int 				vec_GetIndexOfFirstVecWithType_SafeRead(
-						Vec* p_vec, 
+int  				vec_UpsertVecWithType_UnsafeWrite(
+						Vec* p_vec,
 						Type type);
-int 				vec_GetIndexOfFirstVecWithTypeFromIndex_SafeRead(
+int 				vec_UpsertVecWithTypeFromIndex_UnsafeWrite(
 						Vec* p_vec, 
 						Type type, 
 						int index);
 
 // ================================================================================================================================
-// UpsertIndexOfFirstVecWithType Locking
+// UpsertNullElement_SafeWrite
 // ================================================================================================================================
-int 				vec_UpsertIndexOfFirstVecWithType_SafeWrite(
-						Vec* p_vec, 
+int  				vec_UpsertNullElement_UnsafeWrite(
+						Vec* p_vec,
 						Type type);
-int 				vec_UpsertIndexOfFirstVecWithTypeFromIndex_SafeWrite(
-						Vec* p_vec, 
-						Type type, 
-						int index);
-
-// ================================================================================================================================
-// UpsertVecWithType Lock
-// ================================================================================================================================
-void*  				vec_UpsertVecWithType_LockRead(
-						Vec* p_vec, 
-						Type type);
-
-// ================================================================================================================================
-// UpsertNullElement Safe
-// ================================================================================================================================
-void* 				vec_UpsertNullElement_LockRead(
-						Vec* p_vec);
-void* 				vec_UpsertNullElement_LockWrite(
-						Vec* p_vec);
-
-// ================================================================================================================================
-// UpsertFirstVecWithType Locking
-// ================================================================================================================================
-Vec* 				vec_UpsertFirstVecWithType_LockRead(
-						Vec* p_vec, 
-						Type type);
-Vec* 				vec_UpsertFirstVecWithType_LockWrite(
-						Vec* p_vec, 
-						Type type);
-Vec* 				vec_UpsertFirstVecWithTypeFromIndex_LockRead(
-						Vec* p_vec, 
-						Type type, 
-						int index);
-Vec* 				vec_UpsertFirstVecWithTypeFromIndex_LockWrite(
-						Vec* p_vec, 
-						Type type, 
-						int index);
 
 // ================================================================================================================================
 // Create Locking
 // ================================================================================================================================
-void* 				vec_CreateAtVaArgs_LockRead(
-						Vec* p_root_vec,
+void				vec_CreateAtVaArgs_UnsafeWrite(
+						Vec* p_vec,
 						Type type, 
 						size_t n_args, 
 						...);
-void* 				vec_CreateAtVaArgs_LockWrite(
-						Vec* p_root_vec,
-						Type type,
-						size_t n_args, 
-						...);
-
+        
 // ================================================================================================================================
-// Get Unlocking
+// GetIndexVecWithType…_SafeRead
 // ================================================================================================================================
-void* 				vec_GetAtIndices_UnlockRead(
-						Vec* p_root_vec,
-						size_t indices_count, 
-						const int* p_indices);
-void* 				vec_GetAtIndices_UnlockWrite(
-						Vec* p_root_vec,
-						size_t indices_count, 
-						const int* p_indices);
-void* 				vec_GetAtVaArgs_UnlockRead(
-						Vec* p_root_vec,
-						size_t n_args, 
-						...);
-void* 				vec_GetAtVaArgs_UnlockWrite(
-						Vec* p_root_vec,
-						size_t n_args, 
-						...);
-void* 				vec_GetAtPath_UnlockRead(
-						Vec* p_root_vec,
-						const char* path);
-void* 				vec_GetAtPath_UnlockWrite(
-						Vec* p_root_vec,
-						const char* path);
-
-// ================================================================================================================================
-// Get Unsafe
-// ================================================================================================================================
-void*   			vec_GetAt_Unsafe(
-						Vec* p_vec,
+int 				vec_GetVecWithType_UnsafeRead(
+						Vec* p_vec, 
+						Type type);
+int 				vec_GetVecWithTypeFromIndex_UnsafeRead(
+						Vec* p_vec, 
+						Type type, 
 						int index);
+
+// ================================================================================================================================
+// Get…Between_SafeRead
+// ================================================================================================================================
+int*				vec_GetIndicesBetween_SafeRead(
+						Vec* p_vec_begin,
+						Vec* p_vec_end);
+char*				vec_GetPathBetween_SafeRead(
+						Vec* p_vec_begin,
+						Vec* p_vec_end);
+
+// ================================================================================================================================
+// Get…_UnsafeRead
+// ================================================================================================================================
+unsigned char* 		vec_GetElement_UnsafeRead(
+						Vec* p_vec,
+						int index,
+						Type type);
 unsigned int 		vec_GetElementSize_UnsafeRead(
 						Vec* p_vec);
-unsigned short 		vec_GetElementType_UnsafeRead(
-						Vec* p_vec);
-unsigned short 		vec_GetThisType_UnsafeRead(
+Type 				vec_GetType_UnsafeRead(
 						Vec* p_vec);
 unsigned int		vec_GetCount_UnsafeRead(
 						Vec* p_vec);
@@ -238,17 +191,8 @@ unsigned int		vec_GetCapacity_UnsafeRead(
 						Vec* p_vec);
 
 // ================================================================================================================================
-// Set Unsafe
+// Set…_SafeWrite
 // ================================================================================================================================
-void  				vec_SetElementSize_UnsafeWrite(
-						Vec* p_vec, 
-						unsigned int size);
-void  				vec_SetElementType_Unsafe(
-						Vec* p_vec, 
-						unsigned short type);
-void  				vec_SetThisType_UnsafeWrite(
-						Vec* p_vec, 
-						unsigned short type);
 void  				vec_SetCount_UnsafeWrite(
 						Vec* p_vec, 
 						unsigned int count);

@@ -18,13 +18,19 @@ extern Type 			null_type;
 extern Type 			type_type;
 
 // if return = 0 it means it failed
-Type 			type_Create(
+Type 			type_Create_Safe(
 					Type_Name name,
 					Type_Size size, 
 					Type_Destructor destructor);
-bool 			type_IsValid(
+bool 			type_IsValid_Safe(
 					Type type);
-Type_Info 		type_GetTypeInfo(
+Type_Info 		type_GetTypeInfo_Safe(
+					Type type);
+Type_Name 		type_GetName_Safe(
+					Type type);
+Type_Size 		type_GetSize_Safe(
+					Type type);
+Type_Destructor type_GetDestructor_Safe(
 					Type type);
 
 #endif // VEC_TYPE_H

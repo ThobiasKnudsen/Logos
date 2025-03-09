@@ -116,156 +116,160 @@ char* _vec_Path_Combine(const char* path_1, const char* path_2) {
     free(combined);
     return result;
 }
-int* vec_Path_ToIndices(const char* path, size_t path_length, size_t* const out_indices_count) {
+int* vec_Path_ToIndices(const char* path, size_t* const out_indices_count) {
     DEBUG_ASSERT(path, "NULL pointer");
-    DEBUG_ASSERT(path_length, "provided path length is zero");
-    DEBUG_ASSERT(path[0] == '/', "Path must start with '/'");
-    DEBUG_ASSERT(path[path_length - 1] == '/', "Path must end with '/'");
-    
-    // Allocate an initial array (worst-case every other character starts a token).
+    if (!path || !out_indices_count) {
+        return NULL; // Handle invalid inputs
+    }
+
+    size_t path_length = strlen(path);
+    if (path_length == 0) {
+        *out_indices_count = 0;
+        DEBUG_SCOPE(int* indices = alloc(NULL, sizeof(int)));
+        if (!indices) {
+            return NULL;
+        }
+        return indices; // Empty path returns empty array
+    }
+
+    // Initial capacity: estimate max number of tokens
     size_t capacity = (path_length / 2) + 1;
-    DEBUG_SCOPE(int* indices = malloc(sizeof(int) * capacity));
-    DEBUG_ASSERT(indices, "malloc failed");
-    if (!indices) return NULL;
-    
+    DEBUG_SCOPE(int* indices = alloc(NULL, sizeof(int) * capacity));
+    if (!indices) {
+        return NULL; // Handle allocation failure
+    }
     size_t count = 0;
+
     const char* p = path;
     const char* end = path + path_length;
-    
+
     while (p < end) {
-        // Skip any extra slashes.
-        while (p < end && *p == '/')
+        // Skip extra slashes
+        while (p < end && *p == '/') {
             p++;
-        if (p >= end)
+        }
+        if (p >= end) {
             break;
-        
-        // Check for ".." component.
-        if ((p + 1 < end) &&
-            (p[0] == '.') && (p[1] == '.') &&
-            ((p + 2 == end) || (p[2] == '/')))
-        {
-            // ".." should only appear when there's a previous valid token;
-            // if not, treat it as a valid token representing moving up.
+        }
+
+        // Handle ".." component
+        if (p + 1 < end && p[0] == '.' && p[1] == '.' &&
+            (p + 2 == end || p[2] == '/')) {
             if (count > 0 && indices[count - 1] != -1) {
-                // Pop the last token.
-                count--;
+                count--; // Pop previous token
             } else {
                 if (count >= capacity) {
                     capacity *= 2;
-                    DEBUG_SCOPE(indices = realloc(indices, sizeof(int) * capacity));
-                    DEBUG_ASSERT(indices, "realloc failed");
+                    DEBUG_SCOPE(int* new_indices = realloc(indices, sizeof(int) * capacity));
+                    if (!new_indices) {
+                        DEBUG_SCOPE(free(indices));
+                        return NULL;
+                    }
+                    indices = new_indices;
                 }
                 indices[count++] = -1;
             }
-            p += 2;  // Skip ".."
-            if (p < end && *p == '/')
-                p++; // Skip trailing slash.
-            continue;
-        }
-        
-        // Check for a "." component.
-        if ((p[0] == '.') && ((p + 1 == end) || (p[1] == '/'))) {
-            p++;
-            if (p < end && *p == '/')
+            p += 2;
+            if (p < end && *p == '/') {
                 p++;
+            }
             continue;
         }
-        
-        // Parse a number token.
-        // According to the design, only non-negative numbers are allowed.
-        // An initial '-' is not allowed unless it forms the token "-1", which should have been
-        // handled by the ".." check. We assert failure if we see a '-' here.
-        DEBUG_ASSERT(*p != '-', "Invalid negative number token; only -1 (represented as '..') is allowed");
-        
-        DEBUG_ASSERT(isdigit((unsigned char)*p), "Expected digit in path component");
+
+        // Handle "." component
+        if (p[0] == '.' && (p + 1 == end || p[1] == '/')) {
+            p++;
+            if (p < end && *p == '/') {
+                p++;
+            }
+            continue;
+        }
+
+        // Parse number token
+        DEBUG_ASSERT(*p != '-', "Invalid negative number; use '..' for -1");
+        DEBUG_ASSERT(isdigit((unsigned char)*p), "Expected digit");
         int number = 0;
         while (p < end && *p != '/') {
-            DEBUG_ASSERT(isdigit((unsigned char)*p), "Invalid character in number component");
+            DEBUG_ASSERT(isdigit((unsigned char)*p), "Invalid character in number");
             number = number * 10 + (*p - '0');
             p++;
         }
-        
         if (count >= capacity) {
             capacity *= 2;
-            DEBUG_SCOPE(indices = realloc(indices, sizeof(int) * capacity));
-            DEBUG_ASSERT(indices, "realloc failed");
+            DEBUG_SCOPE(int* new_indices = realloc(indices, sizeof(int) * capacity));
+            if (!new_indices) {
+                DEBUG_SCOPE(free(indices));
+                return NULL;
+            }
+            indices = new_indices;
         }
         indices[count++] = number;
     }
-    
-    // Optionally shrink allocation.
-    DEBUG_SCOPE(indices = realloc(indices, sizeof(int) * count));
-    DEBUG_ASSERT(indices, "realloc failed");
+
+    // Shrink to fit
+    DEBUG_SCOPE(int* final_indices = realloc(indices, sizeof(int) * count));
+    if (!final_indices) {
+        DEBUG_SCOPE(free(indices));
+        return NULL;
+    }
+    indices = final_indices;
+
     *out_indices_count = count;
     return indices;
 }
 char* vec_Path_FromVaArgs(size_t n_args, ...) {
-    if (n_args == 0) { return ""; }
+    if (n_args == 0) {
+        char* empty = alloc(NULL, 1);
+        if (empty) { empty[0] = '\0'; }
+        return empty;
+    }
+
     va_list args;
     va_start(args, n_args);
-    DEBUG_SCOPE(int* p_indices = alloc(NULL, n_args * sizeof(int)));
+    int* p_indices = alloc(NULL, n_args * sizeof(int));
+    if (!p_indices) {
+        va_end(args);
+        return NULL;
+    }
     for (size_t i = 0; i < n_args; i++) {
         p_indices[i] = va_arg(args, int);
     }
     va_end(args);
 
-    /*  First pass: calculate required length.
-        For each element, we need:
-          - 2 characters if the value is -1 (for ".."),
-          - Otherwise, the number of digits in the integer (special-case 0 -> 1 digit).
-        Also, every element gets a trailing '/' and the path starts with '/'.
-        Finally, add one byte for the terminating '\0'. */
-    size_t total_len = 0; // for initial '/'
+    // Calculate required length.
+    size_t total_len = 1; // Start with a '/'
     for (size_t i = 0; i < n_args; i++) {
-        total_len += 1; // for the '/' before each element
         if (p_indices[i] == -1) {
             total_len += 2; // ".."
         } else {
-            int x = p_indices[i];
-            int digit_count = (x == 0) ? 1 : 0;
-            for (int tmp = x; tmp > 0; tmp /= 10) {
-                digit_count++;
-            }
-            total_len += digit_count;
+            int num = p_indices[i];
+            int digits = (num == 0) ? 1 : 0;
+            while (num != 0) { digits++; num /= 10; }
+            total_len += digits;
         }
+        if (i < n_args - 1) { total_len += 1; } // Separator
     }
-    total_len += 1; // for '\0'
+    total_len += 1; // Null terminator
 
-    DEBUG_SCOPE(char* ptr = alloc(NULL, total_len));
+    char* ptr = alloc(NULL, total_len);
+    if (!ptr) { free(p_indices); return NULL; }
     char* p = ptr;
-
-    // Begin with the starting slash.
     *p++ = '/';
-
-    // Second pass: fill in each element.
     for (size_t i = 0; i < n_args; i++) {
-        // Append slash before this element.
-        *p++ = '/';
-        int num = p_indices[i];
-        if (num == -1) {
-            // Append ".."
+        if (p_indices[i] == -1) {
             *p++ = '.';
             *p++ = '.';
-        } else if (num == 0) {
-            *p++ = '0';
         } else {
-            // Convert integer to string.
-            // Since numbers are non-negative (other than -1) we can do this quickly.
-            char temp[12]; // Enough for 32-bit integers.
-            int len = 0;
-            while (num > 0) {
-                temp[len++] = '0' + (num % 10);
-                num /= 10;
-            }
-            // The digits are in reverse order, so copy them in reverse.
-            for (int j = len - 1; j >= 0; j--) {
-                *p++ = temp[j];
-            }
+            char temp[12]; // Buffer for number conversion.
+            int len = snprintf(temp, sizeof(temp), "%d", p_indices[i]);
+            memcpy(p, temp, len);
+            p += len;
+        }
+        if (i < n_args - 1) {
+            *p++ = '/';
         }
     }
-    // Null-terminate the string.
     *p = '\0';
-
-    DEBUG_SCOPE(free(p_indices));
+    free(p_indices);
     return ptr;
 }

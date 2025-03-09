@@ -11,6 +11,10 @@
 // 		ID shouldnt be int but long long
 //  	GPI_Shader should be integrated into graphics and compute pipeline
 //  	remove this_type as static vec_type exists now
+// 		change from read dominant to write dominant so that writes can be prioritized faster
+//  	when doing vec_SetCount_SafeWrite you should actually lock write before finding the new count, but Vec is not designed to do that so one thread could SetCount before this thread so that when this thread does it both threads could end up having the same index. i dont know how to fix this without making other stuff more difficult. for now you must check that the new index is null 
+// 		when starting a Vec** how can you be sure that all parents are locked? maybe you should have a vec function that gets a Vec* then checks that the parent is NULL then locks that Vec*
+// 		now youve added switch between read and write functions. to make this more usefull maybe you need to add more mutexes
 /*
 n_1:u8:43
 arr_1:[]u8:[43, 23, 541, 632, 15]
@@ -35,17 +39,17 @@ void* alloc(void* ptr, size_t size) {
 
 int main() {
 	DEBUG_SCOPE(cpi_Initialize());
-	DEBUG_SCOPE(char* gpu_device_path = cpi_GPUDevice_Create());
-	DEBUG_SCOPE(char* window_path = cpi_Window_Create(800, 600, "Λόγος"));
-	DEBUG_SCOPE(char* vert_path = cpi_Shader_CreateFromGlslFile(gpu_device_path, "../shaders/shader.vert.glsl", "main", shaderc_vertex_shader, true));
-	DEBUG_SCOPE(char* frag_path = cpi_Shader_CreateFromGlslFile(gpu_device_path, "../shaders/shader.frag.glsl", "main", shaderc_fragment_shader, true));
-	DEBUG_SCOPE(char* graphics_pipeline_path = cpi_GraphicsPipeline_Create(vert_path, frag_path, true));
-	DEBUG_SCOPE(cpi_GraphicsPipeline_Destroy(&graphics_pipeline_path));
-	DEBUG_SCOPE(cpi_Shader_Destroy(&vert_path));
-	DEBUG_SCOPE(cpi_Shader_Destroy(&frag_path));
+	DEBUG_SCOPE(int gpu_device_index = cpi_GPUDevice_Create());
+	DEBUG_SCOPE(int window_index = cpi_Window_Create(800, 600, "Λόγος"));
+	DEBUG_SCOPE(int vert_index = cpi_Shader_CreateFromGlslFile(gpu_device_index, "../shaders/shader.vert.glsl", "main", shaderc_vertex_shader, true));
+	DEBUG_SCOPE(int frag_index = cpi_Shader_CreateFromGlslFile(gpu_device_index, "../shaders/shader.frag.glsl", "main", shaderc_fragment_shader, true));
+	DEBUG_SCOPE(int graphics_pipeline_index = cpi_GraphicsPipeline_Create(vert_index, frag_index, true));
+	DEBUG_SCOPE(cpi_GraphicsPipeline_Destroy(&graphics_pipeline_index));
+	DEBUG_SCOPE(cpi_Shader_Destroy(&vert_index));
+	DEBUG_SCOPE(cpi_Shader_Destroy(&frag_index));
 
-	DEBUG_SCOPE(cpi_Window_Show(window_path));
-	DEBUG_SCOPE(cpi_Window_Destroy(&window_path));
+	DEBUG_SCOPE(cpi_Window_Show(window_index));
+	DEBUG_SCOPE(cpi_Window_Destroy(&window_index));
 	/*
 	TRACK(ASSERT(o_Initialize(), "ERROR: could not initialize Lo_GUI\n"));
 	TRACK(CPI_ID_Handle window_handle = o_Window_Create(800, 600, "Λόγος"));
