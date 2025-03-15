@@ -169,8 +169,8 @@ Type vec_type = 0;
     			else {
     				for (unsigned short i = 0; i < p_vec->count; ++i) {
                         printf("    %d non-vec at %p:\n",  i, p_vec->p_data + i*element_size);
-    					for (unsigned int j = 0; j < element_size/8; j++) {
-    						printf("        0x%X\n", *((unsigned long long*)(p_vec->p_data + i*element_size/8+j)));
+    					for (unsigned int j = 0; j < element_size; j+=8) {
+    						printf("        %p\n", *((unsigned long long*)(p_vec->p_data + i*element_size+j)));
     					}
     					printf("\n");
     				}
@@ -262,7 +262,7 @@ Type vec_type = 0;
                             if (p_vec_tmp_2 == p_vec_tmp) {
                                 index = i;
                                 printf("new child = %d\n", i+1);
-                                DEBUG_SCOPE(vec_MoveToIndex(pp_vec, i+1, ((Vec*)(*pp_vec)->p_data)->type));
+                                DEBUG_SCOPE(vec_MoveToIndex(pp_vec, i+1, ((Vec*)(*pp_vec)->p_data)[(i+1)].type));
                                 break;
                             }
                         }
@@ -407,7 +407,7 @@ Type vec_type = 0;
     }
 
 // ================================================================================================================================
-// IsValid Locking
+// IsValid
 // ================================================================================================================================
     bool vec_IsValid_SafeRead(Vec* p_vec) {
         DEBUG_ASSERT(p_vec, "NULL pointer");
@@ -611,6 +611,17 @@ Type vec_type = 0;
         DEBUG_ASSERT(p_indices, "p_indices is NULL pointer\n");
         DEBUG_SCOPE(vec_MoveToIndices(pp_vec, indices_count, p_indices));
         free(p_indices);
+    }
+    void* vec_MoveToPathAndGetElement(Vec** pp_vec, const char* path, Type type) {
+        DEBUG_ASSERT(pp_vec, "p_vec is NULL pointer\n");
+        DEBUG_ASSERT(vec_IsValid_UnsafeRead(*pp_vec), "*pp_vec is invalid\n");
+        size_t indices_count = 0;
+        DEBUG_SCOPE(int* p_indices = vec_Path_ToIndices(path, &indices_count));
+        DEBUG_ASSERT(p_indices, "p_indices is NULL pointer\n");
+        DEBUG_SCOPE(vec_MoveToIndices(pp_vec, indices_count-1, p_indices));
+        void* p_element = vec_GetElement_UnsafeRead(*pp_vec, p_indices[indices_count-1], type);
+        free(p_indices);
+        return p_element;
     }
 
 // ================================================================================================================================

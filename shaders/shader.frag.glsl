@@ -27,7 +27,7 @@ void main() {
     else if (fragTexIndex == 6) {textureColor = texture(texture_5, fragTexCoord);} 
     else if (fragTexIndex == 7) {textureColor = texture(texture_6, fragTexCoord);} 
     else if (fragTexIndex == 8) {textureColor = texture(texture_7, fragTexCoord);}
-    
+
     vec4 color = (fragTexIndex == 0 || fragTexIndex >= 9)
         ? fragColor
         : fragColor * textureColor;
@@ -39,7 +39,8 @@ void main() {
     float edge = 0.003;
 
     if (fragCornerRadiusWidth < 0.0001 || fragCornerRadiusHeight < 0.0001 ||
-        x >= fragCornerRadiusWidth + edge || y >= fragCornerRadiusHeight + edge) {
+        x >= fragCornerRadiusWidth + edge || y >= fragCornerRadiusHeight + edge) 
+    {
         outColor = color;
         return;
     }
@@ -47,12 +48,13 @@ void main() {
     y = y - fragCornerRadiusHeight * 0.98;
     float a = (pow(x / fragCornerRadiusWidth, 2)) + (pow(y / fragCornerRadiusHeight, 2));
     if (a < 1.0) {
-        if (a > 0.9) {
-            outColor = vec4(color.rgb, color.a * (1.0 - a) * 10.0);
-            return;
-        }
-        outColor = color;
+        // Compute normalized squared distance 'a' from the corner center.
+        float a = (pow(x / fragCornerRadiusWidth, 2.0)) + (pow(y / fragCornerRadiusHeight, 2.0));
+        // Use smoothstep to compute a factor: when 'a' is less than 0.9, factor is near 1,
+        // and when 'a' is greater than 1.0, factor is 0, with a smooth transition in between.
+        float alphaFactor = 1.0 - smoothstep(0.9, 1.0, a);
+        outColor = vec4(color.rgb, color.a * alphaFactor);
         return;
     }
-    outColor = vec4(0.0);
+    outColor = vec4(0.0, 0.0, 0.0, 0.0);
 }

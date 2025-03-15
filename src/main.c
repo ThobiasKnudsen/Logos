@@ -25,38 +25,22 @@ arr_2:p_arr_1@
 arr_2[0].a 
 */
 
-
-
-
-void* alloc(void* ptr, size_t size) {
-    void* tmp = (ptr == NULL) ? malloc(size) : realloc(ptr, size);
-    if (!tmp) {
-        printf("Memory allocation failed\n");
-        exit(-1);
-    }
-    return tmp;
-}
-
 int main() {
+
+	//cpi_Debug();
+	
 	DEBUG_SCOPE(cpi_Initialize());
 	DEBUG_SCOPE(int gpu_device_index = cpi_GPUDevice_Create());
-	DEBUG_SCOPE(int window_index = cpi_Window_Create(800, 600, "Λόγος"));
+	DEBUG_SCOPE(int window_index = cpi_Window_Create(gpu_device_index, 800, 600, "Λόγος"));
 	DEBUG_SCOPE(int vert_index = cpi_Shader_CreateFromGlslFile(gpu_device_index, "../shaders/shader.vert.glsl", "main", shaderc_vertex_shader, true));
 	DEBUG_SCOPE(int frag_index = cpi_Shader_CreateFromGlslFile(gpu_device_index, "../shaders/shader.frag.glsl", "main", shaderc_fragment_shader, true));
 	DEBUG_SCOPE(int graphics_pipeline_index = cpi_GraphicsPipeline_Create(vert_index, frag_index, true));
+	
+	DEBUG_SCOPE(cpi_Window_Show(window_index, graphics_pipeline_index));
 	DEBUG_SCOPE(cpi_GraphicsPipeline_Destroy(&graphics_pipeline_index));
 	DEBUG_SCOPE(cpi_Shader_Destroy(&vert_index));
 	DEBUG_SCOPE(cpi_Shader_Destroy(&frag_index));
-
-	DEBUG_SCOPE(cpi_Window_Show(window_index));
 	DEBUG_SCOPE(cpi_Window_Destroy(&window_index));
-	/*
-	TRACK(ASSERT(o_Initialize(), "ERROR: could not initialize Lo_GUI\n"));
-	TRACK(CPI_ID_Handle window_handle = o_Window_Create(800, 600, "Λόγος"));
-	TRACK(ASSERT(window_handle>=0, "ERROR: failed to create window\n"));
-	TRACK(o_Window_Show(window_handle));
-	TRACK(ASSERT(o_Window_Destroy(&window_handle), "ERROR: failed to destroy window\n"));
-	TRACK(ASSERT(o_Destroy(), "ERROR: could not destroy Lo_GUI\n"));
-	*/
+	
 	return 0;
 }

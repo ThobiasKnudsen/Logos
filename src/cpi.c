@@ -1,3 +1,6 @@
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 #include "cpi.h"
 #include "vec.h"
 #include "vec_path.h"
@@ -6,6 +9,15 @@
 #include <SDL3/SDL.h>
 #include <SDL3_shadercross/SDL_shadercross.h>
 #include "spirv_reflect.h"
+
+void* alloc(void* ptr, size_t size) {
+    void* tmp = (ptr == NULL) ? malloc(size) : realloc(ptr, size);
+    if (!tmp) {
+        printf("Memory allocation failed\n");
+        exit(-1);
+    }
+    return tmp;
+}
 
 // ===============================================================================================================
 // CPU states
@@ -68,6 +80,7 @@ typedef struct CPI_Window {
 	unsigned long long 				id;
 #endif
 	SDL_Window* 					p_sdl_window;
+	int  							gpu_device_index;
 	SDL_ThreadID        			thread_id;
 } CPI_Window;
 
@@ -130,7 +143,7 @@ typedef struct CPI_GraphicsPipeline {
 #endif
 	int  							vertex_shader_index;
 	int 							fragment_shader_index;
-	SDL_GPUGraphicsPipeline* 		p_sdl_pipeline;
+	SDL_GPUGraphicsPipeline* 		p_graphics_pipeline;
 } CPI_GraphicsPipeline;
 
 typedef struct CPI_ComputePipeline {
@@ -164,6 +177,10 @@ typedef struct CPI_Command {
 	long long   					id;
 #endif
 	SDL_ThreadID        			thread_id;
+	int*  							p_target_path; // either window or texture
+	size_t  						target_path_length;
+	int**							pp_path_passes;
+	size_t*  						p_path_passes;
 } CPI_Command;
 
 // CPU States
@@ -183,11 +200,11 @@ static Type cpi_buffer_type;
 // GPU Operators
 static Type cpi_gpu_device_type;
 static Type cpi_command_type;
-static Type cpi_renderpass_type;
-static Type cpi_computepass_type;
-static Type cpi_copyPass_type;
+static Type cpi_render_pass_type;
+static Type cpi_compute_pass_type;
+static Type cpi_copy_pass_type;
 static Type cpi_graphics_pipeline_type;
-static Type cpi_computerpipeline_type;
+static Type cpi_computer_pipeline_type;
 static Type cpi_shader_type;
 
 static Vec* g_vec = NULL;
@@ -224,54 +241,310 @@ void cpi_Initialize()
     DEBUG_SCOPE(result = SDL_ShaderCross_Init());
     DEBUG_ASSERT(result, "Failed to initialize SDL_ShaderCross. %s", SDL_GetError());
 }
-
 // ===============================================================================================================
 // Window
 // ===============================================================================================================
 int cpi_Window_Create(
+	int gpu_device_index,
 	unsigned int width,
 	unsigned int height,
 	const char* title)
 {
 	DEBUG_ASSERT(title, "title is NULL");
-	Vec** pp_vec = vec_MoveStart(g_vec);
-	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_vec));
-	DEBUG_SCOPE(int window_vec_index = vec_UpsertVecWithType_UnsafeWrite(*pp_vec, cpi_window_type));
-	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_vec));
-	DEBUG_SCOPE(vec_MoveToIndex(pp_vec, window_vec_index, cpi_window_type));
-	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_vec));
-	DEBUG_SCOPE(int window_index = vec_UpsertNullElement_UnsafeWrite(*pp_vec, cpi_window_type));
-	DEBUG_SCOPE(CPI_Window* p_window = (CPI_Window*)vec_GetElement_UnsafeRead(*pp_vec, window_index, cpi_window_type));
+	DEBUG_SCOPE(Vec** pp_window_vec = vec_MoveStart(g_vec));
+	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_window_vec));
+	DEBUG_SCOPE(int window_vec_index = vec_UpsertVecWithType_UnsafeWrite(*pp_window_vec, cpi_window_type));
+	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_window_vec));
+	DEBUG_SCOPE(vec_MoveToIndex(pp_window_vec, window_vec_index, cpi_window_type));
+	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_window_vec));
+	DEBUG_SCOPE(int window_index = vec_UpsertNullElement_UnsafeWrite(*pp_window_vec, cpi_window_type));
+	DEBUG_SCOPE(CPI_Window* p_window = (CPI_Window*)vec_GetElement_UnsafeRead(*pp_window_vec, window_index, cpi_window_type));
 	DEBUG_ASSERT(p_window, "NULL pointer");
 	DEBUG_ASSERT(!p_window->p_sdl_window, "INTERNAL ERROR: sdl window should be NULL");
 	DEBUG_SCOPE(p_window->p_sdl_window = SDL_CreateWindow(title, width, height, SDL_WINDOW_RESIZABLE));
 	DEBUG_ASSERT(p_window->p_sdl_window, "ERROR: failed to create window: %s", SDL_GetError());
+
+	// getting gpu device
+	p_window->gpu_device_index = gpu_device_index;
+	DEBUG_SCOPE(Vec** pp_gpu_device_vec = vec_MoveStart(g_vec));
+	DEBUG_SCOPE(int gpu_device_vec_index = vec_UpsertVecWithType_UnsafeWrite(*pp_gpu_device_vec, cpi_gpu_device_type));
+	DEBUG_SCOPE(vec_MoveToIndex(pp_gpu_device_vec, gpu_device_vec_index, cpi_gpu_device_type));
+	DEBUG_SCOPE(CPI_GPUDevice* p_gpu_device = (CPI_GPUDevice*)vec_GetElement_UnsafeRead(*pp_gpu_device_vec, gpu_device_index, cpi_gpu_device_type));
+	DEBUG_SCOPE(DEBUG_ASSERT(p_gpu_device->p_gpu_device, "NULL pointer"));
+	DEBUG_SCOPE(ASSERT(SDL_ClaimWindowForGPUDevice(p_gpu_device->p_gpu_device, p_window->p_sdl_window), "Failed to claim window"));
+	DEBUG_SCOPE(vec_MoveEnd(pp_gpu_device_vec));
+
 	#ifdef DEBUG
 		SDL_LockMutex(g_unique_id_mutex);
 		p_window->id = g_unique_id++;
 		SDL_UnlockMutex(g_unique_id_mutex);
 	#endif
-	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_vec));
-	DEBUG_SCOPE(vec_MoveEnd(pp_vec));
+
+	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_window_vec));
+	DEBUG_SCOPE(vec_MoveEnd(pp_window_vec));
 
     printf("SUCCESSFULLY created window\n");
 	return window_index;
 }
 void cpi_Window_Show(
-	int window_index) 
+    int window_index,
+    int graphics_pipeline_index) 
 {
-	SDL_Event event;
-    bool quit = false;
-    while (!quit) {
+    // get the window
+    DEBUG_SCOPE(Vec** pp_window_vec = vec_MoveStart(g_vec));
+    DEBUG_SCOPE(int window_vec_index = vec_GetVecWithType_UnsafeRead(*pp_window_vec, cpi_window_type));
+    DEBUG_SCOPE(vec_MoveToIndex(pp_window_vec, window_vec_index, cpi_window_type));
+    DEBUG_SCOPE(CPI_Window* p_window = (CPI_Window*)vec_GetElement_UnsafeRead(*pp_window_vec, window_index, cpi_window_type));
+    DEBUG_SCOPE(DEBUG_ASSERT(p_window->p_sdl_window, "NULL pointer"));
+
+    // get the gpu device
+    DEBUG_SCOPE(Vec** pp_gpu_device_vec = vec_MoveStart(g_vec));
+    DEBUG_SCOPE(int gpu_device_vec_index = vec_GetVecWithType_UnsafeRead(*pp_gpu_device_vec, cpi_gpu_device_type));
+    DEBUG_SCOPE(vec_MoveToIndex(pp_gpu_device_vec, gpu_device_vec_index, cpi_gpu_device_type));
+    DEBUG_SCOPE(CPI_GPUDevice* p_gpu_device = (CPI_GPUDevice*)vec_GetElement_UnsafeRead(*pp_gpu_device_vec, p_window->gpu_device_index, cpi_gpu_device_type));
+    DEBUG_SCOPE(DEBUG_ASSERT(p_gpu_device->p_gpu_device, "NULL pointer"));
+
+    SDL_GPUTextureFormat color_format = SDL_GetGPUSwapchainTextureFormat(p_gpu_device->p_gpu_device, p_window->p_sdl_window);
+    DEBUG_ASSERT(SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM == color_format, "not correct color format");
+
+    // get the graphics pipeline
+    DEBUG_SCOPE(Vec** pp_graphics_pipeline_vec = vec_MoveStart(g_vec));
+    DEBUG_SCOPE(int gpu_graphics_pipeline_index = vec_GetVecWithType_UnsafeRead(*pp_graphics_pipeline_vec, cpi_graphics_pipeline_type));
+    DEBUG_SCOPE(vec_MoveToIndex(pp_graphics_pipeline_vec, gpu_graphics_pipeline_index, cpi_graphics_pipeline_type));
+    DEBUG_SCOPE(CPI_GraphicsPipeline* p_graphics_pipeline = (CPI_GraphicsPipeline*)vec_GetElement_UnsafeRead(*pp_graphics_pipeline_vec, graphics_pipeline_index, cpi_graphics_pipeline_type));
+    DEBUG_SCOPE(DEBUG_ASSERT(p_graphics_pipeline->p_graphics_pipeline, "NULL pointer"));
+
+    Rect rects[2] = {
+        { 
+            .rect = { .x = 100.f, .y = 100.f, .w = 300.f, .h = 300.f },
+            .rotation = 0.0f,
+            .corner_radius_pixels = 20.f,
+            .color = { .r = 200, .g = 200, .b = 200, .a = 255 },
+            .tex_index = 1,
+            .tex_rect = { .x = 0.0f, .y = 0.0f, .w = 1.0f, .h = 1.0f }
+        }, { 
+            .rect = { .x = 100.f, .y = 100.f, .w = 100.f, .h = 100.f },
+            .rotation = 50.0f,
+            .corner_radius_pixels = 20.f,
+            .color = { .r = 200, .g = 200, .b = 200, .a = 100 },
+            .tex_index = 0,
+            .tex_rect = { .x = 0.0f, .y = 0.0f, .w = 1.0f, .h = 1.0f }
+        }
+    };
+    unsigned int size = sizeof(rects);
+
+    SDL_GPUTransferBufferCreateInfo transfer_info = {
+        .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+        .size = size
+    };
+    DEBUG_SCOPE(SDL_GPUTransferBuffer* transfer_buffer = SDL_CreateGPUTransferBuffer(p_gpu_device->p_gpu_device, &transfer_info));
+    DEBUG_ASSERT(transfer_buffer, "Failed to create transfer buffer: %s", SDL_GetError());
+
+    DEBUG_SCOPE(void* mapped_data = SDL_MapGPUTransferBuffer(p_gpu_device->p_gpu_device, transfer_buffer, false));
+    DEBUG_ASSERT(mapped_data, "Failed to map transfer buffer: %s", SDL_GetError());
+    memcpy(mapped_data, rects, size);
+    DEBUG_SCOPE(SDL_UnmapGPUTransferBuffer(p_gpu_device->p_gpu_device, transfer_buffer));
+    SDL_GPUBufferCreateInfo buffer_create_info = {
+        .usage = SDL_GPU_BUFFERUSAGE_VERTEX,
+        .size = size
+    };
+
+    DEBUG_SCOPE(SDL_GPUBuffer* gpu_buffer = SDL_CreateGPUBuffer(p_gpu_device->p_gpu_device, &buffer_create_info));
+    DEBUG_ASSERT(gpu_buffer, "Failed to create GPU buffer: %s", SDL_GetError());
+    DEBUG_SCOPE(SDL_GPUCommandBuffer* command_buffer = SDL_AcquireGPUCommandBuffer(p_gpu_device->p_gpu_device));
+    DEBUG_ASSERT(command_buffer, "Failed to acquire command buffer: %s", SDL_GetError());
+    DEBUG_SCOPE(SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(command_buffer));
+    SDL_GPUTransferBufferLocation source = { transfer_buffer, 0 };
+    SDL_GPUBufferRegion destination = { gpu_buffer, 0, size };
+    DEBUG_SCOPE(SDL_UploadToGPUBuffer(copy_pass, &source, &destination, false));
+    DEBUG_SCOPE(SDL_EndGPUCopyPass(copy_pass));
+    DEBUG_ASSERT(SDL_SubmitGPUCommandBuffer(command_buffer), "Failed to submit command buffer: %s", SDL_GetError());
+    SDL_ReleaseGPUTransferBuffer(p_gpu_device->p_gpu_device, transfer_buffer);
+
+	// Load image using stb_image
+    char absolute_path[PATH_MAX];
+    DEBUG_ASSERT(realpath("../resources/Bitcoin.png", absolute_path), "realpath failed\n");
+    printf("Loading image from: %s\n", absolute_path);
+    
+
+    int width, height, channels;
+    unsigned char* p_data = stbi_load("../resources/Bitcoin.png", &width, &height, &channels, STBI_rgb_alpha);
+    DEBUG_ASSERT(p_data, "Failed to load image file: %s\n", "../resources/Bitcoin.png");
+    
+    // Create a bitcoin_texture with the dimensions of the loaded image.
+    SDL_GPUTextureCreateInfo tex_info = {
+        .type = SDL_GPU_TEXTURETYPE_2D,
+        .format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+        .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET,
+        .width = width,
+        .height = height,
+        .layer_count_or_depth = 1,
+        .num_levels = 1,
+        .sample_count = SDL_GPU_SAMPLECOUNT_1,
+        .props = 0
+    };
+    SDL_GPUTexture* bitcoin_texture = SDL_CreateGPUTexture(p_gpu_device->p_gpu_device, &tex_info);
+    DEBUG_ASSERT(bitcoin_texture, "Failed to create bitcoin_texture: %s\n", SDL_GetError());
+    
+    // Create a transfer buffer sized to hold the entire image.
+    size_t image_size = width * height * 4; // 4 bytes per pixel (RGBA)
+    SDL_GPUTransferBufferCreateInfo tex_transfer_info = {
+        .usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+        .size = image_size
+    };
+    SDL_GPUTransferBuffer* tex_transfer_buffer = SDL_CreateGPUTransferBuffer(p_gpu_device->p_gpu_device, &tex_transfer_info);
+    DEBUG_ASSERT(tex_transfer_buffer, "Failed to create transfer buffer: %s\n", SDL_GetError());
+    
+    // Map the transfer buffer and copy the image data into it.
+    void* tex_map = SDL_MapGPUTransferBuffer(p_gpu_device->p_gpu_device, tex_transfer_buffer, false);
+    DEBUG_ASSERT(tex_map, "Failed to map transfer buffer: %s\n", SDL_GetError());
+    memcpy(tex_map, p_data, image_size);
+    SDL_UnmapGPUTransferBuffer(p_gpu_device->p_gpu_device, tex_transfer_buffer);
+    
+    // Define a bitcoin_texture region covering the entire bitcoin_texture.
+    SDL_GPUTextureRegion tex_region = {
+        .texture = bitcoin_texture,
+        .mip_level = 0,
+        .layer = 0,
+        .x = 0,
+        .y = 0,
+        .w = width,
+        .h = height,
+        .d = 1
+    };
+    
+    // Set up transfer info. Here, pixels_per_row and rows_per_layer match the image dimensions.
+    SDL_GPUTextureTransferInfo tex_transfer = {
+        .transfer_buffer = tex_transfer_buffer,
+        .offset = 0,
+        .pixels_per_row = width,
+        .rows_per_layer = height
+    };
+    
+    // Upload the bitcoin_texture data using a copy pass.
+    SDL_GPUCommandBuffer* tex_cmd = SDL_AcquireGPUCommandBuffer(p_gpu_device->p_gpu_device);
+    SDL_GPUCopyPass* tex_copy = SDL_BeginGPUCopyPass(tex_cmd);
+    SDL_UploadToGPUTexture(tex_copy, &tex_transfer, &tex_region, false);
+    SDL_EndGPUCopyPass(tex_copy);
+    SDL_SubmitGPUCommandBuffer(tex_cmd);
+    SDL_ReleaseGPUTransferBuffer(p_gpu_device->p_gpu_device, tex_transfer_buffer);
+    
+    // Create a bitcoin_sampler for the bitcoin_texture.
+    SDL_GPUSamplerCreateInfo sampler_info = {
+        .min_filter = SDL_GPU_FILTER_NEAREST,
+        .mag_filter = SDL_GPU_FILTER_NEAREST,
+        .mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST,
+        .address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+        .address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+        .address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
+        .mip_lod_bias = 0.0f,
+        .max_anisotropy = 1.0f,
+        .compare_op = SDL_GPU_COMPAREOP_ALWAYS,
+        .min_lod = 0.0f,
+        .max_lod = 0.0f,
+        .enable_anisotropy = false,
+        .enable_compare = false,
+        .props = 0
+    };
+    SDL_GPUSampler* bitcoin_sampler = SDL_CreateGPUSampler(p_gpu_device->p_gpu_device, &sampler_info);
+    DEBUG_ASSERT(bitcoin_sampler, "Failed to create bitcoin_sampler: %s\n", SDL_GetError());
+    
+    // Free the loaded image data as it is now uploaded to the GPU.
+    stbi_image_free(p_data);
+    // --- Main rendering loop ---
+    bool running = true;
+    while (running) {
+        // Process events (quit if window is closed)
+        SDL_Event event;
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_EVENT_QUIT) {
-                quit = true;
+                running = false;
             }
         }
-        SDL_Delay(16);
+
+        // Acquire a command buffer for the current frame.
+        SDL_GPUCommandBuffer* cmd_buffer = SDL_AcquireGPUCommandBuffer(p_gpu_device->p_gpu_device);
+        DEBUG_SCOPE(ASSERT(cmd_buffer, "Failed to acquire command buffer: %s", SDL_GetError()));
+
+        SDL_GPUTexture *swapchain_tex = NULL;
+	    unsigned int tex_width = 0, tex_height = 0;
+	    DEBUG_SCOPE(ASSERT(SDL_WaitAndAcquireGPUSwapchainTexture(cmd_buffer, p_window->p_sdl_window, &swapchain_tex, &tex_width, &tex_height),
+	                       "Failed to acquire swapchain texture: %s", SDL_GetError()));
+
+	    // Create dummy UBO data (for the vertex shader’s UBO in set 1).
+	    typedef struct {
+	        float targetWidth;
+	        float targetHeight;
+	        float padding[2];
+	    } UniformBufferObject;
+	    UniformBufferObject dummyUBO = { (float)tex_width, (float)tex_height, {0.0f, 0.0f} };
+
+        // Push dummy uniform data onto the command buffer (for vertex shader UBO)
+        // This pushes data into uniform slot 0 of the vertex stage.
+        SDL_PushGPUVertexUniformData(cmd_buffer, 0, &dummyUBO, sizeof(dummyUBO));
+
+        
+
+        // Set up the color target info for the render pass.
+        SDL_GPUColorTargetInfo color_target = {0};
+        color_target.texture = swapchain_tex;
+        color_target.mip_level = 0;
+        color_target.layer_or_depth_plane = 0;
+        color_target.clear_color = (SDL_FColor){ .r = 0.0f, .g = 0.0f, .b = 0.0f, .a = 0.5f };
+        color_target.load_op = SDL_GPU_LOADOP_CLEAR;
+        color_target.store_op = SDL_GPU_STOREOP_STORE;
+        color_target.resolve_texture = NULL;
+        color_target.cycle = false;
+        color_target.cycle_resolve_texture = false;
+
+        // Begin the render pass.
+        SDL_GPURenderPass *render_pass = SDL_BeginGPURenderPass(cmd_buffer, &color_target, 1, NULL);
+        DEBUG_SCOPE(ASSERT(render_pass, "Failed to begin render pass: %s", SDL_GetError()));
+
+        // Set the viewport to cover the entire swapchain texture.
+        SDL_GPUViewport viewport = {
+            .x = 0,
+            .y = 0,
+            .w = (float)tex_width,
+            .h = (float)tex_height,
+            .min_depth = 0.0f,
+            .max_depth = 1.0f
+        };
+        DEBUG_SCOPE(SDL_SetGPUViewport(render_pass, &viewport));
+
+        // Bind the graphics pipeline.
+        DEBUG_SCOPE(SDL_BindGPUGraphicsPipeline(render_pass, p_graphics_pipeline->p_graphics_pipeline));
+
+        // Bind the vertex buffer.
+        SDL_GPUBufferBinding buffer_binding = { .buffer = gpu_buffer, .offset = 0 };
+        DEBUG_SCOPE(SDL_BindGPUVertexBuffers(render_pass, 0, &buffer_binding, 1));
+
+        // Bind dummy texture–sampler pairs for the fragment shader.
+        SDL_GPUTextureSamplerBinding dummyTexBindings[8];
+        for (int i = 0; i < 8; i++) {
+            dummyTexBindings[i].texture = bitcoin_texture;
+            dummyTexBindings[i].sampler = bitcoin_sampler;
+        }
+        SDL_BindGPUFragmentSamplers(render_pass, 0, dummyTexBindings, 8);
+
+        DEBUG_SCOPE(SDL_DrawGPUPrimitives(render_pass, 4, 2, 0, 0));
+
+        // End the render pass.
+        SDL_EndGPURenderPass(render_pass);
+
+        // Submit the command buffer so that the commands are executed on the GPU.
+        DEBUG_SCOPE(ASSERT(SDL_SubmitGPUCommandBuffer(cmd_buffer), "Failed to submit command buffer: %s", SDL_GetError()));
+
+        // Optionally, delay to cap the frame rate (here ~60 FPS).
+        // SDL_Delay(16);
     }
+
+    DEBUG_SCOPE(SDL_ReleaseGPUBuffer(p_gpu_device->p_gpu_device, gpu_buffer));
+    // (Be sure to release/destroy your dummy resources when cleaning up.)
 }
-void cpi_Window_Destructor(void* p_void) {
+void cpi_Window_Destructor(
+	void* p_void) 
+{
 	CPI_Window* p_window = (CPI_Window*)p_void;
 	DEBUG_ASSERT(p_window, "NULL pointer");
 	DEBUG_ASSERT(p_window->p_sdl_window, "NULL pointer");
@@ -282,6 +555,18 @@ void cpi_Window_Destructor(void* p_void) {
 		}
 	}
 	ASSERT(!is_null, "shaderc compiler is null");
+
+	// getting gpu device
+	/*
+	DEBUG_SCOPE(Vec** pp_gpu_device_vec = vec_MoveStart(g_vec));
+	DEBUG_SCOPE(int gpu_device_vec_index = vec_UpsertVecWithType_UnsafeWrite(*pp_gpu_device_vec, cpi_gpu_device_type));
+	DEBUG_SCOPE(vec_MoveToIndex(pp_gpu_device_vec, gpu_device_vec_index, cpi_gpu_device_type));
+	DEBUG_SCOPE(CPI_GPUDevice* p_gpu_device = vec_GetElement_UnsafeRead(*pp_gpu_device_vec, gpu_device_index, cpi_gpu_device_type));
+	DEBUG_SCOPE(DEBUG_ASSERT(p_gpu_device->p_gpu_device, "NULL pointer"));
+	DEBUG_SCOPE(SDL_ReleaseWindowFromGPUDevice(p_gpu_device->p_gpu_device, p_window->p_sdl_window));
+	DEBUG_SCOPE(vec_MoveEnd(pp_gpu_device_vec));
+	*/
+
 	DEBUG_SCOPE(SDL_DestroyWindow(p_window->p_sdl_window));
 	memset(p_window, 0, sizeof(CPI_Window));
 }
@@ -307,8 +592,6 @@ void cpi_Window_Destroy(
 int cpi_ShadercCompiler_GetIndex() 
 {
 	DEBUG_SCOPE(SDL_ThreadID this_thread_id = SDL_GetCurrentThreadID());
-	printf("?====================================================================================\n");
-
 
 	// Check if a shaderc compiler already exists for this thread
 	DEBUG_SCOPE(Vec** pp_vec = vec_MoveStart(g_vec));
@@ -350,7 +633,9 @@ int cpi_ShadercCompiler_GetIndex()
     printf("SUCCESSFULLY created shaderc compiler\n");
     return shaderc_compiler_index;
 }
-void cpi_ShadercCompiler_Destructor(void* p_void) {
+void cpi_ShadercCompiler_Destructor(
+	void* p_void) 
+{
 	CPI_ShadercCompiler* p_shaderc_compiler = (CPI_ShadercCompiler*)p_void;
 	DEBUG_ASSERT(p_shaderc_compiler, "NULL pointer");
 	bool is_null = true;
@@ -364,7 +649,9 @@ void cpi_ShadercCompiler_Destructor(void* p_void) {
     shaderc_compile_options_release(p_shaderc_compiler->shaderc_options);
     memset(p_shaderc_compiler, 0, sizeof(CPI_ShadercCompiler));
 }
-void cpi_ShadercCompiler_Destroy(int* p_shaderc_compiler_index) {
+void cpi_ShadercCompiler_Destroy(
+	int* p_shaderc_compiler_index) 
+{
     DEBUG_SCOPE(ASSERT(p_shaderc_compiler_index, "NULL pointer"));
     DEBUG_SCOPE(Vec** pp_vec = vec_MoveStart(g_vec));
     DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_vec));
@@ -429,7 +716,9 @@ int cpi_GPUDevice_Create()
 	printf("SUCCESSFULLY created gpu device\n");
 	return gpu_device_index;
 }
-void cpi_GPUDevice_Destructor(void* p_void) {
+void cpi_GPUDevice_Destructor(
+	void* p_void) 
+{
 	CPI_GPUDevice* p_gpu_device = (CPI_GPUDevice*)p_void;
 	DEBUG_ASSERT(p_gpu_device, "NULL pointer");
 	DEBUG_ASSERT((CPI_GPUDevice*)p_gpu_device->p_gpu_device, "NULL pointer");
@@ -444,7 +733,9 @@ void cpi_GPUDevice_Destructor(void* p_void) {
 	DEBUG_SCOPE(SDL_DestroyGPUDevice(p_gpu_device->p_gpu_device));
 	memset(p_gpu_device, 0, sizeof(CPI_GPUDevice));
 }
-void cpi_GPUDevice_Destroy(int* p_gpu_device_index) {
+void cpi_GPUDevice_Destroy(
+	int* p_gpu_device_index) 
+{
 	DEBUG_ASSERT(p_gpu_device_index, "NULL pointer");
 	DEBUG_SCOPE(Vec** pp_vec = vec_MoveStart(g_vec));
 	DEBUG_SCOPE(int gpu_device_vec_index = vec_GetVecWithType_UnsafeRead(*pp_vec, cpi_gpu_device_type));
@@ -641,7 +932,7 @@ SDL_GPUVertexAttribute* _cpi_Shader_Create_VertexInputAttribDesc(
         }
 
         attribute_descriptions[attribute_index].location = refl_var->location;
-        attribute_descriptions[attribute_index].buffer_slot = 0;
+        attribute_descriptions[attribute_index].buffer_slot = 0; // ASSUMES ONLY ONE SLOT
         DEBUG_SCOPE(attribute_descriptions[attribute_index].format = _cpi_spvReflectFormatToSDLGPUformat(refl_var->format));
         attribute_descriptions[attribute_index].offset = 0; // WILL CALCULATE OFFSET LATER
         attribute_index++;
@@ -683,6 +974,90 @@ SDL_GPUVertexAttribute* _cpi_Shader_Create_VertexInputAttribDesc(
     _cpi_Shader_PrintAttributeDescriptions(attribute_descriptions, *p_attribute_count);
 
     return attribute_descriptions;  
+}
+SDL_GPUShaderCreateInfo _cpi_Shader_CreateShaderInfo(const Uint8 *spv_code, size_t spv_code_size, const char *entrypoint, int is_vert)
+{
+    SDL_GPUShaderCreateInfo shader_info = {0};
+    shader_info.code       = spv_code;
+    shader_info.code_size  = spv_code_size;
+    shader_info.entrypoint = entrypoint;
+    shader_info.format     = SDL_GPU_SHADERFORMAT_SPIRV;
+    shader_info.stage      = is_vert ? SDL_GPU_SHADERSTAGE_VERTEX : SDL_GPU_SHADERSTAGE_FRAGMENT;
+    shader_info.props      = 0;  // No extension properties for now
+
+    // Create a SPIR-V reflection module
+    SpvReflectShaderModule module;
+    SpvReflectResult result = spvReflectCreateShaderModule(spv_code_size, spv_code, &module);
+    if (result != SPV_REFLECT_RESULT_SUCCESS) {
+        fprintf(stderr, "Error: Failed to create SPIR-V reflection module (result: %d)\n", result);
+        return shader_info;
+    }
+
+    // First, determine how many descriptor bindings exist
+    uint32_t binding_count = 0;
+    result = spvReflectEnumerateDescriptorBindings(&module, &binding_count, NULL);
+    if (result != SPV_REFLECT_RESULT_SUCCESS) {
+        fprintf(stderr, "Error: Failed to enumerate descriptor bindings (result: %d)\n", result);
+        spvReflectDestroyShaderModule(&module);
+        return shader_info;
+    }
+
+    // Allocate an array to hold pointers to descriptor binding info
+    SpvReflectDescriptorBinding **bindings = malloc(binding_count * sizeof(SpvReflectDescriptorBinding*));
+    if (!bindings) {
+        fprintf(stderr, "Error: Out of memory.\n");
+        spvReflectDestroyShaderModule(&module);
+        return shader_info;
+    }
+
+    // Retrieve the descriptor bindings
+    result = spvReflectEnumerateDescriptorBindings(&module, &binding_count, bindings);
+    if (result != SPV_REFLECT_RESULT_SUCCESS) {
+        fprintf(stderr, "Error: Failed to get descriptor bindings (result: %d)\n", result);
+        free(bindings);
+        spvReflectDestroyShaderModule(&module);
+        return shader_info;
+    }
+
+    // Counters for each descriptor type
+    uint32_t num_samplers          = 0;
+    uint32_t num_storage_textures  = 0;
+    uint32_t num_storage_buffers   = 0;
+    uint32_t num_uniform_buffers   = 0;
+
+    // Loop over each binding and update counts based on its type.
+    for (uint32_t i = 0; i < binding_count; ++i) {
+        const SpvReflectDescriptorBinding *binding = bindings[i];
+        switch (binding->descriptor_type) {
+            case SPV_REFLECT_DESCRIPTOR_TYPE_SAMPLER:
+            case SPV_REFLECT_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+                num_samplers++;
+                break;
+            case SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+                num_storage_textures++;
+                break;
+            case SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+                num_storage_buffers++;
+                break;
+            case SPV_REFLECT_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+                num_uniform_buffers++;
+                break;
+            default:
+                break;
+        }
+    }
+
+    // Populate the SDL3 shader creation info struct
+    shader_info.num_samplers         = num_samplers;
+    shader_info.num_storage_textures = num_storage_textures;
+    shader_info.num_storage_buffers  = num_storage_buffers;
+    shader_info.num_uniform_buffers  = num_uniform_buffers;
+
+    // Clean up
+    free(bindings);
+    spvReflectDestroyShaderModule(&module);
+
+    return shader_info;
 }
 int cpi_Shader_CreateFromGlslFile(
 	int gpu_device_index,
@@ -748,6 +1123,8 @@ int cpi_Shader_CreateFromGlslFile(
 		if (shader_kind == shaderc_vertex_shader || shader_kind == shaderc_fragment_shader) {
 			bool is_vert = shader_kind == shaderc_vertex_shader;
 			// Prepare SPIRV_Info for Vertex Shader
+
+			/*
 		    SDL_ShaderCross_SPIRV_Info shader_info = {
 		        .bytecode = shader.p_spv_code,
 		        .bytecode_size = shader.spv_code_size,
@@ -757,6 +1134,9 @@ int cpi_Shader_CreateFromGlslFile(
 		        .name = NULL,
 		        .props = 0  // Assuming no special properties
 		    };
+		    */
+
+		    SDL_GPUShaderCreateInfo shader_info = _cpi_Shader_CreateShaderInfo(shader.p_spv_code, shader.spv_code_size, entrypoint, is_vert);
 		    
 
 	    	DEBUG_SCOPE(int gpu_device_vec_index = vec_GetVecWithType_UnsafeRead(*pp_vec, cpi_gpu_device_type));
@@ -766,7 +1146,9 @@ int cpi_Shader_CreateFromGlslFile(
 			DEBUG_ASSERT(p_gpu_device, "NULL pointer");
 			DEBUG_ASSERT(p_gpu_device->p_gpu_device, "NULL pointer");
 			SDL_ShaderCross_GraphicsShaderMetadata metadata;
-		    DEBUG_SCOPE(shader.p_sdl_shader = SDL_ShaderCross_CompileGraphicsShaderFromSPIRV(p_gpu_device->p_gpu_device, &shader_info, &metadata));
+		    // DEBUG_SCOPE(shader.p_sdl_shader = SDL_ShaderCross_CompileGraphicsShaderFromSPIRV(p_gpu_device->p_gpu_device, &shader_info, &metadata));
+		    // DEBUG_ASSERT(shader.p_sdl_shader, "Failed to compile Shader from SPIR-V. %s\n", SDL_GetError());
+		    DEBUG_SCOPE(shader.p_sdl_shader = SDL_CreateGPUShader(p_gpu_device->p_gpu_device, &shader_info));
 		    DEBUG_ASSERT(shader.p_sdl_shader, "Failed to compile Shader from SPIR-V. %s\n", SDL_GetError());
 		    DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_vec));
 	    	DEBUG_SCOPE(vec_MoveToIndex(pp_vec, -1, vec_type));
@@ -783,6 +1165,8 @@ int cpi_Shader_CreateFromGlslFile(
 		SDL_UnlockMutex(g_unique_id_mutex);
 	#endif 
 
+
+
 	DEBUG_SCOPE(vec_SwitchReadToWrite(*pp_vec));
 	DEBUG_SCOPE(int shader_vec_index = vec_UpsertVecWithType_UnsafeWrite(*pp_vec, cpi_shader_type));
 	DEBUG_SCOPE(vec_SwitchWriteToRead(*pp_vec));
@@ -798,7 +1182,9 @@ int cpi_Shader_CreateFromGlslFile(
 	printf("SUCCESSFULLY created shader\n");
     return shader_index;
 }
-void cpi_Shader_Destructor(void* p_void) {
+void cpi_Shader_Destructor(
+	void* p_void) 
+{
     CPI_Shader* p_shader = (CPI_Shader*)p_void;
     DEBUG_ASSERT(p_shader, "NULL pointer");
 
@@ -810,23 +1196,10 @@ void cpi_Shader_Destructor(void* p_void) {
 	}
 	ASSERT(!is_null, "shaderc compiler is null");
 
-    if (p_shader->p_glsl_code) {
-    	debug_PrintMemory();
-    	printf("p_glsl_code = %p\n", p_shader->p_glsl_code);
-
-    	vec_Print_UnsafeRead(g_vec, 3);
-
-		int* indices = NULL;
-		size_t count = 0;
-		DEBUG_SCOPE(bool uhh = vec_MatchElement_SafeRead(g_vec, (unsigned char*)p_shader, sizeof(CPI_Shader), &indices, &count));
-		if (uhh) {
-			printf("found p_shader");
-		} else {
-			printf("didnt find p_shader\n");
-		}
-    	free(p_shader->p_glsl_code);
-    }
-    if (p_shader->p_spv_code) {free(p_shader->p_spv_code);}
+    DEBUG_ASSERT(p_shader->p_glsl_code, "NULL pointer before freeing");
+    DEBUG_ASSERT(p_shader->p_spv_code, "NULL pointer before freeing");
+    free(p_shader->p_glsl_code); 
+    free(p_shader->p_spv_code);
 
     DEBUG_SCOPE(spvReflectDestroyShaderModule(&p_shader->reflect_shader_module));
 
@@ -840,7 +1213,9 @@ void cpi_Shader_Destructor(void* p_void) {
     DEBUG_SCOPE(vec_MoveToIndex(pp_vec, -1, vec_type));
     memset(p_shader, 0, sizeof(CPI_Shader));
 }
-void cpi_Shader_Destroy(int* p_shader_index) {
+void cpi_Shader_Destroy(
+	int* p_shader_index) 
+{
     DEBUG_ASSERT(p_shader_index, "NULL pointer");
     DEBUG_SCOPE(Vec** pp_vec = vec_MoveStart(g_vec));
     DEBUG_SCOPE(int shader_vec_index = vec_GetVecWithType_UnsafeRead(*pp_vec, cpi_shader_type));
@@ -869,109 +1244,50 @@ int cpi_GraphicsPipeline_Create(
 	DEBUG_ASSERT(p_vertex_shader->gpu_device_index == p_fragment_shader->gpu_device_index,"shaders does not contain the same gpu device\n");
 	int gpu_device_index = p_vertex_shader->gpu_device_index;
 
+	
 	// 1. Vertex Input State
 	unsigned int vertex_attributes_count;
 	unsigned int vertex_binding_stride;
 	DEBUG_SCOPE(SDL_GPUVertexAttribute* vertex_attributes = _cpi_Shader_Create_VertexInputAttribDesc(vertex_shader_index, &vertex_attributes_count, &vertex_binding_stride));
 
-	SDL_GPUVertexInputState vertex_input_state = {
-	    .vertex_buffer_descriptions = (SDL_GPUVertexBufferDescription[]) {
-	        {
-	            .slot = 0,
-	            .pitch = vertex_binding_stride,
-	            .input_rate = SDL_GPU_VERTEXINPUTRATE_INSTANCE,
-	            .instance_step_rate = 1
-	        }
-	    },
-	    .num_vertex_buffers = 1,
-	    .vertex_attributes = vertex_attributes,
-	    .num_vertex_attributes = vertex_attributes_count
-	};
-
-	// 3. Rasterizer State
-	SDL_GPURasterizerState rasterizer_state = {
-	    .fill_mode = SDL_GPU_FILLMODE_FILL,
-	    .cull_mode = SDL_GPU_CULLMODE_BACK,
-	    .front_face = SDL_GPU_FRONTFACE_CLOCKWISE,
-	    .depth_bias_constant_factor = 0.0f,
-	    .depth_bias_clamp = 0.0f,
-	    .depth_bias_slope_factor = 0.0f,
-	    .enable_depth_bias = false,
-	    .enable_depth_clip = true,
-	    .padding1 = 0,
-	    .padding2 = 0
-	};
-
-	// 4. Multisample State
-	SDL_GPUMultisampleState multisample_state = {
-	    .sample_count = SDL_GPU_SAMPLECOUNT_1,
-	    .sample_mask = 0xFFFFFFFF,
-	    .enable_mask = false,
-	    .padding1 = 0,
-	    .padding2 = 0,
-	    .padding3 = 0
-	};
-
-	// 5. Depth Stencil State
-	SDL_GPUDepthStencilState depth_stencil_state = {
-	    .compare_op = SDL_GPU_COMPAREOP_LESS,
-	    .back_stencil_state = { /* Initialize as needed */ },
-	    .front_stencil_state = { /* Initialize as needed */ },
-	    .compare_mask = 0xFF,
-	    .write_mask = 0xFF,
-	    .enable_depth_test = false,
-	    .enable_depth_write = false,
-	    .enable_stencil_test = false,
-	    .padding1 = 0,
-	    .padding2 = 0,
-	    .padding3 = 0
-	};
-
-	// 7. Render Targets
-	SDL_GPUTextureFormat color_format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-
-	SDL_GPUColorTargetDescription color_targets[] = {
-	    {
-	        .format = color_format,
-	        .blend_state = (SDL_GPUColorTargetBlendState){
-	            .src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA,
-	            .dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
-	            .color_blend_op = SDL_GPU_BLENDOP_ADD,
-	            .src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA,
-	            .dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
-	            .alpha_blend_op = SDL_GPU_BLENDOP_ADD,
-	            .color_write_mask = SDL_GPU_COLORCOMPONENT_R
-	                              | SDL_GPU_COLORCOMPONENT_G
-	                              | SDL_GPU_COLORCOMPONENT_B
-	                              | SDL_GPU_COLORCOMPONENT_A,
-	            .enable_blend = true,
-	            .enable_color_write_mask = true
-	        }
-	    }
-	};
-
-	SDL_GPUGraphicsPipelineTargetInfo target_info = {
-	    .color_target_descriptions = color_targets,
-	    .num_color_targets = 1,
-	    .depth_stencil_format = SDL_GPU_TEXTUREFORMAT_INVALID,
-	    .has_depth_stencil_target = false,
-	    .padding1 = 0,
-	    .padding2 = 0,
-	    .padding3 = 0
-	};
-
-
-	// 8. Pipeline Creation
 	SDL_GPUGraphicsPipelineCreateInfo pipeline_create_info = {
+		.target_info = {
+			.num_color_targets = 1,
+			.color_target_descriptions = (SDL_GPUColorTargetDescription[]){{
+				//.format = SDL_GetGPUSwapchainTextureFormat(p_gpu_device, p_sdl_window)
+				.format = SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM,
+				.blend_state = {
+				    .enable_blend = true,
+				    .src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA,
+				    .dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+				    .color_blend_op = SDL_GPU_BLENDOP_ADD,        // Valid blend op for RGB
+				    .src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA,
+				    .dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+				    .alpha_blend_op = SDL_GPU_BLENDOP_ADD,        // Valid blend op for alpha
+				    .color_write_mask = SDL_GPU_COLORCOMPONENT_R |
+				                        SDL_GPU_COLORCOMPONENT_G |
+				                        SDL_GPU_COLORCOMPONENT_B |
+				                        SDL_GPU_COLORCOMPONENT_A,
+				    .enable_color_write_mask = true,
+				}
+			}},
+		},
+	    .vertex_input_state = {
+		    .vertex_buffer_descriptions = (SDL_GPUVertexBufferDescription[]) {
+		        {
+		            .slot = 0,
+		            .pitch = vertex_binding_stride,
+		            .input_rate = SDL_GPU_VERTEXINPUTRATE_INSTANCE,
+		            .instance_step_rate = 1
+		        }
+		    },
+		    .num_vertex_buffers = 1,
+		    .vertex_attributes = vertex_attributes,
+		    .num_vertex_attributes = vertex_attributes_count,
+		},
+	    .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP,
 	    .vertex_shader = p_vertex_shader->p_sdl_shader,
     	.fragment_shader = p_fragment_shader->p_sdl_shader,
-	    .vertex_input_state = vertex_input_state,
-	    .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLESTRIP,
-	    .rasterizer_state = rasterizer_state,
-	    .multisample_state = multisample_state,
-	    .depth_stencil_state = depth_stencil_state,
-	    .target_info = target_info,
-	    .props = 0
 	};
 	
 	DEBUG_SCOPE(Vec** pp_gpu_device_vec = vec_MoveStart(g_vec));
@@ -984,8 +1300,8 @@ int cpi_GraphicsPipeline_Create(
 	CPI_GraphicsPipeline pipeline = {0};
     pipeline.vertex_shader_index = vertex_shader_index;
     pipeline.fragment_shader_index = fragment_shader_index;
-	DEBUG_SCOPE(pipeline.p_sdl_pipeline = SDL_CreateGPUGraphicsPipeline(p_gpu_device->p_gpu_device, &pipeline_create_info));
-	DEBUG_ASSERT(pipeline.p_sdl_pipeline, "Failed to create SDL3 graphics pipeline: %s\n", SDL_GetError());
+	DEBUG_SCOPE(pipeline.p_graphics_pipeline = SDL_CreateGPUGraphicsPipeline(p_gpu_device->p_gpu_device, &pipeline_create_info));
+	DEBUG_ASSERT(pipeline.p_graphics_pipeline, "Failed to create SDL3 graphics pipeline: %s\n", SDL_GetError());
 	DEBUG_SCOPE(vec_MoveEnd(pp_shader_vec));
 	DEBUG_SCOPE(vec_MoveEnd(pp_gpu_device_vec));
 
@@ -1021,7 +1337,7 @@ void cpi_GraphicsPipeline_Destructor(
 	DEBUG_SCOPE(CPI_GPUDevice* p_gpu_device = (CPI_GPUDevice*)vec_GetElement_UnsafeRead(*pp_gpu_device_vec, p_vertex_shader->gpu_device_index, cpi_gpu_device_type));
 	DEBUG_ASSERT(p_gpu_device->p_gpu_device, "NULL pointer\n");
 
-	DEBUG_SCOPE(SDL_ReleaseGPUGraphicsPipeline(p_gpu_device->p_gpu_device, p_graphics_pipeline->p_sdl_pipeline));	
+	DEBUG_SCOPE(SDL_ReleaseGPUGraphicsPipeline(p_gpu_device->p_gpu_device, p_graphics_pipeline->p_graphics_pipeline));	
 	DEBUG_SCOPE(memset(p_graphics_pipeline, 0, sizeof(CPI_GraphicsPipeline)));
 
 	DEBUG_SCOPE(vec_MoveEnd(pp_shader_vec));

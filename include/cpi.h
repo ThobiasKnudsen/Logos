@@ -5,10 +5,20 @@
 #include <stdarg.h>
 #include <shaderc/shaderc.h>
 
+typedef struct {
+    struct { float x, y, w, h; } 	rect;
+    float 							rotation;
+    float 							corner_radius_pixels;
+    struct { unsigned char r, g, b, a; } 	color;
+    unsigned int 					tex_index;
+    struct { float x, y, w, h; } 	tex_rect;
+} Rect;
+
 // ======================================================================================================================
 // main
 // ======================================================================================================================
 void 					cpi_Initialize();
+void 					cpi_Debug();
 
 // ======================================================================================================================
 // CPU Device
@@ -23,11 +33,13 @@ void    				cpi_GPUDevice_Destroy(
 // Windows
 // ======================================================================================================================
 int 					cpi_Window_Create(
+							int gpu_device_index,
 							unsigned int width, 
 							unsigned int height, 
 							const char* title);
 void 					cpi_Window_Show(
-							int window_path);
+							int window_index,
+							int graphics_pipeline_index);
 void  					cpi_Window_Destructor(
 							void* p_window);
 void  					cpi_Window_Destroy(

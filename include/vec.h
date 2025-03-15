@@ -125,6 +125,11 @@ void 				vec_MoveToVaArgs(
 void 				vec_MoveToPath(
 						Vec** pp_vec,
 						const char* path);
+void* 				vec_MoveToPathAndGetElement(
+						Vec** pp_vec,
+						const char* path, 
+						Type type);
+
 
 // ================================================================================================================================
 // UpsertVecWithType…_SafeWrite
