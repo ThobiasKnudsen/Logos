@@ -1,7 +1,6 @@
 #ifndef CPI_H
 #define CPI_H
 
-#include "map.h"
 #include <stdbool.h>
 #include <stdarg.h>
 #include <shaderc/shaderc.h>
@@ -18,32 +17,29 @@ typedef struct {
 // ======================================================================================================================
 // main
 // ======================================================================================================================
-void 					cpi_Initialize(
-							void);
-void 					cpi_Debug(
-							void);
+void 					cpi_Initialize();
+void 					cpi_Debug();
 
 // ======================================================================================================================
 // CPU Device
 // ======================================================================================================================
-int  					cpi_GPUDevice_Create(
-							void);
+int   					cpi_GPUDevice_Create();
 void    				cpi_GPUDevice_Destructor(
 							void* p_gpu_device);
 void    				cpi_GPUDevice_Destroy(
-							int* gpu_device_id);
+							int* p_gpu_device_index);
 
 // ======================================================================================================================
 // Windows
 // ======================================================================================================================
 int 					cpi_Window_Create(
-							int gpu_device_id,
+							int gpu_device_index,
 							unsigned int width, 
 							unsigned int height, 
 							const char* title);
 void 					cpi_Window_Show(
-							int window_id,
-							int graphics_pipeline_id);
+							int window_index,
+							int graphics_pipeline_index);
 void  					cpi_Window_Destructor(
 							void* p_window);
 void  					cpi_Window_Destroy(
@@ -53,7 +49,7 @@ void  					cpi_Window_Destroy(
 // Shader
 // ======================================================================================================================
 int						cpi_Shader_CreateFromGlslFile(
-							int gpu_device_id,
+							int gpu_device_index,
 							const char* glsl_file_path, 
 							const char* entrypoint, 
 							shaderc_shader_kind shader_kind, 
@@ -61,19 +57,19 @@ int						cpi_Shader_CreateFromGlslFile(
 void 					cpi_Shader_Destructor(
 							void* p_shader);
 void 					cpi_Shader_Destroy(
-							int* p_shader_id);
+							int* p_shader_index);
 
 // ======================================================================================================================
 // Graphics Pipeline
 // ======================================================================================================================
 int  					cpi_GraphicsPipeline_Create(
-						    int vertex_shader_id,
-						    int fragment_shader_id,
+						    int vertex_shader_index,
+						    int fragment_shader_index,
 						    bool enable_debug);
 void 					cpi_GraphicsPipeline_Destructor(
 							void* p_graphics_pipeline);
 void 					cpi_GraphicsPipeline_Destroy(
-							int* graphics_pipeline_id);
+							int* p_graphics_pipeline_index);
 
 // ======================================================================================================================
 // Shaderc Compiler
@@ -82,6 +78,6 @@ void 					cpi_GraphicsPipeline_Destroy(
 void 					cpi_ShadercCompiler_Destructor(
 							void* p_graphics_pipeline);
 void 					cpi_ShadercCompiler_Destroy(
-							int* graphics_pipeline_id);
+							int* p_graphics_pipeline_index);
 
 #endif // CPI_H

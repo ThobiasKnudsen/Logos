@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 project(CPI LANGUAGES C)
 
 include(FetchContent)
+include(ExternalProject)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
@@ -79,55 +80,170 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(SPIRV-Reflect)
 
 # ====================================================================
-# tcc
+# Verstable
 # ====================================================================
-#include(ExternalProject)
-#ExternalProject_Add(tcc
-#  GIT_REPOSITORY https://github.com/TinyCC/tinycc.git
-#  GIT_TAG mob
-#  CONFIGURE_COMMAND ./configure --prefix="${CMAKE_CURRENT_SOURCE_DIR}/tcc" --enable-static --enable-libonly
-#  BUILD_COMMAND make
-#  INSTALL_COMMAND make install
-#   ^ Tweak the flags for TCC's configure script as needed
-#)
-# Create an imported target that depends on ExternalProject build steps.
-#add_library(tcc_lib INTERFACE)
-#add_dependencies(tcc_lib tcc)
-# Expose the include directory and library from the installed location
-#ExternalProject_Get_Property(tcc INSTALL_DIR)
-#target_include_directories(tcc_lib INTERFACE "${INSTALL_DIR}/include")
-#target_link_libraries(tcc_lib INTERFACE "${INSTALL_DIR}/lib/libtcc.a")
-# Or libtcc.so, depending on how it was built.
+FetchContent_Declare(
+    verstable
+    GIT_REPOSITORY https://github.com/JacksonAllan/Verstable.git
+    GIT_TAG main
+)
+FetchContent_MakeAvailable(verstable)
 
 # ====================================================================
-# Executable and Linking
+# xxHash
+# ====================================================================
+FetchContent_Declare(
+    xxhash
+    GIT_REPOSITORY https://github.com/Cyan4973/xxHash.git
+    GIT_TAG release
+)
+FetchContent_MakeAvailable(xxhash)
+
+# ====================================================================
+# userspace-rcu (urcu) - Use system package
+# ====================================================================
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(URCU REQUIRED liburcu liburcu-cds)
+
+# Create imported targets
+add_library(urcu::urcu INTERFACE IMPORTED)
+add_library(urcu::urcu-cds INTERFACE IMPORTED)
+
+target_link_libraries(urcu::urcu INTERFACE ${URCU_LIBRARIES})
+target_include_directories(urcu::urcu INTERFACE ${URCU_INCLUDE_DIRS})
+target_compile_options(urcu::urcu INTERFACE ${URCU_CFLAGS_OTHER})
+
+target_link_libraries(urcu::urcu-cds INTERFACE ${URCU_LIBRARIES})
+target_include_directories(urcu::urcu-cds INTERFACE ${URCU_INCLUDE_DIRS})
+target_compile_options(urcu::urcu-cds INTERFACE ${URCU_CFLAGS_OTHER})
+
+# ====================================================================
+# Main Executable
 # ====================================================================
 add_executable(main 
     src/main.c
-    src/debug.c
+    src/cpi.c
+    src/tklog.c
     src/vec.c
     src/vec_path.c
     src/type.c
-    src/cpi.c
+    src/map.c
+    src/global_data/core.c
+    src/global_data/type.c
+    src/tests/test_global_data.c
+    src/urcu_safe.c
     ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c
 )
 
-# Add SPIRV-Reflect include directory
+# Add include directories
 target_include_directories(main PRIVATE 
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders
     ${spirv-reflect_SOURCE_DIR}
+    ${verstable_SOURCE_DIR}
+    ${URCU_INCLUDE_DIRS}
 )
 
-# Link SPIRV-Reflect library
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(main PRIVATE
+        # General warnings
+        # -Wall -Wextra -Wpedantic
+        # Correctness
+        # -Wcast-align -Wpointer-arith -Wstrict-prototypes
+        # -Wmissing-prototypes -Wformat=2 -Wshadow
+        # -Wwrite-strings -Wundef -Wswitch-enum
+        # -Wconversion -Wsign-conversion
+        # Treat warnings as errors
+        -Werror
+        -Werror=return-type         # what we care about here
+        # Optimise for production (you can override from the CLI)
+        $<$<CONFIG:Release>:-O3>
+        # _DEBUG builds keep symbols and sanitiser hooks
+        $<$<CONFIG:Debug>:-O0 -g -fsanitize=address,undefined>
+    )
+elseif (MSVC)
+    target_compile_options(main PRIVATE
+        /W4 /WX                   # high warnings, treat as error
+        /permissive-              # conforming mode
+    )
+endif()
+
+# Link libraries
 target_link_libraries(main PRIVATE
     SDL3_shadercross::SDL3_shadercross
     SDL3::SDL3
     shaderc_combined
+    urcu::urcu          # Add the specific urcu library you need
+    urcu::urcu-cds      # For concurrent data structures
+    xxhash
     stdc++
 #    tcc_lib
 )
 
 target_compile_definitions(main PRIVATE 
-    DEBUG
+    #DEBUG
+
+    TKLOG_SHOW_LOG_LEVEL
+    TKLOG_SHOW_TIME
+    TKLOG_SHOW_THREAD
+    TKLOG_SHOW_PATH
+
+    # TKLOG_MEMORY
+    TKLOG_SCOPE
+
+    # TKLOG_DEBUG
+    TKLOG_INFO
+    TKLOG_NOTICE
+    TKLOG_WARNING
+    TKLOG_ERROR
+    TKLOG_CRITICAL
+    TKLOG_ALERT
+    TKLOG_EMERGENCY
+
+    TKLOG_EXIT_ON_ERROR
+    TKLOG_EXIT_ON_CRITICAL
+    TKLOG_EXIT_ON_ALERT
+    TKLOG_EXIT_ON_EMERGENCY
+
+    URCU_LFHT_SAFETY_ON
+
+    RPMALLOC_FIRST_CLASS_HEAPS=1
 )
+# Debug output
+message(STATUS "URCU_FOUND: ${URCU_FOUND}")
+message(STATUS "URCU_INCLUDE_DIRS: ${URCU_INCLUDE_DIRS}")
+message(STATUS "URCU_LIBRARIES: ${URCU_LIBRARIES}")
+
+# test tklog
+add_executable(test_tklog 
+    src/tests/test_tklog.c
+    src/tklog.c
+)
+target_include_directories(test_tklog PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_compile_definitions(test_tklog PRIVATE
+    TKLOG_SHOW_LOG_LEVEL
+    TKLOG_SHOW_TIME
+    TKLOG_SHOW_THREAD
+    TKLOG_SHOW_PATH
+
+    TKLOG_MEMORY
+    TKLOG_SCOPE
+
+    TKLOG_DEBUG
+    TKLOG_INFO
+    TKLOG_NOTICE
+    TKLOG_WARNING
+    TKLOG_ERROR
+    TKLOG_CRITICAL
+    TKLOG_ALERT
+    TKLOG_EMERGENCY
+
+    TKLOG_EXIT_ON_EMERGENCY
+)
+target_link_libraries(test_tklog PRIVATE
+    SDL3::SDL3
+)
+
+

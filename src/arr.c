@@ -1,7 +1,6 @@
 #include "arr.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include "debug.h"
 
 void arr_Initialize(Arr* p_arr) {
     p_arr->p_data = NULL;
@@ -29,13 +28,12 @@ void arr_SetCount(Arr* p_arr, size_t new_count) {
     while (new_count > p_arr->capacity) {
         p_arr->capacity = p_arr->capacity * 2;
     }
-    DEBUG_SCOPE(unsigned char* p_arr->p_data = (unsigned char*)alloc(p_arr->p_data, p_arr->capacity * sizeof(unsigned char)));
+    unsigned char* p_arr->p_data = (unsigned char*)alloc(p_arr->p_data, p_arr->capacity * sizeof(unsigned char));
     p_arr->count = new_count;
     return true;
 }
 bool arr_SetCapacity(Arr* p_arr, size_t new_capacity) {
-    ASSERT(new_capacity < p_arr->count, "cant sett capacity that is less than count");
-    DEBUG_SCOPE(unsigned char* new_data = alloc(p_arr->p_data, new_capacity * sizeof(unsigned char)));
+    unsigned char* new_data = alloc(p_arr->p_data, new_capacity * sizeof(unsigned char));
     p_arr->p_data = new_data;
     p_arr->capacity = new_capacity;
     return true;

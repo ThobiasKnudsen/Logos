@@ -248,7 +248,6 @@ void cpi_Initialize() {
 // ===============================================================================================================
 // Window
 // ===============================================================================================================
-/*
 int cpi_Window_Create(
     int gpu_device_index,
     unsigned int width,
@@ -312,7 +311,6 @@ int cpi_Window_Create(
     printf("SUCCESSFULLY created window\n");
     return window_index;
 }
-*/
 
 int cpi_Window_Create(
     int gpu_device_index,

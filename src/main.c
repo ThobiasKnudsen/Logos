@@ -1,7 +1,22 @@
+
 #include "debug.h"
 #include "vec.h"
 #include "cpi.h"
+#include "global_data/core.h"
+#include "tests/test_global_data.h"
 #include <stdlib.h>
+#include <SDL3/SDL.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <assert.h>
+
+// PLAN:
+// 	create TKLOG
+//  create nodes and graphs
+//  store everyting in the GOD graph
+//  then were back again
+//  create functions for images
 
 // Λόγος
 // libuv
@@ -25,22 +40,65 @@ arr_2:p_arr_1@
 arr_2[0].a 
 */
 
-int main() {
+/*
+ * test_1.c  —  Exercises every feature of the compile‑time tklogger.
+ *
+ * Build example (SDL 3 installed and tklog.c / tklog.h in same dir):
+ *   cc -std=c11 -Wall -Wextra -I/path/to/SDL3/include \
+ *      test_1.c tklog.c `sdl3-config --libs` -o test_1
+ */
 
-	//cpi_Debug();
+/*
+int test_lfht(void)
+{
+    printf("URCU Lock-Free Hash Table Test\n");
+    printf("==============================\n\n");
+    
+    // Initialize SDL 
+    if (!SDL_Init(0)) {
+        printf("Failed to initialize SDL: %s\n", SDL_GetError());
+        return 1;
+    }
+    
+    // Initialize RCU 
+    rcu_init();
+    
+    // Run tests 
+    if (gd_test_basic_operations() != 0) {
+        printf("Basic operations test failed\n");
+        SDL_Quit();
+        return 1;
+    }
+    
+    if (gd_test_concurrent_access() != 0) {
+        printf("Concurrent access test failed\n");
+        SDL_Quit();
+        return 1;
+    }
+    
+    printf("All tests passed!\n");
+    
+    SDL_Quit();
+    return 0;
+}
+*/
+
+int main(void) {
+    test_global_data_all();
+    // Initialize SDL3 (required for tklog)
 	
 	DEBUG_SCOPE(cpi_Initialize());
-	DEBUG_SCOPE(int gpu_device_index = cpi_GPUDevice_Create());
-	DEBUG_SCOPE(int window_index = cpi_Window_Create(gpu_device_index, 800, 600, "Λόγος"));
-	DEBUG_SCOPE(int vert_index = cpi_Shader_CreateFromGlslFile(gpu_device_index, "../shaders/shader.vert.glsl", "main", shaderc_vertex_shader, true));
-	DEBUG_SCOPE(int frag_index = cpi_Shader_CreateFromGlslFile(gpu_device_index, "../shaders/shader.frag.glsl", "main", shaderc_fragment_shader, true));
-	DEBUG_SCOPE(int graphics_pipeline_index = cpi_GraphicsPipeline_Create(vert_index, frag_index, true));
+	DEBUG_SCOPE(int gpu_device_id = cpi_GPUDevice_Create());
+	DEBUG_SCOPE(int window_id = cpi_Window_Create(gpu_device_id, 800, 600, "Λόγος"));
+	DEBUG_SCOPE(int vert_id = cpi_Shader_CreateFromGlslFile(gpu_device_id, "../shaders/shader.vert.glsl", "main", shaderc_vertex_shader, true));
+	DEBUG_SCOPE(int frag_id = cpi_Shader_CreateFromGlslFile(gpu_device_id, "../shaders/shader.frag.glsl", "main", shaderc_fragment_shader, true));
+	DEBUG_SCOPE(int graphics_pipeline_id = cpi_GraphicsPipeline_Create(vert_id, frag_id, true));
 	
-	DEBUG_SCOPE(cpi_Window_Show(window_index, graphics_pipeline_index));
-	DEBUG_SCOPE(cpi_GraphicsPipeline_Destroy(&graphics_pipeline_index));
-	DEBUG_SCOPE(cpi_Shader_Destroy(&vert_index));
-	DEBUG_SCOPE(cpi_Shader_Destroy(&frag_index));
-	DEBUG_SCOPE(cpi_Window_Destroy(&window_index));
+	DEBUG_SCOPE(cpi_Window_Show(window_id, graphics_pipeline_id));
+	DEBUG_SCOPE(cpi_GraphicsPipeline_Destroy(&graphics_pipeline_id));
+	DEBUG_SCOPE(cpi_Shader_Destroy(&vert_id));
+	DEBUG_SCOPE(cpi_Shader_Destroy(&frag_id));
+	DEBUG_SCOPE(cpi_Window_Destroy(&window_id));
 	
 	return 0;
 }

@@ -120,13 +120,13 @@ void debug_Init() {
 // ===========================================================================================================================
 // External
 // ===========================================================================================================================
-void debug_Printf(
-	const char* message, 
-	size_t line, 
-	const char* file) 
-{
-	unsigned int current_time = (unsigned int)(clock() * 1000 / CLOCKS_PER_SEC);
-	printf("%dms %s %s:%ld | %s", current_time-debug_data.start_time_ms, debug_data.code_location, file, line, message);
+void debug_Printf(size_t line, const char* file, const char* fmt, ...) {
+    unsigned int current_time = (unsigned int)(clock() * 1000 / CLOCKS_PER_SEC);
+    printf("%dms %s %s:%ld | ", current_time - debug_data.start_time_ms, debug_data.code_location, file, line);
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
 }
 void* debug_Malloc(size_t size, size_t line, const char* file) {
     // Expand allocation tracking array if necessary.
@@ -181,7 +181,7 @@ void* debug_Realloc(
     for (size_t i = 0; i < debug_data.all_allocs_count; i++) {
         if (debug_data.all_allocs[i].ptr == ptr) {
         	if (new_ptr) {
-        		debug_Printf("ERROR: there are multiple of given ptr in allocation tracking for debug_Realloc", __LINE__, __FILE__);
+        		debug_Printf(__LINE__, __FILE__, "ERROR: there are multiple of given ptr in allocation tracking for debug_Realloc");
     			exit(-1);
         	}
             new_ptr = realloc(ptr, size);
@@ -197,7 +197,7 @@ void* debug_Realloc(
     }
 
     if (new_ptr == NULL) {
-    	debug_Printf("ERROR: Pointer not found in allocation tracking for debug_Realloc", __LINE__, __FILE__);
+    	debug_Printf(__LINE__, __FILE__, "ERROR: Pointer not found in allocation tracking for debug_Realloc");
 	    exit(-1);
     }
 
@@ -209,7 +209,7 @@ void debug_Free(
 	const char* file) 
 {
 	if (!ptr) {
-		debug_Printf("you tried to free NULL ptr\n", line, file); // Changed function name to "debug_Printf" to match existing function
+		debug_Printf(line, file, "you tried to free NULL ptr\n");
 		printf("ERROR\n");
 		exit(EXIT_FAILURE);
 	}
@@ -221,7 +221,7 @@ void debug_Free(
 		}
 	}
 	if (index == -1) {
-		debug_Printf("you tried to double free\n", line, file); // Changed function name to "debug_Printf" to match existing function
+		debug_Printf(line, file, "you tried to double free\n"); 
 		printf("ERROR\n");
 		exit(EXIT_FAILURE);
 	}
