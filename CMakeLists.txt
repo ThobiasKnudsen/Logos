@@ -130,8 +130,7 @@ add_executable(main
     src/map.c
     src/global_data/core.c
     src/global_data/type.c
-    src/tests/test_global_data.c
-    src/urcu_safe.c
+    src/global_data/urcu_safe.c
     ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c
 )
 
@@ -219,9 +218,11 @@ add_executable(test_tklog
     src/tests/test_tklog.c
     src/tklog.c
 )
+
 target_include_directories(test_tklog PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+
 target_compile_definitions(test_tklog PRIVATE
     TKLOG_SHOW_LOG_LEVEL
     TKLOG_SHOW_TIME
@@ -240,10 +241,94 @@ target_compile_definitions(test_tklog PRIVATE
     TKLOG_ALERT
     TKLOG_EMERGENCY
 
+    TKLOG_EXIT_ON_ERROR
+    TKLOG_EXIT_ON_CRITICAL
+    TKLOG_EXIT_ON_ALERT
     TKLOG_EXIT_ON_EMERGENCY
 )
+
 target_link_libraries(test_tklog PRIVATE
     SDL3::SDL3
+)
+
+# test urcu safety wrapper with exit on critical (for production testing)
+add_executable(test_urcu_safety
+    src/tests/test_urcu_safety.c
+    src/global_data/urcu_safe.c
+    src/tklog.c
+)
+
+target_include_directories(test_urcu_safety PRIVATE 
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${URCU_INCLUDE_DIRS}
+)
+
+target_link_libraries(test_urcu_safety PRIVATE
+    urcu::urcu
+    urcu::urcu-cds
+    SDL3::SDL3
+)
+
+target_compile_definitions(test_urcu_safety PRIVATE 
+    URCU_LFHT_SAFETY_ON
+    TKLOG_SHOW_LOG_LEVEL
+    TKLOG_SHOW_TIME
+    TKLOG_SHOW_THREAD
+    TKLOG_SHOW_PATH
+    TKLOG_SCOPE
+    TKLOG_DEBUG
+    TKLOG_INFO
+    TKLOG_NOTICE
+    TKLOG_WARNING
+    TKLOG_ERROR
+    TKLOG_CRITICAL
+    TKLOG_ALERT
+    TKLOG_EMERGENCY
+    TKLOG_EXIT_ON_ERROR
+    TKLOG_EXIT_ON_CRITICAL
+    TKLOG_EXIT_ON_ALERT
+    TKLOG_EXIT_ON_EMERGENCY
+)
+
+# test global_data
+add_executable(test_global_data
+    src/tests/test_global_data.c
+    src/global_data/core.c
+    src/global_data/type.c
+    src/tklog.c
+    src/global_data/urcu_safe.c
+)
+
+target_include_directories(test_global_data PRIVATE 
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${URCU_INCLUDE_DIRS}
+)
+
+target_link_libraries(test_global_data PRIVATE
+    urcu::urcu
+    urcu::urcu-cds
+    SDL3::SDL3
+    xxhash
+)
+
+target_compile_definitions(test_global_data PRIVATE 
+    URCU_LFHT_SAFETY_ON
+    TKLOG_SHOW_LOG_LEVEL
+    TKLOG_SHOW_TIME
+    TKLOG_SHOW_THREAD
+    TKLOG_SHOW_PATH
+    TKLOG_SCOPE
+    TKLOG_INFO
+    TKLOG_NOTICE
+    TKLOG_WARNING
+    TKLOG_ERROR
+    TKLOG_CRITICAL
+    TKLOG_ALERT
+    TKLOG_EMERGENCY
+    TKLOG_EXIT_ON_ERROR
+    TKLOG_EXIT_ON_CRITICAL
+    TKLOG_EXIT_ON_ALERT
+    TKLOG_EXIT_ON_EMERGENCY
 )
 
 

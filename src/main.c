@@ -3,7 +3,6 @@
 #include "vec.h"
 #include "cpi.h"
 #include "global_data/core.h"
-#include "tests/test_global_data.h"
 #include <stdlib.h>
 #include <SDL3/SDL.h>
 #include <stdint.h>
@@ -84,7 +83,6 @@ int test_lfht(void)
 */
 
 int main(void) {
-    test_global_data_all();
     // Initialize SDL3 (required for tklog)
 	
 	DEBUG_SCOPE(cpi_Initialize());

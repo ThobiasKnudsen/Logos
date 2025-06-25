@@ -1,0 +1,1155 @@
+#define LFHT_SAFE_INTERNAL  /* Prevent macro redefinition in this file */
+#include "global_data/urcu_safe.h"
+#include <errno.h>
+#include <unistd.h>
+
+#ifdef URCU_LFHT_SAFETY_ON
+
+/* Global function pointer for getting node size */
+static urcu_node_size_func_t g_node_size_function = NULL;
+
+/* Function to set the node size function */
+void _urcu_safe_set_node_size_function(urcu_node_size_func_t func) {
+    g_node_size_function = func;
+    tklog_debug("Node size function set to %p", (void*)func);
+}
+
+/* Function to get the current node size function */
+urcu_node_size_func_t _urcu_safe_get_node_size_function(void) {
+    return g_node_size_function;
+}
+
+/* Default node size function that returns sizeof(struct cds_lfht_node) */
+static size_t _default_node_size_function(struct cds_lfht_node* node) {
+    (void)node; /* Unused parameter */
+    return sizeof(struct cds_lfht_node);
+}
+
+/* Thread-local safety state for tracking RCU usage */
+typedef struct {
+    bool registered;                 /* Is this thread registered with RCU? */
+    int read_lock_count;             /* Nested read lock depth */
+    pthread_t thread_id;             /* POSIX thread ID for verification */
+    bool initialized;                /* Has thread state been initialized? */
+    
+    /* LFHT node pointer tracking for rcu_dereference calls */
+    struct cds_lfht_node** lfht_nodes;  /* Array of LFHT nodes that have been accessed */
+    size_t node_array_size;             /* Current size of the array */
+    size_t node_array_capacity;         /* Maximum capacity of the array */
+} rcu_thread_state_t;
+
+/* Thread-local safety state */
+static __thread rcu_thread_state_t thread_state = {
+    .registered = false,
+    .read_lock_count = 0,
+    .thread_id = 0,
+    .initialized = false,
+    .lfht_nodes = NULL,
+    .node_array_size = 0,
+    .node_array_capacity = 0
+};
+
+/* Test mode flag - allows tests to indicate when errors are expected */
+static atomic_bool test_mode = ATOMIC_VAR_INIT(false);
+
+/* Safety checks enabled flag - allows disabling safety checks during initialization */
+static atomic_bool safety_checks_enabled = ATOMIC_VAR_INIT(true);
+
+/* Initialize thread state if not already done */
+static void _ensure_thread_state_initialized(void) {
+    if (!thread_state.initialized) {
+        thread_state.thread_id = pthread_self();
+        thread_state.initialized = true;
+        thread_state.registered = false;
+        thread_state.read_lock_count = 0;
+        
+        /* Initialize pointer tracking array */
+        thread_state.node_array_capacity = 16; /* Start with 16 pointers */
+        thread_state.node_array_size = 0;
+        thread_state.lfht_nodes = malloc(thread_state.node_array_capacity * sizeof(struct cds_lfht_node*));
+        if (!thread_state.lfht_nodes) {
+            tklog_critical("Failed to allocate pointer tracking array");
+            thread_state.node_array_capacity = 0;
+        }
+    }
+}
+
+/* Add a pointer to the tracking array */
+static void _add_dereferenced_pointer(struct cds_lfht_node* ptr) {
+    if (!thread_state.lfht_nodes) {
+        return; /* Array not initialized */
+    }
+    
+    /* Check if pointer is already in array */
+    for (size_t i = 0; i < thread_state.node_array_size; i++) {
+        if (thread_state.lfht_nodes[i] == ptr) {
+            return; /* Already tracked */
+        }
+    }
+    
+    /* Expand array if needed */
+    if (thread_state.node_array_size >= thread_state.node_array_capacity) {
+        size_t new_capacity = thread_state.node_array_capacity * 2;
+        struct cds_lfht_node** new_array = realloc(thread_state.lfht_nodes, 
+                                  new_capacity * sizeof(struct cds_lfht_node*));
+        if (!new_array) {
+            tklog_error("Failed to expand pointer tracking array");
+            return;
+        }
+        thread_state.lfht_nodes = new_array;
+        thread_state.node_array_capacity = new_capacity;
+    }
+    
+    /* Add pointer to array */
+    thread_state.lfht_nodes[thread_state.node_array_size++] = ptr;
+    tklog_debug("Added pointer %p to tracking array (size: %zu)", ptr, thread_state.node_array_size);
+}
+
+/* Update _clear_dereferenced_pointers to actually free memory */
+static void _clear_dereferenced_pointers(void) {
+    if (thread_state.lfht_nodes && thread_state.node_array_capacity > 16) {
+        /* Shrink back to initial size */
+        struct cds_lfht_node** new_array = realloc(thread_state.lfht_nodes, 
+                                                   16 * sizeof(struct cds_lfht_node*));
+        if (new_array) {
+            thread_state.lfht_nodes = new_array;
+            thread_state.node_array_capacity = 16;
+        }
+    }
+    thread_state.node_array_size = 0;
+    tklog_debug("Cleared and shrunk pointer tracking array");
+}
+
+/* Check if a pointer is in the tracking array */
+static bool _is_pointer_tracked(struct cds_lfht_node* ptr) {
+    if (!thread_state.lfht_nodes) {
+        return false;
+    }
+    
+    for (size_t i = 0; i < thread_state.node_array_size; i++) {
+        if (thread_state.lfht_nodes[i] == ptr) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* RCU registration with proper error handling */
+void _rcu_register_thread_safe(void) {
+    tklog_scope(_ensure_thread_state_initialized());
+    
+    pthread_t current_thread = pthread_self();
+    
+    if (thread_state.registered) {
+        tklog_scope(bool result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("Thread %lu already registered (test mode)", (unsigned long)current_thread);
+        } else {
+            tklog_warning("Thread %lu already registered", (unsigned long)current_thread);
+        }
+        return;
+    }
+    
+    /* Set thread ID first for better error reporting */
+    thread_state.thread_id = current_thread;
+    
+    /* Attempt URCU registration */
+    tklog_scope(urcu_memb_register_thread());
+    
+    /* Only mark as registered after successful URCU registration */
+    thread_state.registered = true;
+    thread_state.read_lock_count = 0;
+    
+    tklog_debug("Thread %lu registered with RCU", (unsigned long)thread_state.thread_id);
+    return;
+}
+
+void _rcu_unregister_thread_safe(void) {
+    tklog_scope(_ensure_thread_state_initialized());
+    
+    pthread_t current_thread = pthread_self();
+    
+    if (!thread_state.registered) {
+        tklog_scope(bool result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("Thread %lu not registered (test mode)", (unsigned long)current_thread);
+        } else {
+            tklog_error("Thread %lu not registered", (unsigned long)current_thread);
+        }
+        return;
+    }
+    
+    int lock_depth = thread_state.read_lock_count;
+    if (lock_depth > 0) {
+        tklog_scope(bool result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("Thread %lu unregistering with %d pending read locks (test mode)", 
+                       (unsigned long)thread_state.thread_id, lock_depth);
+        } else {
+            tklog_critical("Thread %lu unregistering with %d pending read locks", 
+                          (unsigned long)thread_state.thread_id, lock_depth);
+        }
+        return;
+    }
+    
+    /* Attempt URCU unregistration */
+    urcu_memb_unregister_thread();
+    
+    /* Clean up pointer tracking array */
+    if (thread_state.lfht_nodes) {
+        free(thread_state.lfht_nodes);
+        thread_state.lfht_nodes = NULL;
+        thread_state.node_array_size = 0;
+        thread_state.node_array_capacity = 0;
+        tklog_debug("Freed pointer tracking array");
+    }
+    
+    thread_state.registered = false;
+    tklog_debug("Thread %lu unregistered from RCU", (unsigned long)thread_state.thread_id);
+    
+}
+
+/* RCU read locking with proper atomic operations */
+void _rcu_read_lock_safe(void) {
+    tklog_scope(_ensure_thread_state_initialized());
+    
+    pthread_t current_thread = pthread_self();
+    
+    /* Skip safety checks if disabled (e.g., during initialization) */
+    tklog_scope(bool result = _rcu_are_safety_checks_enabled());
+    if (!result) {
+        tklog_scope(urcu_memb_read_lock());
+        return;
+    }
+    
+    if (!thread_state.registered) {
+        tklog_scope(result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("rcu_read_lock called from unregistered thread %lu (test mode)", 
+                       (unsigned long)current_thread);
+        } else {
+            tklog_critical("rcu_read_lock called from unregistered thread %lu", 
+                          (unsigned long)current_thread);
+        }
+        return;
+    }
+    
+    /* Increment lock count first */
+    thread_state.read_lock_count++;
+    int new_depth = thread_state.read_lock_count;
+    
+    /* Call URCU function */
+    urcu_memb_read_lock();
+    
+    tklog_debug("Read lock acquired (depth: %d)", new_depth);
+}
+
+void _rcu_read_unlock_safe(void) {
+    tklog_scope(_ensure_thread_state_initialized());
+    
+    pthread_t current_thread = pthread_self();
+    
+    /* Skip safety checks if disabled (e.g., during initialization) */
+    tklog_scope(bool result = _rcu_are_safety_checks_enabled());
+    if (!result) {
+        tklog_scope(urcu_memb_read_unlock());
+        return;
+    }
+    
+    if (!thread_state.registered) {
+        tklog_scope(result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("rcu_read_unlock called from unregistered thread %lu (test mode)", 
+                       (unsigned long)current_thread);
+        } else {
+            tklog_critical("rcu_read_unlock called from unregistered thread %lu", 
+                          (unsigned long)current_thread);
+        }
+        return;
+    }
+    
+    int current_depth = thread_state.read_lock_count;
+    if (current_depth <= 0) {
+        tklog_scope(result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("rcu_read_unlock called without matching read_lock (test mode)");
+        } else {
+            tklog_critical("rcu_read_unlock called without matching read_lock");
+        }
+        return;
+    }
+    
+    /* Call URCU function first */
+    urcu_memb_read_unlock();
+    
+    /* Then decrement our counter */
+    thread_state.read_lock_count--;
+    int new_depth = thread_state.read_lock_count;
+    
+    /* Clear pointer tracking array when read lock is fully released */
+    if (new_depth == 0) {
+        tklog_scope(_clear_dereferenced_pointers());
+    }
+    
+    tklog_debug("Read lock released (depth: %d)", new_depth);
+}
+
+void _synchronize_rcu_safe(void) {
+    tklog_scope(bool result = _rcu_is_in_read_section());
+    if (result) {
+        tklog_scope(result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("synchronize_rcu called from within read-side critical section (test mode)");
+        } else {
+            tklog_critical("synchronize_rcu called from within read-side critical section");
+        }
+        return;
+    }
+    
+    urcu_memb_synchronize_rcu();
+    tklog_debug("RCU synchronization completed");
+}
+
+/* State query functions */
+bool _rcu_is_registered(void) {
+    tklog_scope(_ensure_thread_state_initialized());
+    return thread_state.registered;
+}
+
+bool _rcu_is_in_read_section(void) {
+    tklog_scope(_ensure_thread_state_initialized());
+    return thread_state.read_lock_count > 0;
+}
+
+int _rcu_get_lock_depth(void) {
+    tklog_scope(_ensure_thread_state_initialized());
+    return thread_state.read_lock_count;
+}
+
+pthread_t _rcu_get_thread_id(void) {
+    tklog_scope(_ensure_thread_state_initialized());
+    return thread_state.thread_id;
+}
+
+/* Test mode support */
+void _rcu_set_test_mode(bool test_mode_flag) {
+    atomic_store(&test_mode, test_mode_flag);
+    tklog_debug("RCU test mode %s", test_mode_flag ? "enabled" : "disabled");
+}
+
+bool _rcu_is_test_mode(void) {
+    return atomic_load(&test_mode);
+}
+
+/* Safety check control functions */
+void _rcu_disable_safety_checks(void) {
+    atomic_store(&safety_checks_enabled, false);
+    tklog_debug("RCU safety checks disabled");
+}
+
+void _rcu_enable_safety_checks(void) {
+    atomic_store(&safety_checks_enabled, true);
+    tklog_debug("RCU safety checks enabled");
+}
+
+bool _rcu_are_safety_checks_enabled(void) {
+    return atomic_load(&safety_checks_enabled);
+}
+
+/* Pointer tracking debugging functions */
+size_t _rcu_get_tracked_pointer_count(void) {
+    tklog_scope(_ensure_thread_state_initialized());
+    return thread_state.node_array_size;
+}
+
+void _rcu_get_tracked_pointers(struct cds_lfht_node** pointers, size_t max_count) {
+    tklog_scope(_ensure_thread_state_initialized());
+    
+    if (!pointers || !thread_state.lfht_nodes) {
+        return;
+    }
+    
+    size_t count = (max_count < thread_state.node_array_size) ? 
+                   max_count : thread_state.node_array_size;
+    
+    for (size_t i = 0; i < count; i++) {
+        pointers[i] = thread_state.lfht_nodes[i];
+    }
+}
+
+bool _rcu_is_pointer_tracked(struct cds_lfht_node* ptr) {
+    tklog_scope(_ensure_thread_state_initialized());
+    tklog_scope(bool result = _is_pointer_tracked(ptr));
+    return result;
+}
+
+/* Function to track LFHT nodes when accessed */
+void _rcu_track_lfht_node(struct cds_lfht_node* node) {
+    if (!node) {
+        return;
+    }
+    
+    /* Only track nodes when in read lock section */
+    tklog_scope(bool result = _rcu_is_in_read_section());
+    if (!result) {
+        tklog_scope(result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("Attempted to track LFHT node outside read lock (test mode)");
+        } else {
+            tklog_critical("Attempted to track LFHT node outside read lock");
+        }
+        return;
+    }
+    
+    tklog_scope(_add_dereferenced_pointer(node));
+}
+
+/* Check if a pointer is within a tracked LFHT node */
+static bool _is_pointer_within_tracked_node(void* ptr) {
+    if (!ptr || !thread_state.lfht_nodes) {
+        tklog_error("No pointer or tracked nodes");
+        return false;
+    }
+    
+    /* Use the registered function pointer or default to basic node size */
+    urcu_node_size_func_t size_func = g_node_size_function;
+    if (!size_func) {
+        tklog_error("No node size function registered");
+        size_func = _default_node_size_function;
+    }
+    
+    for (size_t i = 0; i < thread_state.node_array_size; i++) {
+        struct cds_lfht_node* node = thread_state.lfht_nodes[i];
+        if (!node) continue;
+        
+        /* Use function pointer to get actual node size */
+        tklog_scope(size_t node_size = size_func(node));
+        
+        /* Check if pointer is within the actual node bounds */
+        if (ptr >= (void*)node && ptr < (void*)((char*)node + node_size)) {
+            return true;
+        }
+    }
+    
+    tklog_error("Pointer %p is not within any tracked node", ptr);
+    return false;
+}
+
+/* Hash table operations with exact API compatibility */
+void _cds_lfht_lookup_safe(struct cds_lfht *ht, unsigned long hash,
+    int (*match)(struct cds_lfht_node *node, const void *key), 
+    const void *key, struct cds_lfht_iter *iter) {
+    
+    tklog_scope(bool result = _rcu_is_in_read_section());
+    if (!result) {
+        tklog_scope(result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("cds_lfht_lookup called without read lock (test mode)");
+        } else {
+            tklog_critical("cds_lfht_lookup called without read lock");
+        }
+        if (iter) {
+            iter->node = NULL;
+            iter->next = NULL;
+        }
+        return;
+    }
+    
+    if (!ht || !match || !key || !iter) {
+        tklog_scope(result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("cds_lfht_lookup called with NULL parameters (test mode)");
+        } else {
+            tklog_error("cds_lfht_lookup called with NULL parameters");
+        }
+        if (iter) {
+            iter->node = NULL;
+            iter->next = NULL;
+        }
+        return;
+    }
+
+    /* Call the original URCU function */
+    tklog_scope(cds_lfht_lookup(ht, hash, match, key, iter));
+    
+    /* Track the node if it was found */
+    if (iter->node) {
+        tklog_scope(_rcu_track_lfht_node(iter->node));
+    }
+    
+    tklog_debug("Lookup performed (found: %s)", iter->node ? "yes" : "no");
+}
+
+void _cds_lfht_add_safe(struct cds_lfht *ht, unsigned long hash,
+    struct cds_lfht_node *node) {
+    
+    tklog_scope(bool result = _rcu_is_in_read_section());
+    if (result) {
+        tklog_scope(result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("cds_lfht_add called from within read-side critical section (test mode)");
+        } else {
+            tklog_critical("cds_lfht_add called from within read-side critical section");
+        }
+        return;
+    }
+    
+    if (!ht || !node) {
+        tklog_scope(result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("cds_lfht_add called with NULL parameters (test mode)");
+        } else {
+            tklog_error("cds_lfht_add called with NULL parameters");
+        }
+        return;
+    }
+    
+    /* Call the original URCU function */
+    cds_lfht_add(ht, hash, node);
+    tklog_debug("Node added");
+}
+
+struct cds_lfht_node *_cds_lfht_add_unique_safe(struct cds_lfht *ht, unsigned long hash,
+    int (*match)(struct cds_lfht_node *node, const void *key),
+    const void *key, struct cds_lfht_node *node) {
+    
+    tklog_scope(bool in_read_section = _rcu_is_in_read_section());
+    if (in_read_section) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("cds_lfht_add_unique called from within read-side critical section (test mode)");
+        } else {
+            tklog_critical("cds_lfht_add_unique called from within read-side critical section");
+        }
+        return NULL;
+    }
+    
+    if (!ht || !match || !key || !node) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("cds_lfht_add_unique called with NULL parameters (test mode)");
+        } else {
+            tklog_error("cds_lfht_add_unique called with NULL parameters");
+        }
+        return NULL;
+    }
+    
+    tklog_scope(struct cds_lfht_node *add_result = cds_lfht_add_unique(ht, hash, match, key, node));
+    if (add_result == node) {
+        tklog_debug("Add unique succeeded - new node inserted");
+    } else {
+        tklog_debug("Add unique failed - existing node found");
+    }
+    
+    return add_result;
+}
+
+struct cds_lfht_node *_cds_lfht_add_replace_safe(struct cds_lfht *ht, unsigned long hash,
+    int (*match)(struct cds_lfht_node *node, const void *key),
+    const void *key, struct cds_lfht_node *node) {
+    
+    tklog_scope(bool in_read_section = _rcu_is_in_read_section());
+    if (in_read_section) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("cds_lfht_add_replace called from within read-side critical section (test mode)");
+        } else {
+            tklog_critical("cds_lfht_add_replace called from within read-side critical section");
+        }
+        return NULL;
+    }
+    
+    if (!ht || !match || !key || !node) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("cds_lfht_add_replace called with NULL parameters (test mode)");
+        } else {
+            tklog_error("cds_lfht_add_replace called with NULL parameters");
+        }
+        return NULL;
+    }
+    
+    tklog_scope(struct cds_lfht_node *replace_result = cds_lfht_add_replace(ht, hash, match, key, node));
+    if (replace_result) {
+        tklog_debug("Add replace succeeded - existing node replaced");
+    } else {
+        tklog_debug("Add replace succeeded - new node inserted");
+    }
+    
+    return replace_result;
+}
+
+int _cds_lfht_del_safe(struct cds_lfht *ht, struct cds_lfht_node *node) {
+    
+    tklog_scope(bool in_read_section = _rcu_is_in_read_section());
+    if (in_read_section) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("cds_lfht_del called from within read-side critical section (test mode)");
+        } else {
+            tklog_critical("cds_lfht_del called from within read-side critical section");
+        }
+        return -EINVAL;
+    }
+    
+    if (!ht || !node) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("cds_lfht_del called with NULL parameters (test mode)");
+        } else {
+            tklog_error("cds_lfht_del called with NULL parameters");
+        }
+        return -EINVAL;
+    }
+    
+    tklog_scope(int del_result = cds_lfht_del(ht, node));
+    if (del_result == 0) {
+        tklog_debug("Node deleted successfully");
+    } else {
+        tklog_error("Delete failed: %d", del_result);
+    }
+    
+    return del_result;
+}
+
+int _cds_lfht_replace_safe(struct cds_lfht *ht, struct cds_lfht_iter *old_iter,
+    unsigned long hash, int (*match)(struct cds_lfht_node *node, const void *key),
+    const void *key, struct cds_lfht_node *new_node) {
+    
+    tklog_scope(bool in_read_section = _rcu_is_in_read_section());
+    if (in_read_section) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("cds_lfht_replace called from within read-side critical section (test mode)");
+        } else {
+            tklog_critical("cds_lfht_replace called from within read-side critical section");
+        }
+        return -EINVAL;
+    }
+    
+    if (!ht || !old_iter || !match || !key || !new_node) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("cds_lfht_replace called with NULL parameters (test mode)");
+        } else {
+            tklog_error("cds_lfht_replace called with NULL parameters");
+        }
+        return -EINVAL;
+    }
+    
+    tklog_scope(int replace_result = cds_lfht_replace(ht, old_iter, hash, match, key, new_node));
+    if (replace_result == 0) {
+        tklog_debug("Node replaced successfully");
+    } else {
+        tklog_error("Replace failed: %d", replace_result);
+    }
+    
+    return replace_result;
+}
+
+struct cds_lfht *_cds_lfht_new_safe(unsigned long init_size,
+    unsigned long min_nr_alloc_buckets, unsigned long max_nr_buckets,
+    int flags, const struct rcu_flavor_struct *flavor) {
+    
+    if (init_size == 0) {
+        tklog_scope(bool result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("cds_lfht_new called with zero init_size (test mode)");
+        } else {
+            tklog_error("cds_lfht_new called with zero init_size");
+        }
+        return NULL;
+    }
+
+    struct cds_lfht *result = cds_lfht_new_flavor(
+        init_size, min_nr_alloc_buckets, max_nr_buckets,
+        flags, flavor, /*attr=*/NULL
+    );
+    
+    if (result) {
+        tklog_debug("Hash table created successfully");
+    } else {
+        tklog_error("Hash table creation failed");
+    }
+    
+    return result;
+}
+
+int _cds_lfht_destroy_safe(struct cds_lfht *ht, pthread_attr_t **attr) {
+    
+    if (!ht) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("cds_lfht_destroy called with NULL hash table (test mode)");
+        } else {
+            tklog_error("cds_lfht_destroy called with NULL hash table");
+        }
+        return -EINVAL;
+    }
+    
+    tklog_scope(bool in_read_section = _rcu_is_in_read_section());
+    if (in_read_section) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("cds_lfht_destroy called from within read-side critical section (test mode)");
+        } else {
+            tklog_critical("cds_lfht_destroy called from within read-side critical section");
+        }
+        return -EINVAL;
+    }
+    
+    tklog_scope(int destroy_result = cds_lfht_destroy(ht, attr));
+    if (destroy_result == 0) {
+        tklog_debug("Hash table destroyed successfully");
+    } else {
+        tklog_error("Hash table destruction failed: %d", destroy_result);
+    }
+    
+    return destroy_result;
+}
+
+void _cds_lfht_resize_safe(struct cds_lfht *ht, unsigned long new_size) {
+    
+    if (!ht) {
+        tklog_scope(bool result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("cds_lfht_resize called with NULL hash table (test mode)");
+        } else {
+            tklog_error("cds_lfht_resize called with NULL hash table");
+        }
+        return;
+    }
+    
+    if (new_size == 0) {
+        tklog_scope(bool result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("cds_lfht_resize called with zero size (test mode)");
+        } else {
+            tklog_error("cds_lfht_resize called with zero size");
+        }
+        return;
+    }
+    
+    tklog_scope(bool result = _rcu_is_in_read_section());
+    if (result) {
+        tklog_scope(result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("cds_lfht_resize called from within read-side critical section (test mode)");
+        } else {
+            tklog_critical("cds_lfht_resize called from within read-side critical section");
+        }
+        return;
+    }
+    
+    cds_lfht_resize(ht, new_size);
+    tklog_debug("Hash table resized to %lu", new_size);
+}
+
+void _cds_lfht_first_safe(struct cds_lfht *ht, struct cds_lfht_iter *iter) {
+    
+    if (!ht || !iter) {
+        tklog_scope(bool result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("cds_lfht_first called with NULL parameters (test mode)");
+        } else {
+            tklog_error("cds_lfht_first called with NULL parameters");
+        }
+        if (iter) {
+            iter->node = NULL;
+            iter->next = NULL;
+        }
+        return;
+    }
+    
+    tklog_scope(bool result = _rcu_is_in_read_section());
+    if (!result) {
+        tklog_scope(result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("cds_lfht_first called without read lock (test mode)");
+        } else {
+            tklog_critical("cds_lfht_first called without read lock");
+        }
+        iter->node = NULL;
+        iter->next = NULL;
+        return;
+    }
+    
+    cds_lfht_first(ht, iter);
+    
+    /* Track the node if it was found */
+    if (iter->node) {
+        tklog_scope(_rcu_track_lfht_node(iter->node));
+    }
+    
+    tklog_debug("Iterator positioned at first");
+}
+
+void _cds_lfht_next_safe(struct cds_lfht *ht, struct cds_lfht_iter *iter) {
+    
+    if (!ht || !iter) {
+        tklog_scope(bool result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("cds_lfht_next called with NULL parameters (test mode)");
+        } else {
+            tklog_error("cds_lfht_next called with NULL parameters");
+        }
+        if (iter) {
+            iter->node = NULL;
+            iter->next = NULL;
+        }
+        return;
+    }
+    
+    tklog_scope(bool result = _rcu_is_in_read_section());
+    if (!result) {
+        tklog_scope(result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("cds_lfht_next called without read lock (test mode)");
+        } else {
+            tklog_critical("cds_lfht_next called without read lock");
+        }
+        iter->node = NULL;
+        iter->next = NULL;
+        return;
+    }
+    
+    cds_lfht_next(ht, iter);
+    
+    /* Track the node if it was found */
+    if (iter->node) {
+        tklog_scope(_rcu_track_lfht_node(iter->node));
+    }
+    
+    tklog_debug("Iterator advanced");
+}
+
+void _cds_lfht_next_duplicate_safe(struct cds_lfht *ht,
+    int (*match)(struct cds_lfht_node *node, const void *key),
+    const void *key, struct cds_lfht_iter *iter) {
+    
+    if (!ht || !match || !key || !iter) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("cds_lfht_next_duplicate called with NULL parameters (test mode)");
+        } else {
+            tklog_error("cds_lfht_next_duplicate called with NULL parameters");
+        }
+        if (iter) {
+            tklog_scope(iter->node = NULL);
+            tklog_scope(iter->next = NULL);
+        }
+        return;
+    }
+    
+    tklog_scope(bool in_read_section = _rcu_is_in_read_section());
+    if (!in_read_section) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("cds_lfht_next_duplicate called without read lock (test mode)");
+        } else {
+            tklog_critical("cds_lfht_next_duplicate called without read lock");
+        }
+        tklog_scope(iter->node = NULL);
+        tklog_scope(iter->next = NULL);
+        return;
+    }
+    
+    tklog_scope(cds_lfht_next_duplicate(ht, match, key, iter));
+    
+    /* Track the node if it was found */
+    if (iter->node) {
+        tklog_scope(_rcu_track_lfht_node(iter->node));
+    }
+    
+    tklog_debug("Iterator advanced to next duplicate");
+}
+
+struct cds_lfht_node *_cds_lfht_iter_get_node_safe(struct cds_lfht_iter *iter) {
+    
+    if (!iter) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("cds_lfht_iter_get_node called with NULL iterator (test mode)");
+        } else {
+            tklog_error("cds_lfht_iter_get_node called with NULL iterator");
+        }
+        return NULL;
+    }
+    
+    tklog_scope(bool in_read_section = _rcu_is_in_read_section());
+    if (!in_read_section) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("cds_lfht_iter_get_node called without read lock (test mode)");
+        } else {
+            tklog_critical("cds_lfht_iter_get_node called without read lock");
+        }
+        return NULL;
+    }
+    
+    tklog_scope(struct cds_lfht_node *result = cds_lfht_iter_get_node(iter));
+    
+    /* Track the node if it was successfully retrieved */
+    if (result) {
+        tklog_scope(_rcu_track_lfht_node(result));
+    }
+    
+    tklog_debug("Got node from iterator: %p", result);
+    
+    return result;
+}
+
+void _cds_lfht_count_nodes_safe(struct cds_lfht *ht,
+    long *approx_before, unsigned long *count, long *approx_after) {
+    
+    if (!ht) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("cds_lfht_count_nodes called with NULL hash table (test mode)");
+        } else {
+            tklog_error("cds_lfht_count_nodes called with NULL hash table");
+        }
+        if (count) tklog_scope(*count = 0);
+        if (approx_before) tklog_scope(*approx_before = 0);
+        if (approx_after) tklog_scope(*approx_after = 0);
+        return;
+    }
+    
+    tklog_scope(bool in_read_section = _rcu_is_in_read_section());
+    if (in_read_section) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("cds_lfht_count_nodes called from within read-side critical section (test mode)");
+        } else {
+            tklog_critical("cds_lfht_count_nodes called from within read-side critical section");
+        }
+        if (count) tklog_scope(*count = 0);
+        if (approx_before) tklog_scope(*approx_before = 0);
+        if (approx_after) tklog_scope(*approx_after = 0);
+        return;
+    }
+
+    tklog_scope(cds_lfht_count_nodes(ht, approx_before, count, approx_after));
+    tklog_debug("Node count: %lu", count ? *count : 0);
+}
+
+/* RCU pointer safety wrapper functions */
+void* _rcu_dereference_safe(void* ptr, const char* file, int line) {
+    tklog_scope(_ensure_thread_state_initialized());
+    
+    /* Skip safety checks if disabled */
+    tklog_scope(bool safety_enabled = _rcu_are_safety_checks_enabled());
+    if (!safety_enabled) {
+        tklog_scope(void* deref_result = rcu_dereference_sym(ptr));
+        return deref_result;
+    }
+    
+    tklog_scope(bool in_read_section = _rcu_is_in_read_section());
+    if (!in_read_section) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("rcu_dereference called outside read lock (test mode) at %s:%d", file, line);
+        } else {
+            tklog_critical("rcu_dereference called outside read lock at %s:%d", file, line);
+        }
+        return ptr; /* Return original pointer even in error case */
+    }
+    
+    /* Validate that the pointer is within a tracked LFHT node */
+    tklog_scope(bool pointer_valid = _is_pointer_within_tracked_node(ptr));
+    if (!pointer_valid) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("rcu_dereference called on untracked pointer %p (test mode) at %s:%d", ptr, file, line);
+        } else {
+            tklog_critical("rcu_dereference called on untracked pointer %p at %s:%d", ptr, file, line);
+        }
+        return ptr; /* Return original pointer even in error case */
+    }
+    
+    tklog_scope(void* deref_result = rcu_dereference_sym(ptr));
+    return deref_result;
+}
+
+void _rcu_assign_pointer_safe(void* ptr_addr, void* val, const char* file, int line) {
+    tklog_scope(_ensure_thread_state_initialized());
+    
+    /* Skip safety checks if disabled */
+    tklog_scope(bool safety_enabled = _rcu_are_safety_checks_enabled());
+    if (!safety_enabled) {
+        tklog_scope(rcu_set_pointer_sym(*(void**)ptr_addr, val));
+        return;
+    }
+    
+    tklog_scope(bool in_read_section = _rcu_is_in_read_section());
+    if (in_read_section) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("rcu_assign_pointer called inside read lock (test mode) at %s:%d", file, line);
+        } else {
+            tklog_critical("rcu_assign_pointer called inside read lock at %s:%d", file, line);
+        }
+        return;
+    }
+    
+    /* Validate that the pointer address is within a tracked LFHT node */
+    tklog_scope(bool pointer_valid = _is_pointer_within_tracked_node(ptr_addr));
+    if (!pointer_valid) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("rcu_assign_pointer called on untracked pointer address %p (test mode) at %s:%d", ptr_addr, file, line);
+        } else {
+            tklog_critical("rcu_assign_pointer called on untracked pointer address %p at %s:%d", ptr_addr, file, line);
+        }
+        return;
+    }
+    
+    tklog_scope(rcu_set_pointer_sym(*(void**)ptr_addr, val));
+}
+
+void* _rcu_xchg_pointer_safe(void* ptr_addr, void* val, const char* file, int line) {
+    tklog_scope(_ensure_thread_state_initialized());
+    
+    /* Skip safety checks if disabled */
+    tklog_scope(bool safety_enabled = _rcu_are_safety_checks_enabled());
+    if (!safety_enabled) {
+        tklog_scope(void* xchg_result = rcu_xchg_pointer_sym(*(void**)ptr_addr, val));
+        return xchg_result;
+    }
+    
+    tklog_scope(bool in_read_section = _rcu_is_in_read_section());
+    if (in_read_section) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("rcu_xchg_pointer called inside read lock (test mode) at %s:%d", file, line);
+        } else {
+            tklog_critical("rcu_xchg_pointer called inside read lock at %s:%d", file, line);
+        }
+        return *(void**)ptr_addr; /* Return original value even in error case */
+    }
+    
+    /* Validate that the pointer address is within a tracked LFHT node */
+    tklog_scope(bool pointer_valid = _is_pointer_within_tracked_node(ptr_addr));
+    if (!pointer_valid) {
+        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
+        if (test_mode_flag) {
+            tklog_debug("rcu_xchg_pointer called on untracked pointer address %p (test mode) at %s:%d", ptr_addr, file, line);
+        } else {
+            tklog_critical("rcu_xchg_pointer called on untracked pointer address %p at %s:%d", ptr_addr, file, line);
+        }
+        return *(void**)ptr_addr; /* Return original value even in error case */
+    }
+    
+    tklog_scope(void* xchg_result = rcu_xchg_pointer_sym(*(void**)ptr_addr, val));
+    return xchg_result;
+}
+
+#endif /* URCU_LFHT_SAFETY_ON */
+
+/* Unsafe versions that bypass safety checks for cleanup operations */
+/* These are always available, regardless of URCU_LFHT_SAFETY_ON setting */
+void cds_lfht_first_unsafe(struct cds_lfht *ht, struct cds_lfht_iter *iter) {
+    if (!ht || !iter) {
+        if (iter) {
+            tklog_scope(iter->node = NULL);
+            tklog_scope(iter->next = NULL);
+        }
+        return;
+    }
+    
+    // Call original URCU function directly, bypassing all safety checks
+    tklog_scope(cds_lfht_first(ht, iter));
+    
+#ifdef URCU_LFHT_SAFETY_ON
+    /* Track the node if it was found (even in unsafe mode) */
+    if (iter->node) {
+        tklog_scope(_rcu_track_lfht_node(iter->node));
+    }
+#endif
+    
+    tklog_debug("Iterator positioned at first (unsafe mode)");
+}
+
+void cds_lfht_next_unsafe(struct cds_lfht *ht, struct cds_lfht_iter *iter) {
+    if (!ht || !iter) {
+        if (iter) {
+            tklog_scope(iter->node = NULL);
+            tklog_scope(iter->next = NULL);
+        }
+        return;
+    }
+    
+    // Call original URCU function directly, bypassing all safety checks
+    tklog_scope(cds_lfht_next(ht, iter));
+
+#ifdef URCU_LFHT_SAFETY_ON
+    /* Track the node if it was found (even in unsafe mode) */
+    if (iter->node) {
+        tklog_scope(_rcu_track_lfht_node(iter->node));
+    }
+#endif
+
+    tklog_debug("Iterator advanced (unsafe mode)");
+
+}
+
+struct cds_lfht_node *cds_lfht_iter_get_node_unsafe(struct cds_lfht_iter *iter) {
+    if (!iter) {
+        return NULL;
+    }
+    
+    // Call original URCU function directly, bypassing all safety checks
+    tklog_scope(struct cds_lfht_node *result = cds_lfht_iter_get_node(iter));
+    
+#ifdef URCU_LFHT_SAFETY_ON
+    /* Track the node if it was successfully retrieved (even in unsafe mode) */
+    if (result) {
+        tklog_scope(_rcu_track_lfht_node(result));
+    }
+#endif
+    
+    tklog_debug("Got node from iterator: %p (unsafe mode)", result);
+    
+    return result;
+}
+
+int cds_lfht_del_unsafe(struct cds_lfht *ht, struct cds_lfht_node *node) {
+    if (!ht || !node) {
+        return -EINVAL;
+    }
+    
+    // Call original URCU function directly, bypassing all safety checks
+    tklog_scope(int result = cds_lfht_del(ht, node));
+    if (result == 0) {
+        tklog_debug("Node deleted successfully (unsafe mode)");
+    } else {
+        tklog_error("Node deletion failed: %d (unsafe mode)", result);
+    }
+    
+    return result;
+}
+
+void cds_lfht_lookup_unsafe(struct cds_lfht *ht, unsigned long hash,
+    int (*match)(struct cds_lfht_node *node, const void *key), 
+    const void *key, struct cds_lfht_iter *iter) {
+    
+    if (!ht || !match || !key || !iter) {
+        if (iter) {
+            tklog_scope(iter->node = NULL);
+            tklog_scope(iter->next = NULL);
+        }
+        return;
+    }
+    
+    // Call original URCU function directly, bypassing all safety checks
+    tklog_scope(cds_lfht_lookup(ht, hash, match, key, iter));
+    
+#ifdef URCU_LFHT_SAFETY_ON
+    /* Track the node if it was found (even in unsafe mode) */
+    if (iter->node) {
+        tklog_scope(_rcu_track_lfht_node(iter->node));
+    }
+#endif
+    
+    tklog_debug("Lookup performed (unsafe mode, found: %s)", iter->node ? "yes" : "no");
+}

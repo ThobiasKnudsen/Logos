@@ -202,30 +202,35 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
     size_t n = 0;
 
     /* level */
-    if (flags & TKLOG_SHOW_LOG_LEVEL) {
+    if (flags & TKLOG_INIT_F_LEVEL) {
         n = SDL_snprintf(p, sizeof msgbuf, "%s | ", levelstr[level]);
         p += n;
     }
 
     /* time */
-    if (flags & TKLOG_SHOW_TIME) {
+    if (flags & TKLOG_INIT_F_TIME) {
         uint64_t t_ms = SDL_GetTicks() - g_start_ms;
         n = SDL_snprintf(p, sizeof msgbuf - (p - msgbuf), "%" PRIu64 "ms | ", (uint64_t)t_ms);
         p += n;
     }
 
     /* thread */
-    if (flags & TKLOG_SHOW_THREAD) {
+    if (flags & TKLOG_INIT_F_THREAD) {
         SDL_ThreadID tid = SDL_GetCurrentThreadID();
         n = SDL_snprintf(p, sizeof msgbuf - (p - msgbuf), "Thread %" PRIu64 " | ", (uint64_t)tid);
         p += n;
     }
 
     /* path */
-    if (flags & TKLOG_SHOW_PATH) {
+    if (flags & TKLOG_INIT_F_PATH) {
         PathStack *ps = pathstack_get();
         if (ps && ps->buf[0]) {
+            /* Show call stack path + current file:line */
             n = SDL_snprintf(p, sizeof msgbuf - (p - msgbuf), "%s → %s:%d | ", ps->buf, file, line);
+            p += n;
+        } else {
+            /* Show just current file:line when no call stack */
+            n = SDL_snprintf(p, sizeof msgbuf - (p - msgbuf), "%s:%d | ", file, line);
             p += n;
         }
     }
