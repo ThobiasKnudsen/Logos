@@ -38,11 +38,20 @@
 /* Function pointer type for getting node size */
 typedef size_t (*urcu_node_size_func_t)(struct cds_lfht_node* node);
 
+/* Function pointer type for getting the start pointer of the containing structure */
+typedef void* (*urcu_node_start_ptr_func_t)(struct cds_lfht_node* node);
+
 /* Function to set the node size function - call this before using any safety features */
 void _urcu_safe_set_node_size_function(urcu_node_size_func_t func);
 
 /* Function to get the current node size function */
 urcu_node_size_func_t _urcu_safe_get_node_size_function(void);
+
+/* Function to set the node start pointer function - call this before using any safety features */
+void _urcu_safe_set_node_start_ptr_function(urcu_node_start_ptr_func_t start_func);
+
+/* Function to get the current node start pointer function */
+urcu_node_start_ptr_func_t _urcu_safe_get_node_start_ptr_function(void);
 
 /* -------------------------------------------------------------------------
  * RCU Safety Wrappers
@@ -113,14 +122,6 @@ bool _rcu_is_test_mode(void);
 void _rcu_disable_safety_checks(void);
 void _rcu_enable_safety_checks(void);
 bool _rcu_are_safety_checks_enabled(void);
-
-/* Pointer tracking debugging functions */
-size_t _rcu_get_tracked_pointer_count(void);
-void _rcu_get_tracked_pointers(struct cds_lfht_node** pointers, size_t max_count);
-bool _rcu_is_pointer_tracked(struct cds_lfht_node* ptr);
-
-/* Function to track LFHT nodes when accessed */
-void _rcu_track_lfht_node(struct cds_lfht_node* node);
 
 /* -------------------------------------------------------------------------
  * RCU Pointer Function Validation

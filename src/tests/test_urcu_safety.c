@@ -273,119 +273,6 @@ static bool test_thread_safety(void) {
     return true;
 }
 
-/* Test pointer tracking functionality */
-static bool test_pointer_tracking(void) {
-    tklog_info("Testing pointer tracking functionality...");
-    
-    // Enable test mode to avoid critical/error logging for expected test conditions
-    _rcu_set_test_mode(true);
-    
-    // Register thread
-    rcu_register_thread();
-    
-    // Create hash table
-    test_ht = cds_lfht_new_flavor(16, 16, 1024, CDS_LFHT_AUTO_RESIZE, &urcu_memb_flavor, NULL);
-    if (!test_ht) {
-        tklog_error("Failed to create hash table for pointer tracking test");
-        _rcu_set_test_mode(false);
-        return false;
-    }
-    
-    // Add a test node
-    struct test_node *test_node = malloc(sizeof(struct test_node));
-    if (!test_node) {
-        tklog_error("Failed to allocate test node");
-        cds_lfht_destroy(test_ht, NULL);
-        _rcu_set_test_mode(false);
-        return false;
-    }
-    
-    strcpy(test_node->key, "tracking_test");
-    test_node->value = 123;
-    cds_lfht_node_init(&test_node->lfht_node);
-    
-    cds_lfht_add(test_ht, 456, &test_node->lfht_node);
-    
-    // Test 1: Access node in read lock and verify it's tracked
-    rcu_read_lock();
-    
-    struct cds_lfht_iter iter;
-    cds_lfht_lookup(test_ht, 456, test_key_match, "tracking_test", &iter);
-    struct cds_lfht_node *node = cds_lfht_iter_get_node(&iter);
-    
-    if (!node) {
-        tklog_error("Failed to find test node");
-        rcu_read_unlock();
-        free(test_node);
-        cds_lfht_destroy(test_ht, NULL);
-        _rcu_set_test_mode(false);
-        return false;
-    }
-    
-    // Check that the node is tracked
-    if (!_rcu_is_pointer_tracked(node)) {
-        tklog_error("Node should be tracked after access");
-        rcu_read_unlock();
-        free(test_node);
-        cds_lfht_destroy(test_ht, NULL);
-        _rcu_set_test_mode(false);
-        return false;
-    }
-    
-    // Test 2: Try to dereference a pointer within the tracked node (should succeed)
-    struct test_node *found_node = caa_container_of(node, struct test_node, lfht_node);
-    const char* key_ptr = rcu_dereference(&found_node->key[0]);
-    
-    if (strcmp(key_ptr, "tracking_test") != 0) {
-        tklog_error("rcu_dereference failed to get correct key");
-        rcu_read_unlock();
-        free(test_node);
-        cds_lfht_destroy(test_ht, NULL);
-        _rcu_set_test_mode(false);
-        return false;
-    }
-    
-    // Test 3: Try to dereference an untracked pointer (should fail in test mode)
-    int dummy_value = 42;
-    int* dummy_ptr = &dummy_value;
-    int* deref_result = rcu_dereference(dummy_ptr);
-    
-    // In test mode, this should log a debug message but not crash
-    if (deref_result != dummy_ptr) {
-        tklog_error("rcu_dereference should return original pointer for untracked pointer");
-        rcu_read_unlock();
-        free(test_node);
-        cds_lfht_destroy(test_ht, NULL);
-        _rcu_set_test_mode(false);
-        return false;
-    }
-    
-    rcu_read_unlock();
-    
-    // Test 4: Verify that tracking array is cleared after read unlock
-    if (_rcu_get_tracked_pointer_count() != 0) {
-        tklog_error("Tracking array should be empty after read unlock");
-        free(test_node);
-        cds_lfht_destroy(test_ht, NULL);
-        _rcu_set_test_mode(false);
-        return false;
-    }
-    
-    // Test 5: Try to track a node outside read lock (should fail in test mode)
-    _rcu_track_lfht_node(node);
-    
-    // Cleanup
-    free(test_node);
-    cds_lfht_destroy(test_ht, NULL);
-    rcu_unregister_thread();
-    
-    // Disable test mode
-    _rcu_set_test_mode(false);
-    
-    tklog_info("Pointer tracking tests passed");
-    return true;
-}
-
 /* Main test function */
 bool test_urcu_safety_wrapper(void) {
     tklog_info("Starting RCU/LFHT safety wrapper tests...");
@@ -396,7 +283,6 @@ bool test_urcu_safety_wrapper(void) {
     all_passed &= test_hash_table_operations();
     all_passed &= test_error_conditions();
     all_passed &= test_thread_safety();
-    all_passed &= test_pointer_tracking();
     
     if (all_passed) {
         tklog_info("All RCU/LFHT safety wrapper tests passed!");

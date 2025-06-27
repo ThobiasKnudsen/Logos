@@ -1434,9 +1434,11 @@ void gd_cleanup_test(void) {
         struct cds_lfht_iter iter;
         
         // Collect a batch of test nodes using proper wrapper functions
+        uint64_t iter_count = 0;
         rcu_read_lock();
         if (gd_iter_first(&iter)) {
             do {
+                tklog_debug("iteration %lld\n", iter_count++);
                 struct gd_base_node* base_node = gd_iter_get_node(&iter);
                 if (base_node) {
                     // Check if this is a test node (has test_node_type as its type)

@@ -1,0 +1,26 @@
+@echo off
+REM CPI Launcher for Windows
+REM This script launches the CPI application
+
+set SCRIPT_DIR=%~dp0
+set CPI_EXE=%SCRIPT_DIR%cpi.exe
+set CPI_DATA=%SCRIPT_DIR%..\share\cpi
+
+if not exist "%CPI_EXE%" (
+    echo Error: CPI executable not found at %CPI_EXE%
+    echo Please ensure the application is properly installed.
+    pause
+    exit /b 1
+)
+
+echo Starting CPI...
+echo Executable: %CPI_EXE%
+echo Data directory: %CPI_DATA%
+
+"%CPI_EXE%" %*
+
+if errorlevel 1 (
+    echo.
+    echo CPI exited with error code %errorlevel%
+    pause
+) 

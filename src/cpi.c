@@ -6,6 +6,7 @@
 #include "vec_path.h"
 #include <stdlib.h>
 #include <SDL3/SDL.h>
+// #include <SDL3/SDL_image.h>  // Not used currently, will replace stb_image in future
 #include <SDL3_shadercross/SDL_shadercross.h>
 #include "spirv_reflect.h"
 #include "tklog.h"
@@ -613,7 +614,7 @@ void cpi_Window_Show(
             return;
         }
 
-        // Create dummy UBO data (for the vertex shader’s UBO in set 1).
+        // Create dummy UBO data (for the vertex shader's UBO in set 1).
         typedef struct {
             float targetWidth;
             float targetHeight;

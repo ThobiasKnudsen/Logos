@@ -8,6 +8,9 @@
 /* Global function pointer for getting node size */
 static urcu_node_size_func_t g_node_size_function = NULL;
 
+/* Global function pointer for getting node start pointer */
+static urcu_node_start_ptr_func_t g_node_start_ptr_function = NULL;
+
 /* Function to set the node size function */
 void _urcu_safe_set_node_size_function(urcu_node_size_func_t func) {
     g_node_size_function = func;
@@ -17,6 +20,17 @@ void _urcu_safe_set_node_size_function(urcu_node_size_func_t func) {
 /* Function to get the current node size function */
 urcu_node_size_func_t _urcu_safe_get_node_size_function(void) {
     return g_node_size_function;
+}
+
+/* Function to set the node start pointer function */
+void _urcu_safe_set_node_start_ptr_function(urcu_node_start_ptr_func_t start_func) {
+    g_node_start_ptr_function = start_func;
+    tklog_debug("Node start pointer function set to %p", (void*)start_func);
+}
+
+/* Function to get the current node start pointer function */
+urcu_node_start_ptr_func_t _urcu_safe_get_node_start_ptr_function(void) {
+    return g_node_start_ptr_function;
 }
 
 /* Default node size function that returns sizeof(struct cds_lfht_node) */
@@ -31,11 +45,6 @@ typedef struct {
     int read_lock_count;             /* Nested read lock depth */
     pthread_t thread_id;             /* POSIX thread ID for verification */
     bool initialized;                /* Has thread state been initialized? */
-    
-    /* LFHT node pointer tracking for rcu_dereference calls */
-    struct cds_lfht_node** lfht_nodes;  /* Array of LFHT nodes that have been accessed */
-    size_t node_array_size;             /* Current size of the array */
-    size_t node_array_capacity;         /* Maximum capacity of the array */
 } rcu_thread_state_t;
 
 /* Thread-local safety state */
@@ -43,10 +52,7 @@ static __thread rcu_thread_state_t thread_state = {
     .registered = false,
     .read_lock_count = 0,
     .thread_id = 0,
-    .initialized = false,
-    .lfht_nodes = NULL,
-    .node_array_size = 0,
-    .node_array_capacity = 0
+    .initialized = false
 };
 
 /* Test mode flag - allows tests to indicate when errors are expected */
@@ -62,76 +68,7 @@ static void _ensure_thread_state_initialized(void) {
         thread_state.initialized = true;
         thread_state.registered = false;
         thread_state.read_lock_count = 0;
-        
-        /* Initialize pointer tracking array */
-        thread_state.node_array_capacity = 16; /* Start with 16 pointers */
-        thread_state.node_array_size = 0;
-        thread_state.lfht_nodes = malloc(thread_state.node_array_capacity * sizeof(struct cds_lfht_node*));
-        if (!thread_state.lfht_nodes) {
-            tklog_critical("Failed to allocate pointer tracking array");
-            thread_state.node_array_capacity = 0;
-        }
     }
-}
-
-/* Add a pointer to the tracking array */
-static void _add_dereferenced_pointer(struct cds_lfht_node* ptr) {
-    if (!thread_state.lfht_nodes) {
-        return; /* Array not initialized */
-    }
-    
-    /* Check if pointer is already in array */
-    for (size_t i = 0; i < thread_state.node_array_size; i++) {
-        if (thread_state.lfht_nodes[i] == ptr) {
-            return; /* Already tracked */
-        }
-    }
-    
-    /* Expand array if needed */
-    if (thread_state.node_array_size >= thread_state.node_array_capacity) {
-        size_t new_capacity = thread_state.node_array_capacity * 2;
-        struct cds_lfht_node** new_array = realloc(thread_state.lfht_nodes, 
-                                  new_capacity * sizeof(struct cds_lfht_node*));
-        if (!new_array) {
-            tklog_error("Failed to expand pointer tracking array");
-            return;
-        }
-        thread_state.lfht_nodes = new_array;
-        thread_state.node_array_capacity = new_capacity;
-    }
-    
-    /* Add pointer to array */
-    thread_state.lfht_nodes[thread_state.node_array_size++] = ptr;
-    tklog_debug("Added pointer %p to tracking array (size: %zu)", ptr, thread_state.node_array_size);
-}
-
-/* Update _clear_dereferenced_pointers to actually free memory */
-static void _clear_dereferenced_pointers(void) {
-    if (thread_state.lfht_nodes && thread_state.node_array_capacity > 16) {
-        /* Shrink back to initial size */
-        struct cds_lfht_node** new_array = realloc(thread_state.lfht_nodes, 
-                                                   16 * sizeof(struct cds_lfht_node*));
-        if (new_array) {
-            thread_state.lfht_nodes = new_array;
-            thread_state.node_array_capacity = 16;
-        }
-    }
-    thread_state.node_array_size = 0;
-    tklog_debug("Cleared and shrunk pointer tracking array");
-}
-
-/* Check if a pointer is in the tracking array */
-static bool _is_pointer_tracked(struct cds_lfht_node* ptr) {
-    if (!thread_state.lfht_nodes) {
-        return false;
-    }
-    
-    for (size_t i = 0; i < thread_state.node_array_size; i++) {
-        if (thread_state.lfht_nodes[i] == ptr) {
-            return true;
-        }
-    }
-    return false;
 }
 
 /* RCU registration with proper error handling */
@@ -194,15 +131,6 @@ void _rcu_unregister_thread_safe(void) {
     
     /* Attempt URCU unregistration */
     urcu_memb_unregister_thread();
-    
-    /* Clean up pointer tracking array */
-    if (thread_state.lfht_nodes) {
-        free(thread_state.lfht_nodes);
-        thread_state.lfht_nodes = NULL;
-        thread_state.node_array_size = 0;
-        thread_state.node_array_capacity = 0;
-        tklog_debug("Freed pointer tracking array");
-    }
     
     thread_state.registered = false;
     tklog_debug("Thread %lu unregistered from RCU", (unsigned long)thread_state.thread_id);
@@ -286,11 +214,6 @@ void _rcu_read_unlock_safe(void) {
     thread_state.read_lock_count--;
     int new_depth = thread_state.read_lock_count;
     
-    /* Clear pointer tracking array when read lock is fully released */
-    if (new_depth == 0) {
-        tklog_scope(_clear_dereferenced_pointers());
-    }
-    
     tklog_debug("Read lock released (depth: %d)", new_depth);
 }
 
@@ -356,85 +279,6 @@ bool _rcu_are_safety_checks_enabled(void) {
     return atomic_load(&safety_checks_enabled);
 }
 
-/* Pointer tracking debugging functions */
-size_t _rcu_get_tracked_pointer_count(void) {
-    tklog_scope(_ensure_thread_state_initialized());
-    return thread_state.node_array_size;
-}
-
-void _rcu_get_tracked_pointers(struct cds_lfht_node** pointers, size_t max_count) {
-    tklog_scope(_ensure_thread_state_initialized());
-    
-    if (!pointers || !thread_state.lfht_nodes) {
-        return;
-    }
-    
-    size_t count = (max_count < thread_state.node_array_size) ? 
-                   max_count : thread_state.node_array_size;
-    
-    for (size_t i = 0; i < count; i++) {
-        pointers[i] = thread_state.lfht_nodes[i];
-    }
-}
-
-bool _rcu_is_pointer_tracked(struct cds_lfht_node* ptr) {
-    tklog_scope(_ensure_thread_state_initialized());
-    tklog_scope(bool result = _is_pointer_tracked(ptr));
-    return result;
-}
-
-/* Function to track LFHT nodes when accessed */
-void _rcu_track_lfht_node(struct cds_lfht_node* node) {
-    if (!node) {
-        return;
-    }
-    
-    /* Only track nodes when in read lock section */
-    tklog_scope(bool result = _rcu_is_in_read_section());
-    if (!result) {
-        tklog_scope(result = _rcu_is_test_mode());
-        if (result) {
-            tklog_debug("Attempted to track LFHT node outside read lock (test mode)");
-        } else {
-            tklog_critical("Attempted to track LFHT node outside read lock");
-        }
-        return;
-    }
-    
-    tklog_scope(_add_dereferenced_pointer(node));
-}
-
-/* Check if a pointer is within a tracked LFHT node */
-static bool _is_pointer_within_tracked_node(void* ptr) {
-    if (!ptr || !thread_state.lfht_nodes) {
-        tklog_error("No pointer or tracked nodes");
-        return false;
-    }
-    
-    /* Use the registered function pointer or default to basic node size */
-    urcu_node_size_func_t size_func = g_node_size_function;
-    if (!size_func) {
-        tklog_error("No node size function registered");
-        size_func = _default_node_size_function;
-    }
-    
-    for (size_t i = 0; i < thread_state.node_array_size; i++) {
-        struct cds_lfht_node* node = thread_state.lfht_nodes[i];
-        if (!node) continue;
-        
-        /* Use function pointer to get actual node size */
-        tklog_scope(size_t node_size = size_func(node));
-        
-        /* Check if pointer is within the actual node bounds */
-        if (ptr >= (void*)node && ptr < (void*)((char*)node + node_size)) {
-            return true;
-        }
-    }
-    
-    tklog_error("Pointer %p is not within any tracked node", ptr);
-    return false;
-}
-
 /* Hash table operations with exact API compatibility */
 void _cds_lfht_lookup_safe(struct cds_lfht *ht, unsigned long hash,
     int (*match)(struct cds_lfht_node *node, const void *key), 
@@ -471,11 +315,6 @@ void _cds_lfht_lookup_safe(struct cds_lfht *ht, unsigned long hash,
 
     /* Call the original URCU function */
     tklog_scope(cds_lfht_lookup(ht, hash, match, key, iter));
-    
-    /* Track the node if it was found */
-    if (iter->node) {
-        tklog_scope(_rcu_track_lfht_node(iter->node));
-    }
     
     tklog_debug("Lookup performed (found: %s)", iter->node ? "yes" : "no");
 }
@@ -776,11 +615,6 @@ void _cds_lfht_first_safe(struct cds_lfht *ht, struct cds_lfht_iter *iter) {
     
     cds_lfht_first(ht, iter);
     
-    /* Track the node if it was found */
-    if (iter->node) {
-        tklog_scope(_rcu_track_lfht_node(iter->node));
-    }
-    
     tklog_debug("Iterator positioned at first");
 }
 
@@ -814,11 +648,6 @@ void _cds_lfht_next_safe(struct cds_lfht *ht, struct cds_lfht_iter *iter) {
     }
     
     cds_lfht_next(ht, iter);
-    
-    /* Track the node if it was found */
-    if (iter->node) {
-        tklog_scope(_rcu_track_lfht_node(iter->node));
-    }
     
     tklog_debug("Iterator advanced");
 }
@@ -856,11 +685,6 @@ void _cds_lfht_next_duplicate_safe(struct cds_lfht *ht,
     
     tklog_scope(cds_lfht_next_duplicate(ht, match, key, iter));
     
-    /* Track the node if it was found */
-    if (iter->node) {
-        tklog_scope(_rcu_track_lfht_node(iter->node));
-    }
-    
     tklog_debug("Iterator advanced to next duplicate");
 }
 
@@ -888,11 +712,6 @@ struct cds_lfht_node *_cds_lfht_iter_get_node_safe(struct cds_lfht_iter *iter) {
     }
     
     tklog_scope(struct cds_lfht_node *result = cds_lfht_iter_get_node(iter));
-    
-    /* Track the node if it was successfully retrieved */
-    if (result) {
-        tklog_scope(_rcu_track_lfht_node(result));
-    }
     
     tklog_debug("Got node from iterator: %p", result);
     
@@ -955,18 +774,6 @@ void* _rcu_dereference_safe(void* ptr, const char* file, int line) {
         return ptr; /* Return original pointer even in error case */
     }
     
-    /* Validate that the pointer is within a tracked LFHT node */
-    tklog_scope(bool pointer_valid = _is_pointer_within_tracked_node(ptr));
-    if (!pointer_valid) {
-        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
-        if (test_mode_flag) {
-            tklog_debug("rcu_dereference called on untracked pointer %p (test mode) at %s:%d", ptr, file, line);
-        } else {
-            tklog_critical("rcu_dereference called on untracked pointer %p at %s:%d", ptr, file, line);
-        }
-        return ptr; /* Return original pointer even in error case */
-    }
-    
     tklog_scope(void* deref_result = rcu_dereference_sym(ptr));
     return deref_result;
 }
@@ -988,18 +795,6 @@ void _rcu_assign_pointer_safe(void* ptr_addr, void* val, const char* file, int l
             tklog_debug("rcu_assign_pointer called inside read lock (test mode) at %s:%d", file, line);
         } else {
             tklog_critical("rcu_assign_pointer called inside read lock at %s:%d", file, line);
-        }
-        return;
-    }
-    
-    /* Validate that the pointer address is within a tracked LFHT node */
-    tklog_scope(bool pointer_valid = _is_pointer_within_tracked_node(ptr_addr));
-    if (!pointer_valid) {
-        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
-        if (test_mode_flag) {
-            tklog_debug("rcu_assign_pointer called on untracked pointer address %p (test mode) at %s:%d", ptr_addr, file, line);
-        } else {
-            tklog_critical("rcu_assign_pointer called on untracked pointer address %p at %s:%d", ptr_addr, file, line);
         }
         return;
     }
@@ -1028,18 +823,6 @@ void* _rcu_xchg_pointer_safe(void* ptr_addr, void* val, const char* file, int li
         return *(void**)ptr_addr; /* Return original value even in error case */
     }
     
-    /* Validate that the pointer address is within a tracked LFHT node */
-    tklog_scope(bool pointer_valid = _is_pointer_within_tracked_node(ptr_addr));
-    if (!pointer_valid) {
-        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
-        if (test_mode_flag) {
-            tklog_debug("rcu_xchg_pointer called on untracked pointer address %p (test mode) at %s:%d", ptr_addr, file, line);
-        } else {
-            tklog_critical("rcu_xchg_pointer called on untracked pointer address %p at %s:%d", ptr_addr, file, line);
-        }
-        return *(void**)ptr_addr; /* Return original value even in error case */
-    }
-    
     tklog_scope(void* xchg_result = rcu_xchg_pointer_sym(*(void**)ptr_addr, val));
     return xchg_result;
 }
@@ -1059,14 +842,7 @@ void cds_lfht_first_unsafe(struct cds_lfht *ht, struct cds_lfht_iter *iter) {
     
     // Call original URCU function directly, bypassing all safety checks
     tklog_scope(cds_lfht_first(ht, iter));
-    
-#ifdef URCU_LFHT_SAFETY_ON
-    /* Track the node if it was found (even in unsafe mode) */
-    if (iter->node) {
-        tklog_scope(_rcu_track_lfht_node(iter->node));
-    }
-#endif
-    
+
     tklog_debug("Iterator positioned at first (unsafe mode)");
 }
 
@@ -1082,13 +858,6 @@ void cds_lfht_next_unsafe(struct cds_lfht *ht, struct cds_lfht_iter *iter) {
     // Call original URCU function directly, bypassing all safety checks
     tklog_scope(cds_lfht_next(ht, iter));
 
-#ifdef URCU_LFHT_SAFETY_ON
-    /* Track the node if it was found (even in unsafe mode) */
-    if (iter->node) {
-        tklog_scope(_rcu_track_lfht_node(iter->node));
-    }
-#endif
-
     tklog_debug("Iterator advanced (unsafe mode)");
 
 }
@@ -1100,14 +869,7 @@ struct cds_lfht_node *cds_lfht_iter_get_node_unsafe(struct cds_lfht_iter *iter) 
     
     // Call original URCU function directly, bypassing all safety checks
     tklog_scope(struct cds_lfht_node *result = cds_lfht_iter_get_node(iter));
-    
-#ifdef URCU_LFHT_SAFETY_ON
-    /* Track the node if it was successfully retrieved (even in unsafe mode) */
-    if (result) {
-        tklog_scope(_rcu_track_lfht_node(result));
-    }
-#endif
-    
+
     tklog_debug("Got node from iterator: %p (unsafe mode)", result);
     
     return result;
@@ -1143,13 +905,6 @@ void cds_lfht_lookup_unsafe(struct cds_lfht *ht, unsigned long hash,
     
     // Call original URCU function directly, bypassing all safety checks
     tklog_scope(cds_lfht_lookup(ht, hash, match, key, iter));
-    
-#ifdef URCU_LFHT_SAFETY_ON
-    /* Track the node if it was found (even in unsafe mode) */
-    if (iter->node) {
-        tklog_scope(_rcu_track_lfht_node(iter->node));
-    }
-#endif
     
     tklog_debug("Lookup performed (unsafe mode, found: %s)", iter->node ? "yes" : "no");
 }

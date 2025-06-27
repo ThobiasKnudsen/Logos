@@ -1,5 +1,6 @@
 #include "global_data/core.h"
 #include "global_data/type.h"
+#include "global_data/urcu_safe.h"
 #include "tklog.h"
 #include "xxhash.h"
 
@@ -25,9 +26,9 @@ int _gd_key_match(struct cds_lfht_node *node, const void *key_ctx) {
         tklog_debug("Comparing number key: node_key=%llu, lookup_key=%llu\n", node_key, lookup_key);
         return node_key == lookup_key;
     } else {
-        // String key comparison - use rcu_dereference for proper memory ordering
-        const char* node_key = rcu_dereference(base_node->key.string);
-        const char* lookup_key = rcu_dereference(ctx->key.string);
+        // String key comparison - access string fields directly since we're within hash table operations
+        const char* node_key = base_node->key.string;
+        const char* lookup_key = ctx->key.string;
         tklog_debug("Comparing string key: node_key=%s, lookup_key=%s\n", node_key, lookup_key);
         return strcmp(node_key, lookup_key) == 0;
     }
@@ -59,6 +60,9 @@ bool gd_init(void) {
     
     // Register the node size function with urcu_safe system
     _urcu_safe_set_node_size_function(_gd_get_node_size);
+    
+    // Register the node bounds functions with urcu_safe system
+    _urcu_safe_set_node_start_ptr_function(_gd_get_node_start_ptr);
     
     tklog_scope(g_p_ht = cds_lfht_new(8, 8, 0, CDS_LFHT_AUTO_RESIZE, NULL));
     if (!g_p_ht) {
@@ -226,7 +230,6 @@ void gd_cleanup(void) {
     struct cds_lfht_iter iter;
     cds_lfht_first(g_p_ht, &iter);
     struct cds_lfht_node* node = cds_lfht_iter_get_node(&iter);
-    rcu_read_unlock();
     
     if (node) {
         struct gd_base_node* base_node = caa_container_of(node, struct gd_base_node, lfht_node);
@@ -241,6 +244,8 @@ void gd_cleanup(void) {
             tklog_warning("Expected base_type node but found different node during cleanup\n");
         }
     }
+    
+    rcu_read_unlock();
     
     // Wait for base_type node to be freed
     synchronize_rcu();
@@ -416,6 +421,11 @@ uint64_t gd_create_node(const union gd_key* key, bool key_is_number, const union
     tklog_scope(gd_node_init(p_new_node));
     p_new_node->key_is_number = key_is_number;
     p_new_node->type_key_is_number = type_key_is_number;
+    p_new_node->size_bytes = p_type_node->type_size;
+    
+    // Initialize union fields to prevent uninitialized pointer access
+    p_new_node->key.string = NULL;
+    p_new_node->type_key.string = NULL;
     
     // Set up the key
     uint64_t actual_key = 0;
@@ -439,7 +449,7 @@ uint64_t gd_create_node(const union gd_key* key, bool key_is_number, const union
             return 0;
         }
         strcpy(new_key_str, str_key);
-        rcu_assign_pointer(p_new_node->key.string, new_key_str);
+        p_new_node->key.string = new_key_str;
     }
     
     // Set up the type key
@@ -458,7 +468,7 @@ uint64_t gd_create_node(const union gd_key* key, bool key_is_number, const union
             return 0;
         }
         strcpy(new_type_key_str, str_type_key);
-        rcu_assign_pointer(p_new_node->type_key.string, new_type_key_str);
+        p_new_node->type_key.string = new_type_key_str;
     }
 
     // Log what we're creating
@@ -535,6 +545,15 @@ bool gd_remove_node(const union gd_key* key, bool key_is_number) {
 
     struct gd_node_base_type* p_type_node = caa_container_of(p_type_base_node, struct gd_node_base_type, base);
     
+    // Copy the free callback while still holding the read lock
+    // This ensures the callback remains valid even after we release the lock
+    void (*free_callback)(struct rcu_head*) = rcu_dereference(p_type_node->fn_free_node_callback);
+    if (!free_callback) {
+        tklog_error("free_callback is NULL\n");
+        tklog_scope(rcu_read_unlock());
+        return false;
+    }
+    
     // Release read lock before doing write operations
     tklog_scope(rcu_read_unlock());
 
@@ -548,7 +567,7 @@ bool gd_remove_node(const union gd_key* key, bool key_is_number) {
         return false;
     }
 
-    void (*free_callback)(struct rcu_head*) = rcu_dereference(p_type_node->fn_free_node_callback);
+    // Schedule for RCU cleanup after successful removal
     tklog_scope(call_rcu(&p_base->rcu_head, free_callback));
 
     return true;
@@ -600,6 +619,14 @@ bool gd_update(const union gd_key* key, bool key_is_number, void* new_data, size
         return false;
     }
 
+    // Get the free callback while still holding the read lock
+    void (*free_callback)(struct rcu_head*) = rcu_dereference(p_type_node->fn_free_node_callback);
+    if (!free_callback) {
+        tklog_error("free_callback is NULL\n");
+        tklog_scope(rcu_read_unlock());
+        return false;
+    }
+
     // Create new node
     struct gd_base_node* p_new_node = malloc(p_type_node->type_size);
     if (!p_new_node) {
@@ -617,6 +644,11 @@ bool gd_update(const union gd_key* key, bool key_is_number, void* new_data, size
     // Copy key information from existing node
     p_new_node->key_is_number = p_existing->key_is_number;
     p_new_node->type_key_is_number = p_existing->type_key_is_number;
+    p_new_node->size_bytes = p_existing->size_bytes;
+    
+    // Initialize union fields to prevent uninitialized pointer access
+    p_new_node->key.string = NULL;
+    p_new_node->type_key.string = NULL;
     
     // Set up the key
     if (key_is_number) {
@@ -631,7 +663,7 @@ bool gd_update(const union gd_key* key, bool key_is_number, void* new_data, size
             return false;
         }
         strcpy(new_key_str, str_key);
-        rcu_assign_pointer(p_new_node->key.string, new_key_str);
+        p_new_node->key.string = new_key_str;
     }
     
     // Set up the type key
@@ -650,7 +682,7 @@ bool gd_update(const union gd_key* key, bool key_is_number, void* new_data, size
             return false;
         }
         strcpy(new_type_key_str, str_type_key);
-        rcu_assign_pointer(p_new_node->type_key.string, new_type_key_str);
+        p_new_node->type_key.string = new_type_key_str;
     }
 
     // Release read lock before doing write operations
@@ -667,7 +699,6 @@ bool gd_update(const union gd_key* key, bool key_is_number, void* new_data, size
     if (replaced_node) {
         // Schedule old node for RCU cleanup
         struct gd_base_node* old_base_node = caa_container_of(replaced_node, struct gd_base_node, lfht_node);
-        void (*free_callback)(struct rcu_head*) = rcu_dereference(p_type_node->fn_free_node_callback);
         tklog_scope(call_rcu(&old_base_node->rcu_head, free_callback));
         
         if (key_is_number) {
@@ -744,7 +775,6 @@ bool gd_iter_first(struct cds_lfht_iter* iter) {
         tklog_error("gd_iter_first called with NULL parameters or uninitialized system\n");
         return false;
     }
-    
     
     tklog_scope(cds_lfht_first(g_p_ht, iter));
     tklog_scope(struct cds_lfht_node* lfht_node = cds_lfht_iter_get_node(iter));
@@ -831,16 +861,17 @@ uint64_t _gd_get_node_size(struct cds_lfht_node* node) {
     // Cast to our base node structure
     struct gd_base_node* base_node = caa_container_of(node, struct gd_base_node, lfht_node);
     
-    // Look up the type node using the base node's type_key
-    struct gd_base_node* type_base_node = gd_get_node_unsafe(&base_node->type_key, base_node->type_key_is_number);
-    if (!type_base_node) {
-        // Fallback to base node size if type not found
-        tklog_error("Type node not found for base node\n");
-        return sizeof(struct gd_base_node);
+    // Return the size directly from the node
+    return base_node->size_bytes;
+}
+
+// Implementation of gd_get_node_start_ptr function
+void* _gd_get_node_start_ptr(struct cds_lfht_node* node) {
+    if (!node) {
+        return NULL;
     }
     
-    // Cast to type node to get the type_size
-    struct gd_node_base_type* type_node = caa_container_of(type_base_node, struct gd_node_base_type, base);
-    
-    return type_node->type_size;
+    // Cast to our base node structure and return the start pointer
+    struct gd_base_node* base_node = caa_container_of(node, struct gd_base_node, lfht_node);
+    return (void*)base_node;
 }

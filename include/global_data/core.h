@@ -21,10 +21,11 @@ union gd_key {
 
 struct gd_base_node {
     struct cds_lfht_node lfht_node;
-    bool key_is_number;
-    bool type_key_is_number;
     union gd_key key;
     union gd_key type_key;
+    bool key_is_number;
+    bool type_key_is_number;
+    uint32_t size_bytes;
     struct rcu_head rcu_head;
 };
 
@@ -36,6 +37,7 @@ struct gd_key_match_ctx {
 
 // Define the node size function
 uint64_t _gd_get_node_size(struct cds_lfht_node* node);
+void* _gd_get_node_start_ptr(struct cds_lfht_node* node);
 
 // Core system functions
 bool                    gd_init(void);

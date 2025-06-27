@@ -1,0 +1,333 @@
+cmake_minimum_required(VERSION 3.24)
+project(CPI LANGUAGES C)
+
+include(FetchContent)
+include(ExternalProject)
+
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+
+# ====================================================================
+# SDL3
+# ====================================================================
+FetchContent_Declare(
+    SDL3
+    GIT_REPOSITORY https://github.com/libsdl-org/SDL
+    GIT_TAG release-3.2.0
+)
+set(SDL_SHARED OFF CACHE BOOL "Build SDL3 as a static library" FORCE)
+set(SDL_STATIC ON CACHE BOOL "Build SDL3 as a static library" FORCE)
+FetchContent_MakeAvailable(SDL3)
+# list(APPEND CMAKE_PREFIX_PATH "${sdl3_BINARY_DIR}")
+
+# ====================================================================
+# SDL3_shadercross (will reuse SPIRV-Headers/SPIRV-Tools)
+# ====================================================================
+FetchContent_Declare(
+    SDL3_shadercross
+    GIT_REPOSITORY https://github.com/libsdl-org/SDL_shadercross.git
+    GIT_TAG main
+)
+set(SDLSHADERCROSS_VENDORED ON CACHE BOOL "Use vendored dependencies (SPIRV-Cross, DXC, etc.)")
+if(WIN32 OR WIN64)
+    set(SDLSHADERCROSS_DXC ON CACHE BOOL "Enable HLSL support via DirectX Shader Compiler")
+else()
+    set(SDLSHADERCROSS_DXC OFF CACHE BOOL "Enable HLSL support via DirectX Shader Compiler")
+endif()
+set(SDLSHADERCROSS_CLI OFF CACHE BOOL "Disable building the CLI tool")
+FetchContent_MakeAvailable(SDL3_shadercross)
+
+# ====================================================================
+# Makes SPIRV-Headers and SPIRV-Tools available
+# ====================================================================
+set(FETCHCONTENT_SOURCE_DIR_SPIRV-Headers"${sdl3_shadercross_SOURCE_DIR}/external/SPIRV-Headers")
+set(FETCHCONTENT_SOURCE_DIR_SPIRV-Tools "${sdl3_shadercross_SOURCE_DIR}/external/SPIRV-Tools")
+
+# ====================================================================
+# glslang
+# ====================================================================
+FetchContent_Declare(
+    glslang
+    GIT_REPOSITORY https://github.com/KhronosGroup/glslang
+    GIT_TAG vulkan-sdk-1.3.296.0
+)
+FetchContent_MakeAvailable(glslang)
+
+# ====================================================================
+# shaderc (reuse SPIRV-Headers/SPIRV-Tools)
+# ====================================================================
+set(SHADERC_SKIP_INSTALL ON CACHE BOOL "Skip install" FORCE)
+set(SHADERC_SKIP_TESTS ON CACHE BOOL "Disable tests" FORCE)
+set(SHADERC_SKIP_EXAMPLES ON CACHE BOOL "Disable examples" FORCE)
+set(SHADERC_SKIP_COPYRIGHT_CHECK ON CACHE BOOL "Skip copyright" FORCE)
+set(SHADERC_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(SHADERC_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    shaderc
+    GIT_REPOSITORY https://github.com/google/shaderc
+    GIT_TAG v2024.3
+)
+FetchContent_MakeAvailable(shaderc)
+
+# ====================================================================
+# SPIRV-Reflect
+# ====================================================================
+FetchContent_Declare(
+    SPIRV-Reflect
+    GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Reflect
+    GIT_TAG main
+)
+FetchContent_MakeAvailable(SPIRV-Reflect)
+
+# ====================================================================
+# Verstable
+# ====================================================================
+FetchContent_Declare(
+    verstable
+    GIT_REPOSITORY https://github.com/JacksonAllan/Verstable.git
+    GIT_TAG main
+)
+FetchContent_MakeAvailable(verstable)
+
+# ====================================================================
+# xxHash
+# ====================================================================
+FetchContent_Declare(
+    xxhash
+    GIT_REPOSITORY https://github.com/Cyan4973/xxHash.git
+    GIT_TAG release
+)
+FetchContent_MakeAvailable(xxhash)
+
+# ====================================================================
+# userspace-rcu (urcu) - Use system package
+# ====================================================================
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(URCU REQUIRED liburcu liburcu-cds)
+
+# Create imported targets
+add_library(urcu::urcu INTERFACE IMPORTED)
+add_library(urcu::urcu-cds INTERFACE IMPORTED)
+
+target_link_libraries(urcu::urcu INTERFACE ${URCU_LIBRARIES})
+target_include_directories(urcu::urcu INTERFACE ${URCU_INCLUDE_DIRS})
+target_compile_options(urcu::urcu INTERFACE ${URCU_CFLAGS_OTHER})
+
+target_link_libraries(urcu::urcu-cds INTERFACE ${URCU_LIBRARIES})
+target_include_directories(urcu::urcu-cds INTERFACE ${URCU_INCLUDE_DIRS})
+target_compile_options(urcu::urcu-cds INTERFACE ${URCU_CFLAGS_OTHER})
+
+# ====================================================================
+# Main Executable
+# ====================================================================
+add_executable(main 
+    src/main.c
+    src/cpi.c
+    src/tklog.c
+    src/vec.c
+    src/vec_path.c
+    src/type.c
+    src/map.c
+    src/global_data/core.c
+    src/global_data/type.c
+    src/global_data/urcu_safe.c
+    ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c
+)
+
+# Add include directories
+target_include_directories(main PRIVATE 
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders
+    ${spirv-reflect_SOURCE_DIR}
+    ${verstable_SOURCE_DIR}
+    ${URCU_INCLUDE_DIRS}
+)
+
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(main PRIVATE
+        # General warnings
+        # -Wall -Wextra -Wpedantic
+        # Correctness
+        # -Wcast-align -Wpointer-arith -Wstrict-prototypes
+        # -Wmissing-prototypes -Wformat=2 -Wshadow
+        # -Wwrite-strings -Wundef -Wswitch-enum
+        # -Wconversion -Wsign-conversion
+        # Treat warnings as errors
+        -Werror
+        -Werror=return-type         # what we care about here
+        # Optimise for production (you can override from the CLI)
+        $<$<CONFIG:Release>:-O3>
+        # _DEBUG builds keep symbols and sanitiser hooks
+        $<$<CONFIG:Debug>:-O0 -g -fsanitize=address,undefined>
+    )
+elseif (MSVC)
+    target_compile_options(main PRIVATE
+        /W4 /WX                   # high warnings, treat as error
+        /permissive-              # conforming mode
+    )
+endif()
+
+# Link libraries
+target_link_libraries(main PRIVATE
+    SDL3_shadercross::SDL3_shadercross
+    SDL3::SDL3
+    shaderc_combined
+    urcu::urcu          # Add the specific urcu library you need
+    urcu::urcu-cds      # For concurrent data structures
+    xxhash
+    stdc++
+#    tcc_lib
+)
+
+target_compile_definitions(main PRIVATE 
+    #DEBUG
+
+    TKLOG_SHOW_LOG_LEVEL
+    TKLOG_SHOW_TIME
+    TKLOG_SHOW_THREAD
+    TKLOG_SHOW_PATH
+
+    # TKLOG_MEMORY
+    TKLOG_SCOPE
+
+    # TKLOG_DEBUG
+    TKLOG_INFO
+    TKLOG_NOTICE
+    TKLOG_WARNING
+    TKLOG_ERROR
+    TKLOG_CRITICAL
+    TKLOG_ALERT
+    TKLOG_EMERGENCY
+
+    TKLOG_EXIT_ON_ERROR
+    TKLOG_EXIT_ON_CRITICAL
+    TKLOG_EXIT_ON_ALERT
+    TKLOG_EXIT_ON_EMERGENCY
+
+    URCU_LFHT_SAFETY_ON
+
+    RPMALLOC_FIRST_CLASS_HEAPS=1
+)
+# Debug output
+message(STATUS "URCU_FOUND: ${URCU_FOUND}")
+message(STATUS "URCU_INCLUDE_DIRS: ${URCU_INCLUDE_DIRS}")
+message(STATUS "URCU_LIBRARIES: ${URCU_LIBRARIES}")
+
+# test tklog
+add_executable(test_tklog 
+    src/tests/test_tklog.c
+    src/tklog.c
+)
+
+target_include_directories(test_tklog PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_compile_definitions(test_tklog PRIVATE
+    TKLOG_SHOW_LOG_LEVEL
+    TKLOG_SHOW_TIME
+    TKLOG_SHOW_THREAD
+    TKLOG_SHOW_PATH
+
+    TKLOG_MEMORY
+    TKLOG_SCOPE
+
+    TKLOG_DEBUG
+    TKLOG_INFO
+    TKLOG_NOTICE
+    TKLOG_WARNING
+    TKLOG_ERROR
+    TKLOG_CRITICAL
+    TKLOG_ALERT
+    TKLOG_EMERGENCY
+
+    TKLOG_EXIT_ON_ERROR
+    TKLOG_EXIT_ON_CRITICAL
+    TKLOG_EXIT_ON_ALERT
+    TKLOG_EXIT_ON_EMERGENCY
+)
+
+target_link_libraries(test_tklog PRIVATE
+    SDL3::SDL3
+)
+
+# test urcu safety wrapper with exit on critical (for production testing)
+add_executable(test_urcu_safety
+    src/tests/test_urcu_safety.c
+    src/global_data/urcu_safe.c
+    src/tklog.c
+)
+
+target_include_directories(test_urcu_safety PRIVATE 
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${URCU_INCLUDE_DIRS}
+)
+
+target_link_libraries(test_urcu_safety PRIVATE
+    urcu::urcu
+    urcu::urcu-cds
+    SDL3::SDL3
+)
+
+target_compile_definitions(test_urcu_safety PRIVATE 
+    URCU_LFHT_SAFETY_ON
+    TKLOG_SHOW_LOG_LEVEL
+    TKLOG_SHOW_TIME
+    TKLOG_SHOW_THREAD
+    TKLOG_SHOW_PATH
+    TKLOG_SCOPE
+    TKLOG_DEBUG
+    TKLOG_INFO
+    TKLOG_NOTICE
+    TKLOG_WARNING
+    TKLOG_ERROR
+    TKLOG_CRITICAL
+    TKLOG_ALERT
+    TKLOG_EMERGENCY
+    TKLOG_EXIT_ON_ERROR
+    TKLOG_EXIT_ON_CRITICAL
+    TKLOG_EXIT_ON_ALERT
+    TKLOG_EXIT_ON_EMERGENCY
+)
+
+# test global_data
+add_executable(test_global_data
+    src/tests/test_global_data.c
+    src/global_data/core.c
+    src/global_data/type.c
+    src/tklog.c
+    src/global_data/urcu_safe.c
+)
+
+target_include_directories(test_global_data PRIVATE 
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${URCU_INCLUDE_DIRS}
+)
+
+target_link_libraries(test_global_data PRIVATE
+    urcu::urcu
+    urcu::urcu-cds
+    SDL3::SDL3
+    xxhash
+)
+
+target_compile_definitions(test_global_data PRIVATE 
+    URCU_LFHT_SAFETY_ON
+    TKLOG_SHOW_LOG_LEVEL
+    TKLOG_SHOW_TIME
+    TKLOG_SHOW_THREAD
+    TKLOG_SHOW_PATH
+    TKLOG_SCOPE
+    TKLOG_INFO
+    TKLOG_NOTICE
+    TKLOG_WARNING
+    TKLOG_ERROR
+    TKLOG_CRITICAL
+    TKLOG_ALERT
+    TKLOG_EMERGENCY
+    TKLOG_EXIT_ON_ERROR
+    TKLOG_EXIT_ON_CRITICAL
+    TKLOG_EXIT_ON_ALERT
+    TKLOG_EXIT_ON_EMERGENCY
+)
+

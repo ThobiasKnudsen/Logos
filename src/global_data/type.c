@@ -42,7 +42,7 @@ static bool _gd_node_base_type_is_valid(struct gd_base_node* node) {
     bool (*free_node)(struct gd_base_node*) = rcu_dereference(node_type->fn_free_node);
     void (*free_callback)(struct rcu_head*) = rcu_dereference(node_type->fn_free_node_callback);
     bool (*is_valid)(struct gd_base_node*) = rcu_dereference(node_type->fn_is_valid);
-    return (node_type->type_size > 0 && free_node != NULL && free_callback != NULL);
+    return (node_type->type_size >= sizeof(struct gd_base_node) && free_node != NULL && free_callback != NULL);
 }
 
 // Initialize the base_type node
@@ -83,7 +83,8 @@ bool _gd_init_base_type(void) {
     base_type->fn_free_node = _gd_node_base_type_free;
     base_type->fn_free_node_callback = _gd_node_base_type_free_callback;
     base_type->fn_is_valid = _gd_node_base_type_is_valid;
-    base_type->type_size = sizeof(struct gd_node_base_type);
+    base_type->type_size = sizeof(struct gd_node_base_type); // this correct because the nodes this is type for must have the same fields but the type_size for the nodes this is type for would likely have a different size because at that point you narrowing down the data more and more for specific cases.
+    base_type->base.size_bytes = sizeof(struct gd_node_base_type);
     
     // Insert the base_type node into the hash table using bootstrap function
     extern struct cds_lfht_node* _gd_add_unique_bootstrap(const union gd_key* key, bool key_is_number, struct cds_lfht_node* node);
@@ -176,6 +177,7 @@ const char* gd_create_node_type(const char* type_name,
     node_type->fn_free_node_callback = fn_free_node_callback;
     node_type->fn_is_valid = fn_is_valid;
     node_type->type_size = type_size;
+    node_type->base.size_bytes = type_size;
     
     // Insert the node type into the hash table using bootstrap function
     extern struct cds_lfht_node* _gd_add_unique_bootstrap(const union gd_key* key, bool key_is_number, struct cds_lfht_node* node);
