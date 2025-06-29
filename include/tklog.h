@@ -107,14 +107,16 @@ void _tklog(uint32_t    flags,
  *  Memory tracking (optional) -------------------------------------------- */
 #ifdef TKLOG_MEMORY
     void *tklog_malloc (size_t size, const char *file, int line);
+    void *tklog_calloc (size_t nmemb, size_t size, const char *file, int line);
     void *tklog_realloc(void *ptr, size_t size, const char *file, int line);
     void  tklog_free   (void *ptr, const char *file, int line);
-    void  tklog_memory_dump(void);
 
     #define malloc(sz)       tklog_malloc ((sz), __TKLOG_FILE_NAME__, __LINE__)
+    #define calloc(n, sz)    tklog_calloc((n), (sz), __TKLOG_FILE_NAME__, __LINE__)
     #define realloc(p, sz)   tklog_realloc((p), (sz), __TKLOG_FILE_NAME__, __LINE__)
     #define free(p)          tklog_free   ((p), __TKLOG_FILE_NAME__, __LINE__)
 #endif /* TKLOG_MEMORY */
+    void tklog_memory_dump(void);
 
 /* -------------------------------------------------------------------------
  *  Helper macro: common call site (compile‑time flags only) -------------- */
@@ -198,7 +200,7 @@ void _tklog(uint32_t    flags,
 #ifdef TKLOG_SCOPE
     void _tklog_scope_start(int line, const char *file);
     void _tklog_scope_end(void);
-    #define tklog_scope(code)  _tklog_scope_start(__LINE__, __TKLOG_FILE_NAME__); code; _tklog_scope_end();
+    #define tklog_scope(code)  _tklog_scope_start(__LINE__, __TKLOG_FILE_NAME__); code; _tklog_scope_end()
 #else
     #define tklog_scope(code)  code
 #endif /* TKLOG_SCOPE */

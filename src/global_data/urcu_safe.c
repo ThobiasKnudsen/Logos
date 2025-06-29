@@ -3,35 +3,26 @@
 #include <errno.h>
 #include <unistd.h>
 
-#ifdef URCU_LFHT_SAFETY_ON
-
-/* Global function pointer for getting node size */
+/* Global function pointer for getting node size and start pointer*/
 static urcu_node_size_func_t g_node_size_function = NULL;
-
-/* Global function pointer for getting node start pointer */
 static urcu_node_start_ptr_func_t g_node_start_ptr_function = NULL;
 
-/* Function to set the node size function */
-void _urcu_safe_set_node_size_function(urcu_node_size_func_t func) {
+void urcu_safe_set_node_size_function(urcu_node_size_func_t func) {
     g_node_size_function = func;
     tklog_debug("Node size function set to %p", (void*)func);
 }
-
-/* Function to get the current node size function */
-urcu_node_size_func_t _urcu_safe_get_node_size_function(void) {
+urcu_node_size_func_t urcu_safe_get_node_size_function(void) {
     return g_node_size_function;
 }
-
-/* Function to set the node start pointer function */
-void _urcu_safe_set_node_start_ptr_function(urcu_node_start_ptr_func_t start_func) {
+void urcu_safe_set_node_start_ptr_function(urcu_node_start_ptr_func_t start_func) {
     g_node_start_ptr_function = start_func;
     tklog_debug("Node start pointer function set to %p", (void*)start_func);
 }
-
-/* Function to get the current node start pointer function */
-urcu_node_start_ptr_func_t _urcu_safe_get_node_start_ptr_function(void) {
+urcu_node_start_ptr_func_t urcu_safe_get_node_start_ptr_function(void) {
     return g_node_start_ptr_function;
 }
+
+#ifdef URCU_LFHT_SAFETY_ON
 
 /* Default node size function that returns sizeof(struct cds_lfht_node) */
 static size_t _default_node_size_function(struct cds_lfht_node* node) {

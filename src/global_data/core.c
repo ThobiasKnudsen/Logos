@@ -59,10 +59,10 @@ bool gd_init(void) {
     }
     
     // Register the node size function with urcu_safe system
-    _urcu_safe_set_node_size_function(_gd_get_node_size);
+    urcu_safe_set_node_size_function(_gd_get_node_size);
     
     // Register the node bounds functions with urcu_safe system
-    _urcu_safe_set_node_start_ptr_function(_gd_get_node_start_ptr);
+    urcu_safe_set_node_start_ptr_function(_gd_get_node_start_ptr);
     
     tklog_scope(g_p_ht = cds_lfht_new(8, 8, 0, CDS_LFHT_AUTO_RESIZE, NULL));
     if (!g_p_ht) {
@@ -88,12 +88,7 @@ void gd_cleanup(void) {
         return;
     }
     
-    // Ensure this thread is registered with RCU for cleanup operations
-    // This is necessary because the calling thread might not be registered
-    bool was_registered = _rcu_is_registered();
-    if (!was_registered) {
-        rcu_register_thread();
-    }
+    rcu_register_thread();
     
     // Phase 1: Process non-type nodes in batches until none are left
     const int batch_size = 1000;
@@ -163,8 +158,8 @@ void gd_cleanup(void) {
             }
         }
         
-        // Wait for this batch to be freed before processing the next batch
-        synchronize_rcu();
+        // Wait for this batch's call_rcu callbacks to finish before processing the next batch
+        rcu_barrier();
     }
     
     if (total_deleted > 0) {
@@ -223,8 +218,8 @@ void gd_cleanup(void) {
             }
         }
         
-        // Wait for this batch to be freed before processing the next batch
-        synchronize_rcu();
+        // Wait for this batch's call_rcu callbacks to finish before processing the next batch
+        rcu_barrier();
     }
     
     if (total_deleted > 0) {
@@ -257,16 +252,11 @@ void gd_cleanup(void) {
         rcu_read_unlock();
     }
     
-    // Wait for readers to finish
-    synchronize_rcu();
-
-    // Wait for writers to finish
+    // Wait for all call_rcu callbacks to finish
     rcu_barrier();
     
     // Only unregister if we registered this thread (don't unregister if it was already registered)
-    if (!was_registered) {
-        rcu_unregister_thread();
-    }
+    rcu_unregister_thread();
     
     // Now destroy the hash table
     cds_lfht_destroy(g_p_ht, NULL);

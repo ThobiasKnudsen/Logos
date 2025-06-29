@@ -477,14 +477,22 @@ void* stress_test_string_keys_thread(void* arg) {
             if (node) {
                 if (gd_remove_node_wrapper(created_keys[idx], false)) {
                     data->num_delete++;
-                    // Remove from array
-                    strcpy(created_keys[idx], created_keys[--created_count]);
+                    // Remove from array - use memmove to avoid overlap
+                    if (idx < created_count - 1) {
+                        memmove(&created_keys[idx], &created_keys[idx + 1], 
+                                (created_count - idx - 1) * sizeof(created_keys[0]));
+                    }
+                    created_count--;
                 } else {
                     data->errors++;
                 }
             } else {
-                // Already deleted, just remove from array
-                strcpy(created_keys[idx], created_keys[--created_count]);
+                // Already deleted, just remove from array - use memmove to avoid overlap
+                if (idx < created_count - 1) {
+                    memmove(&created_keys[idx], &created_keys[idx + 1], 
+                            (created_count - idx - 1) * sizeof(created_keys[0]));
+                }
+                created_count--;
             }
         }
     }
@@ -1501,8 +1509,8 @@ void gd_cleanup_test(void) {
             }
         }
         
-        // Wait for this batch to be freed before processing the next batch
-        synchronize_rcu();
+        // Wait for this batch's call_rcu callbacks to finish before processing the next batch
+        rcu_barrier();
     }
     
     if (total_deleted > 0) {
@@ -1576,7 +1584,7 @@ bool test_global_data_all(void) {
     tklog_info("\n=== STARTING STRESS TESTS ===\n");
     
     // Light stress test
-    tklog_scope(bool test_stress_concurrent_result = test_stress_concurrent(4, 1000, "Light Number Keys Stress", stress_test_number_keys_thread))
+    tklog_scope(bool test_stress_concurrent_result = test_stress_concurrent(4, 1000, "Light Number Keys Stress", stress_test_number_keys_thread));
     if (test_stress_concurrent_result) {
         results.passed++;
     } else {
@@ -1586,7 +1594,7 @@ bool test_global_data_all(void) {
     tklog_scope(gd_cleanup_test()); // Clean up test data between tests
     
     // Medium stress test
-    tklog_scope(test_stress_concurrent_result = test_stress_concurrent(8, 5000, "Medium Number Keys Stress", stress_test_number_keys_thread))
+    tklog_scope(test_stress_concurrent_result = test_stress_concurrent(8, 5000, "Medium Number Keys Stress", stress_test_number_keys_thread));
     if (test_stress_concurrent_result) {
         results.passed++;
     } else {
@@ -1596,7 +1604,7 @@ bool test_global_data_all(void) {
     tklog_scope(gd_cleanup_test()); // Clean up test data between tests
     
     // Heavy stress test
-    tklog_scope(test_stress_concurrent_result = test_stress_concurrent(16, 10000, "Heavy Number Keys Stress", stress_test_number_keys_thread))
+    tklog_scope(test_stress_concurrent_result = test_stress_concurrent(16, 10000, "Heavy Number Keys Stress", stress_test_number_keys_thread));
     if (test_stress_concurrent_result) {
         results.passed++;
     } else {
@@ -1606,7 +1614,7 @@ bool test_global_data_all(void) {
     tklog_scope(gd_cleanup_test()); // Clean up test data between tests
     
     // String keys stress test
-    tklog_scope(test_stress_concurrent_result = test_stress_concurrent(8, 2000, "String Keys Stress", stress_test_string_keys_thread))
+    tklog_scope(test_stress_concurrent_result = test_stress_concurrent(8, 2000, "String Keys Stress", stress_test_string_keys_thread));
     if (test_stress_concurrent_result) {
         results.passed++;
     } else {
@@ -1616,7 +1624,7 @@ bool test_global_data_all(void) {
     tklog_scope(gd_cleanup_test()); // Clean up test data between tests
     
     // Mixed keys stress test
-    tklog_scope(test_stress_concurrent_result = test_stress_concurrent(8, 2000, "Mixed Keys Stress", stress_test_mixed_keys_thread))
+    tklog_scope(test_stress_concurrent_result = test_stress_concurrent(8, 2000, "Mixed Keys Stress", stress_test_mixed_keys_thread));
     if (test_stress_concurrent_result) {
         results.passed++;
     } else {
@@ -1626,7 +1634,7 @@ bool test_global_data_all(void) {
     tklog_scope(gd_cleanup_test()); // Clean up test data between tests
     
     // Memory pressure test
-    tklog_scope(bool test_memory_pressure_result = test_memory_pressure(10000))
+    tklog_scope(bool test_memory_pressure_result = test_memory_pressure(10000));
     if (test_memory_pressure_result) {
         results.passed++;
     } else {
@@ -1636,7 +1644,7 @@ bool test_global_data_all(void) {
     tklog_scope(gd_cleanup_test()); // Clean up test data between tests
     
     // RCU grace period test
-    tklog_scope(bool test_rcu_grace_periods_result = test_rcu_grace_periods())
+    tklog_scope(bool test_rcu_grace_periods_result = test_rcu_grace_periods());
     if (test_rcu_grace_periods_result) {
         results.passed++;
     } else {
@@ -1895,7 +1903,17 @@ int main(int argc, char* argv[]) {
     gd_cleanup();
     
     // Wait for RCU callbacks to finish
+    rcu_barrier();
+    
+    // Additional cleanup to reduce memory leaks
+    // Force RCU cleanup by synchronizing all threads
     synchronize_rcu();
+    
+    // Wait a bit more for any pending RCU callbacks
+    rcu_barrier();
+    
+    // Dump memory if TKLOG_MEMORY is enabled
+    tklog_memory_dump();
     
     if (all_passed) {
         tklog_info("✓ All global_data tests passed!\n");

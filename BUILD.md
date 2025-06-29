@@ -137,6 +137,28 @@ cmake --build . --target package
 - **shaderc**: Shader compilation
 - **SPIRV-Reflect**: SPIR-V reflection
 
+### tklog Cross-Platform Support
+
+The tklog logging library has been designed for easy integration into other projects with minimal dependencies:
+
+**Supported Platforms:**
+- **Linux**: Native pthread support, POSIX timing
+- **macOS**: Native pthread support, POSIX timing  
+- **Windows**: pthread via MinGW-w64, Windows-specific high-resolution timing
+
+**Dependencies:**
+- **pthread**: For threading primitives (mutex, rwlock, thread-local storage)
+- **Standard C library**: For memory management and string operations
+- **Platform-specific timing**: 
+  - Windows: `QueryPerformanceCounter` (with `GetTickCount64` fallback)
+  - POSIX: `clock_gettime(CLOCK_MONOTONIC)` (with `gettimeofday` fallback)
+
+**Integration:**
+- No SDL dependency required
+- Can be easily integrated into any C project
+- Thread-safe logging with configurable output callbacks
+- Optional memory tracking and scope tracing
+
 ## Output Structure
 
 After building, the project structure will be:

@@ -11,9 +11,9 @@
  *       -DTKLOG_EXIT_ON_WARNING  -DTKLOG_EXIT_ON_ERROR  -DTKLOG_EXIT_ON_CRITICAL \
  *       -DTKLOG_EXIT_ON_ALERT    -DTKLOG_EXIT_ON_EMERGENCY \
  *       -DTKLOG_OUTPUT_FN=buffer_output \
- *       tklog_full_test.c tklog.c -lSDL3 -pthread -o tklog_full_test
+ *       tklog_full_test.c tklog.c -pthread -o tklog_full_test
  *
- * On Windows/MSVC remove the _EXIT_ON_* flags (because fork() isn’t available)
+ * On Windows/MSVC remove the _EXIT_ON_* flags (because fork() isn't available)
  * or #define TKLOG_SKIP_EXIT_TESTS before compiling.
  *
  * Expected:
@@ -26,12 +26,18 @@
  *   • Final call to tklog_memory_dump() shows exactly one live allocation.
  */
 
-#include <SDL3/SDL.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <time.h>
 #include "tklog.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 /* -------------------------------------------------------------------------
  *  Optional fork()/wait helpers (POSIX only)                               */
@@ -48,7 +54,7 @@
 bool buffer_output(const char *msg, void *user)
 {
     (void)user;                /* not used */
-    /* Prefix to make it obvious we’re in the custom sink. */
+    /* Prefix to make it obvious we're in the custom sink. */
     fprintf(stderr, "[buffer] %s\n", msg);
     /* Returning false would tell tklog the write failed. */
     return true;
@@ -56,16 +62,20 @@ bool buffer_output(const char *msg, void *user)
 
 /* -------------------------------------------------------------------------
  *  Worker thread — showcases TKLOG_SHOW_THREAD                            */
-static int worker_thread(void *userdata)
+static void *worker_thread(void *userdata)
 {
     int id = (int)(intptr_t)userdata;
     tklog_info("Worker thread #%d started", id);
     for (int i = 0; i < 4; ++i) {
         tklog_debug("Thread %d — iteration %d", id, i);
-        SDL_Delay(40);
+#ifdef _WIN32
+        Sleep(40); /* 40ms delay on Windows */
+#else
+        usleep(40000); /* 40ms delay on POSIX */
+#endif
     }
     tklog_notice("Worker thread #%d finished", id);
-    return 0;
+    return NULL;
 }
 
 /* -------------------------------------------------------------------------
@@ -179,18 +189,12 @@ int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
 
-    if (!SDL_Init(SDL_INIT_EVENTS)) {
-        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
-        return 1;
-    }
-
     tklog_info("tklog FULL self-test started");
 
     /* Threaded logging demo (two workers). */
-    SDL_Thread *t1 = SDL_CreateThread(worker_thread, "worker-1",
-                                      (void *)(intptr_t)1);
-    SDL_Thread *t2 = SDL_CreateThread(worker_thread, "worker-2",
-                                      (void *)(intptr_t)2);
+    pthread_t t1, t2;
+    pthread_create(&t1, NULL, worker_thread, (void *)(intptr_t)1);
+    pthread_create(&t2, NULL, worker_thread, (void *)(intptr_t)2);
 
     /* Core feature demos (run in main thread). */
     demo_all_levels();
@@ -198,14 +202,13 @@ int main(int argc, char **argv)
     demo_memory();
     demo_exit_macros();
 
-    SDL_WaitThread(t1, NULL);
-    SDL_WaitThread(t2, NULL);
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
 
     /* Dump outstanding allocations — expect exactly one leak. */
     tklog_memory_dump();
 
     tklog_info("Test complete — expect one intentional leak above");
 
-    SDL_Quit();
     return 0;
 }

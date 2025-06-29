@@ -4,22 +4,45 @@
  *  macros.  This implementation simply honours TKLOG_ACTIVE_FLAGS, the selected
  *  TKLOG_OUTPUT_FN, and TKLOG_OUTPUT_USERPTR.
  *
- *  Requires SDL 3.2.0+ (mutexes, rwlocks, TLS, timing).
+ *  Cross-platform support:
+ *  - Uses pthread for threading (available on Linux, macOS, Windows via MinGW-w64)
+ *  - Uses platform-specific high-resolution timing:
+ *    - Windows: QueryPerformanceCounter (with GetTickCount64 fallback)
+ *    - POSIX: clock_gettime(CLOCK_MONOTONIC) (with gettimeofday fallback)
+ *  - Uses standard C memory functions (malloc, free, etc.)
  */
 
 #include <stdlib.h>
 #include "tklog.h"
-#include <SDL3/SDL.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
+#include <pthread.h>
+#include <time.h>
+#include <sys/time.h>
+#include <inttypes.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 /* -------------------------------------------------------------------------
  *  Internal helpers / globals
  * ------------------------------------------------------------------------- */
-static SDL_Mutex *g_tklog_mutex   = NULL;   /* serialises _tklog() and memory db */
-static SDL_RWLock *g_mem_rwlock = NULL;   /* guards the allocation map       */
-static uint64_t    g_start_ms   = 0;      /* program start in µs             */
+static pthread_mutex_t g_tklog_mutex = PTHREAD_MUTEX_INITIALIZER;   /* serialises _tklog() and memory db */
+static pthread_rwlock_t g_mem_rwlock = PTHREAD_RWLOCK_INITIALIZER;  /* guards the allocation map       */
+static uint64_t         g_start_ms   = 0;                           /* program start in ms             */
+
+/* Store original memory functions to avoid recursion */
+#ifdef TKLOG_MEMORY
+static void *(*original_malloc)(size_t) = NULL;
+static void *(*original_calloc)(size_t, size_t) = NULL;
+static void *(*original_realloc)(void *, size_t) = NULL;
+static void (*original_free)(void *) = NULL;
+#endif
+
+/* Forward declarations */
+static void tklog_init_once_impl(void);
 
 /* ==============================  PATH TLS  ============================== */
 typedef struct PathStack {
@@ -29,28 +52,41 @@ typedef struct PathStack {
     int     depth;      /* number of entries                     */
 } PathStack;
 
-static SDL_TLSID g_tls_path = {0};  /* auto‑initialized by SDL */
+static pthread_key_t g_tls_path;  /* thread-local storage key */
 
 static void pathstack_free(void *ptr)
 {
     PathStack *ps = (PathStack*)ptr;
     if (ps) {
-        SDL_free(ps->buf);
-        SDL_free(ps);
+#ifdef TKLOG_MEMORY
+        original_free(ps->buf);
+        original_free(ps);
+#else
+        free(ps->buf);
+        free(ps);
+#endif
     }
 }
 
 static PathStack *pathstack_get(void)
 {
-    PathStack *ps = SDL_GetTLS(&g_tls_path);
+    PathStack *ps = pthread_getspecific(g_tls_path);
     if (!ps) {
-        ps = (PathStack*)SDL_calloc(1, sizeof *ps);
+#ifdef TKLOG_MEMORY
+        ps = (PathStack*)original_calloc(1, sizeof *ps);
         if (!ps) return NULL; /* out‑of‑mem: just skip tracing */
         ps->cap = 256;
-        ps->buf = (char*)SDL_malloc(ps->cap);
-        if (!ps->buf) { SDL_free(ps); return NULL; }
+        ps->buf = (char*)original_malloc(ps->cap);
+        if (!ps->buf) { original_free(ps); return NULL; }
+#else
+        ps = (PathStack*)calloc(1, sizeof *ps);
+        if (!ps) return NULL; /* out‑of‑mem: just skip tracing */
+        ps->cap = 256;
+        ps->buf = (char*)malloc(ps->cap);
+        if (!ps->buf) { free(ps); return NULL; }
+#endif
         ps->buf[0] = '\0';
-        SDL_SetTLS(&g_tls_path, ps, pathstack_free);
+        pthread_setspecific(g_tls_path, ps);
     }
     return ps;
 }
@@ -61,7 +97,7 @@ static void pathstack_push(const char *file, int line)
     if (!ps) return;
 
     char tmp[128];
-    int  n = SDL_snprintf(tmp, sizeof tmp, "%s:%d", file, line);
+    int  n = snprintf(tmp, sizeof tmp, "%s:%d", file, line);
     if (n < 0) return;
 
     /* ensure space: existing + sep + n + NUL */
@@ -69,7 +105,11 @@ static void pathstack_push(const char *file, int line)
     if (need > ps->cap) {
         size_t newcap = ps->cap * 2;
         while (newcap < need) newcap *= 2;
-        char *newbuf = (char*)SDL_realloc(ps->buf, newcap);
+#ifdef TKLOG_MEMORY
+        char *newbuf = (char*)original_realloc(ps->buf, newcap);
+#else
+        char *newbuf = (char*)realloc(ps->buf, newcap);
+#endif
         if (!newbuf) return; /* OOM */
         ps->buf = newbuf;
         ps->cap = newcap;
@@ -87,19 +127,19 @@ static void pathstack_push(const char *file, int line)
 
 static void pathstack_pop(void)
 {
-    PathStack *ps = SDL_GetTLS(&g_tls_path);
+    PathStack *ps = pthread_getspecific(g_tls_path);
     if (!ps || ps->depth == 0) return;
 
     /* remove last element */
     char *last_sep = NULL;
     if (ps->depth > 1) {
         /* find the penultimate " → " */
-        last_sep = (char*)SDL_strrchr(ps->buf, '\x20'); /* space before arrow */
+        last_sep = (char*)strrchr(ps->buf, '\x20'); /* space before arrow */
         if (last_sep) {
             /* we had space UTF‑8 arrow space; step before that */
             *last_sep = '\0';
             /* now find prev arrow; we need the last arrow occurrence */
-            last_sep = SDL_strrchr(ps->buf, '\xE2'); /* begin arrow UTF‑8 */
+            last_sep = strrchr(ps->buf, '\xE2'); /* begin arrow UTF‑8 */
             if (last_sep) last_sep -= 1; /* step to space before arrow */
         }
     }
@@ -109,7 +149,7 @@ static void pathstack_pop(void)
         ps->len   = 0;
     } else {
         *last_sep = '\0';
-        ps->len = SDL_strlen(ps->buf);
+        ps->len = strlen(ps->buf);
     }
     ps->depth -= 1;
 }
@@ -119,43 +159,70 @@ typedef struct MemEntry {
     void           *ptr;
     size_t          size;
     uint64_t        t_ms;
-    SDL_ThreadID    tid;
+    pthread_t       tid;
     char            path[128];
     struct MemEntry *next;
 } MemEntry;
 
 static MemEntry *g_mem_head = NULL;
 
+static uint64_t get_time_ms(void)
+{
+#ifdef _WIN32
+    /* Windows-specific high-resolution timing */
+    LARGE_INTEGER freq, count;
+    if (QueryPerformanceFrequency(&freq) && QueryPerformanceCounter(&count)) {
+        return (uint64_t)(count.QuadPart * 1000 / freq.QuadPart);
+    }
+    /* Fallback to GetTickCount64 if QueryPerformanceCounter fails */
+    return (uint64_t)GetTickCount64();
+#else
+    /* POSIX timing - try clock_gettime first, fallback to gettimeofday */
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+        return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+    }
+    /* Fallback to gettimeofday if clock_gettime fails */
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000 + (uint64_t)tv.tv_usec / 1000;
+#endif
+}
+
 static void mem_add(void *ptr, size_t size, const char *file, int line)
 {
     if (!ptr) return;
-    SDL_LockRWLockForWriting(g_mem_rwlock);
-    MemEntry *e = (MemEntry*)SDL_malloc(sizeof *e);
+    pthread_rwlock_wrlock(&g_mem_rwlock);
+#ifdef TKLOG_MEMORY
+    MemEntry *e = (MemEntry*)original_malloc(sizeof *e);
+#else
+    MemEntry *e = (MemEntry*)malloc(sizeof *e);
+#endif
     if (e) {
         e->ptr  = ptr;
         e->size = size;
-        e->t_ms = SDL_GetTicks();
-        e->tid  = SDL_GetCurrentThreadID();
+        e->t_ms = get_time_ms();
+        e->tid  = pthread_self();
         
         // Get the full call path from PathStack
         PathStack *ps = pathstack_get();
         if (ps && ps->buf[0]) {
             // Show call stack path + current file:line (same format as _tklog)
-            SDL_snprintf(e->path, sizeof e->path, "%s → %s:%d", ps->buf, file, line);
+            snprintf(e->path, sizeof e->path, "%s → %s:%d", ps->buf, file, line);
         } else {
             // Show just current file:line when no call stack
-            SDL_snprintf(e->path, sizeof e->path, "%s:%d", file, line);
+            snprintf(e->path, sizeof e->path, "%s:%d", file, line);
         }
         
         e->next = g_mem_head;
         g_mem_head = e;
     }
-    SDL_UnlockRWLock(g_mem_rwlock);
+    pthread_rwlock_unlock(&g_mem_rwlock);
 }
 
 static void mem_update(void *oldptr, void *newptr, size_t newsize)
 {
-    SDL_LockRWLockForWriting(g_mem_rwlock);
+    pthread_rwlock_wrlock(&g_mem_rwlock);
     for (MemEntry *e = g_mem_head; e; e = e->next) {
         if (e->ptr == oldptr) {
             e->ptr  = newptr;
@@ -163,23 +230,27 @@ static void mem_update(void *oldptr, void *newptr, size_t newsize)
             break;
         }
     }
-    SDL_UnlockRWLock(g_mem_rwlock);
+    pthread_rwlock_unlock(&g_mem_rwlock);
 }
 
 static void mem_remove(void *ptr)
 {
-    SDL_LockRWLockForWriting(g_mem_rwlock);
+    pthread_rwlock_wrlock(&g_mem_rwlock);
     MemEntry **pp = &g_mem_head;
     while (*pp) {
         if ((*pp)->ptr == ptr) {
             MemEntry *dead = *pp;
             *pp = dead->next;
-            SDL_free(dead);
+#ifdef TKLOG_MEMORY
+            original_free(dead);
+#else
+            free(dead);
+#endif
             break;
         }
         pp = &(*pp)->next;
     }
-    SDL_UnlockRWLock(g_mem_rwlock);
+    pthread_rwlock_unlock(&g_mem_rwlock);
 }
 
 /* =============================  API impl  ============================== */
@@ -194,16 +265,28 @@ static void tklog_exit_function(void)
 bool tklog_output_stdio(const char *msg, void *user)
 {
     (void)user;
-    printf(msg);
+    printf("%s", msg);
     return true;
 }
 
 static void tklog_init_once(void)
 {
-    if (g_tklog_mutex) return; /* already done */
-    g_tklog_mutex   = SDL_CreateMutex();
-    g_mem_rwlock  = SDL_CreateRWLock();
-    g_start_ms    = SDL_GetTicks();
+    static pthread_once_t once_control = PTHREAD_ONCE_INIT;
+    pthread_once(&once_control, tklog_init_once_impl);
+}
+
+static void tklog_init_once_impl(void)
+{
+    pthread_key_create(&g_tls_path, pathstack_free);
+    g_start_ms = get_time_ms();
+    
+#ifdef TKLOG_MEMORY
+    /* Store original memory functions before they get redefined */
+    original_malloc = malloc;
+    original_calloc = calloc;
+    original_realloc = realloc;
+    original_free = free;
+#endif
     
 #ifdef TKLOG_MEMORY
     atexit(tklog_exit_function);
@@ -224,21 +307,21 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
 
     /* level */
     if (flags & TKLOG_INIT_F_LEVEL) {
-        n = SDL_snprintf(p, sizeof msgbuf, "%s | ", levelstr[level]);
+        n = snprintf(p, sizeof msgbuf, "%s | ", levelstr[level]);
         p += n;
     }
 
     /* time */
     if (flags & TKLOG_INIT_F_TIME) {
-        uint64_t t_ms = SDL_GetTicks() - g_start_ms;
-        n = SDL_snprintf(p, sizeof msgbuf - (p - msgbuf), "%" PRIu64 "ms | ", (uint64_t)t_ms);
+        uint64_t t_ms = get_time_ms() - g_start_ms;
+        n = snprintf(p, sizeof msgbuf - (p - msgbuf), "%" PRIu64 "ms | ", (uint64_t)t_ms);
         p += n;
     }
 
     /* thread */
     if (flags & TKLOG_INIT_F_THREAD) {
-        SDL_ThreadID tid = SDL_GetCurrentThreadID();
-        n = SDL_snprintf(p, sizeof msgbuf - (p - msgbuf), "Thread %" PRIu64 " | ", (uint64_t)tid);
+        pthread_t tid = pthread_self();
+        n = snprintf(p, sizeof msgbuf - (p - msgbuf), "Thread %lu | ", (unsigned long)tid);
         p += n;
     }
 
@@ -247,11 +330,11 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
         PathStack *ps = pathstack_get();
         if (ps && ps->buf[0]) {
             /* Show call stack path + current file:line */
-            n = SDL_snprintf(p, sizeof msgbuf - (p - msgbuf), "%s → %s:%d | ", ps->buf, file, line);
+            n = snprintf(p, sizeof msgbuf - (p - msgbuf), "%s → %s:%d | ", ps->buf, file, line);
             p += n;
         } else {
             /* Show just current file:line when no call stack */
-            n = SDL_snprintf(p, sizeof msgbuf - (p - msgbuf), "%s:%d | ", file, line);
+            n = snprintf(p, sizeof msgbuf - (p - msgbuf), "%s:%d | ", file, line);
             p += n;
         }
     }
@@ -259,20 +342,20 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
     /* user message */
     va_list ap;
     va_start(ap, fmt);
-    SDL_vsnprintf(p, sizeof msgbuf - (p - msgbuf), fmt, ap);
+    vsnprintf(p, sizeof msgbuf - (p - msgbuf), fmt, ap);
     va_end(ap);
 
     /* ensure newline */
-    size_t len = SDL_strlen(msgbuf);
+    size_t len = strlen(msgbuf);
     if (len + 1 < sizeof msgbuf && msgbuf[len - 1] != '\n') {
         msgbuf[len]   = '\n';
         msgbuf[len+1] = '\0';
     }
 
     /* lock, write, unlock */
-    SDL_LockMutex(g_tklog_mutex);
+    pthread_mutex_lock(&g_tklog_mutex);
     TKLOG_OUTPUT_FN(msgbuf, TKLOG_OUTPUT_USERPTR);
-    SDL_UnlockMutex(g_tklog_mutex);
+    pthread_mutex_unlock(&g_tklog_mutex);
 }
 
 /* -------------------------  Scope tracing  ----------------------------- */
@@ -285,14 +368,21 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
 #ifdef TKLOG_MEMORY
     void *tklog_malloc(size_t size, const char *file, int line)
     {
-        void *p = SDL_malloc(size);
+        void *p = original_malloc(size);
         mem_add(p, size, file, line);
+        return p;
+    }
+
+    void *tklog_calloc(size_t nmemb, size_t size, const char *file, int line)
+    {
+        void *p = original_calloc(nmemb, size);
+        mem_add(p, nmemb * size, file, line);
         return p;
     }
 
     void *tklog_realloc(void *ptr, size_t size, const char *file, int line)
     {
-        void *newp = SDL_realloc(ptr, size);
+        void *newp = original_realloc(ptr, size);
         mem_update(ptr, newp, size);
         return newp;
     }
@@ -301,36 +391,41 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
     {
         (void)file; (void)line;
         mem_remove(ptr);
-        SDL_free(ptr);
+        original_free(ptr);
     }
 
     void tklog_memory_dump(void)
     {
-        SDL_LockRWLockForReading(g_mem_rwlock);
+        pthread_rwlock_rdlock(&g_mem_rwlock);
         
         // Print header like debug.c does
         char header[] = "\nunfreed memory:\n";
-        SDL_LockMutex(g_tklog_mutex);
+        pthread_mutex_lock(&g_tklog_mutex);
         TKLOG_OUTPUT_FN(header, TKLOG_OUTPUT_USERPTR);
-        SDL_UnlockMutex(g_tklog_mutex);
+        pthread_mutex_unlock(&g_tklog_mutex);
         
         // Print each memory entry with time, thread, and full path
         for (MemEntry *e = g_mem_head; e; e = e->next) {
             char linebuf[512]; // Increased buffer size for longer paths
             uint64_t t_ms = e->t_ms - g_start_ms;
-            SDL_snprintf(linebuf, sizeof linebuf, "\t%" PRIu64 "ms | Thread %" PRIu64 " | address %p | %zu bytes | at %s\n",
-                          t_ms, (uint64_t)e->tid, e->ptr, e->size, e->path);
-            SDL_LockMutex(g_tklog_mutex);
+            snprintf(linebuf, sizeof linebuf, "\t%" PRIu64 "ms | Thread %lu | address %p | %zu bytes | at %s\n",
+                          t_ms, (unsigned long)e->tid, e->ptr, e->size, e->path);
+            pthread_mutex_lock(&g_tklog_mutex);
             TKLOG_OUTPUT_FN(linebuf, TKLOG_OUTPUT_USERPTR);
-            SDL_UnlockMutex(g_tklog_mutex);
+            pthread_mutex_unlock(&g_tklog_mutex);
         }
         
         // Print trailing newline like debug.c does
         char footer[] = "\n";
-        SDL_LockMutex(g_tklog_mutex);
+        pthread_mutex_lock(&g_tklog_mutex);
         TKLOG_OUTPUT_FN(footer, TKLOG_OUTPUT_USERPTR);
-        SDL_UnlockMutex(g_tklog_mutex);
+        pthread_mutex_unlock(&g_tklog_mutex);
         
-        SDL_UnlockRWLock(g_mem_rwlock);
+        pthread_rwlock_unlock(&g_mem_rwlock);
+    }
+#else /* TKLOG_MEMORY not defined */
+    void tklog_memory_dump(void)
+    {
+        printf("tklog_memory_dump: TKLOG_MEMORY must be defined to track and dump memory allocations\n");
     }
 #endif /* TKLOG_MEMORY */

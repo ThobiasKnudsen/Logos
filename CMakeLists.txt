@@ -347,7 +347,12 @@ if(BUILD_TESTS)
     )
 
     # Link libraries for tests
-    target_link_libraries(test_tklog PRIVATE SDL3::SDL3)
+    if(WIN32)
+        # On Windows, pthread is provided by MinGW-w64 or similar
+        target_link_libraries(test_tklog PRIVATE)
+    else()
+        target_link_libraries(test_tklog PRIVATE pthread)
+    endif()
     if(URCU_FOUND)
         target_link_libraries(test_urcu_safety PRIVATE urcu::urcu urcu::urcu-cds SDL3::SDL3)
         target_link_libraries(test_global_data PRIVATE urcu::urcu urcu::urcu-cds SDL3::SDL3 xxhash)

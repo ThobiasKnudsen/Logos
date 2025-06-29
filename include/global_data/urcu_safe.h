@@ -10,6 +10,25 @@
 #include <urcu/rculfhash.h>
 #include "tklog.h"
 
+/* -------------------------------------------------------------------------
+ * URCU LFHT Safety Wrappers
+ * 
+ * This header provides safety wrappers for URCU lock-free hash table operations.
+ * It includes comprehensive validation, logging, and error detection.
+ * 
+ * USAGE:
+ * 1. Define a function to get node size: size_t my_get_node_size(struct cds_lfht_node* node)
+ * 2. Register it with: urcu_safe_set_node_size_function(my_get_node_size)
+ * 3. Include this header: #include "urcu_safe.h"
+ * ------------------------------------------------------------------------- */
+
+typedef size_t (*urcu_node_size_func_t)(struct cds_lfht_node* node);
+typedef void* (*urcu_node_start_ptr_func_t)(struct cds_lfht_node* node);
+void urcu_safe_set_node_size_function(urcu_node_size_func_t func);
+urcu_node_size_func_t urcu_safe_get_node_size_function(void);
+void urcu_safe_set_node_start_ptr_function(urcu_node_start_ptr_func_t start_func);
+urcu_node_start_ptr_func_t urcu_safe_get_node_start_ptr_function(void);
+
 #ifdef URCU_LFHT_SAFETY_ON
 
 /* -------------------------------------------------------------------------
@@ -22,36 +41,6 @@
 #ifndef URCU_VERSION_MINOR  
 #define URCU_VERSION_MINOR 13
 #endif
-
-/* -------------------------------------------------------------------------
- * URCU LFHT Safety Wrappers
- * 
- * This header provides safety wrappers for URCU lock-free hash table operations.
- * It includes comprehensive validation, logging, and error detection.
- * 
- * USAGE:
- * 1. Define a function to get node size: size_t my_get_node_size(struct cds_lfht_node* node)
- * 2. Register it with: _urcu_safe_set_node_size_function(my_get_node_size)
- * 3. Include this header: #include "urcu_safe.h"
- * ------------------------------------------------------------------------- */
-
-/* Function pointer type for getting node size */
-typedef size_t (*urcu_node_size_func_t)(struct cds_lfht_node* node);
-
-/* Function pointer type for getting the start pointer of the containing structure */
-typedef void* (*urcu_node_start_ptr_func_t)(struct cds_lfht_node* node);
-
-/* Function to set the node size function - call this before using any safety features */
-void _urcu_safe_set_node_size_function(urcu_node_size_func_t func);
-
-/* Function to get the current node size function */
-urcu_node_size_func_t _urcu_safe_get_node_size_function(void);
-
-/* Function to set the node start pointer function - call this before using any safety features */
-void _urcu_safe_set_node_start_ptr_function(urcu_node_start_ptr_func_t start_func);
-
-/* Function to get the current node start pointer function */
-urcu_node_start_ptr_func_t _urcu_safe_get_node_start_ptr_function(void);
 
 /* -------------------------------------------------------------------------
  * RCU Safety Wrappers
