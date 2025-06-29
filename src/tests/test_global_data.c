@@ -1912,7 +1912,6 @@ int main(int argc, char* argv[]) {
     // Wait a bit more for any pending RCU callbacks
     rcu_barrier();
     
-    
     // Dump memory if TKLOG_MEMORY is enabled
     tklog_memory_dump();
     
