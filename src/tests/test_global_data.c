@@ -109,11 +109,22 @@ bool gd_lookup_iter_wrapper(const void* key, bool key_is_number, struct cds_lfht
 // Test node callback implementations
 bool test_node_free(struct gd_base_node* node) {
     if (!node) return false;
-    
+
     struct test_node* test_n = (struct test_node*)node;
     tklog_debug("Freeing test node with value: %d, string: %s\n", 
                test_n->test_value, test_n->test_string);
-    
+
+    // Free key string if needed
+    if (!node->key_is_number && node->key.string) {
+        free(node->key.string);
+        node->key.string = NULL;
+    }
+    // Free type_key string if needed
+    if (!node->type_key_is_number && node->type_key.string) {
+        free(node->type_key.string);
+        node->type_key.string = NULL;
+    }
+
     free(node);
     return true;
 }
@@ -1403,28 +1414,15 @@ bool test_gd_count_nodes(void) {
 }
 
 // Test-specific cleanup function that only removes test data, keeps system initialized
-static bool g_cleanup_done = false;  // Track if cleanup has been performed
-
-// Reset cleanup flag for new test runs
-void gd_reset_cleanup_flag(void) {
-    g_cleanup_done = false;
-}
-
 void gd_cleanup_test(void) {
-    // If cleanup has already been done, don't do it again
-    if (g_cleanup_done) {
-        return;
-    }
-    
     struct cds_lfht* g_p_ht = _gd_get_hash_table();
     
     if (!g_p_ht) {
         // Hash table not initialized, nothing to clean up
-        g_cleanup_done = true;
         return;
     }
     
-    // Process test nodes in batches until none are left
+    // Process all nodes in batches until none are left
     const int batch_size = 1000;
     struct cds_lfht_node* nodes_to_delete[batch_size];
     int total_deleted = 0;
@@ -1433,7 +1431,7 @@ void gd_cleanup_test(void) {
         int delete_count = 0;
         struct cds_lfht_iter iter;
         
-        // Collect a batch of test nodes using proper wrapper functions
+        // Collect a batch of nodes using proper wrapper functions
         uint64_t iter_count = 0;
         rcu_read_lock();
         if (gd_iter_first(&iter)) {
@@ -1441,22 +1439,32 @@ void gd_cleanup_test(void) {
                 tklog_debug("iteration %lld\n", iter_count++);
                 struct gd_base_node* base_node = gd_iter_get_node(&iter);
                 if (base_node) {
-                    // Check if this is a test node (has test_node_type as its type)
-                    bool is_test_node = false;
-                    if (!base_node->type_key_is_number) {
-                        is_test_node = (strcmp(rcu_dereference(base_node->type_key.string), g_test_node_type_key) == 0);
+                    // Clean up ALL nodes except base_type itself
+                    bool is_base_type = false;
+                    
+                    if (!base_node->key_is_number && base_node->key.string) {
+                        is_base_type = (strcmp(base_node->key.string, "base_type") == 0);
                     }
                     
-                    if (is_test_node) {
+                    if (!is_base_type) {
+                        // Debug: print what we're cleaning up
+                        if (base_node->key_is_number) {
+                            tklog_debug("Cleaning up node with number key: %llu\n", base_node->key.number);
+                        } else {
+                            tklog_debug("Cleaning up node with string key: %s\n", base_node->key.string);
+                        }
+                        
                         // Store this node for deletion
                         nodes_to_delete[delete_count++] = &base_node->lfht_node;
+                    } else {
+                        tklog_debug("Skipping base_type node\n");
                     }
                 }
             } while (delete_count < batch_size && gd_iter_next(&iter));
         }
         rcu_read_unlock();
         
-        // If no test nodes found in this batch, we're done
+        // If no nodes found in this batch, we're done
         if (delete_count == 0) {
             break;
         }
@@ -1467,8 +1475,26 @@ void gd_cleanup_test(void) {
             
             // Remove from hash table
             if (cds_lfht_del(g_p_ht, nodes_to_delete[i]) == 0) {
-                // Schedule for cleanup
-                call_rcu(&base_node->rcu_head, test_node_free_callback);
+                // Get the correct free callback for this node type
+                rcu_read_lock();
+                struct gd_base_node* type_base = gd_get_node_unsafe(&base_node->type_key, base_node->type_key_is_number);
+                
+                if (type_base) {
+                    struct gd_node_base_type* type_node = caa_container_of(type_base, struct gd_node_base_type, base);
+                    void (*free_callback)(struct rcu_head*) = rcu_dereference(type_node->fn_free_node_callback);
+                    rcu_read_unlock();
+                    
+                    if (free_callback) {
+                        call_rcu(&base_node->rcu_head, free_callback);
+                    } else {
+                        // Fallback to test callback
+                        call_rcu(&base_node->rcu_head, test_node_free_callback);
+                    }
+                } else {
+                    // Fallback to test callback if type not found
+                    rcu_read_unlock();
+                    call_rcu(&base_node->rcu_head, test_node_free_callback);
+                }
                 total_deleted++;
             } else {
                 tklog_warning("Failed to delete test node during cleanup\n");
@@ -1480,11 +1506,8 @@ void gd_cleanup_test(void) {
     }
     
     if (total_deleted > 0) {
-        tklog_debug("Cleaned up %d test nodes\n", total_deleted);
+        tklog_debug("Cleaned up %d nodes (all except base_type)\n", total_deleted);
     }
-    
-    // Mark cleanup as done
-    g_cleanup_done = true;
 }
 
 // Main test runner with stress tests
@@ -1501,9 +1524,6 @@ bool test_global_data_all(void) {
     // The gd_init() function may have registered/unregistered during initialization
     // so we need to ensure we're registered for the test duration
     rcu_register_thread();
-    
-    // Reset cleanup flag for fresh test run
-    tklog_scope(gd_reset_cleanup_flag());
     
     struct test_result results = {0, 0, 0};
     
@@ -1632,6 +1652,9 @@ bool test_global_data_all(void) {
     
     // Unregister the main thread from RCU
     rcu_unregister_thread();
+    
+    // Ensure full cleanup of the global data system
+    gd_cleanup();
     
     if (results.failed == 0) {
         tklog_info("✓ ALL TESTS PASSED!\n");
@@ -1867,6 +1890,12 @@ int main(int argc, char* argv[]) {
     
     // Run all tests
     bool all_passed = test_global_data_all();
+
+    // Ensure full cleanup of the global data system
+    gd_cleanup();
+    
+    // Wait for RCU callbacks to finish
+    synchronize_rcu();
     
     if (all_passed) {
         tklog_info("✓ All global_data tests passed!\n");

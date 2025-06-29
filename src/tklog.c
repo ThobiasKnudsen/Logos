@@ -136,7 +136,17 @@ static void mem_add(void *ptr, size_t size, const char *file, int line)
         e->size = size;
         e->t_ms = SDL_GetTicks();
         e->tid  = SDL_GetCurrentThreadID();
-        SDL_snprintf(e->path, sizeof e->path, "%s:%d", file, line);
+        
+        // Get the full call path from PathStack
+        PathStack *ps = pathstack_get();
+        if (ps && ps->buf[0]) {
+            // Show call stack path + current file:line (same format as _tklog)
+            SDL_snprintf(e->path, sizeof e->path, "%s → %s:%d", ps->buf, file, line);
+        } else {
+            // Show just current file:line when no call stack
+            SDL_snprintf(e->path, sizeof e->path, "%s:%d", file, line);
+        }
+        
         e->next = g_mem_head;
         g_mem_head = e;
     }
@@ -174,6 +184,13 @@ static void mem_remove(void *ptr)
 
 /* =============================  API impl  ============================== */
 
+static void tklog_exit_function(void)
+{
+#ifdef TKLOG_MEMORY
+    tklog_memory_dump();
+#endif
+}
+
 bool tklog_output_stdio(const char *msg, void *user)
 {
     (void)user;
@@ -187,6 +204,10 @@ static void tklog_init_once(void)
     g_tklog_mutex   = SDL_CreateMutex();
     g_mem_rwlock  = SDL_CreateRWLock();
     g_start_ms    = SDL_GetTicks();
+    
+#ifdef TKLOG_MEMORY
+    atexit(tklog_exit_function);
+#endif
 }
 
 void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, const char *fmt, ...)
@@ -286,14 +307,30 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
     void tklog_memory_dump(void)
     {
         SDL_LockRWLockForReading(g_mem_rwlock);
+        
+        // Print header like debug.c does
+        char header[] = "\nunfreed memory:\n";
+        SDL_LockMutex(g_tklog_mutex);
+        TKLOG_OUTPUT_FN(header, TKLOG_OUTPUT_USERPTR);
+        SDL_UnlockMutex(g_tklog_mutex);
+        
+        // Print each memory entry with time, thread, and full path
         for (MemEntry *e = g_mem_head; e; e = e->next) {
-            char linebuf[256];
-            SDL_snprintf(linebuf, sizeof linebuf, "%p | %zu | %" PRIu64 "ms | %" PRIu64 " | %s\n",
-                          e->ptr, e->size, e->t_ms, (uint64_t)e->tid, e->path);
+            char linebuf[512]; // Increased buffer size for longer paths
+            uint64_t t_ms = e->t_ms - g_start_ms;
+            SDL_snprintf(linebuf, sizeof linebuf, "\t%" PRIu64 "ms | Thread %" PRIu64 " | address %p | %zu bytes | at %s\n",
+                          t_ms, (uint64_t)e->tid, e->ptr, e->size, e->path);
             SDL_LockMutex(g_tklog_mutex);
             TKLOG_OUTPUT_FN(linebuf, TKLOG_OUTPUT_USERPTR);
             SDL_UnlockMutex(g_tklog_mutex);
         }
+        
+        // Print trailing newline like debug.c does
+        char footer[] = "\n";
+        SDL_LockMutex(g_tklog_mutex);
+        TKLOG_OUTPUT_FN(footer, TKLOG_OUTPUT_USERPTR);
+        SDL_UnlockMutex(g_tklog_mutex);
+        
         SDL_UnlockRWLock(g_mem_rwlock);
     }
 #endif /* TKLOG_MEMORY */

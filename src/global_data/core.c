@@ -88,6 +88,13 @@ void gd_cleanup(void) {
         return;
     }
     
+    // Ensure this thread is registered with RCU for cleanup operations
+    // This is necessary because the calling thread might not be registered
+    bool was_registered = _rcu_is_registered();
+    if (!was_registered) {
+        rcu_register_thread();
+    }
+    
     // Phase 1: Process non-type nodes in batches until none are left
     const int batch_size = 1000;
     struct cds_lfht_node* nodes_to_delete[batch_size];
@@ -235,23 +242,31 @@ void gd_cleanup(void) {
         struct gd_base_node* base_node = caa_container_of(node, struct gd_base_node, lfht_node);
         
         // This should be the base_type node
-        if (!base_node->key_is_number && strcmp(rcu_dereference(base_node->key.string), "base_type") == 0) {
+        if (!base_node->key_is_number && strcmp(base_node->key.string, "base_type") == 0) {
+            rcu_read_unlock(); // Release read lock before delete operation
+            
             if (cds_lfht_del(g_p_ht, node) == 0) {
                 call_rcu(&base_node->rcu_head, _gd_node_base_type_free_callback);
                 tklog_info("Phase 3: Cleaned up base_type node\n");
             }
         } else {
             tklog_warning("Expected base_type node but found different node during cleanup\n");
+            rcu_read_unlock();
         }
+    } else {
+        rcu_read_unlock();
     }
     
-    rcu_read_unlock();
-    
-    // Wait for base_type node to be freed
+    // Wait for readers to finish
     synchronize_rcu();
+
+    // Wait for writers to finish
+    rcu_barrier();
     
-    // Unregister this thread before destroying the hash table
-    rcu_unregister_thread();
+    // Only unregister if we registered this thread (don't unregister if it was already registered)
+    if (!was_registered) {
+        rcu_unregister_thread();
+    }
     
     // Now destroy the hash table
     cds_lfht_destroy(g_p_ht, NULL);
