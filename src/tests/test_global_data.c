@@ -1913,10 +1913,7 @@ int main(int argc, char* argv[]) {
     rcu_barrier();
     
     // Dump memory if TKLOG_MEMORY is enabled
-
     tklog_memory_dump();
-    
-
     
     if (all_passed) {
         tklog_info("✓ All global_data tests passed!\n");
