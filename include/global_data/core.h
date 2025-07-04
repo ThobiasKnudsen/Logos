@@ -20,61 +20,60 @@ union gd_key {
 };
 
 struct gd_base_node {
-    struct cds_lfht_node lfht_node;
+    struct cds_lfht_node lfht_node; // dont use this directly
     union gd_key key;
     union gd_key type_key;
     bool key_is_number;
     bool type_key_is_number;
-    uint32_t size_bytes;
-    struct rcu_head rcu_head;
+    uint32_t size_bytes; // must be at least sizeof(struct gd_base_node)
+    struct rcu_head rcu_head; // dont use this directly
 };
 
-// Wrapper structure for key matching
-struct gd_key_match_ctx {
-    union gd_key key;
-    bool key_is_number;
+struct gd_base_type_node {
+    struct gd_base_node base; // type_key will be set to point to the base_type node
+    bool (*fn_free_node)(struct gd_base_node*); // node to free by base node
+    void (*fn_free_node_callback)(struct rcu_head*); // node to free by base node as callback which should call fn_free_node
+    bool (*fn_is_valid)(struct gd_base_node*); // node to check is valid by base node
+    uint32_t type_size; // bytes
 };
 
-// Define the node size function
-uint64_t _gd_get_node_size(struct cds_lfht_node* node);
-void* _gd_get_node_start_ptr(struct cds_lfht_node* node);
+union gd_key            gd_base_type_get_key_copy(void);
+bool                    gd_base_type_key_is_number(void);
 
 // Core system functions
 bool                    gd_init(void);
 void                    gd_cleanup(void);
 
-// Main node access function - UNSAFE because:
-// 1. You MUST call rcu_read_lock() before and rcu_read_unlock() after use
-// 2. The returned pointer is READ-ONLY - do not modify the data it points to
-// 3. The pointer may become invalid after rcu_read_unlock()
-struct gd_base_node*    gd_get_node_unsafe(const union gd_key* key, bool key_is_number);
+// allocates 0 initialized memory for the given size and fills in base node fields then you must fill in the rest
+// this is zero-copy so you must be careful with the string key pointers
+// when key is 0 it will find a unique non-0 number key
+struct gd_base_node*    gd_base_node_create(
+                            union gd_key key, 
+                            bool key_is_number, 
+                            union gd_key type_key, 
+                            bool type_key_is_number, 
+                            uint32_t size_bytes);
 
-// Node lifecycle functions
-uint64_t                gd_create_node(const union gd_key* key, bool key_is_number, const union gd_key* type_key, bool type_key_is_number);
-bool                    gd_remove_node(const union gd_key* key, bool key_is_number);
-
-// Update functions - these properly handle RCU and atomic updates
-bool                    gd_update(const union gd_key* key, bool key_is_number, void* new_data, size_t data_size);
-bool                    gd_upsert(const union gd_key* key, bool key_is_number, const union gd_key* type_key, bool type_key_is_number, void* data, size_t data_size);
+// must use rcu_read_lock before and rcu_read_unlock after use
+// READ ONLY unless you use rcu_dereference and rcu_assign_pointer for any pointer fields
+struct gd_base_node*    gd_node_get(union gd_key key, bool key_is_number);
+// write functions. this is zero-copy so be careful with the pointers
+bool                    gd_node_insert(struct gd_base_node* new_node);
+bool                    gd_node_remove(union gd_key key, bool key_is_number);
+bool                    gd_node_update(struct gd_base_node* new_node);
+bool                    gd_node_upsert(struct gd_base_node* new_node);
+// Utility functions
+bool                    gd_node_is_deleted(struct gd_base_node* node);
+unsigned long           gd_nodes_count(void);
 
 // Iterator functions for hash table traversal
 bool                    gd_iter_first(struct cds_lfht_iter* iter);
 bool                    gd_iter_next(struct cds_lfht_iter* iter);
 struct gd_base_node*    gd_iter_get_node(struct cds_lfht_iter* iter);
-bool                    gd_lookup_iter(const union gd_key* key, bool key_is_number, struct cds_lfht_iter* iter);
+bool                    gd_iter_lookup(union gd_key key, bool key_is_number, struct cds_lfht_iter* iter);
 
-// Utility functions
-bool                    gd_is_node_deleted(struct gd_base_node* node);
-unsigned long           gd_count_nodes(void);
-
-// Helper functions to create gd_key unions
-union gd_key           gd_create_number_key(uint64_t number);
-union gd_key           gd_create_string_key(const char* string);
-
-// Internal functions for test access
-struct cds_lfht*       _gd_get_hash_table(void);
-uint64_t               _gd_hash_key(const union gd_key* key, bool key_is_number);
-int                    _gd_key_match(struct cds_lfht_node *node, const void *key_ctx);
-void                   _gd_node_base_type_free_callback(struct rcu_head* head);
+// Helper functions for gd_key unions
+union gd_key            gd_key_create(uint64_t number_key, const char* string_key, bool key_is_number);
+bool                    gd_key_free(union gd_key key, bool key_is_number);
 
 #endif /* GLOBAL_DATA_CORE_H */

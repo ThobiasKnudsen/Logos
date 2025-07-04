@@ -34,6 +34,8 @@ INSTALL_HEADERS="OFF"
 CLEAN_BUILD="OFF"
 INSTALL="OFF"
 PACKAGE="OFF"
+ADDRESS_SANITIZER="OFF"
+THREAD_SANITIZER="OFF"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -70,6 +72,14 @@ while [[ $# -gt 0 ]]; do
             PACKAGE="ON"
             shift
             ;;
+        --asan|--address-sanitizer)
+            ADDRESS_SANITIZER="ON"
+            shift
+            ;;
+        --tsan|--thread-sanitizer)
+            THREAD_SANITIZER="ON"
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
@@ -81,7 +91,15 @@ while [[ $# -gt 0 ]]; do
             echo "  --clean           Clean build directory before building"
             echo "  --install         Install after building"
             echo "  --package         Create package after building"
+            echo "  --asan, --address-sanitizer  Enable Address Sanitizer"
+            echo "  --tsan, --thread-sanitizer   Enable Thread Sanitizer"
             echo "  --help, -h        Show this help message"
+            echo ""
+            echo "Sanitizer Notes:"
+            echo "  - Address Sanitizer (ASan) detects memory errors like buffer overflows"
+            echo "  - Thread Sanitizer (TSan) detects data races and threading issues"
+            echo "  - Sanitizers are only available with GCC/Clang on Linux/macOS"
+            echo "  - Using sanitizers automatically enables Debug mode"
             exit 0
             ;;
         *)
@@ -92,6 +110,20 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Validate sanitizer options
+if [ "$ADDRESS_SANITIZER" = "ON" ] && [ "$THREAD_SANITIZER" = "ON" ]; then
+    print_error "Cannot use both Address Sanitizer and Thread Sanitizer simultaneously"
+    exit 1
+fi
+
+# Force Debug mode when using sanitizers
+if [ "$ADDRESS_SANITIZER" = "ON" ] || [ "$THREAD_SANITIZER" = "ON" ]; then
+    if [ "$BUILD_TYPE" = "Release" ]; then
+        print_warning "Sanitizers require Debug mode. Switching to Debug build."
+        BUILD_TYPE="Debug"
+    fi
+fi
+
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -101,6 +133,12 @@ print_status "Building LOGOS in $BUILD_TYPE mode"
 print_status "Project directory: $PROJECT_DIR"
 print_status "Build directory: $BUILD_DIR"
 print_status "Tests: $BUILD_TESTS"
+if [ "$ADDRESS_SANITIZER" = "ON" ]; then
+    print_status "Address Sanitizer: ENABLED"
+fi
+if [ "$THREAD_SANITIZER" = "ON" ]; then
+    print_status "Thread Sanitizer: ENABLED"
+fi
 
 # Clean build if requested
 if [ "$CLEAN_BUILD" = "ON" ]; then
@@ -118,11 +156,13 @@ cmake "$PROJECT_DIR" \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DBUILD_TESTING="$BUILD_TESTS" \
     -DBUILD_TESTS="$BUILD_TESTS" \
-    -DLOGOS_INSTALL_HEADERS="$INSTALL_HEADERS"
+    -DLOGOS_INSTALL_HEADERS="$INSTALL_HEADERS" \
+    -DLOGOS_ADDRESS_SANITIZER="$ADDRESS_SANITIZER" \
+    -DLOGOS_THREAD_SANITIZER="$THREAD_SANITIZER"
 
 # Build
 print_status "Building..."
-cmake --build . --config "$BUILD_TYPE"
+make -j$(nproc)
 
 print_success "Build completed successfully!"
 
@@ -138,6 +178,13 @@ if [ "$PACKAGE" = "ON" ]; then
     print_status "Creating package..."
     cmake --build . --target package
     print_success "Package created successfully!"
+fi
+
+# If ThreadSanitizer is enabled, set up environment for running tests
+if [ "$THREAD_SANITIZER" = "ON" ]; then
+    print_status "Setting up ThreadSanitizer environment..."
+    export TSAN_OPTIONS="abort_on_error=1:suppressions=${PROJECT_DIR}/tsan_suppressions.txt"
+    print_status "TSAN_OPTIONS set to: $TSAN_OPTIONS"
 fi
 
 print_success "All operations completed successfully!" 

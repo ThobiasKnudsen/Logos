@@ -52,6 +52,9 @@ void _rcu_unregister_thread_safe(void);
 void _rcu_read_lock_safe(void);
 void _rcu_read_unlock_safe(void);
 void _synchronize_rcu_safe(void);
+void _rcu_barrier_safe(void);
+void _rcu_init_safe(void);
+void _call_rcu_safe(struct rcu_head *head, void (*func)(struct rcu_head *));
 
 /* RCU pointer safety wrapper functions */
 void* _rcu_dereference_safe(void* ptr, const char* file, int line);
@@ -66,6 +69,7 @@ void* _rcu_xchg_pointer_safe(void* ptr_addr, void* val, const char* file, int li
  * Note: These wrappers maintain the exact same API signatures as the
  * underlying URCU functions to ensure compatibility.
  * ------------------------------------------------------------------------- */
+void _cds_lfht_node_init_safe(struct cds_lfht_node *node);
 void _cds_lfht_lookup_safe(struct cds_lfht *ht, unsigned long hash, 
                           int (*match)(struct cds_lfht_node *node, const void *key), 
                           const void *key, struct cds_lfht_iter *iter);
@@ -160,9 +164,6 @@ bool _validate_gd_node_field(void* field_ptr, void* node_ptr, const char* field_
     _result; \
 })
 
-/* Only override URCU macros if safety is explicitly enabled */
-#ifdef URCU_LFHT_SAFETY_ON
-
 /* Undefine original URCU macros to prevent redefinition errors */
 #ifdef rcu_read_lock
 #undef rcu_read_lock
@@ -196,12 +197,27 @@ bool _validate_gd_node_field(void* field_ptr, void* node_ptr, const char* field_
 #undef rcu_xchg_pointer
 #endif
 
+#ifdef rcu_barrier
+#undef rcu_barrier
+#endif
+
+#ifdef rcu_init
+#undef rcu_init
+#endif
+
+#ifdef call_rcu
+#undef call_rcu
+#endif
+
 /* Define our safety wrappers that override the original URCU functions */
+#define rcu_init() tklog_scope(_rcu_init_safe())
 #define rcu_read_lock() tklog_scope(_rcu_read_lock_safe())
 #define rcu_read_unlock() tklog_scope(_rcu_read_unlock_safe())
 #define rcu_register_thread() tklog_scope(_rcu_register_thread_safe())
 #define rcu_unregister_thread() tklog_scope(_rcu_unregister_thread_safe())
 #define synchronize_rcu() tklog_scope(_synchronize_rcu_safe())
+#define rcu_barrier() tklog_scope(_rcu_barrier_safe())
+#define call_rcu(head, func) tklog_scope(_call_rcu_safe(head, func))
 
 /* RCU pointer function overrides with comprehensive validation */
 #define rcu_dereference(ptr) ({ \
@@ -213,6 +229,8 @@ bool _validate_gd_node_field(void* field_ptr, void* node_ptr, const char* field_
 
 /* Hash table functions with exact API compatibility */
 /* Note: We don't override cds_lfht_new to avoid initialization issues */
+#define cds_lfht_node_init(node) _URCU_SAFE_VOID_CALL(_cds_lfht_node_init_safe, node)
+#define cds_lfht_new(init_size, min_buckets, max_buckets, flags, attr) _URCU_SAFE_PTR_CALL(_cds_lfht_new_safe, init_size, min_buckets, max_buckets, flags, &urcu_memb_flavor)
 #define cds_lfht_lookup(ht, hash, match, key, iter) _URCU_SAFE_VOID_CALL(_cds_lfht_lookup_safe, ht, hash, match, key, iter)
 #define cds_lfht_add(ht, hash, node) _URCU_SAFE_VOID_CALL(_cds_lfht_add_safe, ht, hash, node)
 #define cds_lfht_add_unique(ht, hash, match, key, node) _URCU_SAFE_PTR_CALL(_cds_lfht_add_unique_safe, ht, hash, match, key, node)
@@ -226,8 +244,6 @@ bool _validate_gd_node_field(void* field_ptr, void* node_ptr, const char* field_
 #define cds_lfht_next_duplicate(ht, match, key, iter) _URCU_SAFE_VOID_CALL(_cds_lfht_next_duplicate_safe, ht, match, key, iter)
 #define cds_lfht_iter_get_node(iter) _URCU_SAFE_PTR_CALL(_cds_lfht_iter_get_node_safe, iter)
 #define cds_lfht_count_nodes(ht, approx_before, count, approx_after) _URCU_SAFE_VOID_CALL(_cds_lfht_count_nodes_safe, ht, approx_before, count, approx_after)
-
-#endif /* URCU_LFHT_SAFETY_ON */
 
 #endif /* !LFHT_SAFE_INTERNAL */
 

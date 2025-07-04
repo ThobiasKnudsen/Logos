@@ -85,18 +85,18 @@ int test_lfht(void)
 int main(void) {
     // Initialize SDL3 (required for tklog)
 	
-	DEBUG_SCOPE(cpi_Initialize());
-	DEBUG_SCOPE(int gpu_device_id = cpi_GPUDevice_Create());
-	DEBUG_SCOPE(int window_id = cpi_Window_Create(gpu_device_id, 800, 600, "Λόγος"));
-	DEBUG_SCOPE(int vert_id = cpi_Shader_CreateFromGlslFile(gpu_device_id, "../shaders/shader.vert.glsl", "main", shaderc_vertex_shader, true));
-	DEBUG_SCOPE(int frag_id = cpi_Shader_CreateFromGlslFile(gpu_device_id, "../shaders/shader.frag.glsl", "main", shaderc_fragment_shader, true));
-	DEBUG_SCOPE(int graphics_pipeline_id = cpi_GraphicsPipeline_Create(vert_id, frag_id, true));
+	cpi_Initialize();
+	int gpu_device_id = cpi_GPUDevice_Create();
+	int window_id = cpi_Window_Create(gpu_device_id, 800, 600, "Λόγος");
+	int vert_id = cpi_Shader_CreateFromGlslFile(gpu_device_id, "../shaders/shader.vert.glsl", "main", shaderc_vertex_shader, true);
+	int frag_id = cpi_Shader_CreateFromGlslFile(gpu_device_id, "../shaders/shader.frag.glsl", "main", shaderc_fragment_shader, true);
+	int graphics_pipeline_id = cpi_GraphicsPipeline_Create(vert_id, frag_id, true);
 	
-	DEBUG_SCOPE(cpi_Window_Show(window_id, graphics_pipeline_id));
-	DEBUG_SCOPE(cpi_GraphicsPipeline_Destroy(&graphics_pipeline_id));
-	DEBUG_SCOPE(cpi_Shader_Destroy(&vert_id));
-	DEBUG_SCOPE(cpi_Shader_Destroy(&frag_id));
-	DEBUG_SCOPE(cpi_Window_Destroy(&window_id));
+	cpi_Window_Show(window_id, graphics_pipeline_id);
+	cpi_GraphicsPipeline_Destroy(&graphics_pipeline_id);
+	cpi_Shader_Destroy(&vert_id);
+	cpi_Shader_Destroy(&frag_id);
+	cpi_Window_Destroy(&window_id);
 	
 	return 0;
 }

@@ -133,7 +133,9 @@ static bool test_hash_table_operations(void) {
     // Test node counting
     long split_count_before, split_count_after;
     unsigned long count;
+    rcu_read_lock();
     cds_lfht_count_nodes(test_ht, &split_count_before, &count, &split_count_after);
+    rcu_read_unlock();
     if (count != 1) {
         tklog_error("Node count should be 1, got %lu", count);
         return false;

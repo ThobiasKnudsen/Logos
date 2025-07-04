@@ -7,6 +7,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Build options (SAFE DEFAULTS)
 option(BUILD_TESTS "Build test executables" OFF)
+option(LOGOS_ADDRESS_SANITIZER "Enable Address Sanitizer" OFF)
+option(LOGOS_THREAD_SANITIZER "Enable Thread Sanitizer" OFF)
 
 # Set output directories
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
@@ -31,11 +33,41 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     set(LOGOS_COMMON_FLAGS "-Werror" "-Werror=return-type") # "-Wall" "-Wextra"
     set(LOGOS_DEBUG_FLAGS "-g" "-O0" "-DDEBUG")
     set(LOGOS_RELEASE_FLAGS "-O3" "-DNDEBUG")
+    
+    # Sanitizer flags
+    if(LOGOS_ADDRESS_SANITIZER)
+        if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+            set(LOGOS_SANITIZER_FLAGS "-fsanitize=address" "-fno-omit-frame-pointer")
+        else()
+            set(LOGOS_SANITIZER_FLAGS "-fsanitize=address" "-fno-omit-frame-pointer")
+        endif()
+        # Set environment variable to ensure proper sanitizer loading
+        set(ENV{ASAN_OPTIONS} "detect_leaks=1:abort_on_error=1")
+        message(STATUS "Address Sanitizer enabled")
+    elseif(LOGOS_THREAD_SANITIZER)
+        if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+            set(LOGOS_SANITIZER_FLAGS "-fsanitize=thread" "-fno-omit-frame-pointer")
+        else()
+            set(LOGOS_SANITIZER_FLAGS "-fsanitize=thread" "-fno-omit-frame-pointer")
+        endif()
+        # Set environment variable to ensure proper sanitizer loading with suppressions
+        # Use absolute path to suppressions file
+        set(SUPPRESSIONS_FILE "${CMAKE_SOURCE_DIR}/tsan_suppressions.txt")
+        set(ENV{TSAN_OPTIONS} "abort_on_error=1:suppressions=${SUPPRESSIONS_FILE}")
+        message(STATUS "Thread Sanitizer enabled with suppressions from: ${SUPPRESSIONS_FILE}")
+    endif()
 elseif(MSVC)
     set(LOGOS_COMPILER_MSVC ON)
     set(LOGOS_COMMON_FLAGS "/W4" "/WX" "/D_CRT_SECURE_NO_WARNINGS")
     set(LOGOS_DEBUG_FLAGS "/Zi" "/Od" "/DDEBUG")
     set(LOGOS_RELEASE_FLAGS "/O2" "/DNDEBUG")
+    
+    # Sanitizers not supported on MSVC
+    if(LOGOS_ADDRESS_SANITIZER OR LOGOS_THREAD_SANITIZER)
+        message(WARNING "Sanitizers are not supported with MSVC compiler")
+        set(LOGOS_ADDRESS_SANITIZER OFF)
+        set(LOGOS_THREAD_SANITIZER OFF)
+    endif()
 endif()
 
 # Find required packages
@@ -176,7 +208,6 @@ add_executable(logos
     src/type.c
     src/map.c
     src/global_data/core.c
-    src/global_data/type.c
     src/global_data/urcu_safe.c
 )
 
@@ -198,6 +229,7 @@ if(LOGOS_COMPILER_GCC_CLANG)
         ${LOGOS_COMMON_FLAGS}
         $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}>
         $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>
+        ${LOGOS_SANITIZER_FLAGS}
     )
 elseif(LOGOS_COMPILER_MSVC)
     target_compile_options(logos PRIVATE
@@ -208,6 +240,14 @@ elseif(LOGOS_COMPILER_MSVC)
 endif()
 
 # Link libraries
+# Add sanitizer libraries FIRST if enabled (must be loaded before other libraries)
+if(LOGOS_ADDRESS_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
+    target_link_libraries(logos PRIVATE asan)
+elseif(LOGOS_THREAD_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
+    target_link_libraries(logos PRIVATE tsan)
+endif()
+
+# Link other libraries
 target_link_libraries(logos PRIVATE
     SDL3::SDL3
     xxhash
@@ -266,17 +306,19 @@ if(BUILD_TESTS)
         src/global_data/urcu_safe.c
         src/tklog.c)
     add_executable(test_global_data 
-        src/tests/test_global_data.c 
+        src/tests/test_global_data_2.c 
         src/global_data/core.c 
-        src/global_data/type.c 
         src/global_data/urcu_safe.c 
         src/tklog.c)
+    add_executable(test_asan_demo 
+        src/tests/test_asan_demo.c)
 
     # Apply compiler flags to tests
     if(LOGOS_COMPILER_GCC_CLANG)
-        target_compile_options(test_tklog PRIVATE ${LOGOS_COMMON_FLAGS})
-        target_compile_options(test_urcu_safety PRIVATE ${LOGOS_COMMON_FLAGS})
-        target_compile_options(test_global_data PRIVATE ${LOGOS_COMMON_FLAGS})
+        target_compile_options(test_tklog PRIVATE ${LOGOS_COMMON_FLAGS} ${LOGOS_SANITIZER_FLAGS})
+        target_compile_options(test_urcu_safety PRIVATE ${LOGOS_COMMON_FLAGS} ${LOGOS_SANITIZER_FLAGS})
+        target_compile_options(test_global_data PRIVATE ${LOGOS_COMMON_FLAGS} ${LOGOS_SANITIZER_FLAGS})
+        target_compile_options(test_asan_demo PRIVATE ${LOGOS_SANITIZER_FLAGS})
     endif()
 
     # Include directories for tests
@@ -328,6 +370,7 @@ if(BUILD_TESTS)
     target_compile_definitions(test_global_data PRIVATE 
         URCU_LFHT_SAFETY_ON
         TKLOG_MEMORY
+        TKLOG_MEMORY_PRINT_ON_EXIT
         TKLOG_SHOW_LOG_LEVEL
         TKLOG_SHOW_TIME
         TKLOG_SHOW_THREAD
@@ -340,19 +383,34 @@ if(BUILD_TESTS)
         TKLOG_CRITICAL
         TKLOG_ALERT
         TKLOG_EMERGENCY
-        TKLOG_EXIT_ON_ERROR
         TKLOG_EXIT_ON_CRITICAL
         TKLOG_EXIT_ON_ALERT
         TKLOG_EXIT_ON_EMERGENCY
     )
 
-    # Link libraries for tests
+    # Add sanitizer libraries to tests if enabled (must be first)
+    if(LOGOS_ADDRESS_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
+        # Link sanitizer libraries first for all test targets
+        target_link_libraries(test_tklog PRIVATE asan)
+        target_link_libraries(test_urcu_safety PRIVATE asan)
+        target_link_libraries(test_global_data PRIVATE asan)
+        target_link_libraries(test_asan_demo PRIVATE asan)
+    elseif(LOGOS_THREAD_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
+        # Link sanitizer libraries first for all test targets
+        target_link_libraries(test_tklog PRIVATE tsan)
+        target_link_libraries(test_urcu_safety PRIVATE tsan)
+        target_link_libraries(test_global_data PRIVATE tsan)
+        target_link_libraries(test_asan_demo PRIVATE tsan)
+    endif()
+
+    # Link libraries for tests (after sanitizer libraries)
     if(WIN32)
         # On Windows, pthread is provided by MinGW-w64 or similar
         target_link_libraries(test_tklog PRIVATE)
     else()
         target_link_libraries(test_tklog PRIVATE pthread)
     endif()
+
     if(URCU_FOUND)
         target_link_libraries(test_urcu_safety PRIVATE urcu::urcu urcu::urcu-cds SDL3::SDL3)
         target_link_libraries(test_global_data PRIVATE urcu::urcu urcu::urcu-cds SDL3::SDL3 xxhash)

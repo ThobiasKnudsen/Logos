@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <unistd.h>
 
+
 /* Global function pointer for getting node size and start pointer*/
 static urcu_node_size_func_t g_node_size_function = NULL;
 static urcu_node_start_ptr_func_t g_node_start_ptr_function = NULL;
@@ -24,10 +25,10 @@ urcu_node_start_ptr_func_t urcu_safe_get_node_start_ptr_function(void) {
 
 #ifdef URCU_LFHT_SAFETY_ON
 
-/* Default node size function that returns sizeof(struct cds_lfht_node) */
 static size_t _default_node_size_function(struct cds_lfht_node* node) {
-    (void)node; /* Unused parameter */
-    return sizeof(struct cds_lfht_node);
+    (void)node;
+    tklog_critical("No node size function set - cannot determine actual node size");
+    return 0;
 }
 
 /* Thread-local safety state for tracking RCU usage */
@@ -52,6 +53,20 @@ static atomic_bool test_mode = ATOMIC_VAR_INIT(false);
 /* Safety checks enabled flag - allows disabling safety checks during initialization */
 static atomic_bool safety_checks_enabled = ATOMIC_VAR_INIT(true);
 
+/* RCU initialized flag */
+static atomic_bool g_rcu_initialized = ATOMIC_VAR_INIT(false);
+
+/* Initialize RCU */
+void _rcu_init_safe(void) {
+    if (atomic_load(&g_rcu_initialized)) {
+        tklog_warning("rcu_init called multiple times");
+        return;
+    }
+    urcu_memb_init();
+    atomic_store(&g_rcu_initialized, true);
+    tklog_debug("RCU initialized");
+}
+
 /* Initialize thread state if not already done */
 static void _ensure_thread_state_initialized(void) {
     if (!thread_state.initialized) {
@@ -64,6 +79,11 @@ static void _ensure_thread_state_initialized(void) {
 
 /* RCU registration with proper error handling */
 void _rcu_register_thread_safe(void) {
+    if (!atomic_load(&g_rcu_initialized)) {
+        tklog_critical("rcu_register_thread called before rcu_init");
+        return;
+    }
+
     tklog_scope(_ensure_thread_state_initialized());
     
     pthread_t current_thread = pthread_self();
@@ -90,6 +110,32 @@ void _rcu_register_thread_safe(void) {
     
     tklog_debug("Thread %lu registered with RCU", (unsigned long)thread_state.thread_id);
     return;
+}
+
+/* RCU callback scheduling */
+void _call_rcu_safe(struct rcu_head *head, void (*func)(struct rcu_head *)) {
+    if (!head || !func) {
+        tklog_scope(bool result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("call_rcu called with NULL parameters (test mode)");
+        } else {
+            tklog_error("call_rcu called with NULL parameters");
+        }
+        return;
+    }
+    
+    if (!thread_state.registered) {
+        tklog_scope(bool result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("call_rcu called from unregistered thread (test mode)");
+        } else {
+            tklog_critical("call_rcu called from unregistered thread");
+        }
+        return;
+    }
+    
+    urcu_memb_call_rcu(head, func);
+    tklog_debug("RCU callback scheduled");
 }
 
 void _rcu_unregister_thread_safe(void) {
@@ -224,6 +270,22 @@ void _synchronize_rcu_safe(void) {
     tklog_debug("RCU synchronization completed");
 }
 
+void _rcu_barrier_safe(void) {
+    tklog_scope(bool result = _rcu_is_in_read_section());
+    if (result) {
+        tklog_scope(result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("rcu_barrier called from within read-side critical section (test mode)");
+        } else {
+            tklog_critical("rcu_barrier called from within read-side critical section");
+        }
+        return;
+    }
+    
+    urcu_memb_barrier();
+    tklog_debug("RCU barrier completed");
+}
+
 /* State query functions */
 bool _rcu_is_registered(void) {
     tklog_scope(_ensure_thread_state_initialized());
@@ -270,6 +332,21 @@ bool _rcu_are_safety_checks_enabled(void) {
     return atomic_load(&safety_checks_enabled);
 }
 
+/* Hash table node initialization */
+void _cds_lfht_node_init_safe(struct cds_lfht_node *node) {
+    if (!node) {
+        tklog_scope(bool result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("cds_lfht_node_init called with NULL node (test mode)");
+        } else {
+            tklog_error("cds_lfht_node_init called with NULL node");
+        }
+        return;
+    }
+    cds_lfht_node_init(node);
+    tklog_debug("Hash table node initialized");
+}
+
 /* Hash table operations with exact API compatibility */
 void _cds_lfht_lookup_safe(struct cds_lfht *ht, unsigned long hash,
     int (*match)(struct cds_lfht_node *node, const void *key), 
@@ -314,12 +391,12 @@ void _cds_lfht_add_safe(struct cds_lfht *ht, unsigned long hash,
     struct cds_lfht_node *node) {
     
     tklog_scope(bool result = _rcu_is_in_read_section());
-    if (result) {
+    if (!result) {
         tklog_scope(result = _rcu_is_test_mode());
         if (result) {
-            tklog_debug("cds_lfht_add called from within read-side critical section (test mode)");
+            tklog_debug("cds_lfht_add called without read lock (test mode)");
         } else {
-            tklog_critical("cds_lfht_add called from within read-side critical section");
+            tklog_critical("cds_lfht_add called without read lock");
         }
         return;
     }
@@ -344,12 +421,12 @@ struct cds_lfht_node *_cds_lfht_add_unique_safe(struct cds_lfht *ht, unsigned lo
     const void *key, struct cds_lfht_node *node) {
     
     tklog_scope(bool in_read_section = _rcu_is_in_read_section());
-    if (in_read_section) {
+    if (!in_read_section) {
         tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
         if (test_mode_flag) {
-            tklog_debug("cds_lfht_add_unique called from within read-side critical section (test mode)");
+            tklog_debug("cds_lfht_add_unique called without read lock (test mode)");
         } else {
-            tklog_critical("cds_lfht_add_unique called from within read-side critical section");
+            tklog_critical("cds_lfht_add_unique called without read lock");
         }
         return NULL;
     }
@@ -379,12 +456,12 @@ struct cds_lfht_node *_cds_lfht_add_replace_safe(struct cds_lfht *ht, unsigned l
     const void *key, struct cds_lfht_node *node) {
     
     tklog_scope(bool in_read_section = _rcu_is_in_read_section());
-    if (in_read_section) {
+    if (!in_read_section) {
         tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
         if (test_mode_flag) {
-            tklog_debug("cds_lfht_add_replace called from within read-side critical section (test mode)");
+            tklog_debug("cds_lfht_add_replace called without read lock (test mode)");
         } else {
-            tklog_critical("cds_lfht_add_replace called from within read-side critical section");
+            tklog_critical("cds_lfht_add_replace called without read lock");
         }
         return NULL;
     }
@@ -412,12 +489,12 @@ struct cds_lfht_node *_cds_lfht_add_replace_safe(struct cds_lfht *ht, unsigned l
 int _cds_lfht_del_safe(struct cds_lfht *ht, struct cds_lfht_node *node) {
     
     tklog_scope(bool in_read_section = _rcu_is_in_read_section());
-    if (in_read_section) {
+    if (!in_read_section) {
         tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
         if (test_mode_flag) {
-            tklog_debug("cds_lfht_del called from within read-side critical section (test mode)");
+            tklog_debug("cds_lfht_del called without read lock (test mode)");
         } else {
-            tklog_critical("cds_lfht_del called from within read-side critical section");
+            tklog_critical("cds_lfht_del called without read lock");
         }
         return -EINVAL;
     }
@@ -447,12 +524,12 @@ int _cds_lfht_replace_safe(struct cds_lfht *ht, struct cds_lfht_iter *old_iter,
     const void *key, struct cds_lfht_node *new_node) {
     
     tklog_scope(bool in_read_section = _rcu_is_in_read_section());
-    if (in_read_section) {
+    if (!in_read_section) {
         tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
         if (test_mode_flag) {
-            tklog_debug("cds_lfht_replace called from within read-side critical section (test mode)");
+            tklog_debug("cds_lfht_replace called without read lock (test mode)");
         } else {
-            tklog_critical("cds_lfht_replace called from within read-side critical section");
+            tklog_critical("cds_lfht_replace called without read lock");
         }
         return -EINVAL;
     }
@@ -726,12 +803,12 @@ void _cds_lfht_count_nodes_safe(struct cds_lfht *ht,
     }
     
     tklog_scope(bool in_read_section = _rcu_is_in_read_section());
-    if (in_read_section) {
+    if (!in_read_section) {
         tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
         if (test_mode_flag) {
-            tklog_debug("cds_lfht_count_nodes called from within read-side critical section (test mode)");
+            tklog_debug("cds_lfht_count_nodes called without read lock (test mode)");
         } else {
-            tklog_critical("cds_lfht_count_nodes called from within read-side critical section");
+            tklog_critical("cds_lfht_count_nodes called without read lock");
         }
         if (count) tklog_scope(*count = 0);
         if (approx_before) tklog_scope(*approx_before = 0);
@@ -881,6 +958,8 @@ int cds_lfht_del_unsafe(struct cds_lfht *ht, struct cds_lfht_node *node) {
     
     return result;
 }
+
+
 
 void cds_lfht_lookup_unsafe(struct cds_lfht *ht, unsigned long hash,
     int (*match)(struct cds_lfht_node *node, const void *key), 

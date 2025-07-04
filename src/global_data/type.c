@@ -86,19 +86,26 @@ bool _gd_init_base_type(void) {
     base_type->type_size = sizeof(struct gd_node_base_type); // this correct because the nodes this is type for must have the same fields but the type_size for the nodes this is type for would likely have a different size because at that point you narrowing down the data more and more for specific cases.
     base_type->base.size_bytes = sizeof(struct gd_node_base_type);
     
-    // Insert the base_type node into the hash table using bootstrap function
-    extern struct cds_lfht_node* _gd_add_unique_bootstrap(const union gd_key* key, bool key_is_number, struct cds_lfht_node* node);
-    
-    union gd_key base_type_key = gd_create_string_key(g_base_type_key);
+    tklog_scope(union gd_key base_type_key = gd_create_key(0, g_base_type_key, false));
     
     // During bootstrap, we don't need read locks since we're doing write operations
-    tklog_scope(struct cds_lfht_node* result = _gd_add_unique_bootstrap(&base_type_key, false, &base_type->base.lfht_node));
+    tklog_scope(struct cds_lfht_node* result = _gd_add_unique_bootstrap(base_type_key, false, &base_type->base.lfht_node));
     
     if (result != &base_type->base.lfht_node) {
         tklog_error("Failed to insert base_type node into hash table\n");
         free(base_type->base.key.string);
         free(base_type->base.type_key.string);
         free(base_type);
+        return false;
+    }
+
+    rcu_register_thread();
+    rcu_read_lock();
+    tklog_scope(struct gd_base_node* base_type_node = gd_get_node_unsafe(gd_create_key(0, g_base_type_key, false), false));
+    rcu_read_unlock();
+    rcu_unregister_thread();
+    if (!base_type_node) {
+        tklog_error("base_type node not found after initialization\n");
         return false;
     }
     
@@ -179,13 +186,10 @@ const char* gd_create_node_type(const char* type_name,
     node_type->type_size = type_size;
     node_type->base.size_bytes = type_size;
     
-    // Insert the node type into the hash table using bootstrap function
-    extern struct cds_lfht_node* _gd_add_unique_bootstrap(const union gd_key* key, bool key_is_number, struct cds_lfht_node* node);
-    
-    union gd_key node_type_key = gd_create_string_key(type_name);
+    tklog_scope(union gd_key node_type_key = gd_create_string_key(type_name));
     
     // During node type creation, we don't need read locks since we're doing write operations
-    tklog_scope(struct cds_lfht_node* result = _gd_add_unique_bootstrap(&node_type_key, false, &node_type->base.lfht_node));
+    tklog_scope(struct cds_lfht_node* result = _gd_add_unique_bootstrap(node_type_key, false, &node_type->base.lfht_node));
     
     if (result != &node_type->base.lfht_node) {
         tklog_error("Node type with key %s already exists\n", type_name);

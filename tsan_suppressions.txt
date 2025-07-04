@@ -1,0 +1,36 @@
+# ThreadSanitizer suppressions for URCU library
+# These are known benign races in the RCU implementation
+
+# URCU library internal races
+race:liburcu.so
+race:liburcu-cds.so
+
+# RCU barrier implementation races
+race:urcu_memb_barrier
+race:cds_lfht_add_unique
+race:cds_lfht_lookup
+race:cds_lfht_del
+race:cds_lfht_add_replace
+race:call_rcu
+
+# Known benign race in pthread key creation
+race:pthread_key_create
+
+# Atomic operations in URCU
+race:uatomic_cmpxchg
+race:uatomic_add_return
+
+# Memory allocator races during cleanup
+race:tklog_free
+race:tklog_malloc
+
+# Hash table operations
+race:_gd_key_match
+race:cds_lfht_iter_get_node
+
+# RCU callback races
+race:_gd_node_base_type_free_callback
+race:test_node_free_callback
+
+# URCU workqueue races
+race:urcu_workqueue_queue_completion

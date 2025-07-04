@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <pthread.h>
+#include <stdbool.h>
 #include <time.h>
 #include <sys/time.h>
 #include <inttypes.h>
@@ -233,7 +234,7 @@ static void mem_update(void *oldptr, void *newptr, size_t newsize)
     pthread_rwlock_unlock(&g_mem_rwlock);
 }
 
-static void mem_remove(void *ptr)
+static bool mem_remove(void *ptr)
 {
     pthread_rwlock_wrlock(&g_mem_rwlock);
     MemEntry **pp = &g_mem_head;
@@ -246,18 +247,20 @@ static void mem_remove(void *ptr)
 #else
             free(dead);
 #endif
-            break;
+            pthread_rwlock_unlock(&g_mem_rwlock);
+            return true;
         }
         pp = &(*pp)->next;
     }
     pthread_rwlock_unlock(&g_mem_rwlock);
+    return false;
 }
 
 /* =============================  API impl  ============================== */
 
 static void tklog_exit_function(void)
 {
-#ifdef TKLOG_MEMORY
+#if defined(TKLOG_MEMORY) && defined(TKLOG_MEMORY_PRINT_ON_EXIT)
     tklog_memory_dump();
 #endif
 }
@@ -389,8 +392,19 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
 
     void tklog_free(void *ptr, const char *file, int line)
     {
-        (void)file; (void)line;
-        mem_remove(ptr);
+        // Add NULL pointer check
+        if (!ptr) {
+            _tklog(TKLOG_ACTIVE_FLAGS, TKLOG_LEVEL_ERROR, line, file, "you tried to free NULL ptr");
+            exit(EXIT_FAILURE);
+        }
+        
+        // Check if pointer exists in tracking (detects double-free)
+        bool found = mem_remove(ptr);
+        if (!found) {
+            _tklog(TKLOG_ACTIVE_FLAGS, TKLOG_LEVEL_ERROR, line, file, "you tried to free a pointer that was not allocated");
+            exit(EXIT_FAILURE);
+        }
+        
         original_free(ptr);
     }
 
