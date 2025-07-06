@@ -24,14 +24,8 @@ static bool test_node_free(struct gd_base_node* node) {
     tklog_debug("Freeing test node with value: %d, data: %s\n", tn->value, tn->data);
     
     // Free string keys if allocated
-    if (!node->key_is_number && node->key.string) {
-        free(node->key.string);
-        node->key.string = NULL;
-    }
-    if (!node->type_key_is_number && node->type_key.string) {
-        free(node->type_key.string);
-        node->type_key.string = NULL;
-    }
+    gd_key_free(node->key, node->key_is_number);
+    gd_key_free(node->type_key, node->type_key_is_number);
     
     // Clear the node data to help with debugging
     memset(tn->data, 0, sizeof(tn->data));
@@ -121,7 +115,7 @@ static struct test_node* create_test_node(uint64_t key, int value) {
         snprintf(node->data, 64, "test_data_%d", value);
         tklog_debug("Created test node successfully\n");
     } else {
-        tklog_error("Failed to create test node\n");
+        tklog_critical("Failed to create test node\n");
     }
     
     return node;
@@ -243,10 +237,8 @@ static bool test_string_keys(void) {
     
     // Read it back
     rcu_read_lock();
-    tklog_scope(struct test_node* found = (struct test_node*)gd_node_get(
-        gd_key_create(0, "string_key_test", false), false
-    ));
-    
+    union gd_key string_key_test = gd_key_create(0, "string_key_test", false);
+    tklog_scope(struct test_node* found = (struct test_node*)gd_node_get(string_key_test, false));
     if (!found) {
         tklog_error("Failed to retrieve string key test node\n");
         rcu_read_unlock();
@@ -261,7 +253,8 @@ static bool test_string_keys(void) {
     rcu_read_unlock();
     
     // Clean up
-    tklog_scope(bool remove_result = gd_node_remove(gd_key_create(0, "string_key_test", false), false));
+    tklog_scope(bool remove_result = gd_node_remove(string_key_test, false));
+    gd_key_free(string_key_test, false);
     if (!remove_result) {
         tklog_error("Failed to remove string key test node\n");
         return false;
@@ -376,6 +369,7 @@ static void* concurrent_worker(void* arg) {
                         data->successful_ops++;
                     } else {
                         tklog_debug("Thread %d: upsert failed for key %llu\n", data->thread_id, key);
+                        test_node_free(&node->base);
                     }
                 }
                 break;
@@ -399,7 +393,7 @@ static void* concurrent_worker(void* arg) {
                         data->successful_ops++;
                     } else {
                         tklog_debug("Thread %d: update failed for key %llu\n", data->thread_id, key);
-                        free(updated);
+                        test_node_free(&updated->base);
                     }
                 }
                 break;
@@ -611,7 +605,9 @@ static bool test_edge_cases(void) {
         return false;
     }
     
-    tklog_scope(struct gd_base_node* str_node = gd_node_get(gd_key_create(0, "nonexistent", false), false));
+    union gd_key non_key = gd_key_create(0, "nonexistent", false);
+    tklog_scope(struct gd_base_node* str_node = gd_node_get(non_key, false));
+    gd_key_free(non_key, false);
     if (str_node != NULL) {
         tklog_error("Should not find non-existent string key\n");
         rcu_read_unlock();
@@ -627,7 +623,7 @@ static bool test_edge_cases(void) {
             tklog_error("Update should fail for non-existent node\n");
             return false;
         }
-        free(node);
+        test_node_free(&node->base);
     }
     
     tklog_scope(bool remove_result = gd_node_remove(gd_key_create(99999, NULL, true), true));
@@ -648,7 +644,7 @@ static bool test_edge_cases(void) {
             tklog_error("Insert should fail with invalid type key\n");
             return false;
         }
-        free(node);
+        test_node_free(&node->base);
     }
     
     tklog_info("✓ Edge cases test passed\n");

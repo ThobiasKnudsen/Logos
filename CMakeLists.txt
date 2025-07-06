@@ -369,8 +369,8 @@ if(BUILD_TESTS)
     
     target_compile_definitions(test_global_data PRIVATE 
         URCU_LFHT_SAFETY_ON
-        TKLOG_MEMORY
-        TKLOG_MEMORY_PRINT_ON_EXIT
+        # TKLOG_MEMORY
+        # TKLOG_MEMORY_PRINT_ON_EXIT
         TKLOG_SHOW_LOG_LEVEL
         TKLOG_SHOW_TIME
         TKLOG_SHOW_THREAD
