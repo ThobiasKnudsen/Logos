@@ -98,6 +98,10 @@ struct cds_lfht_node *_cds_lfht_iter_get_node_safe(struct cds_lfht_iter *iter);
 void _cds_lfht_count_nodes_safe(struct cds_lfht *ht, long *approx_before, 
                                unsigned long *count, long *approx_after);
 
+/* Missing functions required by URCU_LFHT_REFERENCE.md */
+void _cds_lfht_node_init_deleted_safe(struct cds_lfht_node *node);
+int _cds_lfht_is_node_deleted_safe(struct cds_lfht_node *node);
+
 /* -------------------------------------------------------------------------
  * Helper Functions
  * These provide state information for debugging and verification.
@@ -115,6 +119,10 @@ bool _rcu_is_test_mode(void);
 void _rcu_disable_safety_checks(void);
 void _rcu_enable_safety_checks(void);
 bool _rcu_are_safety_checks_enabled(void);
+
+/* RCU function call state query functions */
+bool _rcu_has_called_barrier(void);
+bool _rcu_has_called_call_rcu(void);
 
 /* -------------------------------------------------------------------------
  * RCU Pointer Function Validation
@@ -244,6 +252,8 @@ bool _validate_gd_node_field(void* field_ptr, void* node_ptr, const char* field_
 #define cds_lfht_next_duplicate(ht, match, key, iter) _URCU_SAFE_VOID_CALL(_cds_lfht_next_duplicate_safe, ht, match, key, iter)
 #define cds_lfht_iter_get_node(iter) _URCU_SAFE_PTR_CALL(_cds_lfht_iter_get_node_safe, iter)
 #define cds_lfht_count_nodes(ht, approx_before, count, approx_after) _URCU_SAFE_VOID_CALL(_cds_lfht_count_nodes_safe, ht, approx_before, count, approx_after)
+// #define cds_lfht_node_init_deleted(node) _URCU_SAFE_VOID_CALL(_cds_lfht_node_init_deleted_safe, node)
+// #define cds_lfht_is_node_deleted(node) _URCU_SAFE_INT_CALL(_cds_lfht_is_node_deleted_safe, node)
 
 #endif /* !LFHT_SAFE_INTERNAL */
 

@@ -1,14 +1,15 @@
 #ifndef GLOBAL_DATA_CORE_H
 #define GLOBAL_DATA_CORE_H
 
+#define _LGPL_SOURCE
 #include <urcu.h>
 #include <urcu/rculfhash.h>
+#include "global_data/urcu_safe.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include "global_data/urcu_safe.h"
 
 // in _gd_get_node_size every type is treated as being gd_node_base_type
 
@@ -53,6 +54,8 @@ struct gd_base_node*    gd_base_node_create(
                             union gd_key type_key, 
                             bool type_key_is_number, 
                             uint32_t size_bytes);
+// should only be used inside free callback function called with call_rcu
+bool                    gd_base_node_free(struct gd_base_node* p_base_node);
 
 // must use rcu_read_lock before and rcu_read_unlock after use
 // READ ONLY unless you use rcu_dereference and rcu_assign_pointer for any pointer fields
@@ -75,5 +78,7 @@ bool                    gd_iter_lookup(union gd_key key, bool key_is_number, str
 // Helper functions for gd_key unions
 union gd_key            gd_key_create(uint64_t number_key, const char* string_key, bool key_is_number);
 bool                    gd_key_free(union gd_key key, bool key_is_number);
+uint64_t                gd_key_get_number(union gd_key, bool key_is_number);
+const char*             gd_key_get_string(union gd_key, bool key_is_number);
 
 #endif /* GLOBAL_DATA_CORE_H */

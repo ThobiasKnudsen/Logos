@@ -19,26 +19,16 @@ static bool test_node_free(struct gd_base_node* node) {
         tklog_debug("test_node_free called with NULL node\n");
         return false;
     }
-    
-    struct test_node* tn = (struct test_node*)node;
-    tklog_debug("Freeing test node with value: %d, data: %s\n", tn->value, tn->data);
-    
-    // Free string keys if allocated
-    gd_key_free(node->key, node->key_is_number);
-    gd_key_free(node->type_key, node->type_key_is_number);
-    
-    // Clear the node data to help with debugging
-    memset(tn->data, 0, sizeof(tn->data));
-    tn->value = -1;
-    
-    free(node);
+    gd_base_node_free(node);
     return true;
 }
 
 static void test_node_free_callback(struct rcu_head* head) {
     struct gd_base_node* node = caa_container_of(head, struct gd_base_node, rcu_head);
     tklog_debug("RCU callback freeing test node\n");
-    test_node_free(node);
+    if (!test_node_free(node)) {
+        tklog_error("failed to free test_node\n");
+    }
 }
 
 static bool test_node_is_valid(struct gd_base_node* node) {
@@ -781,22 +771,12 @@ int main(void) {
         all_passed = false;
     }
     
-    // Cleanup
-    rcu_unregister_thread();
-    
     // Wait for any pending RCU callbacks before cleanup
     synchronize_rcu();
     
     tklog_scope(gd_cleanup());
-    
-    // Wait for all RCU callbacks to complete
-    rcu_barrier();
-    
-    // Additional barrier to ensure all memory is freed
-    synchronize_rcu();
-    
-    // Final barrier to catch any remaining callbacks
-    rcu_barrier();
+
+    rcu_unregister_thread();
     
     if (all_passed) {
         tklog_info("\n✓ All tests PASSED!\n");

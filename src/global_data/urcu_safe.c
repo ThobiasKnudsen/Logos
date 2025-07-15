@@ -93,7 +93,7 @@ void _rcu_register_thread_safe(void) {
         if (result) {
             tklog_debug("Thread %lu already registered (test mode)", (unsigned long)current_thread);
         } else {
-            tklog_warning("Thread %lu already registered", (unsigned long)current_thread);
+            tklog_error("Thread %lu already registered", (unsigned long)current_thread);
         }
         return;
     }
@@ -170,6 +170,7 @@ void _rcu_unregister_thread_safe(void) {
     urcu_memb_unregister_thread();
     
     thread_state.registered = false;
+    
     tklog_debug("Thread %lu unregistered from RCU", (unsigned long)thread_state.thread_id);
     
 }
@@ -177,6 +178,7 @@ void _rcu_unregister_thread_safe(void) {
 /* RCU read locking with proper atomic operations */
 void _rcu_read_lock_safe(void) {
     tklog_scope(_ensure_thread_state_initialized());
+    tklog_debug("_rcu_read_lock_safe() ...\n");
     
     pthread_t current_thread = pthread_self();
     
@@ -255,6 +257,19 @@ void _rcu_read_unlock_safe(void) {
 }
 
 void _synchronize_rcu_safe(void) {
+    tklog_scope(_ensure_thread_state_initialized());
+    
+    /* Check if thread is registered */
+    if (!thread_state.registered) {
+        tklog_scope(bool result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("synchronize_rcu called from unregistered thread (test mode)");
+        } else {
+            tklog_critical("synchronize_rcu called from unregistered thread");
+        }
+        return;
+    }
+    
     tklog_scope(bool result = _rcu_is_in_read_section());
     if (result) {
         tklog_scope(result = _rcu_is_test_mode());
@@ -271,6 +286,19 @@ void _synchronize_rcu_safe(void) {
 }
 
 void _rcu_barrier_safe(void) {
+    tklog_scope(_ensure_thread_state_initialized());
+    
+    /* Check if thread is registered */
+    if (!thread_state.registered) {
+        tklog_scope(bool result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("rcu_barrier called from unregistered thread (test mode)");
+        } else {
+            tklog_critical("rcu_barrier called from unregistered thread");
+        }
+        return;
+    }
+    
     tklog_scope(bool result = _rcu_is_in_read_section());
     if (result) {
         tklog_scope(result = _rcu_is_test_mode());

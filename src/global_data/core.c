@@ -1,9 +1,10 @@
 #include "global_data/core.h"
-#include "global_data/urcu_safe.h"
 #include "tklog.h"
 #include "xxhash.h"
 
 #include <stdatomic.h>
+#include <pthread.h>
+#include <unistd.h>
 
 #define MAX_STRING_KEY_LEN 64
 
@@ -70,7 +71,6 @@ static void* _gd_get_node_start_ptr(struct cds_lfht_node* node) {
     struct gd_base_node* base_node = caa_container_of(node, struct gd_base_node, lfht_node);
     return (void*)base_node;
 }
-
 
 // Default free function for node type nodes
 static bool _gd_base_type_node_free(struct gd_base_node* node) {
@@ -213,58 +213,122 @@ bool gd_init(void) {
     return true;
 }
 
+// Type tracking structure for cleanup
+struct type_tracking_cleanup_key {
+    union gd_key key;
+    bool key_is_number;
+};
+
+// Hash function for type tracking
+static uint64_t type_tracking_cleanup_hash(struct type_tracking_cleanup_key tk) {
+    return _gd_hash_key(tk.key, tk.key_is_number);
+}
+
+// Comparison function for type tracking
+static int type_tracking_cleanup_cmpr(struct type_tracking_cleanup_key a, struct type_tracking_cleanup_key b) {
+    if (a.key_is_number != b.key_is_number) {
+        return a.key_is_number ? 1 : -1;
+    }
+    
+    if (a.key_is_number) {
+        return (a.key.number > b.key.number) - (a.key.number < b.key.number);
+    } else {
+        return strcmp(a.key.string, b.key.string);
+    }
+}
+
+// Define Verstable set for type tracking
+#define NAME type_tracking_cleanup_set
+#define KEY_TY struct type_tracking_cleanup_key
+#define HASH_FN type_tracking_cleanup_hash
+#define CMPR_FN type_tracking_cleanup_cmpr
+#include "verstable.h"
+
 // Cleanup the global data system
 void gd_cleanup(void) {
+
     if (!g_p_ht) {
         tklog_warning("Global data system not initialized\n");
         return;
     }
     
-    rcu_register_thread();
+    // Create a Verstable set to track which nodes are used as types
+    type_tracking_cleanup_set used_as_type_set;
+    type_tracking_cleanup_set_init(&used_as_type_set);
     
-    // Phase 1: Process non-type nodes in batches until none are left
+    // Iteratively remove nodes layer by layer
     const int batch_size = 1000;
     struct cds_lfht_node* nodes_to_delete[batch_size];
-    int total_deleted = 0;
+    int layer = 0;
     
-    tklog_info("Phase 1: Cleaning up non-type nodes\n");
     while (true) {
+        int total_nodes = 0;
         int delete_count = 0;
         struct cds_lfht_iter iter;
         
-        // Collect a batch of non-type nodes
+        // Clear the used_as_type tracking set
+        type_tracking_cleanup_set_clear(&used_as_type_set);
+        
+        // Phase 1: Count nodes and identify which are used as types
         rcu_read_lock();
         cds_lfht_first(g_p_ht, &iter);
-        
         struct cds_lfht_node* node;
-        while ((node = cds_lfht_iter_get_node(&iter)) != NULL && delete_count < batch_size) {
+        
+        while ((node = cds_lfht_iter_get_node(&iter)) != NULL) {
             struct gd_base_node* base_node = caa_container_of(node, struct gd_base_node, lfht_node);
+            total_nodes++;
             
-            // Check if this is a non-type node (not base_type and not a type node)
-            bool is_base_type = (!base_node->key_is_number && strcmp(rcu_dereference(base_node->key.string), "base_type") == 0);
-            bool is_type_node = false;
+            // Add this node's type to the used_as_type set
+            struct type_tracking_cleanup_key track_key;
+            track_key.key = base_node->type_key;
+            track_key.key_is_number = base_node->type_key_is_number;
             
-            if (!is_base_type && !base_node->type_key_is_number) {
-                // Check if this node's type is base_type (making it a type node)
-                is_type_node = (strcmp(rcu_dereference(base_node->type_key.string), "base_type") == 0);
+            type_tracking_cleanup_set_itr itr = type_tracking_cleanup_set_insert(&used_as_type_set, track_key);
+            if (type_tracking_cleanup_set_is_end(itr)) {
+                tklog_error("Out of memory tracking used types\n");
+                // Continue anyway, will force cleanup
             }
             
-            if (!is_base_type && !is_type_node) {
-                // Store this node for deletion
-                nodes_to_delete[delete_count++] = node;
-            }
-            
-            // Move to next node
             cds_lfht_next(g_p_ht, &iter);
         }
         
-        // If no non-type nodes found in this batch, we're done with phase 1
-        if (delete_count == 0) {
+        // If no nodes left, we're done
+        if (total_nodes == 0) {
             rcu_read_unlock();
             break;
         }
         
-        // Delete all nodes in this batch
+        // Phase 2: Collect nodes that are not used as types
+        cds_lfht_first(g_p_ht, &iter);
+        while ((node = cds_lfht_iter_get_node(&iter)) != NULL && delete_count < batch_size) {
+            struct gd_base_node* base_node = caa_container_of(node, struct gd_base_node, lfht_node);
+            
+            // Check if this node is used as a type
+            struct type_tracking_cleanup_key lookup_key;
+            lookup_key.key = base_node->key;
+            lookup_key.key_is_number = base_node->key_is_number;
+            
+            type_tracking_cleanup_set_itr found = type_tracking_cleanup_set_get(&used_as_type_set, lookup_key);
+            
+            if (type_tracking_cleanup_set_is_end(found)) {
+                // This node is not used as a type, mark for deletion
+                nodes_to_delete[delete_count++] = node;
+            }
+            
+            cds_lfht_next(g_p_ht, &iter);
+        }
+        
+        // If no nodes to delete in this layer, force cleanup of remaining nodes
+        if (delete_count == 0 && total_nodes > 0) {
+            tklog_warning("No progress made, forcing cleanup of remaining %d nodes\n", total_nodes);
+            cds_lfht_first(g_p_ht, &iter);
+            while ((node = cds_lfht_iter_get_node(&iter)) != NULL && delete_count < batch_size) {
+                nodes_to_delete[delete_count++] = node;
+                cds_lfht_next(g_p_ht, &iter);
+            }
+        }
+        
+        // Phase 3: Delete collected nodes
         for (int i = 0; i < delete_count; i++) {
             struct gd_base_node* base_node = caa_container_of(nodes_to_delete[i], struct gd_base_node, lfht_node);
             
@@ -281,119 +345,32 @@ void gd_cleanup(void) {
                     // Fallback to default callback if type not found
                     call_rcu(&base_node->rcu_head, _gd_base_type_node_free_callback);
                 }
-                total_deleted++;
             } else {
-                tklog_warning("Failed to delete non-type node during cleanup\n");
+                tklog_warning("Failed to delete node during cleanup\n");
             }
         }
+        
         rcu_read_unlock();
         
-        // Wait for this batch's call_rcu callbacks to finish before processing the next batch
-        rcu_barrier();
+        if (delete_count > 0) {
+            tklog_info("Layer %d: Cleaned up %d nodes\n", layer, delete_count);
+            layer++;
+        }
+        
+        // The RCU barrier thread will handle waiting for call_rcu callbacks
+        // No need to call rcu_barrier() here as it's handled by the dedicated thread
     }
     
-    if (total_deleted > 0) {
-        tklog_info("Phase 1: Cleaned up %d non-type nodes\n", total_deleted);
-    }
-    
-    // Phase 2: Process type nodes (except base_type) in batches until none are left
-    total_deleted = 0;
-    
-    tklog_info("Phase 2: Cleaning up type nodes\n");
-    while (true) {
-        int delete_count = 0;
-        struct cds_lfht_iter iter;
-        
-        // Collect a batch of type nodes
-        rcu_barrier();
-        rcu_read_lock();
-        cds_lfht_first(g_p_ht, &iter);
-        
-        struct cds_lfht_node* node;
-        while ((node = cds_lfht_iter_get_node(&iter)) != NULL && delete_count < batch_size) {
-            struct gd_base_node* base_node = caa_container_of(node, struct gd_base_node, lfht_node);
-            
-            // Check if this is a type node (not base_type)
-            bool is_base_type = (!base_node->key_is_number && strcmp(rcu_dereference(base_node->key.string), "base_type") == 0);
-            bool is_type_node = false;
-            
-            if (!is_base_type && !base_node->type_key_is_number) {
-                is_type_node = (strcmp(rcu_dereference(base_node->type_key.string), "base_type") == 0);
-            }
-            
-            if (!is_base_type && is_type_node) {
-                // Store this node for deletion
-                nodes_to_delete[delete_count++] = node;
-            }
-            
-            // Move to next node
-            cds_lfht_next(g_p_ht, &iter);
-        }
-        
-        
-        // If no type nodes found in this batch, we're done with phase 2
-        if (delete_count == 0) {
-            rcu_read_unlock();
-            break;
-        }
-        
-        // Delete all nodes in this batch
-        for (int i = 0; i < delete_count; i++) {
-            struct gd_base_node* base_node = caa_container_of(nodes_to_delete[i], struct gd_base_node, lfht_node);
-            
-            // Remove from hash table
-            if (cds_lfht_del(g_p_ht, nodes_to_delete[i]) == 0) {
-                call_rcu(&base_node->rcu_head, _gd_base_type_node_free_callback);
-                total_deleted++;
-            } else {
-                tklog_warning("Failed to delete type node during cleanup\n");
-            }
-        }
+    // Clean up tracking set
+    type_tracking_cleanup_set_cleanup(&used_as_type_set);
 
-        rcu_read_unlock();
-        
-        // Wait for this batch's call_rcu callbacks to finish before processing the next batch
-        rcu_barrier();
-    }
-    
-    if (total_deleted > 0) {
-        tklog_info("Phase 2: Cleaned up %d type nodes\n", total_deleted);
-    }
-    
-    // Phase 3: Remove the base_type node (should be the last remaining node)
-    tklog_info("Phase 3: Cleaning up base_type node\n");
-    rcu_read_lock();
-    struct cds_lfht_iter iter;
-    cds_lfht_first(g_p_ht, &iter);
-    struct cds_lfht_node* node = cds_lfht_iter_get_node(&iter);
-    
-    if (node) {
-        struct gd_base_node* base_node = caa_container_of(node, struct gd_base_node, lfht_node);
-        
-        // This should be the base_type node
-        if (!base_node->key_is_number && strcmp(base_node->key.string, "base_type") == 0) {
-            if (cds_lfht_del(g_p_ht, node) == 0) {
-                call_rcu(&base_node->rcu_head, _gd_base_type_node_free_callback);
-                tklog_info("Phase 3: Cleaned up base_type node\n");
-            }
-        } else {
-            tklog_warning("Expected base_type node but found different node during cleanup\n");
-            
-        }
-    } 
-    rcu_read_unlock();
-    
-    // Wait for all call_rcu callbacks to finish
     rcu_barrier();
-    
-    // Only unregister if we registered this thread (don't unregister if it was already registered)
-    rcu_unregister_thread();
-    
+
     // Now destroy the hash table
     cds_lfht_destroy(g_p_ht, NULL);
     g_p_ht = NULL;
     
-    tklog_info("Global data system cleanup completed\n");
+    tklog_info("Global data system cleanup completed (%d layers)\n", layer);
 }
 
 // Internal function - moved from header to be internal only
@@ -452,6 +429,16 @@ struct gd_base_node* gd_base_node_create(union gd_key key, bool key_is_number, u
     node->type_key_is_number = type_key_is_number;
     node->size_bytes = size_bytes;
     return node;
+}
+bool gd_base_node_free(struct gd_base_node* p_base_node) {
+    if (!p_base_node) {
+        tklog_error("p_base_node is NULL when trying to free it");
+        return false;
+    }
+    gd_key_free(p_base_node->key, p_base_node->key_is_number);
+    gd_key_free(p_base_node->type_key, p_base_node->type_key_is_number);
+    free(p_base_node);
+    return true;
 }
 
 // Getter function for the global hash table (for test access)

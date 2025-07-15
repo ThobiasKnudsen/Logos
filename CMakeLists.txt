@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
 project(LOGOS LANGUAGES C VERSION 1.0.0)
 
+# Add this after the project declaration to enable offline builds after initial fetch
+set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL "Prevent FetchContent from updating sources")
+
 # Set C standard
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -31,7 +34,7 @@ endif()
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     set(LOGOS_COMPILER_GCC_CLANG ON)
     set(LOGOS_COMMON_FLAGS "-Werror" "-Werror=return-type") # "-Wall" "-Wextra"
-    set(LOGOS_DEBUG_FLAGS "-g" "-O0" "-DDEBUG")
+    set(LOGOS_DEBUG_FLAGS "-g" "-O1" "-DDEBUG")
     set(LOGOS_RELEASE_FLAGS "-O3" "-DNDEBUG")
     
     # Sanitizer flags
@@ -53,7 +56,7 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         # Set environment variable to ensure proper sanitizer loading with suppressions
         # Use absolute path to suppressions file
         set(SUPPRESSIONS_FILE "${CMAKE_SOURCE_DIR}/tsan_suppressions.txt")
-        set(ENV{TSAN_OPTIONS} "abort_on_error=1:suppressions=${SUPPRESSIONS_FILE}")
+        set(ENV{TSAN_OPTIONS} "abort_on_error=1:suppressions=${SUPPRESSIONS_FILE}:history_size=5:verbosity=2")
         message(STATUS "Thread Sanitizer enabled with suppressions from: ${SUPPRESSIONS_FILE}")
     endif()
 elseif(MSVC)
@@ -73,32 +76,36 @@ endif()
 # Find required packages
 find_package(PkgConfig REQUIRED)
 
-# URCU (Userspace RCU) - required
-if(LOGOS_PLATFORM_LINUX)
-    pkg_check_modules(URCU REQUIRED liburcu liburcu-cds)
-    if(URCU_FOUND)
-        message(STATUS "URCU_FOUND: ${URCU_FOUND}")
-        message(STATUS "URCU_INCLUDE_DIRS: ${URCU_INCLUDE_DIRS}")
-        message(STATUS "URCU_LIBRARIES: ${URCU_LIBRARIES}")
-        
-        # Create imported targets like in the old working version
-        add_library(urcu::urcu INTERFACE IMPORTED)
-        add_library(urcu::urcu-cds INTERFACE IMPORTED)
+# Build URCU locally with debug options (replaces system pkg_check_modules)
+include(ExternalProject)
+include(FetchContent)
+set(URCU_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/urcu-install")
+set(URCU_INCLUDE_DIRS "${URCU_INSTALL_PREFIX}/include")
+set(URCU_LIB_DIR "${URCU_INSTALL_PREFIX}/lib")
+set(URCU_LIBRARIES "${URCU_LIB_DIR}/liburcu.so" "${URCU_LIB_DIR}/liburcu-cds.so")  # Shared libs; use .a for static if preferred
 
-        target_link_libraries(urcu::urcu INTERFACE ${URCU_LIBRARIES})
-        target_include_directories(urcu::urcu INTERFACE ${URCU_INCLUDE_DIRS})
-        target_compile_options(urcu::urcu INTERFACE ${URCU_CFLAGS_OTHER})
+FetchContent_Declare(
+    urcu
+    URL https://lttng.org/files/urcu/userspace-rcu-0.14.0.tar.bz2
+)
 
-        target_link_libraries(urcu::urcu-cds INTERFACE ${URCU_LIBRARIES})
-        target_include_directories(urcu::urcu-cds INTERFACE ${URCU_INCLUDE_DIRS})
-        target_compile_options(urcu::urcu-cds INTERFACE ${URCU_CFLAGS_OTHER})
-    else()
-        message(FATAL_ERROR "URCU not found - required for this build")
-    endif()
+FetchContent_GetProperties(urcu)
+if(NOT urcu_POPULATED)
+    FetchContent_Populate(urcu)
 endif()
 
+ExternalProject_Add(urcu
+    SOURCE_DIR ${urcu_SOURCE_DIR}
+    CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=${URCU_INSTALL_PREFIX} --enable-rcu-debug --enable-cds-lfht-iter-debug
+    BUILD_COMMAND make -j${CMAKE_BUILD_PARALLEL_LEVEL}
+    INSTALL_COMMAND make install
+    LOG_UPDATE ON
+    LOG_CONFIGURE ON
+    LOG_BUILD ON
+    LOG_INSTALL ON
+)
+
 # External dependencies using FetchContent
-include(FetchContent)
 
 # SDL3 - must be first so other packages can find it
 FetchContent_Declare(
@@ -138,7 +145,7 @@ FetchContent_MakeAvailable(verstable)
 FetchContent_Declare(
     xxhash
     GIT_REPOSITORY https://github.com/Cyan4973/xxHash.git
-    GIT_TAG release
+    GIT_TAG v0.8.2
 )
 FetchContent_MakeAvailable(xxhash)
 
@@ -219,8 +226,8 @@ target_include_directories(logos PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders
     ${verstable_SOURCE_DIR}
-    ${URCU_INCLUDE_DIRS}
     ${spirv-reflect_SOURCE_DIR}
+    ${URCU_INCLUDE_DIRS}
 )
 
 # Apply compiler flags
@@ -252,12 +259,8 @@ target_link_libraries(logos PRIVATE
     SDL3::SDL3
     xxhash
     ${LOGOS_PLATFORM_LIBS}
+    ${URCU_LIBRARIES}
 )
-
-# Add URCU libraries if available
-if(URCU_FOUND)
-    target_link_libraries(logos PRIVATE urcu::urcu urcu::urcu-cds)
-endif()
 
 # Add shader-related libraries
 target_link_libraries(logos PRIVATE
@@ -266,7 +269,7 @@ target_link_libraries(logos PRIVATE
     stdc++
 )
 
-# Compile definitions
+# Compile definitions (add URCU debug defines)
 target_compile_definitions(logos PRIVATE 
     TKLOG_SHOW_LOG_LEVEL
     TKLOG_SHOW_TIME
@@ -286,6 +289,8 @@ target_compile_definitions(logos PRIVATE
     TKLOG_EXIT_ON_EMERGENCY
     URCU_LFHT_SAFETY_ON
     RPMALLOC_FIRST_CLASS_HEAPS=1
+    DEBUG_RCU  # Fine-grained RCU debug
+    DEBUG_YIELD  # Add random delays for testing races
 )
 
 # Set executable name
@@ -294,6 +299,9 @@ if(LOGOS_PLATFORM_WINDOWS)
 else()
     set_target_properties(logos PROPERTIES OUTPUT_NAME "logos")
 endif()
+
+# Make logos depend on URCU build
+add_dependencies(logos urcu)
 
 # Test targets (only if enabled)
 if(BUILD_TESTS)
@@ -324,7 +332,7 @@ if(BUILD_TESTS)
     # Include directories for tests
     target_include_directories(test_tklog PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_include_directories(test_urcu_safety PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${URCU_INCLUDE_DIRS})
-    target_include_directories(test_global_data PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${URCU_INCLUDE_DIRS})
+    target_include_directories(test_global_data PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${URCU_INCLUDE_DIRS} ${verstable_SOURCE_DIR})
 
     # Compile definitions for tests
     target_compile_definitions(test_tklog PRIVATE 
@@ -365,6 +373,8 @@ if(BUILD_TESTS)
         TKLOG_EXIT_ON_CRITICAL
         TKLOG_EXIT_ON_ALERT
         TKLOG_EXIT_ON_EMERGENCY
+        DEBUG_RCU
+        DEBUG_YIELD
     )
     
     target_compile_definitions(test_global_data PRIVATE 
@@ -386,6 +396,8 @@ if(BUILD_TESTS)
         TKLOG_EXIT_ON_CRITICAL
         TKLOG_EXIT_ON_ALERT
         TKLOG_EXIT_ON_EMERGENCY
+        DEBUG_RCU
+        DEBUG_YIELD
     )
 
     # Add sanitizer libraries to tests if enabled (must be first)
@@ -411,10 +423,12 @@ if(BUILD_TESTS)
         target_link_libraries(test_tklog PRIVATE pthread)
     endif()
 
-    if(URCU_FOUND)
-        target_link_libraries(test_urcu_safety PRIVATE urcu::urcu urcu::urcu-cds SDL3::SDL3)
-        target_link_libraries(test_global_data PRIVATE urcu::urcu urcu::urcu-cds SDL3::SDL3 xxhash)
-    endif()
+    target_link_libraries(test_urcu_safety PRIVATE ${URCU_LIBRARIES} SDL3::SDL3)
+    target_link_libraries(test_global_data PRIVATE ${URCU_LIBRARIES} SDL3::SDL3 xxhash)
+
+    # Make tests depend on URCU build
+    add_dependencies(test_urcu_safety urcu)
+    add_dependencies(test_global_data urcu)
 endif()
 
 # Install rules
@@ -447,4 +461,4 @@ else()
     set(CPACK_GENERATOR "DEB;RPM;TGZ")
 endif()
 
-include(CPack) 
+include(CPack)

@@ -41,14 +41,13 @@
 ### `call_rcu(struct rcu_head *head, void (*func)(struct rcu_head *))`
 - **Purpose**: Schedules callback to run after grace period
 - **Prerequisites**: Must be called after `rcu_register_thread()`
-- **Call context**: Can be called inside `rcu_read_lock()`/`rcu_read_unlock()` section
+- **Call context**: Can be called inside `rcu_read_lock()`/`rcu_read_unlock()` section. `rcu_barrier()` should not be called within a callback fucntion given to `call_rcu()`
 - **Notes**: Callback function runs outside of critical sections
 
 ### `rcu_barrier()`
 - **Purpose**: Waits for all pending `call_rcu()` callbacks to complete
 - **Prerequisites**: Must be called after `rcu_register_thread()`
-- **Call context**: **Must NOT be called from within a `rcu_read_lock()`/`rcu_read_unlock()` section** (generates error: "rcu_barrier() called from within RCU read-side critical section.")
-- **Additional restrictions**: Must NOT be called from within a `call_rcu()` callback
+- **Call context**: **Must NOT be called from within a `rcu_read_lock()`/`rcu_read_unlock()` section** (generates error: "rcu_barrier() called from within RCU read-side critical section.").  `rcu_barrier()` should not be called within a callback fucntion given to `call_rcu()`
 - **Notes**: Should be called before program cleanup to ensure all pending memory deallocations complete
 
 ---
