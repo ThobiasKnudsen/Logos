@@ -20,8 +20,8 @@ This reference explains all structures, unions, and functions from `global_data/
 - **Purpose**: Represents a key that can be either a 64-bit number or a string.
 - **Fields**:
   - `uint64_t number`: Used when `key_is_number` is `true`. Must not be 0 (0 is invalid).
-  - `char* string`: Used when `key_is_number` is `false`. Must be null-terminated and allocated via `gd_key_create()` (system copies strings).
-- **Notes**: Always pair with a `bool key_is_number` flag. String keys are limited to 63 characters (MAX_STRING_KEY_LEN - 1). Use helper functions like `gd_key_create()` and `gd_key_free()` for management. Keys are zero-copy in nodes, so manage memory carefully.
+  - `char* string`: Used when `key_is_number` is `false`. Must be NULL
+- **Notes**: Always pair with a `bool key_is_number` flag. String keys are limited to 63 characters (MAX_STRING_KEY_LEN - 1). Use functions like `gd_key_create()` and `gd_key_free()` for ANY access of gd_key, meaning you should never directly access the fields number and string manually, only use functions on the union.
 
 ### `struct gd_base_node`
 - **Purpose**: Base structure for all nodes stored in the hash table. All custom node types must embed this as their first member.

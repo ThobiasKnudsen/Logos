@@ -15,12 +15,10 @@ typedef struct Shader {
     unsigned int spv_code_size;
     unsigned int glsl_code_size;
     const char* entrypoint;
-    union gd_key shaderc_compiler_key;
-    bool shaderc_compiler_key_is_number;
+    struct gd_key_ctx gpu_device_key_ctx;
+    struct gd_key_ctx shaderc_compiler_key_ctx;
     shaderc_shader_kind shader_kind;
     SpvReflectShaderModule reflect_shader_module;
-    union gd_key gpu_device_key;
-    bool gpu_device_key_is_number;
     SDL_GPUShader* p_sdl_shader;
 } Shader;
 bool shader_free(struct gd_base_node* node) {

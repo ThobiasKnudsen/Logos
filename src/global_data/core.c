@@ -13,15 +13,10 @@ static _Atomic uint64_t g_key_counter = 1; // 0 is invalid. 1 is the first valid
 static const union gd_key g_base_type_key = { .string = "base_type" };
 static const bool g_base_type_key_is_number = false;
 
-struct gd_key_match_ctx {
-    union gd_key key;
-    bool key_is_number;
-};
-
 // Unified key matching function that handles both number and string keys
 static int _gd_key_match(struct cds_lfht_node *node, const void *key_ctx) {
     struct gd_base_node *base_node = caa_container_of(node, struct gd_base_node, lfht_node);
-    struct gd_key_match_ctx *ctx = (struct gd_key_match_ctx *)key_ctx;
+    struct gd_key_ctx *ctx = (struct gd_key_ctx *)key_ctx;
     
     // Check if key types match
     if (base_node->key_is_number != ctx->key_is_number) {
@@ -110,44 +105,84 @@ static void _gd_base_type_node_free_callback(struct rcu_head* rcu_head) {
 }
 
 // Default validation function for node type nodes
-static bool _gd_base_type_node_is_valid(struct gd_base_node* node) {
-    if (!node) return false;
+static bool _gd_base_type_node_is_valid(struct gd_base_node* p_base) {
+    if (!p_base) {
+        tklog_debug("p_base is NULL\n");
+        return false;
+    }
     
     // Basic validation - check if it's a node type node
-    struct gd_base_type_node* node_type = caa_container_of(node, struct gd_base_type_node, base);
-    bool (*free_node)(struct gd_base_node*) = rcu_dereference(node_type->fn_free_node);
-    void (*free_callback)(struct rcu_head*) = rcu_dereference(node_type->fn_free_node_callback);
-    bool (*is_valid)(struct gd_base_node*) = rcu_dereference(node_type->fn_is_valid);
-    return (node_type->type_size >= sizeof(struct gd_base_node) && free_node != NULL && free_callback != NULL);
+    struct gd_base_type_node* p_type = caa_container_of(p_base, struct gd_base_type_node, base);
+
+    if (!p_type->fn_free_node) {
+        tklog_debug("p_type->fn_free_node is NULL\n");
+        return false;
+    }
+    if (!p_type->fn_free_node_callback) {
+        tklog_debug("p_type->fn_free_node_callback is NULL\n");
+        return false;
+    }
+    if (!p_type->fn_is_valid) {
+        tklog_debug("p_type->fn_is_valid is NULL\n");
+        return false;
+    }
+    if (!p_type->fn_print_info) {
+        tklog_debug("p_type->fn_print_info is NULL\n");
+        return false;
+    }
+    if (p_type->type_size >= sizeof(struct gd_base_node)) {
+        tklog_debug("node_type->type_size(%d) >= sizeof(struct gd_base_node)(%d)\n", node_type->type_size, sizeof(struct gd_base_node));
+        return false;
+    }
+
+    return true;
+}
+
+static bool _gd_base_type_node_print_info(struct gd_base_node* p_base) {
+
+    if (!gd_base_node_print_info(p_base)) {
+        tklog_error("failed to print base node\n");
+        return false;
+    }
+
+    struct gd_base_type_node* p_type_node = caa_container_of(p_base, struct gd_base_type_node, base);
+
+    tklog_info("gd_base_type_node:\n");
+    tklog_info("    fn_free_node: %p\n", p_type_node->fn_free_node);
+    tklog_info("    fn_free_node_callback: %p\n", p_type_node->fn_free_node_callback);
+    tklog_info("    fn_is_valid: %p\n", p_type_node->fn_is_valid);
+    tklog_info("    fn_print_info: %p\n", p_type_node->fn_print_info);
+    tklog_info("    size of node this is type for in bytes: %d\n", p_type_node->type_size);
+
+    return true;
 }
 
 // Initialize the base_type node
 bool _gd_init_base_type(void) {
     
     // Create proper copies of the string keys for the base_type node
-    union gd_key base_key = gd_key_create(g_base_type_key.number, g_base_type_key.string, g_base_type_key_is_number);
-    union gd_key base_type_key_copy = gd_key_create(g_base_type_key.number, g_base_type_key.string, g_base_type_key_is_number);
+    struct gd_key_ctx base_key_ctx = gd_key_ctx_create(g_base_type_key.number, g_base_type_key.string, g_base_type_key_is_number);
+    struct gd_key_ctx base_type_key_ctx = gd_key_ctx_create(g_base_type_key.number, g_base_type_key.string, g_base_type_key_is_number);
     
     struct gd_base_type_node* base_type = (struct gd_base_type_node*)gd_base_node_create(
-        base_key, g_base_type_key_is_number, 
-        base_type_key_copy, g_base_type_key_is_number, 
-        sizeof(struct gd_base_type_node));
+        base_key_ctx, base_type_key_ctx, sizeof(struct gd_base_type_node));
     if (!base_type) {
         tklog_error("Failed to create base_type node\n");
-        gd_key_free(base_key, g_base_type_key_is_number);
-        gd_key_free(base_type_key_copy, g_base_type_key_is_number);
+        gd_key_ctx_free(&base_key_ctx);
+        gd_key_ctx_free(&base_type_key_ctx);
         return false;
     }
     base_type->fn_free_node = _gd_base_type_node_free;
     base_type->fn_free_node_callback = _gd_base_type_node_free_callback;
     base_type->fn_is_valid = _gd_base_type_node_is_valid;
+    base_type->fn_print_info = _gd_base_type_node_print_info;
     base_type->type_size = sizeof(struct gd_base_type_node);
     
     uint64_t hash = _gd_hash_key(base_type->base.key, base_type->base.key_is_number);
-    struct gd_key_match_ctx ctx = { .key = base_type->base.key, .key_is_number = base_type->base.key_is_number };
+    struct gd_key_ctx ctx = { .key = base_type->base.key, .key_is_number = base_type->base.key_is_number };
 
-    rcu_register_thread();
     rcu_read_lock();
+
     tklog_scope(struct cds_lfht_node* result = cds_lfht_add_unique(g_p_ht, hash, _gd_key_match, &ctx, &base_type->base.lfht_node));
     
     if (result != &base_type->base.lfht_node) {
@@ -159,10 +194,11 @@ bool _gd_init_base_type(void) {
     }
 
     tklog_scope(union gd_key key = gd_key_create(g_base_type_key.number, g_base_type_key.string, g_base_type_key_is_number));
-    tklog_scope(struct gd_base_node* base_node = gd_node_get(key, g_base_type_key_is_number));
+    struct gd_key_ctx key_ctx = { .key = key, .key_is_number = g_base_type_key_is_number};
+    tklog_scope(struct gd_base_node* base_node = gd_node_get(key_ctx));
     tklog_scope(gd_key_free(key, g_base_type_key_is_number));
+
     rcu_read_unlock();
-    rcu_unregister_thread();
     if (!base_node) {
         tklog_error("base_type node not found after initialization\n");
         return false;
@@ -173,11 +209,12 @@ bool _gd_init_base_type(void) {
     return true;
 }
 
-union gd_key gd_base_type_get_key_copy(void) {
-    return gd_key_create(g_base_type_key.number, g_base_type_key.string, g_base_type_key_is_number);
-}
-bool gd_base_type_key_is_number(void) {
-    return g_base_type_key_is_number;
+struct gd_key_ctx gd_base_type_key_ctx_copy(void) {
+    struct gd_key_ctx key_ctx = { 
+        .key = gd_key_create(g_base_type_key.number, g_base_type_key.string, g_base_type_key_is_number), 
+        .key_is_number = g_base_type_key_is_number
+    };
+    return key_ctx;
 }
 
 // Initialize the global data system
@@ -186,9 +223,6 @@ bool gd_init(void) {
         tklog_warning("Global data system already initialized\n");
         return true;
     }
-    
-    // Initialize RCU system first
-    rcu_init();
     
     // Register the node size function with urcu_safe  system
     urcu_safe_set_node_size_function(_gd_get_node_size);
@@ -202,7 +236,8 @@ bool gd_init(void) {
     }
     
     // Initialize the base_type node first
-    if (!_gd_init_base_type()) {
+    tklog_scope(bool base_type_init_result = _gd_init_base_type());
+    if (!base_type_init_result) {
         tklog_error("Failed to initialize base_type node\n");
         tklog_scope(cds_lfht_destroy(g_p_ht, NULL));
         g_p_ht = NULL;
@@ -335,7 +370,8 @@ void gd_cleanup(void) {
             // Remove from hash table
             if (cds_lfht_del(g_p_ht, nodes_to_delete[i]) == 0) {
                 // Get the type node to find the correct free callback
-                struct gd_base_node* type_base = gd_node_get(base_node->type_key, base_node->type_key_is_number);
+                struct gd_key_ctx type_key_ctx = { .key = base_node->type_key, .key_is_number = base_node->type_key_is_number };
+                tklog_scope(struct gd_base_node* type_base = gd_node_get(type_key_ctx));
                 
                 if (type_base) {
                     struct gd_base_type_node* type_node = caa_container_of(type_base, struct gd_base_type_node, base);
@@ -382,13 +418,13 @@ static void _gd_lfht_node_init(struct gd_base_node* node) {
     tklog_scope(cds_lfht_node_init(&node->lfht_node));
 }
 
-struct gd_base_node* gd_base_node_create(union gd_key key, bool key_is_number, union gd_key type_key, bool type_key_is_number, uint32_t size_bytes) 
+struct gd_base_node* gd_base_node_create(struct gd_key_ctx key_ctx, struct gd_key_ctx type_key_ctx, uint32_t size_bytes) 
 {
-    if (key.string == NULL && !key_is_number) {
+    if (key_ctx.key.string == NULL && !key_ctx.key_is_number) {
         tklog_error("key.string is NULL and key_is_number is false\n");
         return NULL;
     }
-    if (type_key.number == 0) {
+    if (key_ctx.key.number == 0) {
         tklog_error("type_key.number is 0\n");
         return NULL;
     }
@@ -404,29 +440,28 @@ struct gd_base_node* gd_base_node_create(union gd_key key, bool key_is_number, u
     tklog_scope(_gd_lfht_node_init(node));
     
     // Handle key assignment - copy string keys, use number keys directly
-    if (key_is_number) {
-        if (key.number == 0) {
+    if (key_ctx.key_is_number) {
+        if (key_ctx.key.number == 0) {
             // id key is number and is 0 that means we must find a valid number key because 0 is invalid. 
             // this is the only function where number key being 0 is allowed.
             node->key.number = atomic_fetch_add(&g_key_counter, 1);
         } else {
-            node->key.number = key.number;
+            node->key.number = key_ctx.key.number;
         }
     } else {
-        // String key is already copied by gd_key_create
-        node->key.string = key.string;
+        node->key.string = key_ctx.key.string;
     }
     
     // Handle type_key assignment - copy string keys, use number keys directly
-    if (type_key_is_number) {
-        node->type_key.number = type_key.number;
+    if (type_key_ctx.key_is_number) {
+        node->type_key.number = type_key_ctx.key.number;
     } else {
         // String type_key is already copied by gd_key_create
-        node->type_key.string = type_key.string;
+        node->type_key.string = type_key_ctx.key.string;
     }
     
-    node->key_is_number = key_is_number;
-    node->type_key_is_number = type_key_is_number;
+    node->key_is_number = key_ctx.key_is_number;
+    node->type_key_is_number = type_key_ctx.key_is_number;
     node->size_bytes = size_bytes;
     return node;
 }
@@ -441,85 +476,202 @@ bool gd_base_node_free(struct gd_base_node* p_base_node) {
     return true;
 }
 
+bool gd_base_node_is_valid(struct gd_base_node* p_base) {
+    
+    if (!p_base) {
+        tklog_error("p_base is NULL\n");
+        return false;
+    }
+
+    struct gd_key_ctx key_ctx = { .key = p_base->key, .key_is_number = p_base->key_is_number};
+    struct gd_key_ctx type_key_ctx = { .key = p_base->type_key, .key_is_number = p_base->type_key_is_number};
+
+    tklog_scope(struct gd_base_node* p_base_copy = gd_node_get(key_ctx));
+    if (p_base != p_base_copy) {
+        tklog_debug("given p_base and p_base gotten from key in given p_base is not the same\n");
+        tklog_info("given p_base:\n");
+        if (!gd_node_print_info(p_base)) {
+            tklog_error("failed to print p_base node\n");
+        }
+        tklog_info("retrieved p_base from given p_base:\n");
+        if (!gd_node_print_info(p_base_copy)) {
+            tklog_error("failed to print p_base node\n");
+        }
+        return false;
+    }
+
+    tklog_scope(struct gd_base_node* p_base_type = gd_node_get(type_key_ctx));
+    if (!p_base_type) {
+        tklog_debug("did not find type for given base node\n");
+        if (!gd_node_print_info(p_base)) {
+            tklog_error("failed to print p_base node\n");
+        }
+        return false;
+    }
+
+    struct gd_base_type_node* p_type = caa_container_of(p_base_type, struct gd_base_type_node, base);
+
+    if (p_base->size_bytes != p_type->type_size) {
+        tklog_debug("p_base->size_bytes(%d) != p_type->type_size(%d)", p_base->size_bytes, p_type->type_size);
+        if (!gd_node_print_info(p_base)) {
+            tklog_error("failed to print p_base node\n");
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool gd_base_node_print_info(struct gd_base_node* p_base) {
+
+    tklog_info("gd_base_node:\n");
+    if (p_base->key_is_number) {
+        tklog_info("    key: %lld\n", p_base->key.number);
+    } else {
+        tklog_info("    key: %s\n", p_base->key.string);
+    }
+
+    if (p_base->type_key_is_number) {
+        tklog_info("    type_key: %lld\n", p_base->type_key.number);
+    } else {
+        tklog_info("    type_key: %s\n", p_base->type_key.string);
+    }
+
+    tklog_info("    size of whole node in bytes: %d\n", p_base->size_bytes);
+
+    return true;
+}
+
 // Getter function for the global hash table (for test access)
 struct cds_lfht* _gd_get_hash_table(void) {
     return g_p_ht;
 }
 
-
-
 // Main node access function - must be used with RCU read lock
-struct gd_base_node* gd_node_get(union gd_key key, bool key_is_number) {
+struct gd_base_node* gd_node_get(struct gd_key_ctx key_ctx) {
     if (!g_p_ht) {
         tklog_error("Global data system not initialized\n");
         return NULL;
     }
-    if (key.number == 0) {
+    if (key_ctx.key.number == 0) {
         tklog_error("number key is 0\n");
         return NULL;
     }
-    if (key_is_number && key.number == 0) {
+    if (key_ctx.key_is_number && key_ctx.key.number == 0) {
         tklog_error("number key is 0\n");
         return NULL;
     }
-    if (key_is_number) {
-        tklog_debug("Looking up number key %llu\n", key.number);
+    if (key_ctx.key_is_number) {
+        tklog_debug("Looking up number key %llu\n", key_ctx.key.number);
     } else {
-        tklog_debug("Looking up string key %s\n", key.string);
+        tklog_debug("Looking up string key %s\n", key_ctx.key.string);
     }
     
     // Calculate hash internally
-    uint64_t hash = _gd_hash_key(key, key_is_number);
-    
-    struct gd_key_match_ctx ctx = { .key = key, .key_is_number = key_is_number };
+    uint64_t hash = _gd_hash_key(key_ctx.key, key_ctx.key_is_number);
     struct cds_lfht_iter iter = {0};
-    
-    cds_lfht_lookup(g_p_ht, hash, _gd_key_match, &ctx, &iter);
+    cds_lfht_lookup(g_p_ht, hash, _gd_key_match, &key_ctx, &iter);
     struct cds_lfht_node* lfht_node = cds_lfht_iter_get_node(&iter);
     
     if (lfht_node) {
         struct gd_base_node* result = caa_container_of(lfht_node, struct gd_base_node, lfht_node);
-        if (key_is_number) {
-            tklog_debug("Found node for number key %llu\n", key.number);
+        if (key_ctx.key_is_number) {
+            tklog_debug("Found node for number key %llu\n", key_ctx.key.number);
         } else {
-            tklog_debug("Found node for string key %s\n", key.string);
+            tklog_debug("Found node for string key %s\n", key_ctx.key.string);
         }
         return result;
     }
     
-    if (key_is_number) {
-        tklog_debug("Node for number key %llu not found\n", key.number);
+    if (key_ctx.key_is_number) {
+        tklog_debug("Node for number key %llu not found\n", key_ctx.key.number);
     } else {
-        tklog_debug("Node for string key %s not found\n", key.string);
+        tklog_debug("Node for string key %s not found\n", key_ctx.key.string);
     }
     return NULL;
+}
+
+bool gd_node_is_valid(struct gd_key_ctx key_ctx) {
+
+    tklog_scope(struct gd_base_node* p_base = gd_node_get(key_ctx));
+    if (!p_base) {
+        tklog_error("getting base node failed\n");
+        return false;
+    }
+
+    struct gd_key_ctx type_key_ctx = { .key = p_base->type_key, .key_is_number = p_base->type_key_is_number };
+    tklog_scope(struct gd_base_node* p_base_type = gd_node_get(type_key_ctx));
+
+    if (!p_base_type) {
+        tklog_notice("tried to get type node but got NULL for node: \n");
+        return false;
+    }
+
+    tklog_scope(struct gd_base_type_node* p_type = caa_container_of(p_base_type, struct gd_base_type_node, base));
+    
+    if (p_base->size_bytes != p_type->type_size) {
+        tklog_notice("p_base->size_bytes(%d) != p_type->type_size(%d)\n", p_base->size_bytes, p_type->type_size);
+        tklog_scope(p_type->fn_print_info(p_base));
+        return false;
+    }
+
+    tklog_scope(bool return_result = p_type->fn_is_valid(p_base));
+
+    return return_result;
+}
+
+bool gd_node_print_info(struct gd_base_node* p_base) {
+
+    if (!p_base) {
+        tklog_error("p_base is NULL");
+        return false;
+    }
+
+    struct gd_key_ctx type_key_ctx = { .key = p_base->type_key, .key_is_number = p_base->type_key_is_number };
+    tklog_scope(struct gd_base_node* p_base_type = gd_node_get(type_key_ctx));
+
+    if (!p_base_type) {
+        if (p_base->type_key_is_number) {
+            tklog_error("could not get type node with key %lld\n", p_base->type_key.number);
+        } else {
+            tklog_error("could not get type node with key %s\n", p_base->type_key.string);
+        }
+        return false;
+    }
+
+    struct gd_base_type_node* p_type = caa_container_of(p_base_type, struct gd_base_type_node, base);
+
+    p_type->fn_print_info(p_base);
+
+    return true;
 }
 
 // Insert a new node into the global data system
 bool gd_node_insert(struct gd_base_node* new_node) {
     if (!new_node) {
         tklog_error("new_node is NULL\n");
+        tklog_scope(gd_node_print_info(new_node));
         return false;
     }
     if (new_node->key.number == 0) {
         tklog_error("key number is 0\n");
+        tklog_scope(gd_node_print_info(new_node));
         return false;
     }
     if (new_node->type_key.number == 0) {
         tklog_error("type_key number is 0\n");
+        tklog_scope(gd_node_print_info(new_node));
         return false;
     }
 
     rcu_read_lock();
 
-    tklog_scope(struct gd_base_node* p_type_node_base = gd_node_get(new_node->type_key, new_node->type_key_is_number));
+    struct gd_key_ctx type_key_ctx = { .key = new_node->type_key, .key_is_number = new_node->type_key_is_number };
+    tklog_scope(struct gd_base_node* p_type_node_base = gd_node_get(type_key_ctx));
 
     if (!p_type_node_base) {
-        if (new_node->type_key_is_number) {
-            tklog_error("didnt find node_type for given type_key: %lld\n", new_node->type_key.number);
-        } else {
-            tklog_error("didnt find node_type for given type_key: %s\n", new_node->type_key.string);
-        }
+        tklog_error("didnt find node_type");
+        tklog_scope(gd_node_print_info(new_node));
         rcu_read_unlock();
         return false;
     }
@@ -527,17 +679,20 @@ bool gd_node_insert(struct gd_base_node* new_node) {
     struct gd_base_type_node* p_type_node = caa_container_of(p_type_node_base, struct gd_base_type_node, base);
     uint32_t type_size = p_type_node->type_size;
 
+    if (type_size != new_node->size_bytes) {
+        tklog_error("type_size(%d) != new_node->size_bytes(%d)", type_size, new_node->size_bytes);
+        tklog_scope(gd_node_print_info(new_node));
+        rcu_read_unlock();
+        return false;
+    }
+
     uint64_t hash = _gd_hash_key(new_node->key, new_node->key_is_number);
-    
-    struct gd_key_match_ctx ctx = { .key = new_node->key, .key_is_number = new_node->key_is_number };
-    tklog_scope(struct cds_lfht_node* result = cds_lfht_add_unique(g_p_ht, hash, _gd_key_match, &ctx, &new_node->lfht_node));
+    struct gd_key_ctx key_ctx = { .key = new_node->key, .key_is_number = new_node->key_is_number };
+    tklog_scope(struct cds_lfht_node* result = cds_lfht_add_unique(g_p_ht, hash, _gd_key_match, &key_ctx, &new_node->lfht_node));
     
     if (result != &new_node->lfht_node) {
-        if (new_node->key_is_number) {
-            tklog_critical("Somehow node with number key %llu already exists\n", new_node->key.number);
-        } else {
-            tklog_critical("Somehow node with string key %s already exists\n", new_node->key.string);
-        }
+        tklog_error("Somehow node already exists\n");
+        tklog_scope(gd_node_print_info(new_node));
         rcu_read_unlock();
         return false;
     }
@@ -554,12 +709,12 @@ bool gd_node_insert(struct gd_base_node* new_node) {
 }
 
 // Remove a node from the global data system
-bool gd_node_remove(union gd_key key, bool key_is_number) {
+bool gd_node_remove(struct gd_key_ctx key_ctx) {
     if (!g_p_ht) {
         tklog_error("Global data system not initialized\n");
         return false;
     }
-    if (key.number == 0) {
+    if (key_ctx.key.number == 0) {
         tklog_error("trying to delete node by NULL/0 key\n");
         return false;
     }
@@ -567,19 +722,20 @@ bool gd_node_remove(union gd_key key, bool key_is_number) {
     rcu_read_lock();
     
     // Find the node to remove
-    tklog_scope(struct gd_base_node* p_base = gd_node_get(key, key_is_number));
+    tklog_scope(struct gd_base_node* p_base = gd_node_get(key_ctx));
     if (!p_base) {
-        if (key_is_number) {
-            tklog_debug("Cannot remove - node with number key %llu not found\n", key.number);
+        if (key_ctx.key_is_number) {
+            tklog_debug("Cannot remove - node with number key %llu not found\n", key_ctx.key.number);
         } else {
-            tklog_debug("Cannot remove - node with string key %s not found\n", key.string);
+            tklog_debug("Cannot remove - node with string key %s not found\n", key_ctx.key.string);
         }
         rcu_read_unlock();
         return false;
     }
 
     // Get the type information
-    tklog_scope(struct gd_base_node* p_type_base_node = gd_node_get(p_base->type_key, p_base->type_key_is_number));
+    struct gd_key_ctx type_key_ctx = { .key = p_base->type_key, .key_is_number = p_base->type_key_is_number };
+    tklog_scope(struct gd_base_node* p_type_base_node = gd_node_get(type_key_ctx));
     if (!p_type_base_node) {
         tklog_error("Cannot find type node for node to be removed\n");
         rcu_read_unlock();
@@ -599,10 +755,10 @@ bool gd_node_remove(union gd_key key, bool key_is_number) {
     
 
     if (cds_lfht_del(g_p_ht, &p_base->lfht_node) != 0) {
-        if (key_is_number) {
-            tklog_error("Failed to delete node with number key %llu from hash table\n", key.number);
+        if (key_ctx.key_is_number) {
+            tklog_error("Failed to delete node with number key %llu from hash table\n", key_ctx.key.number);
         } else {
-            tklog_error("Failed to delete node with string key %s from hash table\n", key.string);
+            tklog_error("Failed to delete node with string key %s from hash table\n", key_ctx.key.string);
         }
         rcu_read_unlock();
         return false;
@@ -639,7 +795,7 @@ bool gd_node_update(struct gd_base_node* new_node) {
     
     // Find the existing node
     uint64_t                hash = _gd_hash_key(new_node->key, new_node->key_is_number);
-    struct gd_key_match_ctx ctx = { .key = new_node->key, .key_is_number = new_node->key_is_number };
+    struct gd_key_ctx ctx = { .key = new_node->key, .key_is_number = new_node->key_is_number };
     struct cds_lfht_iter    old_iter = {0};
     cds_lfht_lookup(g_p_ht, hash, _gd_key_match, &ctx, &old_iter);
     struct cds_lfht_node*   old_lfht_node = cds_lfht_iter_get_node(&old_iter);
@@ -655,7 +811,8 @@ bool gd_node_update(struct gd_base_node* new_node) {
     }
 
     // Get the type information
-    tklog_scope(struct gd_base_node* p_type_base_node = gd_node_get(old_node->type_key, old_node->type_key_is_number));
+    struct gd_key_ctx old_type_key_ctx = { .key = old_node->type_key, .key_is_number = old_node->type_key_is_number };
+    tklog_scope(struct gd_base_node* p_type_base_node = gd_node_get(old_type_key_ctx));
     if (!p_type_base_node) {
         tklog_error("Cannot find type node for existing node\n");
         rcu_read_unlock();
@@ -720,7 +877,8 @@ bool gd_node_upsert(struct gd_base_node* new_node) {
     }
 
     rcu_read_lock();
-    tklog_scope(struct gd_base_node* old_node = gd_node_get(new_node->key, new_node->key_is_number));
+    struct gd_key_ctx key_ctx = { .key = new_node->key, .key_is_number = new_node->key_is_number };
+    tklog_scope(struct gd_base_node* old_node = gd_node_get(key_ctx));
     rcu_read_unlock();
     if (old_node) {
         tklog_scope(bool update_result = gd_node_update(new_node));
@@ -781,22 +939,19 @@ struct gd_base_node* gd_iter_get_node(struct cds_lfht_iter* iter) {
     return NULL;
 }
 
-bool gd_iter_lookup(union gd_key key, bool key_is_number, struct cds_lfht_iter* iter) {
+bool gd_iter_lookup(struct gd_key_ctx key_ctx, struct cds_lfht_iter* iter) {
     if (!g_p_ht || !iter) {
         tklog_error("gd_lookup_iter called with NULL parameters\n");
         return false;
     }
-    if (key.number == 0) {
+    if (key_ctx.key.number == 0) {
         tklog_error("number key is 0\n");
         return false;
     }
     
     // Calculate hash
-    uint64_t hash = _gd_hash_key(key, key_is_number);
-    
-    struct gd_key_match_ctx ctx = { .key = key, .key_is_number = key_is_number };
-    
-    tklog_scope(cds_lfht_lookup(g_p_ht, hash, _gd_key_match, &ctx, iter));
+    uint64_t hash = _gd_hash_key(key_ctx.key, key_ctx.key_is_number);
+    tklog_scope(cds_lfht_lookup(g_p_ht, hash, _gd_key_match, &key_ctx, iter));
     tklog_scope(struct cds_lfht_node* lfht_node = cds_lfht_iter_get_node(iter));
     
     return (lfht_node != NULL);
@@ -820,20 +975,25 @@ unsigned long gd_nodes_count(void) {
     return count;
 }
 
-bool gd_key_free(union gd_key key, bool key_is_number) {
-    if (key.number == 0) {
-        tklog_error("number key is 0\n");
+struct gd_key_ctx gd_key_ctx_create(uint64_t number_key, const char* string_key, bool key_is_number) {
+    struct gd_key_ctx return_value = {0};
+    tklog_scope(return_value.key = gd_key_create(number_key, string_key, key_is_number));
+    return_value.key_is_number = key_is_number;
+    return return_value;
+}
+bool gd_key_ctx_free(struct gd_key_ctx* key_ctx) {
+    if (!key_ctx) {
+        tklog_warning("key_ctx is NULL\n");
         return false;
     }
-    if (key_is_number) {
-        return true;
-    } else {
-        if (key.string) {
-            free(key.string);
-            return true;
-        }
+    tklog_scope(bool free_result = gd_key_free(key_ctx->key, key_ctx->key_is_number));
+    if (!free_result) {
+        tklog_scope("failed to free node\n");
+        return false;
     }
-    return false;
+    key_ctx->key.number = 0;
+    key_ctx->key_is_number = true;
+    return true;
 }
 // Helper functions to create gd_key unions
 // if key is string then the string will be copied
@@ -878,4 +1038,19 @@ union gd_key gd_key_create(uint64_t number_key, const char* string_key, bool key
         key.string = copied_string;
     }
     return key;
+}
+bool gd_key_free(union gd_key key, bool key_is_number) {
+    if (key.number == 0) {
+        tklog_error("number key is 0\n");
+        return false;
+    }
+    if (key_is_number) {
+        return true;
+    } else {
+        if (key.string) {
+            free(key.string);
+            return true;
+        }
+    }
+    return false;
 }

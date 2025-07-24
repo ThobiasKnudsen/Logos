@@ -37,6 +37,11 @@ static bool test_node_is_valid(struct gd_base_node* node) {
         return false;
     }
     
+    if (!gd_base_node_is_valid(node)) {
+        tklog_debug("base node is not valid\n");
+        return false;
+    }
+
     struct test_node* tn = (struct test_node*)node;
     bool valid = tn->value >= 0 && tn->value < 1000000;
     
@@ -51,11 +56,11 @@ static bool test_node_is_valid(struct gd_base_node* node) {
 static bool create_test_node_type(void) {
     tklog_info("Creating test node type...\n");
     
-    union gd_key type_key = gd_key_create(0, "test_node_type", false);
+    struct gd_key_ctx type_key_ctx = gd_key_ctx_create(0, "test_node_type", false);
     
     // Check if already exists
     rcu_read_lock();
-    tklog_scope(struct gd_base_node* existing = gd_node_get(type_key, false));
+    tklog_scope(struct gd_base_node* existing = gd_node_get(type_key_ctx));
     rcu_read_unlock();
     
     if (existing) {
@@ -65,9 +70,7 @@ static bool create_test_node_type(void) {
     
     // Create type node
     tklog_scope(struct gd_base_type_node* type_node = (struct gd_base_type_node*)gd_base_node_create(
-        type_key, false,
-        gd_base_type_get_key_copy(), gd_base_type_key_is_number(),
-        sizeof(struct gd_base_type_node)
+        type_key_ctx, gd_base_type_key_ctx_copy(), sizeof(struct gd_base_type_node)
     ));
     
     if (!type_node) {
@@ -95,8 +98,8 @@ static struct test_node* create_test_node(uint64_t key, int value) {
     tklog_debug("Creating test node with key: %llu, value: %d\n", key, value);
     
     tklog_scope(struct test_node* node = (struct test_node*)gd_base_node_create(
-        gd_key_create(key, NULL, true), true,
-        gd_key_create(0, "test_node_type", false), false,
+        gd_key_ctx_create(key, NULL, true),
+        gd_key_ctx_create(0, "test_node_type", false),
         sizeof(struct test_node)
     ));
     
@@ -131,7 +134,7 @@ static bool test_basic_operations(void) {
     
     // Read it back
     rcu_read_lock();
-    tklog_scope(struct test_node* found = (struct test_node*)gd_node_get(gd_key_create(1001, NULL, true), true));
+    tklog_scope(struct test_node* found = (struct test_node*)gd_node_get(gd_key_ctx_create(1001, NULL, true)));
     if (!found) {
         tklog_error("Failed to retrieve inserted test node\n");
         rcu_read_unlock();
@@ -166,7 +169,7 @@ static bool test_basic_operations(void) {
     
     // Verify update
     rcu_read_lock();
-    tklog_scope(found = (struct test_node*)gd_node_get(gd_key_create(1001, NULL, true), true));
+    tklog_scope(found = (struct test_node*)gd_node_get(gd_key_ctx_create(1001, NULL, true)));
     if (!found) {
         tklog_error("Failed to retrieve updated test node\n");
         rcu_read_unlock();
@@ -181,7 +184,7 @@ static bool test_basic_operations(void) {
     rcu_read_unlock();
     
     // Remove it
-    tklog_scope(bool remove_result = gd_node_remove(gd_key_create(1001, NULL, true), true));
+    tklog_scope(bool remove_result = gd_node_remove(gd_key_ctx_create(1001, NULL, true)));
     if (!remove_result) {
         tklog_error("Failed to remove test node\n");
         return false;
@@ -189,7 +192,7 @@ static bool test_basic_operations(void) {
     
     // Verify removal
     rcu_read_lock();
-    tklog_scope(found = (struct test_node*)gd_node_get(gd_key_create(1001, NULL, true), true));
+    tklog_scope(found = (struct test_node*)gd_node_get(gd_key_ctx_create(1001, NULL, true)));
     if (found != NULL) {
         tklog_error("Node still exists after removal\n");
         rcu_read_unlock();
@@ -207,8 +210,8 @@ static bool test_string_keys(void) {
     
     // Create node with string key
     tklog_scope(struct test_node* node = (struct test_node*)gd_base_node_create(
-        gd_key_create(0, "string_key_test", false), false,
-        gd_key_create(0, "test_node_type", false), false,
+        gd_key_ctx_create(0, "string_key_test", false),
+        gd_key_ctx_create(0, "test_node_type", false),
         sizeof(struct test_node)
     ));
     
@@ -227,8 +230,8 @@ static bool test_string_keys(void) {
     
     // Read it back
     rcu_read_lock();
-    union gd_key string_key_test = gd_key_create(0, "string_key_test", false);
-    tklog_scope(struct test_node* found = (struct test_node*)gd_node_get(string_key_test, false));
+    struct gd_key_ctx string_key_ctx_test = gd_key_ctx_create(0, "string_key_test", false);
+    tklog_scope(struct test_node* found = (struct test_node*)gd_node_get(string_key_ctx_test));
     if (!found) {
         tklog_error("Failed to retrieve string key test node\n");
         rcu_read_unlock();
@@ -243,8 +246,8 @@ static bool test_string_keys(void) {
     rcu_read_unlock();
     
     // Clean up
-    tklog_scope(bool remove_result = gd_node_remove(string_key_test, false));
-    gd_key_free(string_key_test, false);
+    tklog_scope(bool remove_result = gd_node_remove(string_key_ctx_test));
+    gd_key_ctx_free(&string_key_ctx_test);
     if (!remove_result) {
         tklog_error("Failed to remove string key test node\n");
         return false;
@@ -295,7 +298,7 @@ static bool test_iterators(void) {
     
     // Test lookup iterator
     rcu_read_lock();
-    tklog_scope(bool lookup_result = gd_iter_lookup(gd_key_create(2005, NULL, true), true, &iter));
+    tklog_scope(bool lookup_result = gd_iter_lookup(gd_key_ctx_create(2005, NULL, true), &iter));
     if (!lookup_result) {
         tklog_error("Failed to lookup key 2005 with iterator\n");
         rcu_read_unlock();
@@ -318,7 +321,7 @@ static bool test_iterators(void) {
     
     // Clean up
     for (int i = 0; i < count; i++) {
-        tklog_scope(bool remove_result = gd_node_remove(gd_key_create(2000 + i, NULL, true), true));
+        tklog_scope(bool remove_result = gd_node_remove(gd_key_ctx_create(2000 + i, NULL, true)));
         if (!remove_result) {
             tklog_warning("Failed to remove test node %d during cleanup\n", i);
         }
@@ -366,9 +369,7 @@ static void* concurrent_worker(void* arg) {
             }
             case 1: { // Read
                 rcu_read_lock();
-                tklog_scope(struct test_node* found = (struct test_node*)gd_node_get(
-                    gd_key_create(key, NULL, true), true
-                ));
+                tklog_scope(struct test_node* found = (struct test_node*)gd_node_get(gd_key_ctx_create(key, NULL, true)));
                 if (found && test_node_is_valid(&found->base)) {
                     data->successful_ops++;
                 }
@@ -389,7 +390,7 @@ static void* concurrent_worker(void* arg) {
                 break;
             }
             case 3: { // Delete
-                tklog_scope(bool remove_result = gd_node_remove(gd_key_create(key, NULL, true), true));
+                tklog_scope(bool remove_result = gd_node_remove(gd_key_ctx_create(key, NULL, true)));
                 if (remove_result) {
                     data->successful_ops++;
                 }
@@ -462,7 +463,7 @@ static bool test_concurrent_operations(void) {
     
     // Now remove all collected nodes
     for (int i = 0; i < key_count; i++) {
-        tklog_scope(bool remove_result = gd_node_remove(gd_key_create(keys_to_remove[i], NULL, true), true));
+        tklog_scope(bool remove_result = gd_node_remove(gd_key_ctx_create(keys_to_remove[i], NULL, true)));
         if (!remove_result) {
             tklog_debug("Failed to remove cleanup node with key %llu\n", keys_to_remove[i]);
         }
@@ -478,7 +479,7 @@ static bool test_concurrent_operations(void) {
 // Helper function for RCU grace period test deleter thread
 static void* rcu_deleter_thread(void* arg) {
     rcu_register_thread();
-    tklog_scope(bool remove_result = gd_node_remove(gd_key_create(5000, NULL, true), true));
+    tklog_scope(bool remove_result = gd_node_remove(gd_key_ctx_create(5000, NULL, true)));
     if (!remove_result) {
         tklog_error("Failed to remove test node in deleter thread\n");
     }
@@ -505,9 +506,7 @@ static bool test_rcu_grace_periods(void) {
     
     // Hold a reference in read-side critical section
     rcu_read_lock();
-    tklog_scope(struct test_node* ref = (struct test_node*)gd_node_get(
-        gd_key_create(5000, NULL, true), true
-    ));
+    tklog_scope(struct test_node* ref = (struct test_node*)gd_node_get(gd_key_ctx_create(5000, NULL, true)));
     if (!ref) {
         tklog_error("Failed to get test node for RCU grace period test\n");
         rcu_read_unlock();
@@ -545,7 +544,7 @@ static bool test_rcu_grace_periods(void) {
     
     // After unlock and grace period, node should be gone
     rcu_read_lock();
-    tklog_scope(ref = (struct test_node*)gd_node_get(gd_key_create(5000, NULL, true), true));
+    tklog_scope(ref = (struct test_node*)gd_node_get(gd_key_ctx_create(5000, NULL, true)));
     if (ref != NULL) {
         tklog_error("Node still exists after RCU grace period\n");
         rcu_read_unlock();
@@ -588,16 +587,16 @@ static bool test_edge_cases(void) {
     
     // Test non-existent keys
     rcu_read_lock();
-    tklog_scope(struct gd_base_node* num_node = gd_node_get(gd_key_create(99999, NULL, true), true));
+    tklog_scope(struct gd_base_node* num_node = gd_node_get(gd_key_ctx_create(99999, NULL, true)));
     if (num_node != NULL) {
         tklog_error("Should not find non-existent number key\n");
         rcu_read_unlock();
         return false;
     }
     
-    union gd_key non_key = gd_key_create(0, "nonexistent", false);
-    tklog_scope(struct gd_base_node* str_node = gd_node_get(non_key, false));
-    gd_key_free(non_key, false);
+    struct gd_key_ctx non_key = gd_key_ctx_create(0, "nonexistent", false);
+    tklog_scope(struct gd_base_node* str_node = gd_node_get(non_key));
+    gd_key_ctx_free(&non_key);
     if (str_node != NULL) {
         tklog_error("Should not find non-existent string key\n");
         rcu_read_unlock();
@@ -616,7 +615,7 @@ static bool test_edge_cases(void) {
         test_node_free(&node->base);
     }
     
-    tklog_scope(bool remove_result = gd_node_remove(gd_key_create(99999, NULL, true), true));
+    tklog_scope(bool remove_result = gd_node_remove(gd_key_ctx_create(99999, NULL, true)));
     if (remove_result) {
         tklog_error("Remove should fail for non-existent node\n");
         return false;
@@ -624,8 +623,8 @@ static bool test_edge_cases(void) {
     
     // Test invalid type key
     tklog_scope(node = (struct test_node*)gd_base_node_create(
-        gd_key_create(88888, NULL, true), true,
-        gd_key_create(0, "invalid_type", false), false,
+        gd_key_ctx_create(88888, NULL, true),
+        gd_key_ctx_create(0, "invalid_type", false),
         sizeof(struct test_node)
     ));
     if (node) {
@@ -673,7 +672,7 @@ static bool test_node_count(void) {
     
     // Remove some
     for (int i = 0; i < 3; i++) {
-        tklog_scope(bool remove_result = gd_node_remove(gd_key_create(7000 + i, NULL, true), true));
+        tklog_scope(bool remove_result = gd_node_remove(gd_key_ctx_create(7000 + i, NULL, true)));
         if (!remove_result) {
             tklog_error("Failed to remove test node %d for count test\n", i);
             return false;
@@ -690,7 +689,7 @@ static bool test_node_count(void) {
     
     // Clean up
     for (int i = 3; i < to_add; i++) {
-        tklog_scope(bool remove_result = gd_node_remove(gd_key_create(7000 + i, NULL, true), true));
+        tklog_scope(bool remove_result = gd_node_remove(gd_key_ctx_create(7000 + i, NULL, true)));
         if (!remove_result) {
             tklog_warning("Failed to remove test node %d during cleanup\n", i);
         }
@@ -706,6 +705,11 @@ static bool test_node_count(void) {
 // Main test runner
 int main(void) {
     tklog_info("Starting global_data tests...\n");
+
+    rcu_init();
+
+    // Register main thread
+    rcu_register_thread();
     
     // Initialize system
     tklog_scope(bool init_result = gd_init());
@@ -713,9 +717,6 @@ int main(void) {
         tklog_error("Failed to initialize global data system\n");
         return 1;
     }
-    
-    // Register main thread
-    rcu_register_thread();
     
     // Create test node type
     tklog_scope(bool type_result = create_test_node_type());

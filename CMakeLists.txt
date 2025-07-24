@@ -4,12 +4,14 @@ project(LOGOS LANGUAGES C VERSION 1.0.0)
 # Add this after the project declaration to enable offline builds after initial fetch
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL "Prevent FetchContent from updating sources")
 
+# Ensure Git is found to perform direct population at configure time (avoids deferred fetches during build)
+find_package(Git REQUIRED)
+
 # Set C standard
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Build options (SAFE DEFAULTS)
-option(BUILD_TESTS "Build test executables" OFF)
 option(LOGOS_ADDRESS_SANITIZER "Enable Address Sanitizer" OFF)
 option(LOGOS_THREAD_SANITIZER "Enable Thread Sanitizer" OFF)
 
@@ -17,6 +19,10 @@ option(LOGOS_THREAD_SANITIZER "Enable Thread Sanitizer" OFF)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+
+# Enable IPO/LTO for release builds if supported
+include(CheckIPOSupported)
+check_ipo_supported(RESULT ipo_supported LANGUAGES C)
 
 # Platform detection
 if(WIN32)
@@ -35,7 +41,7 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     set(LOGOS_COMPILER_GCC_CLANG ON)
     set(LOGOS_COMMON_FLAGS "-Werror" "-Werror=return-type") # "-Wall" "-Wextra"
     set(LOGOS_DEBUG_FLAGS "-g" "-O1" "-DDEBUG")
-    set(LOGOS_RELEASE_FLAGS "-O3" "-DNDEBUG")
+    set(LOGOS_RELEASE_FLAGS "-Ofast" "-march=native" "-DNDEBUG")
     
     # Sanitizer flags
     if(LOGOS_ADDRESS_SANITIZER)
@@ -94,9 +100,14 @@ if(NOT urcu_POPULATED)
     FetchContent_Populate(urcu)
 endif()
 
+set(URCU_DEBUG_FLAGS "")
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+    set(URCU_DEBUG_FLAGS "--enable-rcu-debug" "--enable-cds-lfht-iter-debug")
+endif()
+
 ExternalProject_Add(urcu
     SOURCE_DIR ${urcu_SOURCE_DIR}
-    CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=${URCU_INSTALL_PREFIX} --enable-rcu-debug --enable-cds-lfht-iter-debug
+    CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=${URCU_INSTALL_PREFIX} ${URCU_DEBUG_FLAGS}
     BUILD_COMMAND make -j${CMAKE_BUILD_PARALLEL_LEVEL}
     INSTALL_COMMAND make install
     LOG_UPDATE ON
@@ -205,7 +216,8 @@ configure_file(
     "${CMAKE_CURRENT_BINARY_DIR}/include/version.h"
 )
 
-# Main executable
+
+# Add executables
 add_executable(logos
     src/main.c
     src/cpi.c
@@ -215,11 +227,63 @@ add_executable(logos
     src/type.c
     src/map.c
     src/global_data/core.c
-    src/global_data/urcu_safe.c
-)
-
-# Add SPIRV-Reflect source
+    src/global_data/urcu_safe.c)
 target_sources(logos PRIVATE ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c)
+
+add_executable(logos_prev
+    src/main_2.c
+    src/cpi.c
+    src/tklog.c
+    src/vec.c
+    src/vec_path.c
+    src/type.c
+    src/map.c
+    src/global_data/core.c
+    src/global_data/urcu_safe.c)
+target_sources(logos_prev PRIVATE ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c)
+
+add_executable(test_tklog 
+    src/tests/test_tklog.c 
+    src/tklog.c)
+add_executable(test_urcu_safety 
+    src/tests/test_urcu_safety.c
+    src/global_data/urcu_safe.c
+    src/tklog.c)
+add_executable(test_global_data 
+    src/tests/test_global_data_2.c 
+    src/global_data/core.c 
+    src/global_data/urcu_safe.c 
+    src/tklog.c)
+add_executable(test_asan_demo 
+    src/tests/test_asan_demo.c)
+
+# Enable LTO for release builds if supported
+if(ipo_supported)
+    set_property(TARGET logos PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET logos_prev PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET test_tklog PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET test_urcu_safety PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET test_global_data PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET test_asan_demo PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+endif()
+
+# Apply compiler flags to
+if(LOGOS_COMPILER_GCC_CLANG)
+    target_compile_options(logos PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
+    target_compile_options(logos_prev PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
+    target_compile_options(test_tklog PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
+    target_compile_options(test_urcu_safety PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
+    target_compile_options(test_global_data PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
+    target_compile_options(test_asan_demo PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS} -Wno-stringop-overflow)
+elseif(LOGOS_COMPILER_MSVC)
+    target_compile_options(logos PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
+    target_compile_options(logos_prev PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
+    target_compile_options(test_tklog PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
+    target_compile_options(test_urcu_safety PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
+    target_compile_options(test_global_data PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
+    target_compile_options(test_asan_demo PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
+endif()
+
 
 # Include directories
 target_include_directories(logos PRIVATE 
@@ -229,47 +293,18 @@ target_include_directories(logos PRIVATE
     ${spirv-reflect_SOURCE_DIR}
     ${URCU_INCLUDE_DIRS}
 )
-
-# Apply compiler flags
-if(LOGOS_COMPILER_GCC_CLANG)
-    target_compile_options(logos PRIVATE
-        ${LOGOS_COMMON_FLAGS}
-        $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}>
-        $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>
-        ${LOGOS_SANITIZER_FLAGS}
-    )
-elseif(LOGOS_COMPILER_MSVC)
-    target_compile_options(logos PRIVATE
-        ${LOGOS_COMMON_FLAGS}
-        $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}>
-        $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>
-    )
-endif()
-
-# Link libraries
-# Add sanitizer libraries FIRST if enabled (must be loaded before other libraries)
-if(LOGOS_ADDRESS_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
-    target_link_libraries(logos PRIVATE asan)
-elseif(LOGOS_THREAD_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
-    target_link_libraries(logos PRIVATE tsan)
-endif()
-
-# Link other libraries
-target_link_libraries(logos PRIVATE
-    SDL3::SDL3
-    xxhash
-    ${LOGOS_PLATFORM_LIBS}
-    ${URCU_LIBRARIES}
+target_include_directories(logos_prev PRIVATE 
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders
+    ${verstable_SOURCE_DIR}
+    ${spirv-reflect_SOURCE_DIR}
+    ${URCU_INCLUDE_DIRS}
 )
+target_include_directories(test_tklog PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(test_urcu_safety PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${URCU_INCLUDE_DIRS})
+target_include_directories(test_global_data PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${URCU_INCLUDE_DIRS} ${verstable_SOURCE_DIR})
 
-# Add shader-related libraries
-target_link_libraries(logos PRIVATE
-    SDL3_shadercross::SDL3_shadercross
-    shaderc_combined
-    stdc++
-)
-
-# Compile definitions (add URCU debug defines)
+# Compile definitions
 target_compile_definitions(logos PRIVATE 
     TKLOG_SHOW_LOG_LEVEL
     TKLOG_SHOW_TIME
@@ -289,150 +324,173 @@ target_compile_definitions(logos PRIVATE
     TKLOG_EXIT_ON_EMERGENCY
     URCU_LFHT_SAFETY_ON
     RPMALLOC_FIRST_CLASS_HEAPS=1
-    DEBUG_RCU  # Fine-grained RCU debug
-    DEBUG_YIELD  # Add random delays for testing races
+    $<$<CONFIG:Debug>:DEBUG_RCU>  # Fine-grained RCU debug
+    $<$<CONFIG:Debug>:DEBUG_YIELD>  # Add random delays for testing races
+)
+target_compile_definitions(logos_prev PRIVATE 
+    TKLOG_SHOW_LOG_LEVEL
+    TKLOG_SHOW_TIME
+    TKLOG_SHOW_THREAD
+    TKLOG_SHOW_PATH
+    TKLOG_SCOPE
+    TKLOG_INFO
+    TKLOG_NOTICE
+    TKLOG_WARNING
+    TKLOG_ERROR
+    TKLOG_CRITICAL
+    TKLOG_ALERT
+    TKLOG_EMERGENCY
+    TKLOG_EXIT_ON_ERROR
+    TKLOG_EXIT_ON_CRITICAL
+    TKLOG_EXIT_ON_ALERT
+    TKLOG_EXIT_ON_EMERGENCY
+    URCU_LFHT_SAFETY_ON
+    RPMALLOC_FIRST_CLASS_HEAPS=1
+    $<$<CONFIG:Debug>:DEBUG_RCU>  # Fine-grained RCU debug
+    $<$<CONFIG:Debug>:DEBUG_YIELD>  # Add random delays for testing races
+)
+target_compile_definitions(test_tklog PRIVATE 
+    TKLOG_SHOW_LOG_LEVEL
+    TKLOG_SHOW_TIME
+    TKLOG_SHOW_THREAD
+    TKLOG_SHOW_PATH
+    TKLOG_SCOPE
+    TKLOG_MEMORY
+    TKLOG_INFO
+    TKLOG_NOTICE
+    TKLOG_WARNING
+    TKLOG_ERROR
+    TKLOG_CRITICAL
+    TKLOG_ALERT
+    TKLOG_EMERGENCY
+    TKLOG_EXIT_ON_ERROR
+    TKLOG_EXIT_ON_CRITICAL
+    TKLOG_EXIT_ON_ALERT
+    TKLOG_EXIT_ON_EMERGENCY
 )
 
-# Set executable name
+target_compile_definitions(test_urcu_safety PRIVATE 
+    URCU_LFHT_SAFETY_ON
+    TKLOG_SHOW_LOG_LEVEL
+    TKLOG_SHOW_TIME
+    TKLOG_SHOW_THREAD
+    TKLOG_SHOW_PATH
+    TKLOG_SCOPE
+    TKLOG_INFO
+    TKLOG_NOTICE
+    TKLOG_WARNING
+    TKLOG_ERROR
+    TKLOG_CRITICAL
+    TKLOG_ALERT
+    TKLOG_EMERGENCY
+    TKLOG_EXIT_ON_ERROR
+    TKLOG_EXIT_ON_CRITICAL
+    TKLOG_EXIT_ON_ALERT
+    TKLOG_EXIT_ON_EMERGENCY
+    $<$<CONFIG:Debug>:DEBUG_RCU>
+    $<$<CONFIG:Debug>:DEBUG_YIELD>
+)
+target_compile_definitions(test_global_data PRIVATE 
+    URCU_LFHT_SAFETY_ON
+    # TKLOG_MEMORY
+    # TKLOG_MEMORY_PRINT_ON_EXIT
+    TKLOG_SHOW_LOG_LEVEL
+    TKLOG_SHOW_TIME
+    TKLOG_SHOW_THREAD
+    TKLOG_SHOW_PATH
+    TKLOG_SCOPE
+    TKLOG_INFO
+    TKLOG_NOTICE
+    TKLOG_WARNING
+    TKLOG_ERROR
+    TKLOG_CRITICAL
+    TKLOG_ALERT
+    TKLOG_EMERGENCY
+    TKLOG_EXIT_ON_CRITICAL
+    TKLOG_EXIT_ON_ALERT
+    TKLOG_EXIT_ON_EMERGENCY
+    $<$<CONFIG:Debug>:DEBUG_RCU>
+    $<$<CONFIG:Debug>:DEBUG_YIELD>
+)
+
+# Add output name
 if(LOGOS_PLATFORM_WINDOWS)
     set_target_properties(logos PROPERTIES OUTPUT_NAME "logos.exe")
+    set_target_properties(logos_prev PROPERTIES OUTPUT_NAME "logos_prev.exe")
+    set_target_properties(test_tklog PROPERTIES OUTPUT_NAME "test_tklog.exe")
+    set_target_properties(test_urcu_safety PROPERTIES OUTPUT_NAME "test_urcu_safety.exe")
+    set_target_properties(test_global_data PROPERTIES OUTPUT_NAME "test_global_data.exe")
+    set_target_properties(test_asan_demo PROPERTIES OUTPUT_NAME "test_asan_demo.exe")
 else()
     set_target_properties(logos PROPERTIES OUTPUT_NAME "logos")
+    set_target_properties(logos_prev PROPERTIES OUTPUT_NAME "logos_prev")
+    set_target_properties(test_tklog PROPERTIES OUTPUT_NAME "test_tklog")
+    set_target_properties(test_urcu_safety PROPERTIES OUTPUT_NAME "test_urcu_safety")
+    set_target_properties(test_global_data PROPERTIES OUTPUT_NAME "test_global_data")
+    set_target_properties(test_asan_demo PROPERTIES OUTPUT_NAME "test_asan_demo")
 endif()
 
-# Make logos depend on URCU build
+# Add sanitizer libraries if enabled (must be first)
+if(LOGOS_ADDRESS_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
+    target_link_libraries(logos PRIVATE asan)
+    target_link_libraries(logos_prev PRIVATE asan)
+    target_link_libraries(test_tklog PRIVATE asan)
+    target_link_libraries(test_urcu_safety PRIVATE asan)
+    target_link_libraries(test_global_data PRIVATE asan)
+    target_link_libraries(test_asan_demo PRIVATE asan)
+elseif(LOGOS_THREAD_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
+    target_link_libraries(logos PRIVATE tsan)
+    target_link_libraries(logos_prev PRIVATE tsan)
+    target_link_libraries(test_tklog PRIVATE tsan)
+    target_link_libraries(test_urcu_safety PRIVATE tsan)
+    target_link_libraries(test_global_data PRIVATE tsan)
+    target_link_libraries(test_asan_demo PRIVATE tsan)
+endif()
+
+# Link libraries (after sanitizer libraries)
+if(WIN32)
+    # On Windows, pthread is provided by MinGW-w64 or similar
+    target_link_libraries(test_tklog PRIVATE)
+else()
+    target_link_libraries(test_tklog PRIVATE pthread)
+endif()
+
+
+# Link other libraries
+target_link_libraries(logos PRIVATE
+    SDL3::SDL3
+    xxhash
+    ${LOGOS_PLATFORM_LIBS}
+    ${URCU_LIBRARIES}
+    SDL3_shadercross::SDL3_shadercross
+    shaderc_combined
+    stdc++
+)
+target_link_libraries(logos_prev PRIVATE
+    SDL3::SDL3
+    xxhash
+    ${LOGOS_PLATFORM_LIBS}
+    ${URCU_LIBRARIES}
+    SDL3_shadercross::SDL3_shadercross
+    shaderc_combined
+    stdc++
+)
+target_link_libraries(test_urcu_safety PRIVATE ${URCU_LIBRARIES} SDL3::SDL3)
+target_link_libraries(test_global_data PRIVATE ${URCU_LIBRARIES} SDL3::SDL3 xxhash)
+
+# Make executables depend on URCU build
 add_dependencies(logos urcu)
-
-# Test targets (only if enabled)
-if(BUILD_TESTS)
-    # Test executables
-    add_executable(test_tklog 
-        src/tests/test_tklog.c 
-        src/tklog.c)
-    add_executable(test_urcu_safety 
-        src/tests/test_urcu_safety.c
-        src/global_data/urcu_safe.c
-        src/tklog.c)
-    add_executable(test_global_data 
-        src/tests/test_global_data_2.c 
-        src/global_data/core.c 
-        src/global_data/urcu_safe.c 
-        src/tklog.c)
-    add_executable(test_asan_demo 
-        src/tests/test_asan_demo.c)
-
-    # Apply compiler flags to tests
-    if(LOGOS_COMPILER_GCC_CLANG)
-        target_compile_options(test_tklog PRIVATE ${LOGOS_COMMON_FLAGS} ${LOGOS_SANITIZER_FLAGS})
-        target_compile_options(test_urcu_safety PRIVATE ${LOGOS_COMMON_FLAGS} ${LOGOS_SANITIZER_FLAGS})
-        target_compile_options(test_global_data PRIVATE ${LOGOS_COMMON_FLAGS} ${LOGOS_SANITIZER_FLAGS})
-        target_compile_options(test_asan_demo PRIVATE ${LOGOS_SANITIZER_FLAGS})
-    endif()
-
-    # Include directories for tests
-    target_include_directories(test_tklog PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-    target_include_directories(test_urcu_safety PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${URCU_INCLUDE_DIRS})
-    target_include_directories(test_global_data PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${URCU_INCLUDE_DIRS} ${verstable_SOURCE_DIR})
-
-    # Compile definitions for tests
-    target_compile_definitions(test_tklog PRIVATE 
-        TKLOG_SHOW_LOG_LEVEL
-        TKLOG_SHOW_TIME
-        TKLOG_SHOW_THREAD
-        TKLOG_SHOW_PATH
-        TKLOG_SCOPE
-        TKLOG_MEMORY
-        TKLOG_INFO
-        TKLOG_NOTICE
-        TKLOG_WARNING
-        TKLOG_ERROR
-        TKLOG_CRITICAL
-        TKLOG_ALERT
-        TKLOG_EMERGENCY
-        TKLOG_EXIT_ON_ERROR
-        TKLOG_EXIT_ON_CRITICAL
-        TKLOG_EXIT_ON_ALERT
-        TKLOG_EXIT_ON_EMERGENCY
-    )
-    
-    target_compile_definitions(test_urcu_safety PRIVATE 
-        URCU_LFHT_SAFETY_ON
-        TKLOG_SHOW_LOG_LEVEL
-        TKLOG_SHOW_TIME
-        TKLOG_SHOW_THREAD
-        TKLOG_SHOW_PATH
-        TKLOG_SCOPE
-        TKLOG_INFO
-        TKLOG_NOTICE
-        TKLOG_WARNING
-        TKLOG_ERROR
-        TKLOG_CRITICAL
-        TKLOG_ALERT
-        TKLOG_EMERGENCY
-        TKLOG_EXIT_ON_ERROR
-        TKLOG_EXIT_ON_CRITICAL
-        TKLOG_EXIT_ON_ALERT
-        TKLOG_EXIT_ON_EMERGENCY
-        DEBUG_RCU
-        DEBUG_YIELD
-    )
-    
-    target_compile_definitions(test_global_data PRIVATE 
-        URCU_LFHT_SAFETY_ON
-        # TKLOG_MEMORY
-        # TKLOG_MEMORY_PRINT_ON_EXIT
-        TKLOG_SHOW_LOG_LEVEL
-        TKLOG_SHOW_TIME
-        TKLOG_SHOW_THREAD
-        TKLOG_SHOW_PATH
-        TKLOG_SCOPE
-        TKLOG_INFO
-        TKLOG_NOTICE
-        TKLOG_WARNING
-        TKLOG_ERROR
-        TKLOG_CRITICAL
-        TKLOG_ALERT
-        TKLOG_EMERGENCY
-        TKLOG_EXIT_ON_CRITICAL
-        TKLOG_EXIT_ON_ALERT
-        TKLOG_EXIT_ON_EMERGENCY
-        DEBUG_RCU
-        DEBUG_YIELD
-    )
-
-    # Add sanitizer libraries to tests if enabled (must be first)
-    if(LOGOS_ADDRESS_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
-        # Link sanitizer libraries first for all test targets
-        target_link_libraries(test_tklog PRIVATE asan)
-        target_link_libraries(test_urcu_safety PRIVATE asan)
-        target_link_libraries(test_global_data PRIVATE asan)
-        target_link_libraries(test_asan_demo PRIVATE asan)
-    elseif(LOGOS_THREAD_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
-        # Link sanitizer libraries first for all test targets
-        target_link_libraries(test_tklog PRIVATE tsan)
-        target_link_libraries(test_urcu_safety PRIVATE tsan)
-        target_link_libraries(test_global_data PRIVATE tsan)
-        target_link_libraries(test_asan_demo PRIVATE tsan)
-    endif()
-
-    # Link libraries for tests (after sanitizer libraries)
-    if(WIN32)
-        # On Windows, pthread is provided by MinGW-w64 or similar
-        target_link_libraries(test_tklog PRIVATE)
-    else()
-        target_link_libraries(test_tklog PRIVATE pthread)
-    endif()
-
-    target_link_libraries(test_urcu_safety PRIVATE ${URCU_LIBRARIES} SDL3::SDL3)
-    target_link_libraries(test_global_data PRIVATE ${URCU_LIBRARIES} SDL3::SDL3 xxhash)
-
-    # Make tests depend on URCU build
-    add_dependencies(test_urcu_safety urcu)
-    add_dependencies(test_global_data urcu)
-endif()
+add_dependencies(logos_prev urcu)
+add_dependencies(test_urcu_safety urcu)
+add_dependencies(test_global_data urcu)
 
 # Install rules
 install(TARGETS logos
+    RUNTIME DESTINATION bin
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib
+)
+install(TARGETS logos_prev
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
