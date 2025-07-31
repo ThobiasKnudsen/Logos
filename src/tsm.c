@@ -734,11 +734,23 @@ bool tsm_base_node_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_base_no
         return false;
     }
 
+    tklog_scope(bool is_deleted = tsm_node_is_deleted(p_base));
+    if (is_deleted) {
+        tklog_debug("node is deleted and therefore not valid\n");
+        return false;
+    }
+
     return true;
 }
 bool tsm_base_node_print_info(struct tsm_base_node* p_base) {
 
     tklog_info("tsm_base_node:\n");
+    tklog_scope(bool is_deleted = tsm_node_is_deleted(p_base));
+    if (is_deleted) {
+        tklog_info("    is deleted\n");
+    } else {
+        tklog_info("    is not deleted\n");
+    }
     if (p_base->key_is_number) {
         tklog_info("    key: %lld\n", p_base->key.number);
     } else {
