@@ -227,7 +227,8 @@ add_executable(logos
     src/type.c
     src/map.c
     src/global_data/core.c
-    src/global_data/urcu_safe.c)
+    src/global_data/urcu_safe.c
+    src/tsm.c)
 target_sources(logos PRIVATE ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c)
 
 add_executable(logos_prev

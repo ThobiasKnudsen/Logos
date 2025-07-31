@@ -9,6 +9,18 @@
 #include <string.h>
 #include <assert.h>
 
+// The World doesn't approve:
+// Being poor
+// Being a virgin
+// Being bad at talking
+// Being soft
+// AGI will be like God
+// AGI will be good
+// AGI will be the end of the World
+// The good will be harnessed
+// The bad will be burned alongside the World
+// God exists
+
 int main(void) {
     
     /*
