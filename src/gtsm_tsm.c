@@ -1,4 +1,5 @@
 #include "tsm.h"
+#include "gtsm.h"
 #include "tklog.h"
 #include "xxhash.h"
 
@@ -6,9 +7,18 @@
 #include <pthread.h>
 #include <unistd.h>
 
+// ==========================================================================================
+// PRIVATE
+// ==========================================================================================
 
 // ==========================================================================================
-// PUBLIC
+// GLOBAL THREAD SAFE MAP
+// ==========================================================================================
+
+static struct tsm_base_node* GTSM = NULL;
+
+// ==========================================================================================
+// THREAD SAFE MAP
 // ==========================================================================================
 
 #define MAX_STRING_KEY_LEN 64
@@ -131,8 +141,6 @@ static bool _tsm_base_type_node_print_info(struct tsm_base_node* p_base) {
 
     return true;
 }
-
-
 static bool _tsm_tsm_type_free(struct tsm_base_node* p_base) {
     if (!p_base) {
         tklog_warning("p_base is NULL\n");
@@ -176,6 +184,7 @@ static bool _tsm_tsm_type_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_
         return false;
     }
 
+    rcu_read_lock();
     struct cds_lfht_iter* p_iter = NULL;
     tklog_scope(tsm_iter_first(p_base, p_iter));
     bool iter_next = p_iter != NULL;
@@ -185,10 +194,12 @@ static bool _tsm_tsm_type_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_
         if (!is_valid) {
             tklog_info("This node is not valid:\n");
             tklog_scope(tsm_node_print_info(p_base, iter_node));
+            rcu_read_unlock();
             return false;
         }
         tklog_scope(iter_next = tsm_iter_next(p_base, p_iter));
     }
+    rcu_read_unlock();
 
     return true;
 }
@@ -214,6 +225,7 @@ static bool _tsm_tsm_type_print_info(struct tsm_base_node* p_base) {
         }
     }
 
+    rcu_read_lock();
     struct cds_lfht_iter* p_iter = NULL;
     tklog_scope(tsm_iter_first(p_base, p_iter));
     bool iter_next = p_iter != NULL;
@@ -222,6 +234,7 @@ static bool _tsm_tsm_type_print_info(struct tsm_base_node* p_base) {
         tklog_scope(tsm_node_print_info(p_base, iter_node));
         tklog_scope(iter_next = tsm_iter_next(p_base, p_iter));
     }
+    rcu_read_unlock();
 
     return true;
 }
@@ -257,17 +270,258 @@ static int _type_tracking_tsm_clean_cmpr(struct _type_tracking_tsm_clean_key a, 
 // ==========================================================================================
 // PUBLIC
 // ==========================================================================================
-union tsm_key tsm_key_create(uint64_t number_key, const char* string_key, bool key_is_number) {
-    if (key_is_number && number_key == 0) {
-        tklog_error("number key is 0\n");
-        return (union tsm_key){ .number = 0 };
+
+// ==========================================================================================
+// GLOBAL THREAD SAFE MAP
+// ==========================================================================================
+
+bool gtsm_init() {
+
+    if (GTSM) {
+        tklog_error("GTSM is already initialized because its not NULL\n");
+        return false;
     }
+
+    // Register the node size function with urcu_safe  system
+    urcu_safe_set_node_size_function(_tsm_get_node_size);
+    // Register the node bounds functions with urcu_safe system
+    urcu_safe_set_node_start_ptr_function(_tsm_get_node_start_ptr);
+
+    tklog_scope(struct tsm_key_ctx unused_tsm_key_ctx = tsm_key_ctx_create(0, NULL, true));
+    tklog_scope(struct tsm_key_ctx unused_type_tsm_key_ctx = tsm_key_ctx_create(0, NULL, true));
+
+    // create the new tsm node
+    tklog_scope(struct tsm_base_node* p_new_gtsm_base = tsm_base_node_create(unused_tsm_key_ctx, unused_type_tsm_key_ctx, sizeof(struct tsm), false, true));
+    if (!p_new_gtsm_base) {
+        tklog_error("Failed to create base node for new TSM\n");
+        return false;
+    }
+    struct tsm* p_new_gtsm = caa_container_of(p_new_gtsm_base, struct tsm, base);
+    p_new_gtsm->p_ht = cds_lfht_new(8,8,0,CDS_LFHT_AUTO_RESIZE,NULL);
+    if (!p_new_gtsm->p_ht) {
+        tklog_error("Failed to create lock free hash table\n");
+        return false;
+    }
+    p_new_gtsm->path_length = 0;
+    p_new_gtsm->path_from_global_to_parent_tsm = NULL;
+
+    // Create proper copies of the string keys for the base_type node
+    tklog_scope(struct tsm_key_ctx base_key_ctx = tsm_key_ctx_copy(base_type_key_ctx));
+    tklog_scope(struct tsm_base_node* base_type_base = tsm_base_type_node_create(
+        base_key_ctx, 
+        sizeof(struct tsm_base_type_node),
+        _tsm_base_type_node_free,
+        _tsm_base_type_node_free_callback,
+        _tsm_base_type_node_is_valid,
+        _tsm_base_type_node_print_info,
+        sizeof(struct tsm_base_type_node)));
+
+    if (!base_type_base) {
+        tklog_error("Failed to create base_type node\n");
+        tsm_key_ctx_free(&base_key_ctx);
+        _tsm_tsm_type_free(p_new_gtsm_base);
+        return false;
+    }
+    
+    uint64_t hash = _tsm_hash_key(base_type_base->key, base_type_base->key_is_number);
+
+    rcu_read_lock();
+
+    tklog_scope(struct cds_lfht_node* result = cds_lfht_add_unique(p_new_gtsm->p_ht, hash, _tsm_key_match, &base_key_ctx, &base_type_base->lfht_node));
+    
+    if (result != &base_type_base->lfht_node) {
+        tklog_error("Failed to insert base_type node into hash table\n");
+        tsm_base_node_free(base_type_base);
+        _tsm_tsm_type_free(p_new_gtsm_base);
+        rcu_read_unlock();
+        return false;
+    }
+
+    tklog_scope(struct tsm_base_node* base_node = tsm_node_get(p_new_gtsm_base, base_type_key_ctx));
+    if (!base_node) {
+        tklog_error("base_type node not found after initialization\n");
+        _tsm_tsm_type_free(p_new_gtsm_base);
+        rcu_read_unlock();
+        return false;
+    }
+    
+    tklog_info("Created base_type node inside new TSM with key: %s, size: %u\n", base_node->key.string, base_node->this_size_bytes);
+
+    // creating tsm_type now, as base_type is created
+    tklog_scope(struct tsm_key_ctx tsm_type_key_ctx_copy = tsm_key_ctx_copy(tsm_type_key_ctx));
+    tklog_scope(struct tsm_base_node* p_new_gtsm_type_base = tsm_base_type_node_create(
+        tsm_type_key_ctx_copy, 
+        sizeof(struct tsm_base_type_node), 
+        _tsm_tsm_type_free,
+        _tsm_tsm_type_free_callback,
+        _tsm_tsm_type_is_valid,
+        _tsm_tsm_type_print_info,
+        sizeof(struct tsm)));
+    if (!p_new_gtsm_type_base) {
+        tklog_error("Failed to create tsm_type\n");
+        tsm_key_ctx_free(&tsm_type_key_ctx_copy);
+        _tsm_tsm_type_free(p_new_gtsm_base);
+        rcu_read_unlock();
+        return false;
+    }
+
+    tklog_scope(bool insert_result = tsm_node_insert(p_new_gtsm_base, p_new_gtsm_type_base));
+    if (!insert_result) {
+        tklog_error("failed to insert tsm_type into new TSM\n");
+        tklog_scope(_tsm_tsm_type_free(p_new_gtsm_base));
+        rcu_read_unlock();
+        return false;
+    }
+
+    rcu_read_unlock();
+    GTSM = p_new_gtsm_base;
+    return true;
+}
+struct tsm_base_node* gtsm_get() {
+    if (!GTSM) {
+        tklog_error("Global thread safe map not initialized\n");
+        return NULL;
+    }
+    return GTSM;
+}
+bool gtsm_clean() {
+    if (!GTSM) {
+        tklog_error("Global thread safe map not initialized\n");
+        return false;
+    }
+    tklog_scope(bool result = tsm_clean(GTSM));
+    return result;
+}
+
+unsigned long gtsm_nodes_count() {
+    if (!GTSM) {
+        tklog_error("Global thread safe map not initialized\n");
+        return 0;
+    }
+    tklog_scope(unsigned long result = tsm_nodes_count(GTSM));
+    return result;
+}
+
+struct tsm_base_node* gtsm_node_get(struct tsm_key_ctx key_ctx) {
+    if (!GTSM) {
+        tklog_error("Global thread safe map not initialized\n");
+        return NULL;
+    }
+    tklog_scope(struct tsm_base_node* result = tsm_node_get(GTSM, key_ctx));
+    return result;
+}
+
+bool gtsm_node_is_valid(struct tsm_key_ctx key_ctx) {
+    if (!GTSM) {
+        tklog_error("Global thread safe map not initialized\n");
+        return false;
+    }
+    tklog_scope(bool result = tsm_node_is_valid(GTSM, key_ctx));
+    return result;
+}
+
+bool gtsm_node_print_info(struct tsm_base_node* p_base) {
+    if (!GTSM) {
+        tklog_error("Global thread safe map not initialized\n");
+        return false;
+    }
+    tklog_scope(bool result = tsm_node_print_info(GTSM, p_base));
+    return result;
+}
+
+bool gtsm_node_insert(struct tsm_base_node* new_node) {
+    if (!GTSM) {
+        tklog_error("Global thread safe map not initialized\n");
+        return false;
+    }
+    tklog_scope(bool result = tsm_node_insert(GTSM, new_node));
+    return result;
+}
+
+bool gtsm_node_free(struct tsm_key_ctx key_ctx) {
+    if (!GTSM) {
+        tklog_error("Global thread safe map not initialized\n");
+        return false;
+    }
+    tklog_scope(bool result = tsm_node_free(GTSM, key_ctx));
+    return result;
+}
+
+bool gtsm_node_update(struct tsm_base_node* new_node) {
+    if (!GTSM) {
+        tklog_error("Global thread safe map not initialized\n");
+        return false;
+    }
+    tklog_scope(bool result = tsm_node_update(GTSM, new_node));
+    return result;
+}
+
+bool gtsm_node_upsert(struct tsm_base_node* new_node) {
+    if (!GTSM) {
+        tklog_error("Global thread safe map not initialized\n");
+        return false;
+    }
+    tklog_scope(bool result = tsm_node_upsert(GTSM, new_node));
+    return result;
+}
+
+bool gtsm_node_is_deleted(struct tsm_base_node* node) {
+    // This doesn't depend on GTSM, but for consistency check
+    if (!GTSM) {
+        tklog_error("Global thread safe map not initialized\n");
+        return true;
+    }
+    tklog_scope(bool result = tsm_node_is_deleted(node));
+    return result;
+}
+
+bool gtsm_iter_first(struct cds_lfht_iter* iter) {
+    if (!GTSM) {
+        tklog_error("Global thread safe map not initialized\n");
+        return false;
+    }
+    tklog_scope(bool result = tsm_iter_first(GTSM, iter));
+    return result;
+}
+
+bool gtsm_iter_next(struct cds_lfht_iter* iter) {
+    if (!GTSM) {
+        tklog_error("Global thread safe map not initialized\n");
+        return false;
+    }
+    tklog_scope(bool result = tsm_iter_next(GTSM, iter));
+    return result;
+}
+
+struct tsm_base_node* gtsm_iter_get_node(struct cds_lfht_iter* iter) {
+    // This doesn't depend on GTSM directly
+    tklog_scope(struct tsm_base_node* result = tsm_iter_get_node(iter));
+    return result;
+}
+
+bool gtsm_iter_lookup(struct tsm_key_ctx key_ctx, struct cds_lfht_iter* iter) {
+    if (!GTSM) {
+        tklog_error("Global thread safe map not initialized\n");
+        return false;
+    }
+    tklog_scope(bool result = tsm_iter_lookup(GTSM, key_ctx, iter));
+    return result;
+}
+
+
+// ==========================================================================================
+// THREAD SAFE MAP
+// ==========================================================================================
+union tsm_key tsm_key_create(uint64_t number_key, const char* string_key, bool key_is_number) {
     if (!key_is_number && string_key == NULL) {
         tklog_error("string key is NULL\n");
         return (union tsm_key){ .string = NULL };
     }
     union tsm_key key;
     if (key_is_number) {
+        if (number_key == 0) {
+            number_key = atomic_fetch_add(&g_key_counter, 1);
+        }
         key.number = number_key;
     } else {
         // Validate and copy string key
@@ -350,23 +604,6 @@ bool tsm_key_ctx_match(struct tsm_key_ctx key_ctx_1, struct tsm_key_ctx key_ctx_
         return strcmp(key_ctx_1.key.string, key_ctx_2.key.string) == 0;
 }
 
-
-bool tsm_init(void) {
-
-    if (atomic_load(&tsm_is_initialized)) {
-        tklog_error("tsm is already initialized\n");
-        return false;
-    }
-    // Register the node size function with urcu_safe  system
-    urcu_safe_set_node_size_function(_tsm_get_node_size);
-    // Register the node bounds functions with urcu_safe system
-    urcu_safe_set_node_start_ptr_function(_tsm_get_node_start_ptr);
-
-    // set initialized to true
-    atomic_store(&tsm_is_initialized, true);
-
-    return true;
-}
 bool tsm_clean(struct tsm_base_node* p_tsm_base) {
 
     if (!p_tsm_base) {
@@ -501,7 +738,8 @@ bool tsm_clean(struct tsm_base_node* p_tsm_base) {
 }
 struct tsm_base_node* tsm_create_and_insert(
     struct tsm_base_node* p_tsm_base,
-    struct tsm_key_ctx tsm_key_ctx) {
+    struct tsm_key_ctx tsm_key_ctx) 
+{
 
     // validating TSM
     if (!p_tsm_base) {
@@ -509,7 +747,7 @@ struct tsm_base_node* tsm_create_and_insert(
         return NULL;
     }
     tklog_scope(bool is_tsm = tsm_node_is_tsm(p_tsm_base));
-    if (!p_tsm_base) {
+    if (!is_tsm) {
         tklog_warning("given tsm is not a TSM\n");
         return NULL;
     }
@@ -518,14 +756,38 @@ struct tsm_base_node* tsm_create_and_insert(
     // check if tsm_type exists in given TSM
     tklog_scope(struct tsm_base_node* p_tsm_type_base = tsm_node_get(p_tsm_base, tsm_type_key_ctx));
     if (!p_tsm_type_base) {
-        tklog_error("did not find tsm_type in given TSM\n");
-        return NULL;
+        // have to insert "tsm_type" type node into parent TSM because it doesnt exist
+        tklog_info("did not find tsm_type in given TSM\n");
+
+        // creating tsm_type now, as base_type is created
+        tklog_scope(struct tsm_key_ctx tsm_type_key_ctx_copy = tsm_key_ctx_copy(tsm_type_key_ctx));
+        tklog_scope(struct tsm_base_node* p_new_tsm_type = tsm_base_type_node_create(
+            tsm_type_key_ctx_copy, 
+            sizeof(struct tsm_base_type_node), 
+            _tsm_tsm_type_free,
+            _tsm_tsm_type_free_callback,
+            _tsm_tsm_type_is_valid,
+            _tsm_tsm_type_print_info,
+            sizeof(struct tsm)));
+        if (!p_new_tsm_type) {
+            tklog_error("Failed to create tsm_type\n");
+            tsm_key_ctx_free(&tsm_type_key_ctx_copy);
+            return false;
+        }
+
+        tklog_scope(bool insert_result = tsm_node_insert(p_tsm_base, p_new_tsm_type));
+        if (!insert_result) {
+            tklog_error("failed to insert tsm_type into parent TSM\n");
+            return false;
+        }
     }
 
     // create the new tsm node
-    tklog_scope(struct tsm_base_node* p_new_tsm_base = tsm_base_node_create(tsm_key_ctx, tsm_type_key_ctx, sizeof(struct tsm), false));
+    tklog_scope(struct tsm_key_ctx tsm_type_key_ctx_copy = tsm_key_ctx_copy(tsm_type_key_ctx));
+    tklog_scope(struct tsm_base_node* p_new_tsm_base = tsm_base_node_create(tsm_key_ctx, tsm_type_key_ctx_copy, sizeof(struct tsm), false, true));
     if (!p_new_tsm_base) {
         tklog_error("Failed to create base node for new TSM\n");
+        tsm_key_ctx_free(&tsm_type_key_ctx_copy);
         return NULL;
     }
     struct tsm* p_new_tsm = caa_container_of(p_new_tsm_base, struct tsm, base);
@@ -588,7 +850,7 @@ struct tsm_base_node* tsm_create_and_insert(
     tklog_info("Created base_type node inside new TSM with key: %s, size: %u\n", base_node->key.string, base_node->this_size_bytes);
 
     // creating tsm_type now, as base_type is created
-    tklog_scope(struct tsm_key_ctx tsm_type_key_ctx_copy = tsm_key_ctx_copy(tsm_type_key_ctx));
+    tklog_scope(tsm_type_key_ctx_copy = tsm_key_ctx_copy(tsm_type_key_ctx));
     tklog_scope(struct tsm_base_node* p_new_tsm_type_base = tsm_base_type_node_create(
         tsm_type_key_ctx_copy, 
         sizeof(struct tsm_base_type_node), 
@@ -619,14 +881,12 @@ struct tsm_base_node* tsm_create_and_insert(
 
     return p_new_tsm_base;
 }
-
-
-struct tsm_base_node* tsm_base_node_create(struct tsm_key_ctx key_ctx, struct tsm_key_ctx type_key_ctx, uint32_t this_size_bytes, bool this_is_type) {
-    if (key_ctx.key.string == NULL && !key_ctx.key_is_number) {
-        tklog_error("key.string is NULL and key_is_number is false\n");
+struct tsm_base_node* tsm_base_node_create(struct tsm_key_ctx key_ctx, struct tsm_key_ctx type_key_ctx, uint32_t this_size_bytes, bool this_is_type, bool this_is_tsm) {
+    if (key_ctx.key.number == 0) {
+        tklog_error("key.number is 0\n");
         return NULL;
     }
-    if (key_ctx.key.number == 0) {
+    if (type_key_ctx.key.number == 0) {
         tklog_error("type_key.number is 0\n");
         return NULL;
     }
@@ -643,14 +903,9 @@ struct tsm_base_node* tsm_base_node_create(struct tsm_key_ctx key_ctx, struct ts
     
     // Handle key assignment - copy string keys, use number keys directly
     if (key_ctx.key_is_number) {
-        if (key_ctx.key.number == 0) {
-            // id key is number and is 0 that means we must find a valid number key because 0 is invalid. 
-            // this is the only function where number key being 0 is allowed.
-            node->key.number = atomic_fetch_add(&g_key_counter, 1);
-        } else {
-            node->key.number = key_ctx.key.number;
-        }
+        node->key.number = key_ctx.key.number;
     } else {
+        // String key is already copied by tsm_key_create
         node->key.string = key_ctx.key.string;
     }
     
@@ -666,6 +921,7 @@ struct tsm_base_node* tsm_base_node_create(struct tsm_key_ctx key_ctx, struct ts
     node->type_key_is_number = type_key_ctx.key_is_number;
     node->this_size_bytes = this_size_bytes;
     node->this_is_type = this_is_type;
+    node->this_is_tsm = this_is_tsm;
     return node;
 }
 bool tsm_base_node_free(struct tsm_base_node* p_base_node) {
@@ -701,7 +957,7 @@ bool tsm_base_node_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_base_no
     if (p_base != p_base_copy) {
         tklog_debug("given p_base and p_base gotten from key in given p_base is not the same\n");
         tklog_info("given p_base:\n");
-        tklog_scope(bool print_result = tsm_node_print_info(p_tsm_base, p_base));
+        tklog_scope(bool print_result = f(p_tsm_base, p_base));
         if (!print_result) {
             tklog_error("failed to print p_base node\n");
         }
@@ -746,6 +1002,7 @@ bool tsm_base_node_print_info(struct tsm_base_node* p_base) {
 
     tklog_info("tsm_base_node:\n");
     tklog_scope(bool is_deleted = tsm_node_is_deleted(p_base));
+
     if (is_deleted) {
         tklog_info("    is deleted\n");
     } else {
@@ -767,8 +1024,6 @@ bool tsm_base_node_print_info(struct tsm_base_node* p_base) {
 
     return true;
 }
-
-
 struct tsm_base_node* tsm_base_type_node_create(
     struct tsm_key_ctx key_ctx, 
     uint32_t this_size_bytes,
@@ -776,7 +1031,8 @@ struct tsm_base_node* tsm_base_type_node_create(
     void (*fn_free_callback)(struct rcu_head*),
     bool (*fn_is_valid)(struct tsm_base_node*, struct tsm_base_node*),
     bool (*fn_print_info)(struct tsm_base_node*),
-    uint32_t type_size_bytes) {
+    uint32_t type_size_bytes) 
+{
     if (this_size_bytes < sizeof(struct tsm_base_type_node)) {
         tklog_error("this_size_bytes(%d) is less than sizeof(tsm_base_type_node)\n", sizeof(struct tsm_base_type_node));
         return NULL;
@@ -805,11 +1061,7 @@ struct tsm_base_node* tsm_base_type_node_create(
     // Create proper copies of the string keys for the base_type node
     tklog_scope(struct tsm_key_ctx base_type_key_ctx_copy = tsm_key_ctx_copy(base_type_key_ctx));
     
-    tklog_scope(struct tsm_base_node* p_base = tsm_base_node_create(
-        key_ctx, 
-        base_type_key_ctx_copy, 
-        sizeof(struct tsm_base_type_node),
-        true));
+    tklog_scope(struct tsm_base_node* p_base = tsm_base_node_create(key_ctx, base_type_key_ctx_copy, sizeof(struct tsm_base_type_node), true, false));
 
     if (!p_base) {
         tklog_error("Failed to create base_type node\n");
@@ -892,6 +1144,13 @@ bool tsm_node_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_key_ctx key_
 
     return return_result;
 }
+bool tsm_node_is_tsm(struct tsm_base_node* p_base) {
+    if (!p_base) {
+        tklog_error("p_base is NULL\n");
+        return false;
+    }
+    return p_base->this_is_tsm;
+}
 bool tsm_node_print_info(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_base) {
 
     tklog_scope(bool is_tsm_result = tsm_node_is_tsm(p_tsm_base));
@@ -911,7 +1170,8 @@ bool tsm_node_print_info(struct tsm_base_node* p_tsm_base, struct tsm_base_node*
     if (!p_base_type) {
         if (p_base->type_key_is_number) {
             tklog_error("could not get type node with key %lld\n", p_base->type_key.number);
-        } else {
+        } 
+        else {
             tklog_error("could not get type node with key %s\n", p_base->type_key.string);
         }
         return false;
@@ -1079,7 +1339,8 @@ bool tsm_node_update(struct tsm_base_node* p_tsm_base, struct tsm_base_node* new
     if (!old_node) {
         if (new_node->key_is_number) {
             tklog_debug("Cannot update - node with number key %llu not found\n", new_node->key.number);
-        } else {
+        } 
+        else {
             tklog_debug("Cannot update - node with string key %s not found\n", new_node->key.string);
         }
         return false;
@@ -1174,7 +1435,6 @@ bool tsm_node_is_deleted(struct tsm_base_node* node) {
     tklog_scope(bool result = cds_lfht_is_node_deleted(&node->lfht_node));
     return result;
 }
-
 
 bool tsm_iter_first(struct tsm_base_node* p_tsm_base, struct cds_lfht_iter* iter) {
     if (!p_tsm_base || !iter) {

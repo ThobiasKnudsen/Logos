@@ -1,5 +1,6 @@
 #define LFHT_SAFE_INTERNAL  /* Prevent macro redefinition in this file */
 #include "global_data/urcu_safe.h"
+#include "tklog.h"
 #include <errno.h>
 #include <unistd.h>
 

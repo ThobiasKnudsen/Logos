@@ -8,7 +8,6 @@
 #include <string.h>
 #include <urcu.h>
 #include <urcu/rculfhash.h>
-#include "tklog.h"
 
 /* -------------------------------------------------------------------------
  * URCU LFHT Safety Wrappers

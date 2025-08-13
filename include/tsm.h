@@ -208,7 +208,7 @@ struct tsm_key_ctx {
  * @note Prerequisites: Same as tsm_key_create().
  * @note Call context: Any context.
  */
-struct tsm_key_ctx       tsm_key_ctx_create(uint64_t number_key, const char* string_key, bool key_is_number);
+struct tsm_key_ctx      tsm_key_ctx_create(uint64_t number_key, const char* string_key, bool key_is_number);
 
 struct tsm_key_ctx      tsm_key_ctx_copy(struct tsm_key_ctx key_ctx);
 
@@ -281,7 +281,8 @@ struct tsm_base_node*   tsm_base_node_create(
                             struct tsm_key_ctx key_ctx, 
                             struct tsm_key_ctx type_key_ctx, 
                             uint32_t this_size_bytes,
-                            bool this_is_type);
+                            bool this_is_type,
+                            bool this_is_tsm);
 
 /**
  * @brief Frees a node (should only be called from RCU callbacks or if node isnt inside a hashtable yet).
@@ -370,22 +371,25 @@ struct tsm {
 /**
  * @brief does only create a struct tsm_base_node. you have to insert it into the tsm with tsm_node_insert
  */
-struct tsm_base_node*   tsm_create(
+struct tsm_base_node*   tsm_create_and_insert(
                             struct tsm_base_node* p_tsm_base,
-                            struct tsm_key_ctx key_ctx, 
-                            struct tsm_key_ctx type_key_ctx, 
-                            uint32_t this_size_bytes);
+                            struct tsm_key_ctx tsm_key_ctx);
 
 /**
  * @breif Frees all nodes
  */
-bool tsm_clean(struct tsm_base_node* p_tsm_base);
+bool                    tsm_clean(struct tsm_base_node* p_tsm_base);
 
 
 /**
  * @brief Simple function for just checking that the base node is a tsm node
  */
 bool                    tsm_node_is_tsm(struct tsm_base_node* p_base);
+
+/**
+ * @breif Get parent tsm of a tsm node
+ */
+struct tsm_base_node*   tsm_get_parent_tsm(struct tsm_base_node* p_tsm_base);
 
 /**
  * @brief Approximate node count.

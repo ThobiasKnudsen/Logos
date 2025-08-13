@@ -3,10 +3,17 @@
 
 #include "tsm.h"
 
+bool  					gtsm_init();
+
+/**
+ * @brief get the Global Thread Safe Map
+ */
+struct tsm_base_node* 	gtsm_get();
+
 /**
  * @breif Frees all nodes
  */
-bool gtsm_clean();
+bool 					gtsm_clean();
 
 /**
  * @brief Approximate node count.
@@ -35,7 +42,7 @@ unsigned long           gtsm_nodes_count();
  * @note Prerequisites: System initialized. All operations require `rcu_register_thread()` per thread (see URCU_LFHT_REFERENCE.md).
  * @note Call context: Must be inside `rcu_read_lock()`/`rcu_read_unlock()` section.
  */
-struct tsm_base_node*    gtsm_node_get(struct tsm_key_ctx key_ctx);
+struct tsm_base_node* 	gtsm_node_get(struct tsm_key_ctx key_ctx);
 
 /**
  * @brief uses the fn_is_valid function which is in the type for every single node

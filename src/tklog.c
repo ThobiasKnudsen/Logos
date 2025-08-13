@@ -95,11 +95,15 @@ static PathStack *pathstack_get(void)
 static void pathstack_push(const char *file, int line)
 {
     PathStack *ps = pathstack_get();
-    if (!ps) return;
+    if (!ps) {
+        return;
+    }
 
     char tmp[128];
     int  n = snprintf(tmp, sizeof tmp, "%s:%d", file, line);
-    if (n < 0) return;
+    if (n < 0) {
+        return;
+    }
 
     /* ensure space: existing + sep + n + NUL */
     size_t need = ps->len + (ps->depth ? 3 : 0) + n + 1;
@@ -111,7 +115,9 @@ static void pathstack_push(const char *file, int line)
 #else
         char *newbuf = (char*)realloc(ps->buf, newcap);
 #endif
-        if (!newbuf) return; /* OOM */
+        if (!newbuf) {
+            return; /* OOM */
+        }
         ps->buf = newbuf;
         ps->cap = newcap;
     }
@@ -124,12 +130,15 @@ static void pathstack_push(const char *file, int line)
     ps->len += n;
     ps->buf[ps->len] = '\0';
     ps->depth += 1;
+    // printf("push %s\n", ps->buf);
 }
 
 static void pathstack_pop(void)
 {
     PathStack *ps = pthread_getspecific(g_tls_path);
-    if (!ps || ps->depth == 0) return;
+    if (!ps || ps->depth == 0) {
+        return;
+    }
 
     /* remove last element */
     char *last_sep = NULL;
@@ -153,6 +162,8 @@ static void pathstack_pop(void)
         ps->len = strlen(ps->buf);
     }
     ps->depth -= 1;
+
+    // printf("pop  %s\n", ps->buf);
 }
 
 /* =============================  MEM TRACK  ============================== */

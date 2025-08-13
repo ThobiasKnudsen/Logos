@@ -228,7 +228,7 @@ add_executable(logos
     src/map.c
     src/global_data/core.c
     src/global_data/urcu_safe.c
-    src/tsm.c)
+    src/gtsm_tsm.c)
 target_sources(logos PRIVATE ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c)
 
 add_executable(logos_prev
@@ -255,6 +255,11 @@ add_executable(test_global_data
     src/global_data/core.c 
     src/global_data/urcu_safe.c 
     src/tklog.c)
+add_executable(test_gtsm_tsm
+    src/tests/test_gtsm_tsm.c 
+    src/gtsm_tsm.c 
+    src/global_data/urcu_safe.c 
+    src/tklog.c)
 add_executable(test_asan_demo 
     src/tests/test_asan_demo.c)
 
@@ -265,6 +270,7 @@ if(ipo_supported)
     set_property(TARGET test_tklog PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET test_urcu_safety PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET test_global_data PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET test_gtsm_tsm PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET test_asan_demo PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 
@@ -275,6 +281,7 @@ if(LOGOS_COMPILER_GCC_CLANG)
     target_compile_options(test_tklog PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
     target_compile_options(test_urcu_safety PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
     target_compile_options(test_global_data PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
+    target_compile_options(test_gtsm_tsm PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
     target_compile_options(test_asan_demo PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS} -Wno-stringop-overflow)
 elseif(LOGOS_COMPILER_MSVC)
     target_compile_options(logos PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
@@ -282,6 +289,7 @@ elseif(LOGOS_COMPILER_MSVC)
     target_compile_options(test_tklog PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
     target_compile_options(test_urcu_safety PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
     target_compile_options(test_global_data PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
+    target_compile_options(test_gtsm_tsm PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
     target_compile_options(test_asan_demo PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
 endif()
 
@@ -304,6 +312,7 @@ target_include_directories(logos_prev PRIVATE
 target_include_directories(test_tklog PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(test_urcu_safety PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${URCU_INCLUDE_DIRS})
 target_include_directories(test_global_data PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${URCU_INCLUDE_DIRS} ${verstable_SOURCE_DIR})
+target_include_directories(test_gtsm_tsm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include ${URCU_INCLUDE_DIRS} ${verstable_SOURCE_DIR})
 
 # Compile definitions
 target_compile_definitions(logos PRIVATE 
@@ -413,6 +422,28 @@ target_compile_definitions(test_global_data PRIVATE
     $<$<CONFIG:Debug>:DEBUG_RCU>
     $<$<CONFIG:Debug>:DEBUG_YIELD>
 )
+target_compile_definitions(test_gtsm_tsm PRIVATE 
+    URCU_LFHT_SAFETY_ON
+    # TKLOG_MEMORY
+    # TKLOG_MEMORY_PRINT_ON_EXIT
+    TKLOG_SHOW_LOG_LEVEL
+    TKLOG_SHOW_TIME
+    TKLOG_SHOW_THREAD
+    TKLOG_SHOW_PATH
+    TKLOG_SCOPE
+    TKLOG_INFO
+    TKLOG_NOTICE
+    TKLOG_WARNING
+    TKLOG_ERROR
+    TKLOG_CRITICAL
+    TKLOG_ALERT
+    TKLOG_EMERGENCY
+    TKLOG_EXIT_ON_CRITICAL
+    TKLOG_EXIT_ON_ALERT
+    TKLOG_EXIT_ON_EMERGENCY
+    $<$<CONFIG:Debug>:DEBUG_RCU>
+    $<$<CONFIG:Debug>:DEBUG_YIELD>
+)
 
 # Add output name
 if(LOGOS_PLATFORM_WINDOWS)
@@ -421,6 +452,7 @@ if(LOGOS_PLATFORM_WINDOWS)
     set_target_properties(test_tklog PROPERTIES OUTPUT_NAME "test_tklog.exe")
     set_target_properties(test_urcu_safety PROPERTIES OUTPUT_NAME "test_urcu_safety.exe")
     set_target_properties(test_global_data PROPERTIES OUTPUT_NAME "test_global_data.exe")
+    set_target_properties(test_gtsm_tsm PROPERTIES OUTPUT_NAME "test_gtsm_tsm.exe")
     set_target_properties(test_asan_demo PROPERTIES OUTPUT_NAME "test_asan_demo.exe")
 else()
     set_target_properties(logos PROPERTIES OUTPUT_NAME "logos")
@@ -428,6 +460,7 @@ else()
     set_target_properties(test_tklog PROPERTIES OUTPUT_NAME "test_tklog")
     set_target_properties(test_urcu_safety PROPERTIES OUTPUT_NAME "test_urcu_safety")
     set_target_properties(test_global_data PROPERTIES OUTPUT_NAME "test_global_data")
+    set_target_properties(test_gtsm_tsm PROPERTIES OUTPUT_NAME "test_gtsm_tsm")
     set_target_properties(test_asan_demo PROPERTIES OUTPUT_NAME "test_asan_demo")
 endif()
 
@@ -438,6 +471,7 @@ if(LOGOS_ADDRESS_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
     target_link_libraries(test_tklog PRIVATE asan)
     target_link_libraries(test_urcu_safety PRIVATE asan)
     target_link_libraries(test_global_data PRIVATE asan)
+    target_link_libraries(test_gtsm_tsm PRIVATE asan)
     target_link_libraries(test_asan_demo PRIVATE asan)
 elseif(LOGOS_THREAD_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
     target_link_libraries(logos PRIVATE tsan)
@@ -445,6 +479,7 @@ elseif(LOGOS_THREAD_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
     target_link_libraries(test_tklog PRIVATE tsan)
     target_link_libraries(test_urcu_safety PRIVATE tsan)
     target_link_libraries(test_global_data PRIVATE tsan)
+    target_link_libraries(test_gtsm_tsm PRIVATE tsan)
     target_link_libraries(test_asan_demo PRIVATE tsan)
 endif()
 
@@ -478,12 +513,14 @@ target_link_libraries(logos_prev PRIVATE
 )
 target_link_libraries(test_urcu_safety PRIVATE ${URCU_LIBRARIES} SDL3::SDL3)
 target_link_libraries(test_global_data PRIVATE ${URCU_LIBRARIES} SDL3::SDL3 xxhash)
+target_link_libraries(test_gtsm_tsm PRIVATE ${URCU_LIBRARIES} SDL3::SDL3 xxhash)
 
 # Make executables depend on URCU build
 add_dependencies(logos urcu)
 add_dependencies(logos_prev urcu)
 add_dependencies(test_urcu_safety urcu)
 add_dependencies(test_global_data urcu)
+add_dependencies(test_gtsm_tsm urcu)
 
 # Install rules
 install(TARGETS logos
