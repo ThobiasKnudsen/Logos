@@ -191,15 +191,25 @@ void _rcu_read_lock_safe(void) {
     }
     
     if (!thread_state.registered) {
-        tklog_scope(result = _rcu_is_test_mode());
-        if (result) {
-            tklog_debug("rcu_read_lock called from unregistered thread %lu (test mode)", 
-                       (unsigned long)current_thread);
-        } else {
-            tklog_critical("rcu_read_lock called from unregistered thread %lu", 
-                          (unsigned long)current_thread);
+        // have to check if this thread is the callback thread, because if it is that means that this urcu safe code has not 
+        // been able to register the thread because the rcu_register_thread is not called explicitly for the callback thread
+        // but is rather called implicitly inside the first call_rcu functions call
+        // getting id of callback thread
+        struct call_rcu_data *default_crdp = get_default_call_rcu_data();
+        pthread_t callback_thread_id = get_call_rcu_thread(default_crdp);
+        if (callback_thread_id == thread_state.thread_id) {
+            thread_state.registered = true;
+        } 
+        // this branch is when current thread id is not the callback thread
+        else {
+            tklog_scope(result = _rcu_is_test_mode());
+            if (result) {
+                tklog_debug("rcu_read_lock called from unregistered thread %lu (test mode)", (unsigned long)current_thread);
+            } else {
+                tklog_critical("rcu_read_lock called from unregistered thread %lu", (unsigned long)current_thread);
+            }
+            return;
         }
-        return;
     }
     
     /* Increment lock count first */
@@ -623,17 +633,6 @@ int _cds_lfht_destroy_safe(struct cds_lfht *ht, pthread_attr_t **attr) {
         return -EINVAL;
     }
     
-    tklog_scope(bool in_read_section = _rcu_is_in_read_section());
-    if (in_read_section) {
-        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
-        if (test_mode_flag) {
-            tklog_debug("cds_lfht_destroy called from within read-side critical section (test mode)");
-        } else {
-            tklog_critical("cds_lfht_destroy called from within read-side critical section");
-        }
-        return -EINVAL;
-    }
-    
     tklog_scope(int destroy_result = cds_lfht_destroy(ht, attr));
     if (destroy_result == 0) {
         tklog_debug("Hash table destroyed successfully");
@@ -875,13 +874,13 @@ void* _rcu_dereference_safe(void* ptr, const char* file, int line) {
     return deref_result;
 }
 
-void _rcu_assign_pointer_safe(void* ptr_addr, void* val, const char* file, int line) {
+void _rcu_assign_pointer_safe(void** ptr_ptr, void* val, const char* file, int line) {
     tklog_scope(_ensure_thread_state_initialized());
     
     /* Skip safety checks if disabled */
     tklog_scope(bool safety_enabled = _rcu_are_safety_checks_enabled());
     if (!safety_enabled) {
-        tklog_scope(rcu_set_pointer_sym(*(void**)ptr_addr, val));
+        tklog_scope(rcu_set_pointer_sym(*(void**)ptr_ptr, val));
         return;
     }
     
@@ -896,16 +895,16 @@ void _rcu_assign_pointer_safe(void* ptr_addr, void* val, const char* file, int l
         return;
     }
     
-    tklog_scope(rcu_set_pointer_sym(*(void**)ptr_addr, val));
+    tklog_scope(rcu_set_pointer_sym(ptr_ptr, val));
 }
 
-void* _rcu_xchg_pointer_safe(void* ptr_addr, void* val, const char* file, int line) {
+void* _rcu_xchg_pointer_safe(void** ptr_ptr, void* val, const char* file, int line) {
     tklog_scope(_ensure_thread_state_initialized());
     
     /* Skip safety checks if disabled */
     tklog_scope(bool safety_enabled = _rcu_are_safety_checks_enabled());
     if (!safety_enabled) {
-        tklog_scope(void* xchg_result = rcu_xchg_pointer_sym(*(void**)ptr_addr, val));
+        tklog_scope(void* xchg_result = rcu_xchg_pointer_sym(ptr_ptr, val));
         return xchg_result;
     }
     
@@ -917,10 +916,16 @@ void* _rcu_xchg_pointer_safe(void* ptr_addr, void* val, const char* file, int li
         } else {
             tklog_critical("rcu_xchg_pointer called inside read lock at %s:%d", file, line);
         }
-        return *(void**)ptr_addr; /* Return original value even in error case */
+        return NULL; /* Return original value even in error case */
     }
     
-    tklog_scope(void* xchg_result = rcu_xchg_pointer_sym(*(void**)ptr_addr, val));
+    tklog_scope(void* xchg_result = rcu_xchg_pointer_sym(ptr_ptr, val));
+    return xchg_result;
+}
+
+void* _rcu_cmpxchg_pointer_safe(void** ptr_ptr, void* old, void* new, const char* file, int line) {
+    tklog_scope(_ensure_thread_state_initialized());
+    tklog_scope(void* xchg_result = rcu_cmpxchg_pointer_sym(ptr_ptr, old, new));
     return xchg_result;
 }
 

@@ -12,31 +12,31 @@
 - **Purpose**: Registers current thread with RCU
 - **Prerequisites**: Must be called after `rcu_init()`
 - **Call context**: Any context  
-- **Notes**: Must be called before any `rcu_read_lock()` in this thread. Each thread needs its own registration
+- **Notes**: Must be called before any `rcu_read_lock()` in this thread. Each thread needs its own registration. In QSBR flavor, threads are online by default after registration, allowing `rcu_quiescent_state()` calls; use `rcu_thread_offline()`/`rcu_thread_online()` for extended quiescence
 
 ### `rcu_unregister_thread()`
 - **Purpose**: Unregisters current thread from RCU
 - **Prerequisites**: Must be called after `rcu_register_thread()`
 - **Call context**: Must NOT be inside `rcu_read_lock()`/`rcu_read_unlock()` section
-- **Notes**: Must be called before thread exits
+- **Notes**: Must be called before thread exits. In QSBR flavor, thread must be online (not in extended quiescent state via `rcu_thread_offline()`) before unregistering
 
 ### `rcu_read_lock()`
 - **Purpose**: Begins RCU read-side critical section
 - **Prerequisites**: Must be called after `rcu_register_thread()`
-- **Call context**: Any context
-- **Notes**: Can be nested (multiple calls in same thread). Must be balanced with `rcu_read_unlock()`
+- **Call context**: Any context; in QSBR flavor, must be while thread is online (not after `rcu_thread_offline()` and before `rcu_thread_online()`)
+- **Notes**: Can be nested (multiple calls in same thread). Must be balanced with `rcu_read_unlock()`. In QSBR flavor, cannot call `rcu_quiescent_state()` or `rcu_thread_offline()` inside critical section
 
 ### `rcu_read_unlock()`
 - **Purpose**: Ends RCU read-side critical section
 - **Prerequisites**: Must match a previous `rcu_read_lock()`
-- **Call context**: Any context
-- **Notes**: Must be called before `rcu_unregister_thread()`
+- **Call context**: Any context; in QSBR flavor, must be while thread is online (not after `rcu_thread_offline()` and before `rcu_thread_online()`)
+- **Notes**: Must be called before `rcu_unregister_thread()`. In QSBR flavor, cannot call `rcu_quiescent_state()` or `rcu_thread_offline()` inside critical section
 
 ### `synchronize_rcu()`
 - **Purpose**: Waits for all current RCU read-side critical sections to complete
 - **Prerequisites**: Must be called after `rcu_register_thread()`
 - **Call context**: Must NOT be inside `rcu_read_lock()`/`rcu_read_unlock()` section
-- **Notes**: Blocks calling thread until grace period completes. Can cause deadlock if called while holding mutexes that are also acquired within RCU read-side critical sections
+- **Notes**: Blocks calling thread until grace period completes. Can cause deadlock if called while holding mutexes that are also acquired within RCU read-side critical sections. In QSBR flavor, grace periods advance only after threads call `rcu_quiescent_state()` or use `rcu_thread_offline()`/`rcu_thread_online()`; failure to report quiescence stalls this function
 
 ### `call_rcu(struct rcu_head *head, void (*func)(struct rcu_head *))`
 - **Purpose**: Schedules callback to run after grace period
@@ -49,6 +49,24 @@
 - **Prerequisites**: Must be called after `rcu_register_thread()`
 - **Call context**: **Must NOT be called from within a `rcu_read_lock()`/`rcu_read_unlock()` section** (generates error: "rcu_barrier() called from within RCU read-side critical section.").  `rcu_barrier()` should not be called within a callback fucntion given to `call_rcu()`
 - **Notes**: Should be called before program cleanup to ensure all pending memory deallocations complete
+
+### `rcu_quiescent_state()`
+- **Purpose**: Reports a momentary quiescent state for the current thread
+- **Prerequisites**: Must be called after `rcu_register_thread()`
+- **Call context**: Must NOT be inside `rcu_read_lock()`/`rcu_read_unlock()` section; must be while thread is online (default state)
+- **Notes**: Essential for QSBR flavor to advance grace periods; must be called periodically outside critical sections. No-op in MB and other flavors. Failure to call regularly can stall `synchronize_rcu()` indefinitely
+
+### `rcu_thread_offline()`
+- **Purpose**: Begins an extended quiescent state for the current thread
+- **Prerequisites**: Must be called after `rcu_register_thread()`
+- **Call context**: Must NOT be inside `rcu_read_lock()`/`rcu_read_unlock()` section
+- **Notes**: For QSBR flavor only (no-op in others); used for long periods of inactivity (e.g., before sleep/I/O). Must pair with `rcu_thread_online()`. Cannot call RCU read functions or report quiescent states while offline. Threads are online by default after registration
+
+### `rcu_thread_online()`
+- **Purpose**: Ends an extended quiescent state for the current thread
+- **Prerequisites**: Must follow a previous `rcu_thread_offline()`
+- **Call context**: Any context
+- **Notes**: For QSBR flavor only (no-op in others); resumes normal RCU operations. Required after `rcu_thread_offline()` to allow read critical sections again. If using in signal handlers, disable signals around calls
 
 ---
 
@@ -76,7 +94,7 @@
 #### `cds_lfht_destroy(struct cds_lfht *ht, pthread_attr_t **attr)`
 - **Purpose**: Destroys hash table and frees memory
 - **Prerequisites**: Must be called after `rcu_register_thread()`
-- **Call context**: Must NOT be inside `rcu_read_lock()`/`rcu_read_unlock()` section
+- **Call context**: Any
 - **Notes**: Should call `rcu_barrier()` before this to ensure no pending callbacks. May use worker threads for cleanup
 
 ### Node Initialization

@@ -22,6 +22,8 @@
 #include <time.h>
 #include <sys/time.h>
 #include <inttypes.h>
+#include <signal.h>
+#include <unistd.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -269,11 +271,16 @@ static bool mem_remove(void *ptr)
 
 /* =============================  API impl  ============================== */
 
-static void tklog_exit_function(void)
-{
-#if defined(TKLOG_MEMORY) && defined(TKLOG_MEMORY_PRINT_ON_EXIT)
-    tklog_memory_dump();
-#endif
+
+static void signal_handler(int sig) {
+    // Minimal message (async-safe: use write() instead of printf)
+    const char *msg = "\nCaught signal (likely segfault), dumping memory before exit:\n";
+    write(STDERR_FILENO, msg, strlen(msg));
+
+    tklog_memory_dump();  // Call dump (note: not fully async-safe, but useful for dev)
+
+    // Re-raise signal or exit to avoid infinite loops
+    _exit(EXIT_FAILURE);
 }
 
 bool tklog_output_stdio(const char *msg, void *user)
@@ -303,7 +310,10 @@ static void tklog_init_once_impl(void)
 #endif
     
 #ifdef TKLOG_MEMORY
-    atexit(tklog_exit_function);
+    signal(SIGSEGV, signal_handler);
+    signal(SIGABRT, signal_handler);
+    signal(SIGINT, signal_handler);
+    atexit(tklog_memory_dump);
 #endif
 }
 
@@ -335,7 +345,7 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
     /* thread */
     if (flags & TKLOG_INIT_F_THREAD) {
         pthread_t tid = pthread_self();
-        n = snprintf(p, sizeof msgbuf - (p - msgbuf), "Thread %lu | ", (unsigned long)tid);
+        n = snprintf(p, sizeof msgbuf - (p - msgbuf), "tid 0x%lX | ", (unsigned long)tid);
         p += n;
     }
 
@@ -374,8 +384,8 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
 
 /* -------------------------  Scope tracing  ----------------------------- */
 #ifdef TKLOG_SCOPE
-    void _tklog_scope_start(int line, const char *file) { pathstack_push(file, line); }
-    void _tklog_scope_end  (void)                       { pathstack_pop();            }
+    void _tklog_scope_start(int line, const char *file) { tklog_init_once(); pathstack_push(file, line); }
+    void _tklog_scope_end  (void)                       { pathstack_pop(); }
 #endif
 
 /* -------------------------  Memory API  -------------------------------- */
@@ -433,7 +443,7 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
         for (MemEntry *e = g_mem_head; e; e = e->next) {
             char linebuf[512]; // Increased buffer size for longer paths
             uint64_t t_ms = e->t_ms - g_start_ms;
-            snprintf(linebuf, sizeof linebuf, "\t%" PRIu64 "ms | Thread %lu | address %p | %zu bytes | at %s\n",
+            snprintf(linebuf, sizeof linebuf, "\t%" PRIu64 "ms | tid 0x%lX | address %p | %zu bytes | at %s\n",
                           t_ms, (unsigned long)e->tid, e->ptr, e->size, e->path);
             pthread_mutex_lock(&g_tklog_mutex);
             TKLOG_OUTPUT_FN(linebuf, TKLOG_OUTPUT_USERPTR);

@@ -57,8 +57,9 @@ void _call_rcu_safe(struct rcu_head *head, void (*func)(struct rcu_head *));
 
 /* RCU pointer safety wrapper functions */
 void* _rcu_dereference_safe(void* ptr, const char* file, int line);
-void _rcu_assign_pointer_safe(void* ptr_addr, void* val, const char* file, int line);
-void* _rcu_xchg_pointer_safe(void* ptr_addr, void* val, const char* file, int line);
+void _rcu_assign_pointer_safe(void** ptr_addr, void* val, const char* file, int line);
+void* _rcu_xchg_pointer_safe(void** ptr_addr, void* val, const char* file, int line);
+void* _rcu_cmpxchg_pointer_safe(void** ptr_addr, void* old, void* new, const char* file, int line);
 
 /* -------------------------------------------------------------------------
  * Hash Table Safety Wrappers
@@ -204,6 +205,10 @@ bool _validate_gd_node_field(void* field_ptr, void* node_ptr, const char* field_
 #undef rcu_xchg_pointer
 #endif
 
+#ifdef rcu_cmpxchg_pointer
+#undef rcu_cmpxchg_pointer
+#endif
+
 #ifdef rcu_barrier
 #undef rcu_barrier
 #endif
@@ -231,8 +236,9 @@ bool _validate_gd_node_field(void* field_ptr, void* node_ptr, const char* field_
     tklog_scope(void* _temp = _rcu_dereference_safe((void*)(ptr), __FILE__, __LINE__)); \
     (typeof((ptr) + 0))_temp; \
 })
-#define rcu_assign_pointer(ptr, val) tklog_scope(_rcu_assign_pointer_safe((void*)&(ptr), (void*)(val), __FILE__, __LINE__))
-#define rcu_xchg_pointer(ptr, val) tklog_scope((typeof(val))_rcu_xchg_pointer_safe((void*)&(ptr), (void*)(val), __FILE__, __LINE__))
+#define rcu_assign_pointer(ptr_ptr, val) _rcu_assign_pointer_safe((void**)&(ptr_ptr), (void*)(val), __FILE__, __LINE__)
+#define rcu_xchg_pointer(ptr_ptr, val) (typeof(val))_rcu_xchg_pointer_safe((void**)ptr_ptr, (void*)(val), __FILE__, __LINE__)
+#define rcu_cmpxchg_pointer(ptr_ptr, old, new) (typeof(new))_rcu_cmpxchg_pointer_safe((void**)ptr_ptr, (void*)(old), (void*)(new), __FILE__, __LINE__)
 
 /* Hash table functions with exact API compatibility */
 /* Note: We don't override cds_lfht_new to avoid initialization issues */
