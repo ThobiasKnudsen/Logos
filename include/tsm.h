@@ -313,7 +313,7 @@ struct tsm_base_node* tsm_base_type_node_create(
     bool (*fn_print)(struct tsm_base_node*),
     uint32_t type_size_bytes);
 // ================================
-// tsm
+// tsm Thread Safe Map
 // ================================
 /**
  * @struct tsm
@@ -538,4 +538,49 @@ struct tsm_base_node* tsm_iter_get_node(struct cds_lfht_iter* iter);
  * @note Call context: Inside `rcu_read_lock()`/`rcu_read_unlock()`.
  */
 bool tsm_iter_lookup(struct tsm_base_node* p_tsm_base, struct tsm_key key, struct cds_lfht_iter* iter);
+// ================================
+// gtsm Global Thread Safe Map
+// ================================
+/**
+ * @brief Initializes the Global Thread Safe Map.
+ *
+ * @return true on success, false if already initialized or error.
+ *
+ * @note Creates root "base_type" and "tsm_type" if needed, sets up global GTSM.
+ * @note Prerequisites: rcu_init() called.
+ * @note Call context: Any context.
+ */
+bool gtsm_init();
+/**
+ * @brief Gets the Global Thread Safe Map.
+ *
+ * @return Pointer to GTSM base node.
+ *
+ * @note Uses rcu_dereference for safe access.
+ * @note Prerequisites: Initialized via gtsm_init().
+ * @note Call context: Any context.
+ * @note whats unique with this node is that it does not exist inside any TSM since its the first TSM
+ */
+struct tsm_base_node* gtsm_get();
+/**
+ * @brief Frees all nodes in GTSM and frees GTSM itself.
+ *
+ * @return true on success false on failure.
+ *
+ * @note Layered cleanup of nodes, then schedules GTSM free via call_rcu.
+ * @note Prerequisites: No more insertions, rcu_barrier() for pending callbacks.
+ * @warning this function should automatically make more insertions impossible by setting GTSM to NULL and call rcu_barrier but that is not implemented yet
+ * @note Call context: Must NOT be inside `rcu_read_lock()`/`rcu_read_unlock()`.
+ */
+bool gtsm_free();
+/**
+ * @brief Prints information about GTSM and all nodes.
+ *
+ * @return true on success false on failure.
+ *
+ * @note Iterates and prints each node inside GTSM using tsm_node_print.
+ * @note Prerequisites: Initialized.
+ * @note Call context: Inside `rcu_read_lock()`/`rcu_read_unlock()`.
+ */
+bool gtsm_print();
 #endif // THREAD_SAFE_MAP_H
