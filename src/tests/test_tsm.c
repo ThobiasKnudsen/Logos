@@ -105,7 +105,6 @@ struct simple_int_node {
     int value;
 };
 static void simple_int_free_callback(struct rcu_head* p_rcu_head) {
-    tklog_warning("simple_int_free_callback\n");
     struct tsm_base_node* p_base = caa_container_of(p_rcu_head, struct tsm_base_node, rcu_head);
     tklog_scope(bool free_result = tsm_base_node_free(p_base));
     if (!free_result) {
@@ -218,33 +217,19 @@ bool create_custom_types(struct tsm_base_node* p_tsm_base) {
     return true;
 }
 static const unsigned long g_types_count = 4;
-static bool filter_content(struct tsm_base_node* node) {
-    return !node->this_is_type;
-}
-static bool filter_tsm(struct tsm_base_node* node) {
-    return node->this_is_tsm;
-}
-static bool pick_random_key(struct tsm_key* out_key, bool (*filter)(struct tsm_base_node*)) {
+static bool pick_random_key(struct tsm_key* out_key) {
     unsigned long count = tsm_nodes_count(gtsm_get());
-    if (count == 0) return false;
-    int attempts = 0;
-    while (attempts < 20) {
-        unsigned long r = (unsigned long)rand() % count;
-        struct cds_lfht_iter iter;
-        bool found = tsm_iter_first(gtsm_get(), &iter);
-        if (found) {
-            for (unsigned long i = 0; i < r; i++) {
-                if (!tsm_iter_next(gtsm_get(), &iter)) {
-                    break;
-                }
-            }
-            struct tsm_base_node* node = tsm_iter_get_node(&iter);
-            if (node && filter(node)) {
-                *out_key = tsm_key_copy((struct tsm_key){.key_union = node->key_union, .key_is_number = node->key_is_number});
-                return true;
-            }
+    if (count == 0) {
+        return false;
+    }
+    struct cds_lfht_iter iter;
+    bool found = tsm_iter_first(gtsm_get(), &iter);
+    if (found) {
+        struct tsm_base_node* node = tsm_iter_get_node(&iter);
+        if (node) {
+            *out_key = tsm_key_copy((struct tsm_key){.key_union = node->key_union, .key_is_number = node->key_is_number});
+            return true;
         }
-        attempts++;
     }
     return false;
 }
@@ -294,10 +279,10 @@ void* stress_thread(void* arg) {
             if (success) {
                 tklog_scope(tsm_key_free(&k));
             }
-        } else if (r < 50) { // Get
+        } else if (r < 60) { // Get
             rcu_read_lock();
             struct tsm_key k;
-            if (!pick_random_key(&k, filter_content)) {
+            if (!pick_random_key(&k)) {
                 rcu_read_unlock();
                 continue;
             }
@@ -315,7 +300,7 @@ void* stress_thread(void* arg) {
         } else if (r < 60) { // Validate
             rcu_read_lock();
             struct tsm_key k;
-            if (!pick_random_key(&k, filter_content)) {
+            if (!pick_random_key(&k)) {
                 rcu_read_unlock();
                 continue;
             }
@@ -323,13 +308,13 @@ void* stress_thread(void* arg) {
             tklog_scope(bool valid = tsm_node_is_valid(gtsm_get(), p_base_k));
             rcu_read_unlock();
             if (!valid) {
-                tklog_notice("Node validation failed\n");
+                tklog_warning("Node validation failed\n");
             }
             tklog_scope(tsm_key_free(&k));
         } else if (r < 70) { // Update
             rcu_read_lock();
             struct tsm_key uk;
-            if (!pick_random_key(&uk, filter_content)) {
+            if (!pick_random_key(&uk)) {
                 rcu_read_unlock();
                 continue;
             }
@@ -403,7 +388,7 @@ void* stress_thread(void* arg) {
         } else if (r < 80) { // Free
             rcu_read_lock();
             struct tsm_key fk;
-            if (!pick_random_key(&fk, filter_content)) {
+            if (!pick_random_key(&fk)) {
                 rcu_read_unlock();
                 continue;
             }
@@ -452,7 +437,7 @@ void* stress_thread(void* arg) {
             int type = rand() % 3;
             struct tsm_key uk;
             if (!is_new) {
-                if (!pick_random_key(&uk, filter_content)) {
+                if (!pick_random_key(&uk)) {
                     rcu_read_unlock();
                     continue;
                 }
@@ -464,7 +449,7 @@ void* stress_thread(void* arg) {
             bool success = false;
             tklog_scope(struct tsm_base_node* p_gtsm = gtsm_get());
             if (!is_new) {
-                struct tsm_base_node* existing = tsm_node_get(gtsm_get(), uk);
+                struct tsm_base_node* existing = tsm_node_get(p_gtsm, uk);
                 if (!existing) {
                     rcu_read_unlock();
                     tsm_key_free(&uk);
@@ -550,11 +535,15 @@ void* stress_thread(void* arg) {
         } else { // TSM-specific tests
             rcu_read_lock();
             struct tsm_key tk;
-            if (!pick_random_key(&tk, filter_tsm)) {
+            if (!pick_random_key(&tk)) {
                 rcu_read_unlock();
                 continue;
             }
             tklog_scope(struct tsm_base_node* p_tsm = tsm_node_get(gtsm_get(), tk));
+            if (!tsm_node_is_tsm(p_tsm)) {
+                rcu_read_unlock();
+                continue;
+            }
             if (p_tsm) {
                 tklog_scope(tsm_node_is_tsm(p_tsm));
                 tklog_scope(tsm_node_is_type(p_tsm));
@@ -640,6 +629,7 @@ void* stress_thread(void* arg) {
                     rcu_read_lock();
                     tklog_scope(sub_p = tsm_node_get(p_tsm, sub_k));
                     if (sub_p) {
+                        tsm_node_print(p_tsm, sub_p);
                         tklog_error("node not deleted after free\n");
                     }
                     tklog_scope(tsm_key_free(&sub_k));
@@ -657,7 +647,7 @@ void* stress_thread(void* arg) {
 }
 void stress_test() {
     tklog_info("Starting incremental stress test\n");
-    for (int nthreads = 1; nthreads <= 1; nthreads *= 2) {
+    for (int nthreads = 1; nthreads <= 32; nthreads *= 2) {
         tklog_info("Stress testing with %d threads\n", nthreads);
         pthread_t* threads = malloc(nthreads * sizeof(pthread_t));
         if (!threads) {

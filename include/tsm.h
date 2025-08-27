@@ -340,7 +340,7 @@ struct tsm {
  *
  * @note Creates underlying LFHT, sets up path to parent.
  * @note Prerequisites: Parent TSM valid, "tsm_type" exists or is created.
- * @note Call context: Any context (acquires RCU read lock internally).
+ * @note Call context: must be called within rcu_read section
  */
 struct tsm_base_node* tsm_create_and_insert(
     struct tsm_base_node* p_tsm_base,
@@ -389,6 +389,10 @@ bool tsm_node_is_type(struct tsm_base_node* p_base);
  * @note Call context: Inside `rcu_read_lock()`/`rcu_read_unlock()`.
  */
 unsigned long tsm_nodes_count(struct tsm_base_node* p_tsm_base);
+/**
+ * 
+ */
+bool tsm_print(struct tsm_base_node* p_tsm_base);
 // ================================
 // generic node functions
 // ================================
@@ -442,7 +446,7 @@ bool tsm_node_print(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_ba
  * @note Checks that the node's size matches the type's type_size_bytes.
  * @note Logs debug on success, critical if duplicate.
  * @note Prerequisites: Node created via `tsm_base_node_create()`. Type must exist.
- * @note Call context: Any context (acquires RCU read lock internally).
+ * @note Call context: must be called within rcu_read section
  * @note takes ownership of all data in new_node so should not free stuff in new_node if this is successfull
  */
 bool tsm_node_insert(struct tsm_base_node* p_tsm_base, struct tsm_base_node* new_node);
@@ -455,7 +459,7 @@ bool tsm_node_insert(struct tsm_base_node* p_tsm_base, struct tsm_base_node* new
  *
  * @note May require multiple calls with rcu_barrier() in between for dependent nodes.
  * @note Prerequisites: Node exists, no dependencies when returning 1.
- * @note Call context: Any context.
+ * @note Call context: must NOT be called within rcu_read section
  */
 int tsm_node_try_free_callback(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_base);
 /**
@@ -468,7 +472,7 @@ int tsm_node_try_free_callback(struct tsm_base_node* p_tsm_base, struct tsm_base
  * @note Uses `cds_lfht_replace()` and `call_rcu()` for old node (see URCU_LFHT_REFERENCE.md). Checks that the new node's size matches the type's type_size_bytes.
  * Logs debug on success/failure.
  * @note Prerequisites: Existing node with matching key.
- * @note Call context: Any context (acquires RCU read lock internally).
+ * @note Call context: must be called within rcu_read section
  * @note takes ownership of all data in new_node so should not free stuff in new_node if this is successful
  */
 bool tsm_node_update(struct tsm_base_node* p_tsm_base, struct tsm_base_node* new_node);
@@ -481,7 +485,7 @@ bool tsm_node_update(struct tsm_base_node* p_tsm_base, struct tsm_base_node* new
  *
  * @note Combines `tsm_node_get()` with insert or update.
  * @note Prerequisites: Same as insert/update.
- * @note Call context: Any context (acquires RCU read lock internally).
+ * @note Call context: must be called within rcu_read section
  * @note takes ownership of all data in new_node so should not free stuff in new_node if this is successful
  */
 bool tsm_node_upsert(struct tsm_base_node* p_tsm_base, struct tsm_base_node* new_node);

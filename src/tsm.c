@@ -16,6 +16,7 @@
 // ==========================================================================================
 
 #define MAX_STRING_KEY_LEN 64
+// #define TSM_DEBUG
 static _Atomic uint64_t g_key_counter = 1; // 0 is invalid. 1 is the first valid key
 static struct tsm_base_node* GTSM = NULL;
 static const struct tsm_key g_gtsm_key = { .key_union.string = "gtsm", .key_is_number = false };
@@ -146,29 +147,6 @@ static bool _tsm_base_type_node_print(struct tsm_base_node* p_base) {
 }
 
 // TSM Type
-
-// Hash function for type tracking
-static uint64_t _type_tracking_tsm_clean_hash(struct tsm_key tk) {
-    return _tsm_hash_key(tk.key_union, tk.key_is_number);
-}
-// Comparison function for type tracking
-static int _type_tracking_tsm_clean_cmpr(struct tsm_key a, struct tsm_key b) {
-    if (a.key_is_number != b.key_is_number) {
-        return a.key_is_number ? 1 : -1;
-    }
-    
-    if (a.key_is_number) {
-        return (a.key_union.number > b.key_union.number) - (a.key_union.number < b.key_union.number);
-    } else {
-        return strcmp(a.key_union.string, b.key_union.string);
-    }
-}
-#define NAME _type_tracking_tsm_clean_set
-#define KEY_TY struct tsm_key
-#define HASH_FN _type_tracking_tsm_clean_hash
-#define CMPR_FN _type_tracking_tsm_clean_cmpr
-#include "verstable.h"
-
 static void _tsm_tsm_type_free_callback(struct rcu_head* rcu_head) {
     if (!rcu_head) {
         tklog_error("rcu_head is NULL\n");
@@ -188,133 +166,117 @@ static void _tsm_tsm_type_free_callback(struct rcu_head* rcu_head) {
     tsm_key_union_free(p_base->key_union, p_base->key_is_number);
     tsm_key_union_free(p_base->type_key_union, p_base->type_key_is_number);
     struct tsm* p_tsm = caa_container_of(p_base, struct tsm, base);
-    cds_lfht_destroy(p_tsm->p_ht, NULL);
-    for (unsigned int i = 0; i < p_tsm->path_length; ++i) {
-        tsm_key_free(&p_tsm->path_from_global_to_parent_tsm[i]);
+    if (p_tsm->path_length == 0 ^ p_tsm->path_from_global_to_parent_tsm == 0) {
+        tklog_error("p_tsm->path_length(%d) == 0 ^ p_tsm->path_from_global_to_parent_tsm(%p) == 0", p_tsm->path_length, p_tsm->path_from_global_to_parent_tsm);
+    } else {
+        for (unsigned int i = 0; i < p_tsm->path_length; ++i) {
+            tsm_key_free(&p_tsm->path_from_global_to_parent_tsm[i]);
+        }
+        if (p_tsm->path_from_global_to_parent_tsm) {
+            free(p_tsm->path_from_global_to_parent_tsm);
+        }
     }
-    free(p_tsm->path_from_global_to_parent_tsm);
+    cds_lfht_destroy(p_tsm->p_ht, NULL);
     free(p_base);
 }
+// this function must be called within a read section
 static int _tsm_tsm_type_free_children(struct tsm_base_node* p_tsm_base) {
-    // Create a Verstable set to track which nodes are used as types
-    _type_tracking_tsm_clean_set used_as_type_set;
-    _type_tracking_tsm_clean_set_init(&used_as_type_set);
-    
-    // Iteratively remove nodes layer by layer
-    const int batch_size = 1000;
-    struct cds_lfht_node* nodes_to_delete[batch_size];
-    int layer = 0;
-    
-    while (true) {
-        int total_nodes = 0;
-        int delete_count = 0;
-        
-        // Clear the used_as_type tracking set
-        _type_tracking_tsm_clean_set_clear(&used_as_type_set);
-        
-        // Phase 1: Count nodes and identify which are used as types
-        rcu_read_lock();
 
-        struct cds_lfht_iter iter;
-        tklog_scope(bool not_at_iter_end = tsm_iter_first(p_tsm_base, &iter));
-        
-        while (not_at_iter_end) {
+    // first remove all types that arent a type
+    struct cds_lfht_iter iter;
+    tklog_scope(bool iter_valid = tsm_iter_first(p_tsm_base, &iter));
+    while (iter_valid) {
 
-            tklog_scope(struct tsm_base_node* base_node = tsm_iter_get_node(&iter));
-            if (base_node == NULL) {
-                tklog_warning("somehow base_node is NULL when total_nodes is %d\n", total_nodes);
-                break;
-            }
-
-            total_nodes++;
-            
-            // Add this node's type to the used_as_type set
-            struct tsm_key track_key;
-            track_key.key_union = base_node->type_key_union;
-            track_key.key_is_number = base_node->type_key_is_number;
-            
-            _type_tracking_tsm_clean_set_itr itr = _type_tracking_tsm_clean_set_insert(&used_as_type_set, track_key);
-            if (_type_tracking_tsm_clean_set_is_end(itr)) {
-                tklog_error("Out of memory tracking used types\n");
-                // Continue anyway, will force cleanup
-            }
-            
-            tklog_scope(not_at_iter_end = tsm_iter_next(p_tsm_base, &iter));
-        }
-        
-        // If no nodes left, we're done
-        if (total_nodes == 0) {
-            rcu_read_unlock();
+        tklog_scope(struct tsm_base_node* p_base = tsm_iter_get_node(&iter));
+        if (!p_base) {
+            tklog_warning("somehow p_base is NULL\n");
             break;
         }
-        
-        // Phase 2: Collect nodes that are not used as types
-        tklog_scope(not_at_iter_end = tsm_iter_first(p_tsm_base, &iter));
-        while (not_at_iter_end) {
 
-            tklog_scope(struct tsm_base_node* base_node = tsm_iter_get_node(&iter));
-            if (base_node == NULL) {
-                tklog_warning("somehow base_node is NULL\n");
-                break;
-            }
-
-            // Check if this node is used as a type
-            struct tsm_key lookup_key;
-            lookup_key.key_union = base_node->key_union;
-            lookup_key.key_is_number = base_node->key_is_number;
-            
-            _type_tracking_tsm_clean_set_itr found = _type_tracking_tsm_clean_set_get(&used_as_type_set, lookup_key);
-            
-            if (_type_tracking_tsm_clean_set_is_end(found)) {
-                // This node is not used as a type, mark for deletion
-                nodes_to_delete[delete_count++] = &base_node->lfht_node;
-            }
-            
-            tklog_scope(not_at_iter_end = tsm_iter_next(p_tsm_base, &iter));
-        }
-        
-        // If no nodes to delete in this layer
-        if (delete_count == 0 && total_nodes > 0) {
-            if (total_nodes == 1) {
-                tklog_scope(not_at_iter_end = tsm_iter_first(p_tsm_base, &iter));
-                tklog_scope(struct tsm_base_node* base_node = tsm_iter_get_node(&iter));
-                if (base_node == NULL) {
-                    tklog_error("somehow base_node is NULL\n");
-                    break;
-                }
-                nodes_to_delete[delete_count++] = &base_node->lfht_node;
-            } else {
-                tklog_error("No progress made, meaning there are only nodes left which are used as types. There are %d nodes left\n", total_nodes);
-                rcu_read_unlock();
-                break;
-            }
-        }
-        
-        // Phase 3: try free callback for the collected nodes
-        for (int i = 0; i < delete_count; i++) {
-            struct tsm_base_node* base_node = caa_container_of(nodes_to_delete[i], struct tsm_base_node, lfht_node);
-            
+        // if not is not a type then its safe to delete right away
+        if (!tsm_node_is_type(p_base)) {
             // try free callback
-            tklog_scope(int try_free_callback_result = tsm_node_try_free_callback(p_tsm_base, base_node));
-            if (try_free_callback_result == -1) {
-                tklog_error("tsm_node_try_free_callback failed for child node\n");
-                rcu_read_unlock();
+            tklog_scope(int try_free_callback_result = tsm_node_try_free_callback(p_tsm_base, p_base));
+            if (try_free_callback_result < 1) {
+                tklog_error("tsm_node_try_free_callback failed for child node. it is %d\n", try_free_callback_result);
                 return -1;
             }
         }
         
-        rcu_read_unlock();
+        tklog_scope(iter_valid = tsm_iter_next(p_tsm_base, &iter));
+    }
+
+    bool node_freed_since_iter_first = false; // if there is a cycle no type node is deleted. that means the types are cyclical and therefore impossible to free
+    tklog_scope(iter_valid = tsm_iter_first(p_tsm_base, &iter));
+    while (iter_valid) {
+
+        tklog_scope(struct tsm_base_node* p_base = tsm_iter_get_node(&iter));
+        if (!p_base) {
+            tklog_warning("somehow p_base is NULL\n");
+            break;
+        }
+        if (!tsm_node_is_type(p_base)) {
+            tklog_error("somehow found non type when there shouldnt be any more types left\n");
+            return -1;
+        }
+
+        // since p_base is type then we want to check all nodes if this key is found as type key in any other node
+        bool found_in_other_node = false;
+        struct tsm_key base_key = { .key_union = p_base->key_union, .key_is_number = p_base->key_is_number };
+        struct cds_lfht_iter iter_2;
+        tklog_scope(bool iter_2_valid = tsm_iter_first(p_tsm_base, &iter_2));
+        while (iter_2_valid) {
+
+            tklog_scope(struct tsm_base_node* p_iter_base = tsm_iter_get_node(&iter_2));
+            if (!p_iter_base) {
+                tklog_error("Somehow node is NULL\n");
+                return -1;
+            }
+
+            // it not found self then check if base is found as type in other node
+            struct tsm_key other_key = { .key_union = p_iter_base->key_union, .key_is_number = p_iter_base->key_is_number };
+            tklog_scope(bool found_self = tsm_key_match(base_key, other_key));
+            if (!found_self) {
+                struct tsm_key other_type_key = { .key_union = p_iter_base->type_key_union, .key_is_number = p_iter_base->type_key_is_number };
+                tklog_scope(bool type_found_in_other_node = tsm_key_match(base_key, other_type_key));
+                if (type_found_in_other_node) {
+                    found_in_other_node = true;
+                    break;
+                }
+            }
+
+            tklog_scope(iter_2_valid = tsm_iter_next(p_tsm_base, &iter_2));
+        }
+
+        // if node at this iteration isnt found in any other node then we can free it
+        // then break this while loop as well so that the first iterator can be reset 
+        // because we need to exit rcu_read section so that the node is not found in the iteration again. IS THIS TRUE???
+        if (!found_in_other_node) {
+            // try free callback
+            tklog_scope(int try_free_callback_result = tsm_node_try_free_callback(p_tsm_base, p_base));
+            if (try_free_callback_result < 1) {
+                tklog_error("tsm_node_try_free_callback failed for child node. it is %d\n", try_free_callback_result);
+                return -1;
+            }
+            node_freed_since_iter_first = true;
+        }
         
-        if (delete_count > 0) {
-            tklog_info("loop %d: Cleaned up %d nodes\n", layer, delete_count);
-            layer++;
+        tklog_scope(iter_valid = tsm_iter_next(p_tsm_base, &iter));
+        if (!iter_valid) {
+            if (!node_freed_since_iter_first) {
+                tklog_error("children nodes type dependencies are cyclical and hence in an invalid state\n");
+                return -1;
+            }
+            tsm_iter_first(p_tsm_base, &iter);
+            node_freed_since_iter_first = false;
+            // if iter is still invalid then hash table is empty
+            if (!iter_valid) {
+                break;
+            }
         }
     }
     
-    // Clean up tracking set
-    _type_tracking_tsm_clean_set_cleanup(&used_as_type_set);
-    
-    tklog_info("Global data system cleanup completed (%d layers)\n", layer);
+    tklog_info("cleaning all children nodes for TSM completed\n");
 
     return 1;
 }
@@ -329,25 +291,20 @@ static int _tsm_tsm_type_try_free_callback(struct tsm_base_node* p_parent_tsm_ba
         tklog_warning("given tsm is not a TSM\n");
         return -1;
     }
-
     tklog_scope(uint32_t nodes_count = tsm_nodes_count(p_tsm_base));
-
-    // if true then this function must call the try_free_callback on the top layered children 
-    // then this function must be called again so that the next layer can be freed
     if (nodes_count > 0) {
         tklog_scope(int free_children_result = _tsm_tsm_type_free_children(p_tsm_base));
-        return free_children_result;
-    } 
-
-    // all child nodes are freed so now this node can be deleted and tryd for free callback
-    else {
-        tklog_scope(bool free_callback_result = tsm_base_node_free_callback(p_parent_tsm_base, p_tsm_base));
-        if (!free_callback_result) {
-            tklog_error("tsm_base_node_free_callback failed\n");
-            return -1;
-        } 
-        return 1;
+        if (free_children_result != 1) {
+            return free_children_result;
+        }
     }
+    // Now logically empty; free the TSM
+    tklog_scope(bool free_callback_result = tsm_base_node_free_callback(p_parent_tsm_base, p_tsm_base));
+    if (!free_callback_result) {
+        tklog_error("tsm_base_node_free_callback failed\n");
+        return -1;
+    }
+    return 1;
 }
 static bool _tsm_tsm_type_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_base) {
     (void)p_tsm_base;
@@ -364,9 +321,8 @@ static bool _tsm_tsm_type_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_
 
     rcu_read_lock();
     struct cds_lfht_iter* p_iter = calloc(1, sizeof(struct cds_lfht_iter));
-    tklog_scope(tsm_iter_first(p_base, p_iter));
-    bool iter_next = p_iter != NULL;
-    while (iter_next) {
+    tklog_scope(bool iter_valid = tsm_iter_first(p_base, p_iter));
+    while (iter_valid) {
         tklog_scope(struct tsm_base_node* iter_node = tsm_iter_get_node(p_iter));
         if (!iter_node) {
             tklog_warning("iter_node is NULL\n");
@@ -380,7 +336,7 @@ static bool _tsm_tsm_type_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_
             rcu_read_unlock();
             return false;
         }
-        tklog_scope(iter_next = tsm_iter_next(p_base, p_iter));
+        tklog_scope(iter_valid = tsm_iter_next(p_base, p_iter));
     }
     free(p_iter);
     rcu_read_unlock();
@@ -1286,6 +1242,30 @@ int tsm_node_try_free_callback(struct tsm_base_node* p_tsm_base, struct tsm_base
         tklog_error("given p_tsm_base is not a TSM\n");
         return -1;
     }
+    #ifdef TSM_DEBUG
+        struct tsm_key base_key = { .key_union = p_base->key_union, .key_is_number = p_base->key_is_number };
+        struct tsm_key base_type_key = { .key_union = p_base->type_key_union, .key_is_number = p_base->type_key_is_number };
+        // if p_base is type and is not base type then we want to check all nodes if this key is found as type key in any other node
+        if (tsm_node_is_type(p_base) && !tsm_key_match(base_key, base_type_key)) {
+            struct cds_lfht_iter iter;
+            tklog_scope(bool node_exists = tsm_iter_first(p_tsm_base, &iter));
+            while (node_exists) {
+                tklog_scope(struct tsm_base_node* p_iter_base = tsm_iter_get_node(&iter));
+                if (!p_iter_base) {
+                    tklog_error("Somehow node is NULL\n");
+                    break;
+                }
+                struct tsm_key other_key = { .key_union = p_iter_base->type_key_union, .key_is_number = p_iter_base->type_key_is_number };
+                tklog_scope(bool type_found_in_other_node = tsm_key_match(base_key, other_key));
+                if (type_found_in_other_node) {
+                    tsm_node_print(p_tsm_base, p_base);
+                    tsm_node_print(p_tsm_base, p_iter_base);
+                    tklog_error("trying to free type node but it is found in other nodes\n");
+                }
+                tklog_scope(node_exists = tsm_iter_next(p_tsm_base, &iter));
+            }
+        }
+    #endif
     struct tsm_key type_key = { .key_union.string = p_base->type_key_union.string, .key_is_number = p_base->type_key_is_number };
     tklog_scope(struct tsm_base_node* p_type_base = tsm_node_get(p_tsm_base, type_key));
     if (!p_type_base) {
@@ -1318,7 +1298,7 @@ unsigned long tsm_nodes_count(struct tsm_base_node* p_tsm_base) {
     tklog_scope(bool is_tsm = tsm_node_is_tsm(p_tsm_base));
     if (!is_tsm) {
         tklog_error("given p_tsm_base is not TSM\n");
-        return false;
+        return 0;
     }
 
     struct tsm* p_tsm = caa_container_of(p_tsm_base, struct tsm, base);
@@ -1332,7 +1312,34 @@ unsigned long tsm_nodes_count(struct tsm_base_node* p_tsm_base) {
     
     return count;
 }
+bool tsm_print(struct tsm_base_node* p_tsm_base) {
+    if (!p_tsm_base) {
+        tklog_error("p_tsm_base is NULL\n");
+        return false;
+    }
+    tklog_scope(bool is_tsm = tsm_node_is_tsm(p_tsm_base));
+    if (!is_tsm) {
+        tklog_error("given p_tsm_base is not TSM\n");
+        return false;
+    }
+    struct tsm* p_tsm = caa_container_of(p_tsm_base, struct tsm, base);
 
+    struct cds_lfht_iter iter;
+    tklog_scope(bool node_exists = tsm_iter_first(p_tsm_base, &iter));
+    while (node_exists) {
+        tklog_scope(struct tsm_base_node* p_base = tsm_iter_get_node(&iter));
+        if (!p_base) {
+            tklog_error("p_base is NULL\n");
+            return false;
+        }
+
+        tklog_scope(tsm_node_print(p_tsm_base, p_base));
+
+        tklog_scope(node_exists = tsm_iter_next(p_tsm_base, &iter));
+    }
+
+    return true;
+}
 bool tsm_iter_first(struct tsm_base_node* p_tsm_base, struct cds_lfht_iter* iter) {
     if (!p_tsm_base) {
         tklog_error("tsm_iter_first called with NULL p_tsm_base\n");
@@ -1351,6 +1358,12 @@ bool tsm_iter_first(struct tsm_base_node* p_tsm_base, struct cds_lfht_iter* iter
     struct tsm* p_tsm = caa_container_of(p_tsm_base, struct tsm, base);
     
     tklog_scope(cds_lfht_first(p_tsm->p_ht, iter));
+    if (!p_tsm) {
+        return false;
+    }
+    if (iter->node == NULL) {
+        return false;
+    }
     
     return true;
 }
@@ -1368,17 +1381,28 @@ bool tsm_iter_next(struct tsm_base_node* p_tsm_base, struct cds_lfht_iter* iter)
     struct tsm* p_tsm = caa_container_of(p_tsm_base, struct tsm, base);
     
     tklog_scope(cds_lfht_next(p_tsm->p_ht, iter));
-    tklog_scope(struct cds_lfht_node* lfht_node = cds_lfht_iter_get_node(iter));
+    if (!iter) {
+        tklog_error("iter became NULL which it never should be\n");
+        return false;
+    }
+    if (iter->node == NULL) {
+        return false;
+    }
     
-    return (lfht_node != NULL);
+    return true;
 }
 struct tsm_base_node* tsm_iter_get_node(struct cds_lfht_iter* iter) {
     if (!iter) {
         tklog_error("tsm_iter_next called with NULL parameters or uninitialized system\n");
-        return false;
+        return NULL;
+    }
+    if (iter->node == NULL) {
+        tklog_warning("iter->node == NULL which means there is no node for this iter\n");
+        return NULL;
     }
     
     tklog_scope(struct cds_lfht_node* lfht_node = cds_lfht_iter_get_node(iter));
+
     
     if (lfht_node) {
         return caa_container_of(lfht_node, struct tsm_base_node, lfht_node);
@@ -1523,134 +1547,10 @@ bool gtsm_free() {
         return false;
     }
 
-    tklog_scope(uint32_t nodes_count = tsm_nodes_count(GTSM_rcu));
-
-    // if true then this function must call the try_free_callback on the top layered children 
-    // then this function must be called again so that the next layer can be freed
-    if (nodes_count > 0) {
-
-        
-        // Create a Verstable set to track which nodes are used as types
-        _type_tracking_tsm_clean_set used_as_type_set;
-        _type_tracking_tsm_clean_set_init(&used_as_type_set);
-        
-        // Iteratively remove nodes layer by layer
-        const int batch_size = 1000;
-        struct cds_lfht_node* nodes_to_delete[batch_size];
-        int layer = 0;
-
-        rcu_read_lock();
-        
-        while (true) {
-            int total_nodes = 0;
-            int delete_count = 0;
-            
-            // Clear the used_as_type tracking set
-            _type_tracking_tsm_clean_set_clear(&used_as_type_set);
-            
-            // Phase 1: Count nodes and identify which are used as types
-
-            struct cds_lfht_iter iter;
-            tklog_scope(bool not_at_iter_end = tsm_iter_first(GTSM_rcu, &iter));
-            
-            while (not_at_iter_end) {
-
-                tklog_scope(struct tsm_base_node* base_node = tsm_iter_get_node(&iter));
-                if (!base_node) {
-                    tklog_warning("somehow base_node is NULL\n");
-                    break;
-                }
-                total_nodes++;
-                
-                // Add this node's type to the used_as_type set
-                struct tsm_key track_key;
-                track_key.key_union = base_node->type_key_union;
-                track_key.key_is_number = base_node->type_key_is_number;
-                
-                _type_tracking_tsm_clean_set_itr itr = _type_tracking_tsm_clean_set_insert(&used_as_type_set, track_key);
-                if (_type_tracking_tsm_clean_set_is_end(itr)) {
-                    tklog_error("Out of memory tracking used types\n");
-                    // Continue anyway, will force cleanup
-                }
-                
-                tklog_scope(not_at_iter_end = tsm_iter_next(GTSM_rcu, &iter));
-            }
-            
-            // If no nodes left, we're done
-            if (total_nodes == 0) {
-                break;
-            }
-            
-            // Phase 2: Collect nodes that are not used as types
-            tklog_scope(not_at_iter_end = tsm_iter_first(GTSM_rcu, &iter));
-            while (not_at_iter_end) {
-
-                tklog_scope(struct tsm_base_node* base_node = tsm_iter_get_node(&iter));
-                if (!base_node) {
-                    tklog_warning("somehow base_node is NULL\n");
-                    break;
-                }
-
-                // Check if this node is used as a type
-                struct tsm_key lookup_key;
-                lookup_key.key_union = base_node->key_union;
-                lookup_key.key_is_number = base_node->key_is_number;
-                
-                _type_tracking_tsm_clean_set_itr found = _type_tracking_tsm_clean_set_get(&used_as_type_set, lookup_key);
-                
-                if (_type_tracking_tsm_clean_set_is_end(found)) {
-                    // This node is not used as a type, mark for deletion
-                    nodes_to_delete[delete_count++] = &base_node->lfht_node;
-                }
-                
-                tklog_scope(not_at_iter_end = tsm_iter_next(GTSM_rcu, &iter));
-            }
-            
-            // If no nodes to delete in this layer, force cleanup of remaining nodes
-            if (delete_count == 0 && total_nodes > 0) {
-                if (total_nodes == 1) {
-                    tklog_scope(not_at_iter_end = tsm_iter_first(GTSM_rcu, &iter));
-                    tklog_scope(struct tsm_base_node* base_node = tsm_iter_get_node(&iter));
-                    if (base_node == NULL) {
-                        tklog_error("somehow base_node is NULL\n");
-                        rcu_read_unlock();
-                        break;
-                    }
-                    nodes_to_delete[delete_count++] = &base_node->lfht_node;
-                } else {
-                    tklog_error("No progress made, meaning there are only nodes left which are used as types. There are %d nodes left\n", total_nodes);
-                    gtsm_print();
-                    rcu_read_unlock();
-                    break;
-                }
-            }
-            
-            // Phase 3: try free callback for the collected nodes
-            for (int i = 0; i < delete_count; i++) {
-                struct tsm_base_node* base_node = caa_container_of(nodes_to_delete[i], struct tsm_base_node, lfht_node);
-                
-                // try free callback
-                tklog_scope(int try_free_callback_result = tsm_node_try_free_callback(GTSM_rcu, base_node));
-                if (try_free_callback_result == -1) {
-                    tklog_error("tsm_node_try_free_callback failed for child node\n");
-                    rcu_read_unlock();
-                    return false;
-                }
-            }
-            
-            if (delete_count > 0) {
-                tklog_info("loop %d: Cleaned up %d nodes\n", layer, delete_count);
-                layer++;
-            }
-        }
-        
-        rcu_read_unlock();
-        
-        // Clean up tracking set
-        _type_tracking_tsm_clean_set_cleanup(&used_as_type_set);
-        
-        tklog_info("Global data system cleanup completed (%d layers)\n", layer);
-    } 
+    tklog_scope(int free_children_result = _tsm_tsm_type_free_children(GTSM_rcu));
+    if (free_children_result < 1) {
+        tklog_error("shouldnt be less than 1\n");
+    }
     
     // Schedule for RCU cleanup after successful removal
     call_rcu(&GTSM_rcu->rcu_head, _tsm_tsm_type_free_callback);

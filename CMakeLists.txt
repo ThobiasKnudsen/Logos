@@ -209,7 +209,7 @@ add_executable(logos
     src/map.c
     src/global_data/core.c
     src/global_data/urcu_safe.c
-    src/gtsm_tsm.c)
+    src/tsm.c)
 target_sources(logos PRIVATE ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c $<TARGET_OBJECTS:mimalloc-obj>)  # Add mimalloc objects for override
 add_executable(logos_prev
     src/main_2.c
@@ -237,12 +237,12 @@ add_executable(test_global_data
     src/global_data/urcu_safe.c
     src/tklog.c)
 target_sources(test_global_data PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)  # Add mimalloc objects for override
-add_executable(test_gtsm_tsm
-    src/tests/test_gtsm_tsm.c
-    src/gtsm_tsm.c
+add_executable(test_tsm
+    src/tests/test_tsm.c
+    src/tsm.c
     src/global_data/urcu_safe.c
     src/tklog.c)
-target_sources(test_gtsm_tsm PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)  # Add mimalloc objects for override (replaces mimalloc-static)
+target_sources(test_tsm PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)  # Add mimalloc objects for override (replaces mimalloc-static)
 add_executable(test_asan_demo
     src/tests/test_asan_demo.c)
 target_sources(test_asan_demo PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)  # Add mimalloc objects for override
@@ -253,7 +253,7 @@ if(ipo_supported)
     set_property(TARGET test_tklog PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET test_urcu_safety PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET test_global_data PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-    set_property(TARGET test_gtsm_tsm PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET test_tsm PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET test_asan_demo PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 # Apply compiler flags to
@@ -263,7 +263,7 @@ if(LOGOS_COMPILER_GCC_CLANG)
     target_compile_options(test_tklog PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
     target_compile_options(test_urcu_safety PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
     target_compile_options(test_global_data PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
-    target_compile_options(test_gtsm_tsm PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
+    target_compile_options(test_tsm PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
     target_compile_options(test_asan_demo PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS} -Wno-stringop-overflow)
 elseif(LOGOS_COMPILER_MSVC)
     target_compile_options(logos PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
@@ -271,7 +271,7 @@ elseif(LOGOS_COMPILER_MSVC)
     target_compile_options(test_tklog PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
     target_compile_options(test_urcu_safety PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
     target_compile_options(test_global_data PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
-    target_compile_options(test_gtsm_tsm PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
+    target_compile_options(test_tsm PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
     target_compile_options(test_asan_demo PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
 endif()
 # Include directories
@@ -301,7 +301,7 @@ target_include_directories(test_global_data PRIVATE
     ${URCU_INCLUDE_DIRS}
     ${verstable_SOURCE_DIR}
     ${mimalloc_SOURCE_DIR}/include)  # Already had; kept for consistency
-target_include_directories(test_gtsm_tsm PRIVATE
+target_include_directories(test_tsm PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${URCU_INCLUDE_DIRS}
     ${verstable_SOURCE_DIR}
@@ -416,7 +416,7 @@ target_compile_definitions(test_global_data PRIVATE
     $<$<CONFIG:Debug>:DEBUG_RCU>
     $<$<CONFIG:Debug>:DEBUG_YIELD>
 )
-target_compile_definitions(test_gtsm_tsm PRIVATE
+target_compile_definitions(test_tsm PRIVATE
     URCU_LFHT_SAFETY_ON
     TKLOG_MEMORY
     TKLOG_MEMORY_PRINT_ON_EXIT
@@ -425,6 +425,7 @@ target_compile_definitions(test_gtsm_tsm PRIVATE
     TKLOG_SHOW_THREAD
     TKLOG_SHOW_PATH
     TKLOG_SCOPE
+    # TKLOG_DEBUG
     TKLOG_INFO
     TKLOG_NOTICE
     TKLOG_WARNING
@@ -446,7 +447,7 @@ if(LOGOS_PLATFORM_WINDOWS)
     set_target_properties(test_tklog PROPERTIES OUTPUT_NAME "test_tklog.exe")
     set_target_properties(test_urcu_safety PROPERTIES OUTPUT_NAME "test_urcu_safety.exe")
     set_target_properties(test_global_data PROPERTIES OUTPUT_NAME "test_global_data.exe")
-    set_target_properties(test_gtsm_tsm PROPERTIES OUTPUT_NAME "test_gtsm_tsm.exe")
+    set_target_properties(test_tsm PROPERTIES OUTPUT_NAME "test_tsm.exe")
     set_target_properties(test_asan_demo PROPERTIES OUTPUT_NAME "test_asan_demo.exe")
 else()
     set_target_properties(logos PROPERTIES OUTPUT_NAME "logos")
@@ -454,7 +455,7 @@ else()
     set_target_properties(test_tklog PROPERTIES OUTPUT_NAME "test_tklog")
     set_target_properties(test_urcu_safety PROPERTIES OUTPUT_NAME "test_urcu_safety")
     set_target_properties(test_global_data PROPERTIES OUTPUT_NAME "test_global_data")
-    set_target_properties(test_gtsm_tsm PROPERTIES OUTPUT_NAME "test_gtsm_tsm")
+    set_target_properties(test_tsm PROPERTIES OUTPUT_NAME "test_tsm")
     set_target_properties(test_asan_demo PROPERTIES OUTPUT_NAME "test_asan_demo")
 endif()
 # Add sanitizer libraries if enabled (must be first)
@@ -464,7 +465,7 @@ if(LOGOS_ADDRESS_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
     target_link_libraries(test_tklog PRIVATE asan)
     target_link_libraries(test_urcu_safety PRIVATE asan)
     target_link_libraries(test_global_data PRIVATE asan)
-    target_link_libraries(test_gtsm_tsm PRIVATE asan)
+    target_link_libraries(test_tsm PRIVATE asan)
     target_link_libraries(test_asan_demo PRIVATE asan)
 elseif(LOGOS_THREAD_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
     target_link_libraries(logos PRIVATE tsan)
@@ -472,7 +473,7 @@ elseif(LOGOS_THREAD_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
     target_link_libraries(test_tklog PRIVATE tsan)
     target_link_libraries(test_urcu_safety PRIVATE tsan)
     target_link_libraries(test_global_data PRIVATE tsan)
-    target_link_libraries(test_gtsm_tsm PRIVATE tsan)
+    target_link_libraries(test_tsm PRIVATE tsan)
     target_link_libraries(test_asan_demo PRIVATE tsan)
 endif()
 # Link libraries (after sanitizer libraries)
@@ -485,7 +486,7 @@ else()
     target_link_libraries(logos_prev PRIVATE pthread)  # Added for mimalloc
     target_link_libraries(test_urcu_safety PRIVATE pthread)  # Added for mimalloc
     target_link_libraries(test_global_data PRIVATE pthread)  # Added for mimalloc
-    target_link_libraries(test_gtsm_tsm PRIVATE pthread)  # Added for mimalloc
+    target_link_libraries(test_tsm PRIVATE pthread)  # Added for mimalloc
     target_link_libraries(test_asan_demo PRIVATE pthread)  # Added for mimalloc
 endif()
 # Link other libraries
@@ -514,7 +515,7 @@ target_link_libraries(test_global_data PRIVATE
     ${URCU_LIBRARIES}
     SDL3::SDL3
     xxhash)
-target_link_libraries(test_gtsm_tsm PRIVATE
+target_link_libraries(test_tsm PRIVATE
     ${URCU_LIBRARIES}
     SDL3::SDL3
     xxhash)  # Removed mimalloc-static; using objects instead
@@ -523,7 +524,7 @@ add_dependencies(logos urcu)
 add_dependencies(logos_prev urcu)
 add_dependencies(test_urcu_safety urcu)
 add_dependencies(test_global_data urcu)
-add_dependencies(test_gtsm_tsm urcu)
+add_dependencies(test_tsm urcu)
 # Install rules
 install(TARGETS logos
     RUNTIME DESTINATION bin
