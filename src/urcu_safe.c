@@ -550,7 +550,9 @@ int _cds_lfht_del_safe(struct cds_lfht *ht, struct cds_lfht_node *node) {
     
     tklog_scope(int del_result = cds_lfht_del(ht, node));
     if (del_result == 0) {
-        tklog_debug("Node deleted successfully");
+        tklog_debug("Node deleted successfully\n");
+    } else if (del_result == -ENOENT) {
+        tklog_debug("NOde already deleted\n");
     } else {
         tklog_error("Delete failed: %d", del_result);
     }
@@ -586,6 +588,8 @@ int _cds_lfht_replace_safe(struct cds_lfht *ht, struct cds_lfht_iter *old_iter,
     tklog_scope(int replace_result = cds_lfht_replace(ht, old_iter, hash, match, key, new_node));
     if (replace_result == 0) {
         tklog_debug("Node replaced successfully");
+    } else if (replace_result == -ENOENT) {
+        tklog_debug("Node does not exist so it cannot be replaced\n");
     } else {
         tklog_error("Replace failed: %d", replace_result);
     }

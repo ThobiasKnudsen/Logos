@@ -208,9 +208,8 @@ add_executable(logos
     src/type.c
     src/map.c
     src/global_data/core.c
-    src/global_data/urcu_safe.c
+    src/urcu_safe.c
     src/tsm.c)
-target_sources(logos PRIVATE ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c $<TARGET_OBJECTS:mimalloc-obj>)  # Add mimalloc objects for override
 add_executable(logos_prev
     src/main_2.c
     src/cpi.c
@@ -220,32 +219,40 @@ add_executable(logos_prev
     src/type.c
     src/map.c
     src/global_data/core.c
-    src/global_data/urcu_safe.c)
-target_sources(logos_prev PRIVATE ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c $<TARGET_OBJECTS:mimalloc-obj>)  # Add mimalloc objects for override
+    src/urcu_safe.c)
 add_executable(test_tklog
     src/tests/test_tklog.c
     src/tklog.c)
-target_sources(test_tklog PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)  # Add mimalloc objects for override
 add_executable(test_urcu_safety
     src/tests/test_urcu_safety.c
-    src/global_data/urcu_safe.c
+    src/urcu_safe.c
     src/tklog.c)
-target_sources(test_urcu_safety PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)  # Add mimalloc objects for override
 add_executable(test_global_data
     src/tests/test_global_data_2.c
     src/global_data/core.c
-    src/global_data/urcu_safe.c
+    src/urcu_safe.c
     src/tklog.c)
-target_sources(test_global_data PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)  # Add mimalloc objects for override
 add_executable(test_tsm
     src/tests/test_tsm.c
     src/tsm.c
-    src/global_data/urcu_safe.c
+    src/urcu_safe.c
     src/tklog.c)
-target_sources(test_tsm PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)  # Add mimalloc objects for override (replaces mimalloc-static)
 add_executable(test_asan_demo
     src/tests/test_asan_demo.c)
-target_sources(test_asan_demo PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)  # Add mimalloc objects for override
+
+target_sources(logos PRIVATE ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c) 
+target_sources(logos_prev PRIVATE ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c) 
+if(NOT LOGOS_ADDRESS_SANITIZER)
+    # Add mimalloc objects for override
+    target_sources(logos PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
+    target_sources(logos_prev PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
+    target_sources(test_tklog PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
+    target_sources(test_urcu_safety PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
+    target_sources(test_global_data PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
+    target_sources(test_tsm PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
+    target_sources(test_asan_demo PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
+endif()
+
 # Enable LTO for release builds if supported
 if(ipo_supported)
     set_property(TARGET logos PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
@@ -418,8 +425,8 @@ target_compile_definitions(test_global_data PRIVATE
 )
 target_compile_definitions(test_tsm PRIVATE
     URCU_LFHT_SAFETY_ON
-    TKLOG_MEMORY
-    TKLOG_MEMORY_PRINT_ON_EXIT
+    #TKLOG_MEMORY
+    #TKLOG_MEMORY_PRINT_ON_EXIT
     TKLOG_SHOW_LOG_LEVEL
     TKLOG_SHOW_TIME
     TKLOG_SHOW_THREAD
