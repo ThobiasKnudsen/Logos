@@ -388,6 +388,243 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
     void _tklog_scope_end  (void)                       { pathstack_pop(); }
 #endif
 
+/* ------------------------- Time tracing ----------------------------- */
+#ifdef TKLOG_TIMER
+    typedef struct CallPathTime {
+        uint64_t total_time;
+        uint64_t count;
+    } CallPathTime;
+    #define NAME call_path_time_table
+    #define KEY_TY char*
+    #define VAL_TY CallPathTime
+    #include "verstable.h"
+    typedef struct TimeTracker {
+        uint64_t total_time;
+        uint64_t count;
+        call_path_time_table call_paths;
+    } TimeTracker;
+    #define NAME time_tracker_table
+    #define KEY_TY char*
+    #define VAL_TY TimeTracker
+    #include "verstable.h"
+
+    typedef struct TimerState {
+        time_tracker_table table;
+        char* current_start_location;
+        char* current_start_path;
+        uint64_t start_time;
+    } TimerState;
+
+    static pthread_key_t g_tls_timer_state;
+
+    static void timer_state_free(void *ptr) {
+        TimerState *ts = (TimerState*)ptr;
+        if (ts) {
+            // Free all allocated keys in call_paths and the outer table
+            for (time_tracker_table_itr itr = time_tracker_table_begin(&ts->table);
+                 !time_tracker_table_is_end(itr);
+                 itr = time_tracker_table_next(itr)) {
+                TimeTracker *tracker = &itr.data->val;
+                for (call_path_time_table_itr cp_itr = call_path_time_table_begin(&tracker->call_paths);
+                     !call_path_time_table_is_end(cp_itr);
+                     cp_itr = call_path_time_table_next(cp_itr)) {
+                    free((char*)cp_itr.data->key);
+                }
+                // Assuming verstable has _clear; otherwise, it's handled by iteration above
+                call_path_time_table_clear(&tracker->call_paths);
+                free((char*)itr.data->key);
+            }
+            time_tracker_table_clear(&ts->table);
+            free(ts->current_start_location);
+            free(ts->current_start_path);
+            free(ts);
+        }
+    }
+
+    static TimerState *get_timer_state(void) {
+        TimerState *ts = pthread_getspecific(g_tls_timer_state);
+        if (!ts) {
+            ts = calloc(1, sizeof(TimerState));
+            if (!ts) {
+                printf("tklog: out of memory for TimerState\n");
+                return NULL;
+            }
+            time_tracker_table_init(&ts->table);
+            ts->current_start_location = NULL;
+            ts->current_start_path = NULL;
+            ts->start_time = 0;
+            pthread_setspecific(g_tls_timer_state, ts);
+        }
+        return ts;
+    }
+
+    static void tklog_init_once_impl(void) {
+        // ... (existing code)
+        pthread_key_create(&g_tls_timer_state, timer_state_free);
+    }
+
+    void _tklog_timer_init() {
+        TimerState *ts = get_timer_state();
+        if (ts) {
+            // Re-init if needed (clears existing data)
+            time_tracker_table_clear(&ts->table);
+            free(ts->current_start_location);
+            ts->current_start_location = NULL;
+            free(ts->current_start_path);
+            ts->current_start_path = NULL;
+            ts->start_time = 0;
+        }
+    }
+
+    void _tklog_timer_start(int line, const char* file) {
+        TimerState *ts = get_timer_state();
+        if (!ts) return;
+        if (ts->current_start_location != NULL) {
+            printf("tklog: tklog_timer_start is called without a corresponding tklog_timer_stop beforehand\n");
+            return;
+        }
+        PathStack *ps = pathstack_get();
+        if (!ps) {
+            printf("tklog: internal error. pathstack_get failed\n");
+            return;
+        }
+        char temp_location[128];
+        int n = snprintf(temp_location, sizeof temp_location, "%s:%d", file, line);
+        if (n < 0) {
+            printf("tklog: internal error. snprintf failed\n");
+            return;
+        }
+        time_tracker_table_itr itr = time_tracker_table_get(&ts->table, temp_location);
+        if (time_tracker_table_is_end(itr)) {
+            char* key = strdup(temp_location);
+            if (!key) {
+                printf("tklog: out of memory for strdup\n");
+                return;
+            }
+            TimeTracker tracker = {0};
+            tracker.total_time = 0;
+            tracker.count = 0;
+            call_path_time_table_init(&tracker.call_paths);
+            itr = time_tracker_table_insert(&ts->table, key, tracker);
+            if (time_tracker_table_is_end(itr)) {
+                printf("tklog: time_table is out of memory because time_tracker_table_insert failed\n");
+                free(key);
+                return;
+            }
+        }
+        ts->current_start_location = strdup(temp_location);
+        if (!ts->current_start_location) {
+            printf("tklog: out of memory for strdup\n");
+            return;
+        }
+        ts->current_start_path = strdup(ps->buf ? ps->buf : "");
+        if (!ts->current_start_path) {
+            printf("tklog: out of memory for strdup\n");
+            free(ts->current_start_location);
+            ts->current_start_location = NULL;
+            return;
+        }
+        ts->start_time = get_time_ms();
+    }
+
+    void _tklog_timer_stop(int line, const char* file) {
+        uint64_t end_time = get_time_ms();
+        TimerState *ts = get_timer_state();
+        if (!ts) return;
+        if (ts->current_start_location == NULL) {
+            printf("tklog: tklog_timer_stop is called without a corresponding tklog_timer_start beforehand\n");
+            return;
+        }
+        PathStack *ps = pathstack_get();
+        if (!ps) {
+            printf("tklog: internal error. pathstack_get failed\n");
+            free(ts->current_start_location);
+            ts->current_start_location = NULL;
+            free(ts->current_start_path);
+            ts->current_start_path = NULL;
+            return;
+        }
+        char stop_location[128];
+        int n = snprintf(stop_location, sizeof stop_location, "%s:%d", file, line);
+        if (n < 0) {
+            printf("tklog: internal error. snprintf failed\n");
+            free(ts->current_start_location);
+            ts->current_start_location = NULL;
+            free(ts->current_start_path);
+            ts->current_start_path = NULL;
+            return;
+        }
+        size_t needed = strlen(ts->current_start_path) + strlen(ts->current_start_location) + strlen(ps->buf) + strlen(stop_location) + 10;
+        char* call_path = malloc(needed);
+        if (!call_path) {
+            printf("tklog: out of memory for call_path\n");
+            free(ts->current_start_location);
+            ts->current_start_location = NULL;
+            free(ts->current_start_path);
+            ts->current_start_path = NULL;
+            return;
+        }
+        snprintf(call_path, needed, "%s → %s : %s → %s", ts->current_start_path, ts->current_start_location, ps->buf, stop_location);
+        time_tracker_table_itr itr = time_tracker_table_get(&ts->table, ts->current_start_location);
+        if (time_tracker_table_is_end(itr)) {
+            printf("tklog: internal error. no tracker for start location\n");
+            free(call_path);
+            free(ts->current_start_location);
+            ts->current_start_location = NULL;
+            free(ts->current_start_path);
+            ts->current_start_path = NULL;
+            return;
+        }
+        TimeTracker* tracker = &itr.data->val;
+        uint64_t delta = end_time - ts->start_time;
+        tracker->total_time += delta;
+        tracker->count++;
+        call_path_time_table_itr cp_itr = call_path_time_table_get(&tracker->call_paths, call_path);
+        if (call_path_time_table_is_end(cp_itr)) {
+            CallPathTime cpt = {0};
+            cpt.total_time = delta;
+            cpt.count = 1;
+            cp_itr = call_path_time_table_insert(&tracker->call_paths, call_path, cpt);
+            if (call_path_time_table_is_end(cp_itr)) {
+                printf("tklog: call_paths is out of memory because call_path_time_table_insert failed\n");
+                free(call_path);
+            }
+        } else {
+            CallPathTime* cpt = &cp_itr.data->val;
+            cpt->total_time += delta;
+            cpt->count++;
+            free(call_path);  // Since key already exists, free the new one
+        }
+        free(ts->current_start_location);
+        ts->current_start_location = NULL;
+        free(ts->current_start_path);
+        ts->current_start_path = NULL;
+        ts->start_time = 0;
+    }
+
+    void tklog_timer_print(void) {
+        TimerState *ts = get_timer_state();
+        if (!ts) return;
+        for (time_tracker_table_itr itr = time_tracker_table_begin(&ts->table);
+             !time_tracker_table_is_end(itr);
+             itr = time_tracker_table_next(itr)) {
+            const char* start_loc = itr.data->key;
+            TimeTracker* tracker = &itr.data->val;
+            double avg = tracker->count > 0 ? (double)tracker->total_time / tracker->count : 0.0;
+            printf("%s: %" PRIu64 " ms, %" PRIu64 " calls, avg %.2f ms\n",
+                   start_loc, tracker->total_time, tracker->count, avg);
+            for (call_path_time_table_itr cp_itr = call_path_time_table_begin(&tracker->call_paths);
+                 !call_path_time_table_is_end(cp_itr);
+                 cp_itr = call_path_time_table_next(cp_itr)) {
+                const char* path = cp_itr.data->key;
+                CallPathTime* cpt = &cp_itr.data->val;
+                double cp_avg = cpt->count > 0 ? (double)cpt->total_time / cpt->count : 0.0;
+                printf("    %s: %" PRIu64 " ms, %" PRIu64 " calls, avg %.2f ms\n",
+                       path, cpt->total_time, cpt->count, cp_avg);
+            }
+        }
+    }
+#endif
 /* -------------------------  Memory API  -------------------------------- */
 #ifdef TKLOG_MEMORY
     void *tklog_malloc(size_t size, const char *file, int line)
@@ -403,11 +640,19 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
         mem_add(p, nmemb * size, file, line);
         return p;
     }
-
     void *tklog_realloc(void *ptr, size_t size, const char *file, int line)
     {
+        if (size == 0) {
+            tklog_free(ptr, file, line);
+            return NULL;
+        }
+        if (ptr == NULL) {
+            return tklog_malloc(size, file, line);
+        }
         void *newp = original_realloc(ptr, size);
-        mem_update(ptr, newp, size);
+        if (newp != NULL) {
+            mem_update(ptr, newp, size);
+        }
         return newp;
     }
 
@@ -428,7 +673,8 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
         
         original_free(ptr);
     }
-
+#endif 
+#if defined(TKLOG_MEMORY) && defined(TKLOG_MEMORY_PRINT_ON_EXIT)
     void tklog_memory_dump(void)
     {
         pthread_rwlock_rdlock(&g_mem_rwlock);
@@ -458,9 +704,9 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
         
         pthread_rwlock_unlock(&g_mem_rwlock);
     }
-#else /* TKLOG_MEMORY not defined */
+#else /* TKLOG_MEMORY AND TKLOG_MEMORY_PRINT_ON_EXIT not defined */
     void tklog_memory_dump(void)
     {
-        printf("tklog_memory_dump: TKLOG_MEMORY must be defined to track and dump memory allocations\n");
+        printf("tklog_memory_dump: TKLOG_MEMORY_PRINT_ON_EXIT must be defined to track and dump memory allocations\n");
     }
 #endif /* TKLOG_MEMORY */

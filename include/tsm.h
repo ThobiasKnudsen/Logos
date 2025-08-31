@@ -9,7 +9,13 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+
 /**
+ * 
+ * ===========================================================================================
+ * | High-Concurrency Lock-Free RCU-based Self-Referential Type-Generic Recursive Hash Table |
+ * ===========================================================================================
+ * 
  * @file thread_safe_map.h
  * @brief Thread Safe Map Reference
  *
@@ -43,44 +49,51 @@
  */
 
 typedef enum {
-    // Successes (positive or zero)
-    TSM_SUCCESS = 0,                  // General success (e.g., operation completed without issues)
+    TSM_SUCCESS,                    // General success (e.g., operation completed without issues)
 
-    // Usual warning because of multithreaded cenario
-    TSM_WARNING_NODE_NOT_FOUND = 1,           // Node/type not found (e.g., tsm_node_get returns NULL)
-    TSM_WARNING_NODE_ALREADY_REMOVED = 2,     // Node is already removed/deleted
-    TSM_WARNING_ALREADY_EXISTS = 3,           // Node already exists (cds_lfht_add_unique fails)
-    TSM_WARNING_INTERMEDIATE_NOT_TSM = 4,     // Intermediate node in path is not TSM
-    TSM_WARNING_NODE_NOT_REMOVED = 5,         // Node should be removed but isn't (e.g., before scheduling free). Is possible that another thread inserts the same key right after its removed
+    TSM_NULL_ARGUMENT,                  // NULL pointer for required argument (common, e.g., p_base, p_tsm_base, rcu_head)
+    TSM_NULL_FUNCTION_POINTER,          // Required function pointer NULL (e.g., fn_free_callback, fn_is_valid)
+    TSM_NULL_ITER_NODE,                 // Iterator node is NULL (warning in some cases)
 
-    // Errors
-    TSM_ERROR_NULL_ARGUMENT = -1,                // NULL pointer for required argument (common, e.g., p_base, p_tsm_base, rcu_head)
-    TSM_ERROR_INVALID_KEY = -2,                  // Invalid key (number=0, string empty/NULL/too long >63 chars)
-    TSM_ERROR_ALLOCATION_FAILURE = -3,           // Memory allocation failed (calloc, malloc, realloc)
-    TSM_ERROR_STRING_COPY_FAILURE = -4,          // String key copy failed (strncpy)
-    TSM_ERROR_NODE_NOT_FOUND = -5,                // Node/type not found (e.g., tsm_node_get returns NULL)
-    TSM_ERROR_SIZE_MISMATCH = -6,                // Size mismatch (this_size_bytes != type_size_bytes or < min size)
-    TSM_ERROR_FUNCTION_POINTER_NULL = -7,        // Required function pointer NULL (e.g., fn_free_callback, fn_is_valid)
-    TSM_ERROR_NOT_TSM = -8,                      // Given node is not a TSM (tsm_node_is_tsm false)
-    TSM_ERROR_NOT_TYPE = -9,                     // Given node is not a type (tsm_node_is_type false, rare log)
-    TSM_ERROR_NODE_INVALID = -12,                // Node invalid per type validation (fn_is_valid false or base checks)
-    TSM_ERROR_DEL_FAILURE = -14,                 // Hash table delete failed (cds_lfht_del !=0 and !=-ENOENT)
-    TSM_ERROR_REPLACE_FAILURE = -15,             // Hash table replace failed (cds_lfht_replace !=0)
-    TSM_ERROR_TYPE_CYCLICAL_TYPES = -16,         // Cyclical types in TSM
-    TSM_ERROR_TSM_NOT_EMPTY = -17,               // TSM has nodes before freeing
-    TSM_ERROR_PATH_INSERT_KEY_FAILURE = -18,     // Failed to insert key into path
-    TSM_ERROR_PATH_NOTHING_TO_REMOVE = -19,      // Remove from empty path
-    TSM_ERROR_OUT_OF_BOUNDS = -20,               // Out of bounds
-    TSM_ERROR_PATH_INCONSISTENT = -21,           // Path length inconsistent with pointer (length==0 XOR pointer==NULL)
-    TSM_ERROR_BUFFER_OVERFLOW = -22,             // Buffer overflow
-    TSM_ERROR_ITER_NODE_NULL = -23,              // Iterator node is NULL (warning in some cases)
-    TSM_ERROR_TYPE_STILL_USED = -25,             // Trying to free type used in other nodes (DEBUG only)
-    TSM_ERROR_TYPE_MISMATCH = -26,               // Type key mismatch (e.g., old vs new in update)
-    TSM_ERROR_SAME_NODE_REPLACE = -27,           // Replacing node with itself in update
-    TSM_ERROR_ALREADY_INITIALIZED = -28,         // GTSM already initialized
-    TSM_ERROR_CMPXCHG_FAILURE = -29,             // rcu_cmpxchg_pointer failed
-    TSM_ERROR_PRINT_FAILURE = -30,               // Print operation failed (e.g., base_node_print)
-    TSM_ERROR_UNKNOWN = -99                      // Generic/uncaught failure (e.g., "failed to free")
+    TSM_KEY_INVALID,                    // Invalid key (number=0, string empty/NULL/too long >63 chars)
+    TSM_KEYS_NOT_SAME,                  // keys are not the same
+
+    TSM_ALLOCATION_FAILURE,             // Memory allocation failed (calloc, malloc, realloc)
+    TSM_STRING_COPY_FAILURE,            // String key copy failed (strncpy)
+    TSM_CMPXCHG_FAILURE,                // rcu_cmpxchg_pointer failed
+    TSM_PRINT_FAILURE,                  // Print operation failed (e.g., base_node_print)
+
+    TSM_NODE_NOT_FOUND,                 // Node/type not found (e.g., tsm_node_get returns NULL)
+    TSM_NODE_NOT_TSM,                   // Given node is not a TSM (tsm_node_is_tsm false)
+    TSM_NODE_NOT_TYPE,                  // Given node is not a type (tsm_node_is_type false, rare log)
+    TSM_NODE_INVALID,                   // Node invalid per type validation (fn_is_valid false or base checks)
+    TSM_NODE_ALREADY_REMOVED,           // Node is already removed/deleted
+    TSM_NODE_ALREADY_EXISTS,            // Node already exists (cds_lfht_add_unique fails)
+    TSM_NODE_SIZE_MISMATCH,             // Size mismatch (this_size_bytes != type_size_bytes or < min size)
+    TSM_NODE_REPLACING_SAME,            // Replacing node with itself in update
+    TSM_NODE_NOT_REMOVED,               // Not removed from TSM even though it should be
+    TSM_NODE_CREATION_FAILURE,          // failed to create a node
+    TSM_NODE_INSERTION_FAILURE,         // failed to insert node
+    TSM_NODE_REPLACEMENT_FAILURE,       // failed to replace node
+
+    TSM_TSM_CYCLICAL_TYPES,             // Cyclical types in TSM
+    TSM_TSM_NOT_EMPTY,                  // TSM has nodes before freeing
+
+    TSM_PATH_INVALID,                   // Invalid path
+    TSM_PATH_NOTHING_TO_REMOVE,         // Remove from empty path
+    TSM_PATH_INCONSISTENT,              // Path length inconsistent with pointer (length==0 XOR pointer==NULL)
+    TSM_PATH_INSERT_KEY_FAILURE,        // Failed to insert key into path
+
+    TSM_OUT_OF_BOUNDS,                  // Out of bounds
+    TSM_BUFFER_OVERFLOW,                // Buffer overflow
+
+    TSM_TYPE_NOT_FOUND,                 // type node found
+    TSM_TYPE_STILL_USED,                // Trying to free type used in other nodes (DEBUG only)
+    TSM_TYPE_MISMATCH,                  // Type key mismatch (e.g., old vs new in update)
+
+    TSM_ALREADY_INITIALIZED,            // GTSM already initialized
+
+    TSM_UNKNOWN                         // Generic/uncaught failure (e.g., "failed to free")
 } TSM_Result;
 
 // ================================
@@ -267,15 +280,6 @@ struct tsm_base_node* tsm_base_node_create(
  */
 bool tsm_base_node_free(struct tsm_base_node* p_base_node);
 /**
- * @brief This must be called when no other nodes depend on this node and you want to free it.
- * If other nodes still depend on this and you call this function it is UB.
- * You must use this inside the user implementation of try_free_callback functions in the section when
- * try_free_callback will return 1 and not 0. The reason that function returns 0 is to let other nodes not
- * depend on this node. Then you need to call try_free_callback again over and over untill you get 1 because
- * at that time there are no other nodes which depend on this node and therefore this function can then be called
- */
-TSM_Result tsm_base_node_free_callback(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_base);
-/**
  * @brief Validates the base node.
  *
  * @param p_tsm_base The TSM base node.
@@ -307,7 +311,6 @@ bool tsm_base_node_print(struct tsm_base_node* p_base);
  *
  * @field base Embedded base node (its `type_key` points to itself or another type).
  * @field fn_free_callback RCU callback wrapper that calls `fn_free()` (used with `call_rcu()`).
- * @field fn_try_free_callback Function to attempt freeing a node of this type, may require multiple calls.
  * @field fn_is_valid Validation function for nodes of this type (user-called after get to check node integrity).
  * @field fn_print Print information about the node.
  * @field type_size_bytes Expected size of nodes of this type (for validation during insert/update).
@@ -319,10 +322,6 @@ bool tsm_base_node_print(struct tsm_base_node* p_base);
 struct tsm_base_type_node {
     struct tsm_base_node base; // type_key will be set to point to the base_type node
     void (*fn_free_callback)(struct rcu_head*); // node to free by base node as callback which should call fn_free
-    // -1 is error, 0 is scheduled but not deleted and 1 is scheculed and deleted. in the case of 0 it must be scheduled again after calling rcu_barrier()
-    // if fn_try_free_callback is called without the previous callback function being called on the same node this will cause undefined behaviour. rcu_barrier() must be called to ensure that
-    // fn_try_free_callback can be called again.
-    int (*fn_try_free_callback)(struct tsm_base_node*, struct tsm_base_node*); // this is needed because for some nodes you want to call rcu multiple times because the node itself contains other nodes which must be freed first
     bool (*fn_is_valid)(struct tsm_base_node*, struct tsm_base_node*); // node to check is valid by base node
     bool (*fn_print)(struct tsm_base_node*); // print all information about the node
     uint32_t type_size_bytes; // bytes
@@ -334,7 +333,6 @@ struct tsm_base_type_node {
  * @param key Key for the type node.
  * @param this_size_bytes Size of the type node.
  * @param fn_free_callback Free callback function.
- * @param fn_try_free_callback Try free callback function.
  * @param fn_is_valid Validation function.
  * @param fn_print Print function.
  * @param type_size_bytes Expected size for nodes of this type.
@@ -348,7 +346,6 @@ struct tsm_base_node* tsm_base_type_node_create(
     struct tsm_key key,
     uint32_t this_size_bytes,
     void (*fn_free_callback)(struct rcu_head*),
-    int (*fn_try_free_callback)(struct tsm_base_node*, struct tsm_base_node*),
     bool (*fn_is_valid)(struct tsm_base_node*, struct tsm_base_node*),
     bool (*fn_print)(struct tsm_base_node*),
     uint32_t type_size_bytes);
@@ -583,7 +580,7 @@ struct tsm_base_node* tsm_node_get_by_path(struct tsm_base_node* p_tsm_base, str
  * @note Call context: must be called within rcu_read section
  * @note takes ownership of all data in new_node so should not free stuff in new_node if this is successfull
  */
-bool tsm_node_insert(struct tsm_base_node* p_tsm_base, struct tsm_base_node* new_node);
+TSM_Result tsm_node_insert(struct tsm_base_node* p_tsm_base, struct tsm_base_node* new_node);
 /**
  * @brief Replaces an existing node with a new one (same key/type/size).
  *
@@ -597,7 +594,7 @@ bool tsm_node_insert(struct tsm_base_node* p_tsm_base, struct tsm_base_node* new
  * @note Call context: must be called within rcu_read section
  * @note takes ownership of all data in new_node so should not free stuff in new_node if this is successful
  */
-bool tsm_node_update(struct tsm_base_node* p_tsm_base, struct tsm_base_node* new_node);
+TSM_Result tsm_node_update(struct tsm_base_node* p_tsm_base, struct tsm_base_node* new_node);
 /**
  * @brief Inserts if key doesn't exist, updates if it does.
  *
@@ -610,42 +607,19 @@ bool tsm_node_update(struct tsm_base_node* p_tsm_base, struct tsm_base_node* new
  * @note Call context: must be called within rcu_read section
  * @note takes ownership of all data in new_node so should not free stuff in new_node if this is successful
  */
-bool tsm_node_upsert(struct tsm_base_node* p_tsm_base, struct tsm_base_node* new_node);
+TSM_Result tsm_node_upsert(struct tsm_base_node* p_tsm_base, struct tsm_base_node* new_node);
 /**
- * @brief Will run the try_free_callback for the node.
+ * @brief Will delete the node from the TSM then call_rcu with the nodes fn_free_callback type function
  *
- * @param p_tsm_base The TSM base node.
+ * @param p_tsm_base The TSM base parent node.
  * @param p_base The base node to try free.
- * @return -1 error, 0 scheduled but not deleted, 1 scheduled and deleted.
+ * @return TSM_Result
  *
  * @note May require multiple calls with rcu_barrier() in between for dependent nodes.
  * @note Prerequisites: Node exists, no dependencies when returning 1.
  * @note Call context: must NOT be called within rcu_read section
  */
-int tsm_node_try_free_callback(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_base);
-/**
- * @brief Will only remove the node from the TSM and mark it as deleted. 
- *        After this function is called the caller must also call tsm_node_defer_free so that the memory is freed.
- *        Both tsm_node_remove and tsm_node_defer_free must be used within the fn_defer_free of any type node.
- *        tsm_node_remove and tsm_node_defer_free must be within the same read section because tsm_node_remove
- *        makes the node no longer accessible throught the hashtable.
- *        Even though the node is removed it is not safe to change data within the node as other threads could still be using it.
- *        Therefore tsm_node_defer_free is the only write operation you should do on the node after it is removed.
- *        You could still read from the node to do what ever you want. 
- *        If you use custom syncronization inside the node then you could actually do custom writes as long as all threads use 
- *        the syncronization primitive for acccess.
- */
-bool tsm_node_remove(struct tsm_base_node** pp_tsm_base, struct tsm_base_node* p_base);
-/**
- * @brief Will schedule fn_free_callback for the p_base node. The node must be removed from the TSM before calling this function.
- *        You can use tsm_node_remove for that.
- */
-bool tsm_node_schedule_free_callback(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_base);
-/**
- * @brief Will call the defer_free function for p_base which is stored in the type node for p_base
- */
-bool tsm_node_defer_free(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_base);
-
+TSM_Result tsm_node_defer_free(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_base);
 /**
  * @brief Initializes iterator to first node.
  *
@@ -700,7 +674,7 @@ bool tsm_iter_lookup(struct tsm_base_node* p_tsm_base, struct tsm_key key, struc
  * @note Prerequisites: rcu_init() called.
  * @note Call context: Any context.
  */
-bool gtsm_init();
+TSM_Result gtsm_init();
 /**
  * @brief Gets the Global Thread Safe Map.
  *

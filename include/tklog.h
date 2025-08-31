@@ -205,6 +205,17 @@ void _tklog(uint32_t    flags,
     #define tklog_scope(code)  code
 #endif /* TKLOG_SCOPE */
 
+#ifdef TKLOG_TIMER
+    void _tklog_timer_start(int line, const char* file);
+    void _tklog_timer_stop(int line, const char* file);
+    void tklog_timer_print(void);
+    #define tklog_timer_start() _tklog_timer_start(__LINE__, __TKLOG_FILE_NAME__);
+    #define tklog_timer_stop() _tklog_timer_stop(__LINE__, __TKLOG_FILE_NAME__)
+#else
+    #define tklog_timer_start()
+    #define tklog_timer_stop()
+#endif // TKLOG_TIMER
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

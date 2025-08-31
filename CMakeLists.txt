@@ -242,7 +242,7 @@ add_executable(test_asan_demo
 
 target_sources(logos PRIVATE ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c) 
 target_sources(logos_prev PRIVATE ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c) 
-if(NOT LOGOS_ADDRESS_SANITIZER)
+if(NOT LOGOS_ADDRESS_SANITIZER AND NOT LOGOS_THREAD_SANITIZER)
     # Add mimalloc objects for override
     target_sources(logos PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
     target_sources(logos_prev PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
@@ -424,7 +424,7 @@ target_compile_definitions(test_global_data PRIVATE
     $<$<CONFIG:Debug>:DEBUG_YIELD>
 )
 target_compile_definitions(test_tsm PRIVATE
-    URCU_LFHT_SAFETY_ON
+    # URCU_LFHT_SAFETY_ON
     #TKLOG_MEMORY
     #TKLOG_MEMORY_PRINT_ON_EXIT
     TKLOG_SHOW_LOG_LEVEL
@@ -433,7 +433,7 @@ target_compile_definitions(test_tsm PRIVATE
     TKLOG_SHOW_PATH
     TKLOG_SCOPE
     # TKLOG_DEBUG
-    TKLOG_INFO
+    # TKLOG_INFO
     TKLOG_NOTICE
     TKLOG_WARNING
     TKLOG_ERROR
