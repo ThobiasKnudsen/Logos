@@ -109,11 +109,13 @@ void _tklog(uint32_t    flags,
     void *tklog_malloc (size_t size, const char *file, int line);
     void *tklog_calloc (size_t nmemb, size_t size, const char *file, int line);
     void *tklog_realloc(void *ptr, size_t size, const char *file, int line);
+    char *tklog_strdup(const char *str, const char *file, int line);
     void  tklog_free   (void *ptr, const char *file, int line);
 
     #define malloc(sz)       tklog_malloc ((sz), __TKLOG_FILE_NAME__, __LINE__)
     #define calloc(n, sz)    tklog_calloc((n), (sz), __TKLOG_FILE_NAME__, __LINE__)
     #define realloc(p, sz)   tklog_realloc((p), (sz), __TKLOG_FILE_NAME__, __LINE__)
+    #define strdup(str)      tklog_strdup((str), __TKLOG_FILE_NAME__, __LINE__)
     #define free(p)          tklog_free   ((p), __TKLOG_FILE_NAME__, __LINE__)
 #endif /* TKLOG_MEMORY */
     void tklog_memory_dump(void);
@@ -206,14 +208,22 @@ void _tklog(uint32_t    flags,
 #endif /* TKLOG_SCOPE */
 
 #ifdef TKLOG_TIMER
+    void _tklog_timer_init(void);
     void _tklog_timer_start(int line, const char* file);
     void _tklog_timer_stop(int line, const char* file);
-    void tklog_timer_print(void);
-    #define tklog_timer_start() _tklog_timer_start(__LINE__, __TKLOG_FILE_NAME__);
+    void _tklog_timer_print();
+    void _tklog_timer_clear();
+    #define tklog_timer_init() _tklog_timer_init()
+    #define tklog_timer_start() _tklog_timer_start(__LINE__, __TKLOG_FILE_NAME__)
     #define tklog_timer_stop() _tklog_timer_stop(__LINE__, __TKLOG_FILE_NAME__)
+    #define tklog_timer_print() _tklog_timer_print()
+    #define tklog_timer_clear() _tklog_timer_clear()
 #else
-    #define tklog_timer_start()
-    #define tklog_timer_stop()
+    #define tklog_timer_init() 
+    #define tklog_timer_start() 
+    #define tklog_timer_stop() 
+    #define tklog_timer_print() 
+    #define tklog_timer_clear()
 #endif // TKLOG_TIMER
 
 #ifdef __cplusplus

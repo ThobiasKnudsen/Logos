@@ -298,6 +298,20 @@ void _synchronize_rcu_safe(void) {
 
 void _rcu_barrier_safe(void) {
     tklog_scope(_ensure_thread_state_initialized());
+
+    // if this thread is the main callback thread then its not allowed.
+    // this does not support multiple callback threads yet
+    struct call_rcu_data *default_crdp = get_default_call_rcu_data();
+    pthread_t callback_thread_id = get_call_rcu_thread(default_crdp);
+    if (callback_thread_id == thread_state.thread_id) {
+        thread_state.registered = true;
+        tklog_scope(bool result = _rcu_is_test_mode());
+        if (result) {
+            tklog_debug("rcu_barrier called from within callback which is not allowed");
+        } else {
+            tklog_critical("rcu_barrier called from within callback which is not allowed");
+        }
+    } 
     
     /* Check if thread is registered */
     if (!thread_state.registered) {

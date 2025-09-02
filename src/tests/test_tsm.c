@@ -56,12 +56,15 @@ bool node_1_create_in_tsm(
     float x, float y, float width, float height,
     unsigned char red, unsigned char green, unsigned char blue, unsigned char alpha,
     struct tsm_key* out_key) {
+
+    tklog_timer_start();
     tklog_scope(struct tsm_key node_1_key = tsm_key_create(0, NULL, true));
     tklog_scope(struct tsm_key node_1_type_key = tsm_key_copy(g_node_1_type_key));
     tklog_scope(struct tsm_base_node* p_new_node_1_base = tsm_base_node_create(node_1_key, node_1_type_key, sizeof(struct node_1), false, false));
     if (!p_new_node_1_base) {
         tsm_key_free(&node_1_key);
         tsm_key_free(&node_1_type_key);
+        tklog_timer_stop();
         return false;
     }
     struct node_1* p_node_1 = caa_container_of(p_new_node_1_base, struct node_1, base);
@@ -82,12 +85,14 @@ bool node_1_create_in_tsm(
         }
         gtsm_print();
         rcu_read_unlock();
+        tklog_timer_stop();
         return false;
     }
     if (out_key) {
         tklog_scope(*out_key = tsm_key_copy((struct tsm_key){.key_union = p_new_node_1_base->key_union, .key_is_number = p_new_node_1_base->key_is_number}));
     }
     rcu_read_unlock();
+    tklog_timer_stop();
     return true;
 }
 // Define another custom type for testing: simple_int_node
@@ -109,7 +114,12 @@ static bool simple_int_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_bas
         return false;
     }
     struct simple_int_node* p_node = caa_container_of(p_base, struct simple_int_node, base);
-    return p_node->value >= 0;
+    if (p_node->value >= 0) {
+        return true;
+    } else {
+        tklog_notice("p_node->value(%d) is bellow 0\n", p_node->value);
+        return false;
+    }
 }
 static bool simple_int_print(struct tsm_base_node* p_base) {
     tklog_scope(bool print_result = tsm_base_node_print(p_base));
@@ -121,12 +131,14 @@ static bool simple_int_print(struct tsm_base_node* p_base) {
     return true;
 }
 bool simple_int_create_in_tsm(struct tsm_base_node* p_tsm, int value, struct tsm_key* out_key) {
+    tklog_timer_start();
     tklog_scope(struct tsm_key key = tsm_key_create(0, NULL, true));
     tklog_scope(struct tsm_key type_key = tsm_key_copy(g_simple_int_type_key));
     tklog_scope(struct tsm_base_node* p_base = tsm_base_node_create(key, type_key, sizeof(struct simple_int_node), false, false));
     if (!p_base) {
         tsm_key_free(&key);
         tsm_key_free(&type_key);
+        tklog_timer_stop();
         return false;
     }
     struct simple_int_node* p_node = caa_container_of(p_base, struct simple_int_node, base);
@@ -139,12 +151,14 @@ bool simple_int_create_in_tsm(struct tsm_base_node* p_tsm, int value, struct tsm
             tklog_error("tsm_node_defer_free failed with code %d\n", res);
         }
         rcu_read_unlock();
+        tklog_timer_stop();
         return false;
     }
     if (out_key) {
         tklog_scope(*out_key = tsm_key_copy((struct tsm_key){.key_union = p_base->key_union, .key_is_number = p_base->key_is_number}));
     }
     rcu_read_unlock();
+    tklog_timer_stop();
     return true;
 }
 // Helper to free non-inserted nodes
@@ -201,12 +215,10 @@ bool create_custom_types(struct tsm_base_node* p_tsm_base) {
 }
 static const unsigned long g_types_count = 4;
 static bool pick_random_key(struct tsm_key* out_key) {
-    unsigned long count = tsm_nodes_count(gtsm_get());
-    if (count == 0) {
-        return false;
-    }
     struct cds_lfht_iter iter;
+    tklog_timer_start();
     bool found = tsm_iter_first(gtsm_get(), &iter);
+    tklog_timer_stop();
     if (found) {
         struct tsm_base_node* node = tsm_iter_get_node(&iter);
         if (node) {
@@ -220,13 +232,10 @@ static bool pick_random_key(struct tsm_key* out_key) {
 void* stress_thread(void* arg) {
     rcu_register_thread();
     srand(time(NULL) ^ (intptr_t)pthread_self() ^ (intptr_t)arg);
-    for (int op = 0; op < 50000; op++) {
+    for (int op = 0; op < 10000; op++) {
         int r = rand() % 100;
-        rcu_read_lock();
-        tklog_scope(unsigned long total = tsm_nodes_count(gtsm_get()));
-        rcu_read_unlock();
-        unsigned long content_count = total > g_types_count ? total - g_types_count : 0;
-        if (r < 30 || content_count == 0) { // Prefer inserts if no keys or 30% chance
+        if (r < 30) { // Prefer inserts if no keys or 30% chance
+            tklog_timer_start();
             int type = rand() % 3;
             struct tsm_key k;
             bool success = false;
@@ -249,12 +258,14 @@ void* stress_thread(void* arg) {
                         if (result != TSM_SUCCESS) {
                             tklog_error("free_callback failed\n");
                             rcu_read_unlock();
+                            tklog_timer_stop();
                             return NULL;
                         }
                     }
                     tklog_scope(TSM_Result insert_result = tsm_node_insert(p_gtsm, new_tsm));
                     if (insert_result != TSM_SUCCESS && insert_result != TSM_NODE_ALREADY_EXISTS) {
                         tklog_error("inserting new TSM failed\n");
+                        tklog_timer_stop();
                         return NULL;
                     }
                     success = true;
@@ -269,7 +280,9 @@ void* stress_thread(void* arg) {
             if (success) {
                 tklog_scope(tsm_key_free(&k));
             }
+            tklog_timer_stop();
         } else if (r < 50) { // Get
+            tklog_timer_start();
             rcu_read_lock();
             struct tsm_key k;
             tklog_scope(bool rand_result = pick_random_key(&k));
@@ -277,19 +290,19 @@ void* stress_thread(void* arg) {
             tsm_key_print(k);
             if (!rand_result) {
                 rcu_read_unlock();
+                tklog_timer_stop();
                 continue;
             }
             tklog_scope(struct tsm_base_node* node = tsm_node_get(gtsm_get(), k));
             if (node) {
                 // Test additional functions if tsm
                 tklog_scope(bool is_tsm = tsm_node_is_tsm(node));
-                if (is_tsm) {
-                    tklog_scope(tsm_nodes_count(node));
-                }
             }
             rcu_read_unlock();
             tklog_scope(tsm_key_free(&k));
+            tklog_timer_stop();
         } else if (r < 60) { // Validate
+            tklog_timer_start();
             rcu_read_lock();
             struct tsm_key k;
             tklog_scope(bool rand_result = pick_random_key(&k));
@@ -297,16 +310,24 @@ void* stress_thread(void* arg) {
             tsm_key_print(k);
             if (!rand_result) {
                 rcu_read_unlock();
+                tklog_timer_stop();
                 continue;
             }
             tklog_scope(struct tsm_base_node* p_base_k = tsm_node_get(gtsm_get(), k));
-            tklog_scope(bool valid = tsm_node_is_valid(gtsm_get(), p_base_k));
-            rcu_read_unlock();
-            if (!valid) {
-                tklog_warning("Node validation failed\n");
+            if (!p_base_k) {
+                tklog_warning("p_base_k is NULL\n");
+            } else {
+                tklog_scope(bool valid = tsm_node_is_valid(gtsm_get(), p_base_k));
+                if (!valid) {
+                    tklog_warning("Node validation failed\n");
+                    tklog_notice("key: %d | type_key: %s", p_base_k->key_union.number, p_base_k->type_key_union.string);
+                }
             }
+            rcu_read_unlock();
             tklog_scope(tsm_key_free(&k));
+            tklog_timer_stop();
         } else if (r < 70) { // Update
+            tklog_timer_start();
             rcu_read_lock();
             struct tsm_key uk;
             tklog_scope(bool rand_result = pick_random_key(&uk));
@@ -314,17 +335,20 @@ void* stress_thread(void* arg) {
             tsm_key_print(uk);
             if (!rand_result) {
                 rcu_read_unlock();
+                tklog_timer_stop();
                 continue;
             }
             struct tsm_base_node* p_base = tsm_node_get(gtsm_get(), uk);
             if (!p_base) {
                 rcu_read_unlock();
                 tsm_key_free(&uk);
+                tklog_timer_stop();
                 continue;
             }
             if (tsm_node_is_type(p_base)) {
                 rcu_read_unlock();
                 tsm_key_free(&uk);
+                tklog_timer_stop();
                 continue;
             }
             struct tsm_key type_key = {p_base->type_key_union, p_base->type_key_is_number};
@@ -339,6 +363,7 @@ void* stress_thread(void* arg) {
             if (type == -1 || type == 2) {
                 tsm_key_free(&uk);
                 rcu_read_unlock();
+                tklog_timer_stop();
                 continue;
             }
             struct tsm_base_node* update_base = NULL;
@@ -381,7 +406,9 @@ void* stress_thread(void* arg) {
                     tklog_scope(tsm_key_free(&type_key));
                 }
             }
+            tklog_timer_stop();
         } else if (r < 80) { // Free
+            tklog_timer_start();
             rcu_read_lock();
             struct tsm_key fk;
             tklog_scope(bool rand_result = pick_random_key(&fk));
@@ -389,6 +416,7 @@ void* stress_thread(void* arg) {
             tsm_key_print(fk);
             if (!rand_result) {
                 rcu_read_unlock();
+                tklog_timer_stop();
                 continue;
             }
             tklog_scope(struct tsm_base_node* p_base = tsm_node_get(gtsm_get(), fk));
@@ -396,6 +424,7 @@ void* stress_thread(void* arg) {
                 if (tsm_node_is_type(p_base)) {
                     tsm_key_free(&fk);
                     rcu_read_unlock();
+                    tklog_timer_stop();
                     continue;
                 }
                 tklog_scope(TSM_Result res = tsm_node_defer_free(gtsm_get(), p_base));
@@ -405,12 +434,16 @@ void* stress_thread(void* arg) {
             }
             rcu_read_unlock();
             tklog_scope(tsm_key_free(&fk));
-        } else if (r < 85) { // Count
+            tklog_timer_stop();
+        } else if (r < 81) { // Count
+            tklog_timer_start();
             rcu_read_lock();
             tklog_scope(uint32_t count = tsm_nodes_count(gtsm_get()));
             tklog_notice("op: %d count = %d\n", op, count);
             rcu_read_unlock();
+            tklog_timer_stop();
         } else if (r < 85) { // Iterate
+            tklog_timer_start();
             tklog_info("op: %d iterate\n", op);
             rcu_read_lock();
             struct cds_lfht_iter iter;
@@ -425,7 +458,9 @@ void* stress_thread(void* arg) {
                 }
             }
             rcu_read_unlock();
+            tklog_timer_stop();
         } else if (r < 95) { // Upsert
+            tklog_timer_start();
             rcu_read_lock();
             bool is_new = rand() % 2 == 0;
             int type = rand() % 3;
@@ -435,6 +470,7 @@ void* stress_thread(void* arg) {
                 if (!rand_result) {
                     tklog_error("pick_random_key failed\n");
                     rcu_read_unlock();
+                    tklog_timer_stop();
                     continue;
                 }
                 tklog_info("op: %d upsert existing\n", op);
@@ -453,11 +489,13 @@ void* stress_thread(void* arg) {
                 if (!existing) {
                     rcu_read_unlock();
                     tsm_key_free(&uk);
+                    tklog_timer_stop();
                     continue;
                 }
                 if (tsm_node_is_type(existing)) {
                     rcu_read_unlock();
                     tsm_key_free(&uk);
+                    tklog_timer_stop();
                     continue;
                 }
                 type_key = (struct tsm_key){.key_union = existing->type_key_union, .key_is_number = existing->type_key_is_number};
@@ -470,12 +508,14 @@ void* stress_thread(void* arg) {
                 } else {
                     rcu_read_unlock();
                     tsm_key_free(&uk);
+                    tklog_timer_stop();
                     continue;
                 }
             }
             if (type == 2 && !is_new) {
                 rcu_read_unlock();
                 tsm_key_free(&uk);
+                tklog_timer_stop();
                 continue;
             }
             if (type == 0) {
@@ -492,7 +532,7 @@ void* stress_thread(void* arg) {
                     un->blue = rand() % 256;
                     un->alpha = rand() % 256;
                     tklog_scope(success = tsm_node_upsert(gtsm_get(), upsert_base));
-                    if (success != TSM_SUCCESS && success != TSM_NODE_ALREADY_REMOVED) {
+                    if (success != TSM_SUCCESS) {
                         tklog_warning("upsert failed with code %d\n", success);
                         tklog_scope(tsm_base_node_free_non_inserted(upsert_base));
                     }
@@ -504,7 +544,7 @@ void* stress_thread(void* arg) {
                     struct simple_int_node* un = caa_container_of(upsert_base, struct simple_int_node, base);
                     un->value = rand();
                     tklog_scope(success = tsm_node_upsert(gtsm_get(), upsert_base));
-                    if (success != TSM_SUCCESS && success != TSM_NODE_ALREADY_REMOVED) {
+                    if (success != TSM_SUCCESS) {
                         tklog_warning("upsert failed with code %d\n", success);
                         tklog_scope(tsm_base_node_free_non_inserted(upsert_base));
                     }
@@ -519,15 +559,19 @@ void* stress_thread(void* arg) {
                         if (result != TSM_SUCCESS) {
                             tklog_error("free_callback failed\n");
                             rcu_read_unlock();
+                            tklog_timer_stop();
                             return NULL;
                         }
                         success = false;
                     }
                     tklog_scope(TSM_Result insert_result = tsm_node_insert(p_gtsm, upsert_base));
-                    if (insert_result != TSM_SUCCESS && insert_result != TSM_NODE_ALREADY_EXISTS) {
-                        tklog_error("inserting new TSM failed\n");
-                        rcu_read_unlock();
-                        return NULL;
+                    if (insert_result != TSM_SUCCESS) {
+                        if (insert_result != TSM_NODE_ALREADY_EXISTS) {
+                            tklog_error("inserting new TSM failed\n");
+                        }
+                        tsm_node_defer_free(p_gtsm, upsert_base);
+                        tklog_timer_stop();
+                        return NULL;  // Or handle as needed
                     }
                 } else {
                     tklog_error("tsm_create failed\n");
@@ -540,7 +584,9 @@ void* stress_thread(void* arg) {
                     tklog_scope(tsm_key_free(&type_key));
                 }
             }
+            tklog_timer_stop();
         } else { // TSM-specific tests
+            tklog_timer_start();
             rcu_read_lock();
             struct tsm_key tk;
             tklog_scope(bool rand_result = pick_random_key(&tk));
@@ -549,6 +595,7 @@ void* stress_thread(void* arg) {
             if (!rand_result) {
                 rcu_read_unlock();
                 tsm_key_free(&tk);
+                tklog_timer_stop();
                 continue;
             }
             tklog_scope(struct tsm_base_node* p_tsm = tsm_node_get(gtsm_get(), tk));
@@ -556,12 +603,14 @@ void* stress_thread(void* arg) {
                 tklog_warning("gotten p_tsm is NULL\n");
                 rcu_read_unlock();
                 tsm_key_free(&tk);
+                tklog_timer_stop();
                 continue;
             }
             tklog_scope(bool is_tsm = tsm_node_is_tsm(p_tsm));
             if (!is_tsm) {
                 rcu_read_unlock();
                 tsm_key_free(&tk);
+                tklog_timer_stop();
                 continue;
             }
             if (p_tsm) {
@@ -585,6 +634,7 @@ void* stress_thread(void* arg) {
                             if (result != 1) {
                                 tklog_error("free_callback failed\n");
                                 tsm_key_free(&tk);
+                                tklog_timer_stop();
                                 return NULL;
                             }
                             success = false;
@@ -593,6 +643,7 @@ void* stress_thread(void* arg) {
                             tklog_scope(TSM_Result insert_result = tsm_node_insert(p_tsm, sub_base));
                             if (insert_result != TSM_SUCCESS && insert_result != TSM_NODE_ALREADY_EXISTS) {
                                 tklog_error("inserting new TSM failed\n");
+                                tklog_timer_stop();
                                 return NULL;
                             }
                             success = true;
@@ -626,6 +677,7 @@ void* stress_thread(void* arg) {
                         tklog_scope(tsm_node_print(p_tsm, sub_p));
                     }
                     // Iterate
+                    tklog_timer_start();
                     struct cds_lfht_iter iter;
                     tklog_scope(bool iter_first_result = tsm_iter_first(p_tsm, &iter));
                     if (iter_first_result) {
@@ -638,6 +690,7 @@ void* stress_thread(void* arg) {
                             tklog_scope(next = tsm_iter_next(p_tsm, &iter));
                         }
                     }
+                    tklog_timer_stop();
                     // Lookup
                     tklog_scope(tsm_iter_lookup(p_tsm, sub_k, &iter));
                     tklog_scope(tsm_iter_get_node(&iter));
@@ -667,17 +720,20 @@ void* stress_thread(void* arg) {
             }
             rcu_read_unlock();
             tklog_scope(tsm_key_free(&tk));
+            tklog_timer_stop();
         }
         if (op % 200 == 0) {
             usleep(rand() % 500); // Random small delay to increase concurrency contention
         }
     }
+    tklog_timer_print();
+    tklog_timer_clear();
     rcu_unregister_thread();
     return NULL;
 }
 void stress_test() {
     tklog_info("Starting incremental stress test\n");
-    for (int nthreads = 1; nthreads <= 1; nthreads *= 2) {
+    for (int nthreads = 1; nthreads <= 16; nthreads *= 2) {
         tklog_notice("Stress testing with %d threads ===========================================================================================\n", nthreads);
         pthread_t* threads = malloc(nthreads * sizeof(pthread_t));
         if (!threads) {
@@ -696,8 +752,8 @@ void stress_test() {
         free(threads);
         // Cleanup remaining keys
         tklog_notice("Staring gtsm_free for %d threads\n", nthreads);
-        tklog_scope( rcu_read_lock(); gtsm_free(); rcu_read_unlock(); );
-        rcu_barrier();rcu_barrier();rcu_barrier();
+        tklog_scope( rcu_read_lock(); gtsm_print(); gtsm_free(); rcu_read_unlock(); );
+        rcu_barrier();rcu_barrier();rcu_barrier();rcu_barrier();
         tklog_scope( rcu_read_lock(); gtsm_init(); rcu_read_unlock(); );
         rcu_read_lock();
         tklog_scope(bool custom_type_creation_result = create_custom_types(gtsm_get()));
@@ -720,6 +776,7 @@ void stress_test() {
 
 int main() {
     tklog_info("Comprehensive test_gtsm_tsm running\n");
+    tklog_timer_init();
     tklog_scope(rcu_init());
     rcu_register_thread();
     // Test 1: Initialization
@@ -746,8 +803,9 @@ int main() {
     gtsm_free();
     rcu_read_unlock();
     // multiple beacuse each callback can defer new callbacks
-    rcu_barrier();rcu_barrier();rcu_barrier();
+    rcu_barrier();rcu_barrier();rcu_barrier();rcu_barrier();rcu_barrier();
     rcu_unregister_thread();
+    tklog_timer_clear();
     tklog_info("Comprehensive test completed\n");
     return 0;
 }

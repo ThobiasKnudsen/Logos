@@ -424,7 +424,7 @@ target_compile_definitions(test_global_data PRIVATE
     $<$<CONFIG:Debug>:DEBUG_YIELD>
 )
 target_compile_definitions(test_tsm PRIVATE
-    # URCU_LFHT_SAFETY_ON
+    #URCU_LFHT_SAFETY_ON
     #TKLOG_MEMORY
     #TKLOG_MEMORY_PRINT_ON_EXIT
     TKLOG_SHOW_LOG_LEVEL
@@ -432,8 +432,9 @@ target_compile_definitions(test_tsm PRIVATE
     TKLOG_SHOW_THREAD
     TKLOG_SHOW_PATH
     TKLOG_SCOPE
-    # TKLOG_DEBUG
-    # TKLOG_INFO
+    TKLOG_TIMER
+    #TKLOG_DEBUG
+    #TKLOG_INFO
     TKLOG_NOTICE
     TKLOG_WARNING
     TKLOG_ERROR
