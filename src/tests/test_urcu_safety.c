@@ -1,4 +1,4 @@
-#include "global_data/urcu_safe.h"
+#include "urcu_lfht_safe.h"
 #include "tklog.h"
 #include <assert.h>
 #include <pthread.h>

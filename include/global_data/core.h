@@ -4,7 +4,7 @@
 #define _LGPL_SOURCE
 #include <urcu.h>
 #include <urcu/rculfhash.h>
-#include "global_data/urcu_safe.h"
+#include "urcu_lfht_safe.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

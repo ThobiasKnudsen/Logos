@@ -8,7 +8,7 @@
 #include <stdio.h>
 #define MAX_KEYS 10000
 // Define node_1 as in the original
-static struct tsm_key g_node_1_type_key = { .key_union.string = "node_1_type", .key_is_number = false };
+static struct tsm_key g_node_1_type_key = { .key_union.string = "node_1_type", .key_type = TSM_KEY_TYPE_STRING };
 struct node_1 {
     struct tsm_base_node base;
     float x;
@@ -58,7 +58,7 @@ bool node_1_create_in_tsm(
     struct tsm_key* out_key) {
 
     tklog_timer_start();
-    tklog_scope(struct tsm_key node_1_key = tsm_key_create(0, NULL, true));
+    tklog_scope(struct tsm_key node_1_key = tsm_key_create(0, NULL, TSM_KEY_TYPE_UINT64));
     tklog_scope(struct tsm_key node_1_type_key = tsm_key_copy(g_node_1_type_key));
     tklog_scope(struct tsm_base_node* p_new_node_1_base = tsm_base_node_create(node_1_key, node_1_type_key, sizeof(struct node_1), false, false));
     if (!p_new_node_1_base) {
@@ -89,14 +89,14 @@ bool node_1_create_in_tsm(
         return false;
     }
     if (out_key) {
-        tklog_scope(*out_key = tsm_key_copy((struct tsm_key){.key_union = p_new_node_1_base->key_union, .key_is_number = p_new_node_1_base->key_is_number}));
+        tklog_scope(*out_key = tsm_key_copy((struct tsm_key){.key_union = p_new_node_1_base->key_union, .key_type = p_new_node_1_base->key_type}));
     }
     rcu_read_unlock();
     tklog_timer_stop();
     return true;
 }
 // Define another custom type for testing: simple_int_node
-static struct tsm_key g_simple_int_type_key = { .key_union.string = "simple_int_type", .key_is_number = false };
+static struct tsm_key g_simple_int_type_key = { .key_union.string = "simple_int_type", .key_type = false };
 struct simple_int_node {
     struct tsm_base_node base;
     int value;
@@ -132,7 +132,7 @@ static bool simple_int_print(struct tsm_base_node* p_base) {
 }
 bool simple_int_create_in_tsm(struct tsm_base_node* p_tsm, int value, struct tsm_key* out_key) {
     tklog_timer_start();
-    tklog_scope(struct tsm_key key = tsm_key_create(0, NULL, true));
+    tklog_scope(struct tsm_key key = tsm_key_create(0, NULL, TSM_KEY_TYPE_UINT64));
     tklog_scope(struct tsm_key type_key = tsm_key_copy(g_simple_int_type_key));
     tklog_scope(struct tsm_base_node* p_base = tsm_base_node_create(key, type_key, sizeof(struct simple_int_node), false, false));
     if (!p_base) {
@@ -155,7 +155,7 @@ bool simple_int_create_in_tsm(struct tsm_base_node* p_tsm, int value, struct tsm
         return false;
     }
     if (out_key) {
-        tklog_scope(*out_key = tsm_key_copy((struct tsm_key){.key_union = p_base->key_union, .key_is_number = p_base->key_is_number}));
+        tklog_scope(*out_key = tsm_key_copy((struct tsm_key){.key_union = p_base->key_union, .key_type = p_base->key_type}));
     }
     rcu_read_unlock();
     tklog_timer_stop();
@@ -167,10 +167,10 @@ static bool tsm_base_node_free_non_inserted(struct tsm_base_node* p_base) {
     if (p_base->this_is_tsm) {
         struct tsm* p_tsm = (struct tsm*)p_base;
         cds_lfht_destroy(p_tsm->p_ht, NULL);
-        if (p_tsm->path.length > 0) free(p_tsm->path.from_gtsm_to_self);
+        if (p_tsm->path.length > 0) free(p_tsm->path.key_chain);
     }
-    tsm_key_union_free(p_base->key_union, p_base->key_is_number);
-    tsm_key_union_free(p_base->type_key_union, p_base->type_key_is_number);
+    tsm_key_union_free(p_base->key_union, p_base->key_type);
+    tsm_key_union_free(p_base->type_key_union, p_base->type_key_type);
     free(p_base);
     return true;
 }
@@ -178,7 +178,7 @@ static bool tsm_base_node_free_non_inserted(struct tsm_base_node* p_base) {
 bool create_custom_types(struct tsm_base_node* p_tsm_base) {
     struct tsm_base_node* p_gtsm = gtsm_get();
     // Create node_1_type
-    struct tsm_key base_type_key = tsm_key_create(0, "base_type", false);
+    struct tsm_key base_type_key = tsm_key_create(0, "base_type", TSM_KEY_TYPE_STRING);
     tklog_scope(struct tsm_key node1_type_key = tsm_key_copy(g_node_1_type_key));
     struct tsm_base_node* node1_type_base = tsm_base_type_node_create(node1_type_key, sizeof(struct tsm_base_type_node),
                                                                       node_1_free_callback, node_1_is_valid, node_1_print, 
@@ -222,7 +222,7 @@ static bool pick_random_key(struct tsm_key* out_key) {
     if (found) {
         struct tsm_base_node* node = tsm_iter_get_node(&iter);
         if (node) {
-            tklog_scope(*out_key = tsm_key_copy((struct tsm_key){.key_union = node->key_union, .key_is_number = node->key_is_number}));
+            tklog_scope(*out_key = tsm_key_copy((struct tsm_key){.key_union = node->key_union, .key_type = node->key_type}));
             return true;
         }
     }
@@ -247,10 +247,10 @@ void* stress_thread(void* arg) {
             } else if (type == 1) {
                 tklog_scope(success = simple_int_create_in_tsm(p_gtsm, rand(), &k));
             } else {
-                tklog_scope(struct tsm_key temp_k = tsm_key_create(0, NULL, true));
+                tklog_scope(struct tsm_key temp_k = tsm_key_create(0, NULL, TSM_KEY_TYPE_UINT64));
                 tklog_scope(struct tsm_base_node* new_tsm = tsm_create(p_gtsm, temp_k));
                 if (new_tsm) {
-                    tklog_scope(k = tsm_key_copy((struct tsm_key){.key_union = new_tsm->key_union, .key_is_number = new_tsm->key_is_number}));
+                    tklog_scope(k = tsm_key_copy((struct tsm_key){.key_union = new_tsm->key_union, .key_type = new_tsm->key_type}));
                     tklog_scope(bool custom_type_creation_result = create_custom_types(new_tsm));
                     if (!custom_type_creation_result) {
                         tklog_error("creating custom types failed\n");
@@ -320,7 +320,7 @@ void* stress_thread(void* arg) {
                 tklog_scope(bool valid = tsm_node_is_valid(gtsm_get(), p_base_k));
                 if (!valid) {
                     tklog_warning("Node validation failed\n");
-                    tklog_notice("key: %d | type_key: %s", p_base_k->key_union.number, p_base_k->type_key_union.string);
+                    tklog_notice("key: %d | type_key: %s", p_base_k->key_union.uint64, p_base_k->type_key_union.string);
                 }
             }
             rcu_read_unlock();
@@ -351,7 +351,7 @@ void* stress_thread(void* arg) {
                 tklog_timer_stop();
                 continue;
             }
-            struct tsm_key type_key = {p_base->type_key_union, p_base->type_key_is_number};
+            struct tsm_key type_key = {p_base->type_key_union, p_base->type_key_type};
             int type = -1;
             if (tsm_key_match(type_key, g_node_1_type_key)) {
                 type = 0;
@@ -476,7 +476,7 @@ void* stress_thread(void* arg) {
                 tklog_info("op: %d upsert existing\n", op);
                 tsm_key_print(uk);
             } else {
-                tklog_scope(uk = tsm_key_create(0, NULL, true));
+                tklog_scope(uk = tsm_key_create(0, NULL, TSM_KEY_TYPE_UINT64));
                 tklog_info("op: %d upsert new\n", op);
                 tsm_key_print(uk);
             }
@@ -498,7 +498,7 @@ void* stress_thread(void* arg) {
                     tklog_timer_stop();
                     continue;
                 }
-                type_key = (struct tsm_key){.key_union = existing->type_key_union, .key_is_number = existing->type_key_is_number};
+                type_key = (struct tsm_key){.key_union = existing->type_key_union, .key_type = existing->type_key_type};
                 if (tsm_key_match(type_key, g_node_1_type_key)) {
                     type = 0;
                 } else if (tsm_key_match(type_key, g_simple_int_type_key)) {
@@ -624,7 +624,7 @@ void* stress_thread(void* arg) {
                 struct tsm_base_node* sub_base = NULL;
                 if (sub_type == 2) {
                     // Create tsm inside
-                    tklog_scope(struct tsm_key temp_sub_k = tsm_key_create(0, NULL, true));
+                    tklog_scope(struct tsm_key temp_sub_k = tsm_key_create(0, NULL, TSM_KEY_TYPE_UINT64));
                     sub_base = tsm_create(p_tsm, temp_sub_k);
                     if (sub_base) {
                         tklog_scope(bool custom_type_creation_result = create_custom_types(sub_base));
@@ -639,7 +639,7 @@ void* stress_thread(void* arg) {
                             }
                             success = false;
                         } else {
-                            tklog_scope(sub_k = tsm_key_copy((struct tsm_key){.key_union = sub_base->key_union, .key_is_number = sub_base->key_is_number}));
+                            tklog_scope(sub_k = tsm_key_copy((struct tsm_key){.key_union = sub_base->key_union, .key_type = sub_base->key_type}));
                             tklog_scope(TSM_Result insert_result = tsm_node_insert(p_tsm, sub_base));
                             if (insert_result != TSM_SUCCESS && insert_result != TSM_NODE_ALREADY_EXISTS) {
                                 tklog_error("inserting new TSM failed\n");

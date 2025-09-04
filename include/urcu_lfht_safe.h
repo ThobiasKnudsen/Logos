@@ -18,7 +18,7 @@
  * USAGE:
  * 1. Define a function to get node size: size_t my_get_node_size(struct cds_lfht_node* node)
  * 2. Register it with: urcu_safe_set_node_size_function(my_get_node_size)
- * 3. Include this header: #include "urcu_safe.h"
+ * 3. Include this header: #include "urcu_lfht_safe.h"
  * ------------------------------------------------------------------------- */
 
 typedef size_t (*urcu_node_size_func_t)(struct cds_lfht_node* node);

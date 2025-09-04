@@ -15,26 +15,27 @@
 // ==========================================================================================
 
 #define MAX_STRING_KEY_LEN 64
+#define MAX_TYPES_IN_SAME_LAYER 256
 // #define TSM_DEBUG
 static _Atomic uint64_t g_key_counter = 1; // 0 is invalid. 1 is the first valid key
 static struct tsm_base_node* GTSM = NULL;
 static struct tsm_base_node* GTSM_tmp = NULL;
-static const struct tsm_key g_gtsm_key = { .key_union.string = "gtsm", .key_is_number = false };
-static const struct tsm_key g_base_type_key = { .key_union.string = "base_type", .key_is_number = false };
-static const struct tsm_key g_tsm_type_key  = { .key_union.string = "tsm_type",  .key_is_number = false };
+static const struct tsm_key g_gtsm_key = { .key_union.string = "gtsm", .key_type = TSM_KEY_TYPE_STRING };
+static const struct tsm_key g_base_type_key = { .key_union.string = "base_type", .key_type = TSM_KEY_TYPE_STRING };
+static const struct tsm_key g_tsm_type_key  = { .key_union.string = "tsm_type",  .key_type = TSM_KEY_TYPE_STRING };
 // ==========================================================================================
 // THREAD SAFE MAP
 // ==========================================================================================
 
 static int32_t _tsm_key_match(struct cds_lfht_node *node, const void *key) {
     struct tsm_base_node *base_node = caa_container_of(node, struct tsm_base_node, lfht_node);
-    struct tsm_key ctx_1 = { .key_union = base_node->key_union, .key_is_number = base_node->key_is_number };
+    struct tsm_key ctx_1 = { .key_union = base_node->key_union, .key_type = base_node->key_type };
     struct tsm_key* p_ctx_2 = (struct tsm_key *)key;
     return tsm_key_match(ctx_1, *p_ctx_2);
 }
-static uint64_t _tsm_hash_key(union tsm_key_union key_union, bool key_is_number) {
-    if (key_is_number) {
-        return XXH3_64bits(&key_union.number, sizeof(uint64_t));
+static uint64_t _tsm_hash_key(union tsm_key_union key_union, uint8_t key_type) {
+    if (key_type == TSM_KEY_TYPE_UINT64) {
+        return XXH3_64bits(&key_union.uint64, sizeof(uint64_t));
     } else {
         return XXH3_64bits(key_union.string, strlen(key_union.string));
     }
@@ -63,31 +64,31 @@ static void _tsm_base_type_node_free_callback(struct rcu_head* rcu_head) {
         return;
     }
     struct tsm_base_node* p_base = caa_container_of(rcu_head, struct tsm_base_node, rcu_head);
-    tklog_scope(bool free_result = tsm_base_node_free(p_base));
-    if (!free_result) {
-        tklog_error("failed to free\n");
+    tklog_scope(TSM_Result tsm_result = tsm_base_node_free(p_base));
+    if (tsm_result != TSM_RESULT_SUCCESS) {
+        tklog_error("failed to free with code %d\n", tsm_result);
     }
 }
-static bool _tsm_base_type_node_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_base) {
+static TSM_Result _tsm_base_type_node_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_base) {
 
-    if (!p_base) {
-        tklog_debug("p_base is NULL\n");
-        return false;
+    if (!p_base || !p_tsm_base) {
+        tklog_error("arguments is NULL\n");
+        return TSM_RESULT_NULL_ARGUMENT;
     }
-    if (!p_tsm_base) {
-        tklog_error("p_tsm_base is NULL\n");
-        return false;
-    }
-    tklog_scope(bool is_tsm = tsm_node_is_tsm(p_tsm_base));
-    if (!is_tsm) {
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
         tklog_error("p_tsm_base is not TSM\n");
-        return false;
+        return tsm_result;
     }
-
-    tklog_scope(bool is_valid = tsm_base_node_is_valid(p_tsm_base, p_base));
-    if (!is_valid) {
+    tklog_scope(tsm_result = tsm_node_is_type(p_base)); 
+    if (tsm_result != TSM_RESULT_NODE_IS_TYPE) {
+        tklog_info("given base is not type which it should be for it to be valid\n");
+        return tsm_result
+    }
+    tklog_scope(tsm_result = tsm_base_node_is_valid(p_tsm_base, p_base));
+    if (is_valid != TSM_RESULT_NODE_IS_VALID) {
         tklog_info("base is not valid\n");
-        return false;
+        return tsm_result;
     }
 
     // Basic validation - check if it's a node type node
@@ -95,28 +96,38 @@ static bool _tsm_base_type_node_is_valid(struct tsm_base_node* p_tsm_base, struc
 
     if (!p_type->fn_free_callback) {
         tklog_debug("p_type->fn_free_callback is NULL\n");
-        return false;
+        return TSM_RESULT_NULL_FUNCTION_POINTER;
     }
     if (!p_type->fn_is_valid) {
         tklog_debug("p_type->fn_is_valid is NULL\n");
-        return false;
+        return TSM_RESULT_NULL_FUNCTION_POINTER;
     }
     if (!p_type->fn_print) {
         tklog_debug("p_type->fn_print is NULL\n");
-        return false;
+        return TSM_RESULT_NULL_FUNCTION_POINTER;
     }
     if (p_type->type_size_bytes < sizeof(struct tsm_base_node)) {
         tklog_debug("node_type->type_size_bytes(%d) < sizeof(struct tsm_base_node)(%d)\n", p_type->type_size_bytes, sizeof(struct tsm_base_node));
-        return false;
+        return TSM_RESULT_NODE_SIZE_MISMATCH;
     }
 
     return true;
 }
-static bool _tsm_base_type_node_print(struct tsm_base_node* p_base) {
+static TSM_Result _tsm_base_type_node_print(struct tsm_base_node* p_base) {
 
-    if (!tsm_base_node_print(p_base)) {
+    if (!p_base) {
+        tklog_error("NULL argument\n");
+        return TSM_RESULT_NULL_ARGUMENT;
+    }
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_type(p_base)); 
+    if (tsm_result != TSM_RESULT_NODE_IS_TYPE) {
+        tklog_info("given base is not type which it should be\n");
+        return tsm_result
+    }
+    tklog_scope(tsm_result = tsm_base_node_print(p_base));
+    if (tsm_result != TSM_RESULT_SUCCESS) {
         tklog_error("failed to print base node\n");
-        return false;
+        return tsm_result;
     }
 
     struct tsm_base_type_node* p_type_node = caa_container_of(p_base, struct tsm_base_type_node, base);
@@ -126,63 +137,89 @@ static bool _tsm_base_type_node_print(struct tsm_base_node* p_base) {
     tklog_info("    fn_print: %p\n", p_type_node->fn_print);
     tklog_info("    size of the node this node is type for: %d bytes\n", p_type_node->type_size_bytes);
 
-    return true;
+    return TSM_RESULT_SUCCESS;
 }
 
 // TSM Type
-static int32_t _tsm_tsm_type_free_children(struct tsm_base_node* p_tsm_base) {
+static TSM_Result _tsm_tsm_type_free_children(struct tsm_base_node* p_tsm_base) {
+
+    if (!p_tsm_base) {
+        tklog_error("NULL argument\n");
+        return TSM_RESULT_NULL_ARGUMENT;
+    }
+
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
+        tklog_error("node is not TSM\n");
+        return TSM_RESULT_NULL_ARGUMENT;
+    }
+
     // first remove all non-types
     struct cds_lfht_iter iter;
-    bool iter_valid = tsm_iter_first(p_tsm_base, &iter);
-    while (iter_valid) {
-        struct tsm_base_node* p_base = tsm_iter_get_node(&iter);
+    TSM_Result iter_valid = tsm_iter_first(p_tsm_base, &iter);
+    while (iter_valid == TSM_RESULT_SUCCESS) {
+        struct tsm_base_node* p_base = NULL;
+        tklog_scope(tsm_result = tsm_iter_get_node(&iter));
+        if (tsm_result != TSM_RESULT_SUCCESS) {
+            tklog_error("tsm_iter_get_node failed\n");
+            return tsm_result;
+        }
         // Advance BEFORE possible delete
         iter_valid = tsm_iter_next(p_tsm_base, &iter);
         if (!p_base) {
             tklog_warning("somehow p_base is NULL\n");
             continue;
         }
-        if (!tsm_node_is_type(p_base)) {
+        tklog_scope(tsm_result = tsm_node_is_type(p_base));
+        if (tsm_result != TSM_RESULT_NODE_IS_TYPE) {
             TSM_Result defer_free_result = tsm_node_defer_free(p_tsm_base, p_base);
-            if (defer_free_result != TSM_SUCCESS) {
+            if (defer_free_result != TSM_RESULT_SUCCESS) {
                 tklog_error("tsm_node_defer_free failed for child node. it is %d\n", defer_free_result);
-                return -1;
+                return defer_free_result;
             }
+            return tsm_result;
         }
+    }
+    if (iter_valid != TSM_RESULT_ITER_NODE_IS_NULL) {
+        tklog_error("after iter loop iter is not TSM_RESULT_ITER_NODE_IS_NULL but rather %d\n", tsm_result);
+        return tsm_result;
     }
     // now types - collect first to avoid iter invalidation
     while (true) {
-        struct tsm_base_node* to_free[1024]; // Adjust size as needed or use dynamic allocation
+
+        struct tsm_base_node* to_free[MAX_TYPES_IN_SAME_LAYER]; // Adjust size as needed or use dynamic allocation
         size_t to_free_count = 0;
         bool freed_something = false;
         iter_valid = tsm_iter_first(p_tsm_base, &iter);
-        while (iter_valid) {
+        while (iter_valid == TSM_RESULT_SUCCESS) {
             struct tsm_base_node* p_base = tsm_iter_get_node(&iter);
             iter_valid = tsm_iter_next(p_tsm_base, &iter);
             if (!p_base) {
                 tklog_warning("somehow p_base is NULL\n");
                 continue;
             }
-            if (!tsm_node_is_type(p_base)) {
-                tklog_error("somehow found non type when there shouldnt be any more types left\n");
-                return -1;
+            tklog_scope(tsm_result = tsm_node_is_type(p_base))
+            if (tsm_result != TSM_RESULT_NODE_IS_TYPE) {
+                tklog_error("somehow found non-type when there should be only types left\n");
+                return TSM_RESULT_TSM_NON_TYPES_STILL_REMAINING;
             }
             // since p_base is type then we want to check all nodes if this key is found as type key in any other node
             bool found_in_other_node = false;
-            struct tsm_key base_key = { .key_union = p_base->key_union, .key_is_number = p_base->key_is_number };
+            struct tsm_key base_key = { .key_union = p_base->key_union, .key_type = p_base->key_type };
             struct cds_lfht_iter iter_2;
-            bool iter_2_valid = tsm_iter_first(p_tsm_base, &iter_2);
-            while (iter_2_valid) {
-                struct tsm_base_node* p_iter_base = tsm_iter_get_node(&iter_2);
-                if (!p_iter_base) {
+            TSM_Result iter_2_valid = tsm_iter_first(p_tsm_base, &iter_2);
+            while (iter_2_valid == TSM_RESULT_SUCCESS) {
+                struct tsm_base_node* p_iter_base = NULL;
+                tklog_scope(tsm_result = tsm_iter_get_node(&iter_2, &p_iter_base));
+                if (tsm_result != TSM_RESULT_SUCCESS) {
                     tklog_error("Somehow node is NULL\n");
-                    return -1;
+                    return tsm_result;
                 }
                 // it not found self then check if base is found as type in other node
-                struct tsm_key other_key = { .key_union = p_iter_base->key_union, .key_is_number = p_iter_base->key_is_number };
+                struct tsm_key other_key = { .key_union = p_iter_base->key_union, .key_type = p_iter_base->key_type };
                 bool found_self = tsm_key_match(base_key, other_key);
                 if (!found_self) {
-                    struct tsm_key other_type_key = { .key_union = p_iter_base->type_key_union, .key_is_number = p_iter_base->type_key_is_number };
+                    struct tsm_key other_type_key = { .key_union = p_iter_base->type_key_union, .key_type = p_iter_base->type_key_type };
                     bool type_found_in_other_node = tsm_key_match(base_key, other_type_key);
                     if (type_found_in_other_node) {
                         found_in_other_node = true;
@@ -191,139 +228,45 @@ static int32_t _tsm_tsm_type_free_children(struct tsm_base_node* p_tsm_base) {
                 }
                 iter_2_valid = tsm_iter_next(p_tsm_base, &iter_2);
             }
+            if (iter_2_valid != TSM_RESULT_SUCCESS && iter_2_valid != TSM_RESULT_ITER_NODE_IS_NULL) {
+                tklog_error("after iter loop iter is not TSM_RESULT_ITER_NODE_IS_NULL but rather %d\n", iter_2_valid);
+                return iter_2_valid;
+            }
             // if node at this iteration isnt found in any other node then we can free it
             if (!found_in_other_node) {
-                if (to_free_count >= 1024) {
+                if (to_free_count >= MAX_TYPES_IN_SAME_LAYER) {
                     tklog_error("Too many types to free in one pass\n");
-                    return -1;
+                    return TSM_RESULT_TSM_TOO_MANY_TYPES;
                 }
                 to_free[to_free_count++] = p_base;
             }
         }
+        if (iter_valid != TSM_RESULT_ITER_NODE_IS_NULL) {
+            tklog_error("after iter loop iter is not TSM_RESULT_ITER_NODE_IS_NULL but rather %d\n", tsm_result);
+            return tsm_result;
+        }
+
         // Check for cycle or done
         if (to_free_count == 0) {
             uint32_t nodes_count = tsm_nodes_count(p_tsm_base);
             if (nodes_count > 0) {
                 tklog_error("children nodes type dependencies are cyclical and hence in an invalid state\n");
-                return -1;
+                return TSM_RESULT_TSM_CYCLICAL_TYPES;
             }
             break;
         }
         // Free collected
         for (size_t i = 0; i < to_free_count; ++i) {
             TSM_Result defer_free_result = tsm_node_defer_free(p_tsm_base, to_free[i]);
-            if (defer_free_result != TSM_SUCCESS) {
+            if (defer_free_result != TSM_RESULT_SUCCESS) {
                 tklog_error("tsm_node_defer_free failed for child node. it is %d\n", defer_free_result);
-                return -1;
+                return defer_free_result;
             }
             freed_something = true;
         }
     }
     tklog_info("cleaning all children nodes for TSM completed. pointer: %p\n", p_tsm_base);
-    return 1;
-}
-// this function must be called within a read section
-static int32_t _tsm_tsm_type_free_children_2(struct tsm_base_node* p_tsm_base) {
-
-    // first remove all types that arent a type
-    struct cds_lfht_iter iter;
-    tklog_scope(bool iter_valid = tsm_iter_first(p_tsm_base, &iter));
-    while (iter_valid) {
-
-        tklog_scope(struct tsm_base_node* p_base = tsm_iter_get_node(&iter));
-        if (!p_base) {
-            tklog_warning("somehow p_base is NULL\n");
-            break;
-        }
-
-        // if not is not a type then its safe to delete right away
-        tklog_scope(bool is_type = tsm_node_is_type(p_base));
-        if (!is_type) {
-            // try free callback
-            tklog_scope(TSM_Result defer_free_result = tsm_node_defer_free(p_tsm_base, p_base));
-            if (defer_free_result != TSM_SUCCESS) {
-                tklog_error("tsm_node_defer_free failed for child node. it is %d\n", defer_free_result);
-                return -1;
-            }
-        }
-        
-        tklog_scope(iter_valid = tsm_iter_next(p_tsm_base, &iter));
-    }
-
-    bool node_freed_since_iter_first = false; // if there is a cycle where no type node is removed, it means the types are cyclical and therefore impossible to remove
-    tklog_scope(iter_valid = tsm_iter_first(p_tsm_base, &iter));
-    while (iter_valid) {
-
-        tklog_scope(struct tsm_base_node* p_base = tsm_iter_get_node(&iter));
-        if (!p_base) {
-            tklog_warning("somehow p_base is NULL\n");
-            break;
-        }
-        tklog_scope(bool is_type = tsm_node_is_type(p_base));
-        if (!is_type) {
-            tklog_error("somehow found non type when there shouldnt be any more types left\n");
-            return -1;
-        }
-
-        // since p_base is type then we want to check all nodes if this key is found as type key in any other node
-        bool found_in_other_node = false;
-        struct tsm_key base_key = { .key_union = p_base->key_union, .key_is_number = p_base->key_is_number };
-        struct cds_lfht_iter iter_2;
-        tklog_scope(bool iter_2_valid = tsm_iter_first(p_tsm_base, &iter_2));
-        while (iter_2_valid) {
-
-            tklog_scope(struct tsm_base_node* p_iter_base = tsm_iter_get_node(&iter_2));
-            if (!p_iter_base) {
-                tklog_error("Somehow node is NULL\n");
-                return -1;
-            }
-
-            // it not found self then check if base is found as type in other node
-            struct tsm_key other_key = { .key_union = p_iter_base->key_union, .key_is_number = p_iter_base->key_is_number };
-            tklog_scope(bool found_self = tsm_key_match(base_key, other_key));
-            if (!found_self) {
-                struct tsm_key other_type_key = { .key_union = p_iter_base->type_key_union, .key_is_number = p_iter_base->type_key_is_number };
-                tklog_scope(bool type_found_in_other_node = tsm_key_match(base_key, other_type_key));
-                if (type_found_in_other_node) {
-                    found_in_other_node = true;
-                    break;
-                }
-            }
-
-            tklog_scope(iter_2_valid = tsm_iter_next(p_tsm_base, &iter_2));
-        }
-
-        // if node at this iteration isnt found in any other node then we can free it
-        // then break this while loop as well so that the first iterator can be reset 
-        // because we need to exit rcu_read section so that the node is not found in the iteration again. IS THIS TRUE???
-        if (!found_in_other_node) {
-            // try free callback
-            tklog_scope(int32_t defer_free_result = tsm_node_defer_free(p_tsm_base, p_base));
-            if (defer_free_result != TSM_SUCCESS) {
-                tklog_error("tsm_node_defer_free failed for child node. it is %d\n", defer_free_result);
-                return -1;
-            }
-            node_freed_since_iter_first = true;
-        }
-        
-        tklog_scope(iter_valid = tsm_iter_next(p_tsm_base, &iter));
-        if (!iter_valid) {
-            if (!node_freed_since_iter_first) {
-                tklog_error("children nodes type dependencies are cyclical and hence in an invalid state\n");
-                return -1;
-            }
-            tklog_scope(tsm_iter_first(p_tsm_base, &iter));
-            node_freed_since_iter_first = false;
-            // if iter is still invalid then hash table is empty
-            if (!iter_valid) {
-                break;
-            }
-        }
-    }
-    
-    tklog_info("cleaning all children nodes for TSM completed. pointer: %p\n", p_tsm_base);
-
-    return 1;
+    return TSM_RESULT_SUCCESS;
 }
 static void _tsm_tsm_type_free_callback(struct rcu_head* rcu_head) {
     if (!rcu_head) {
@@ -332,72 +275,105 @@ static void _tsm_tsm_type_free_callback(struct rcu_head* rcu_head) {
     }
 
     struct tsm_base_node* p_base = caa_container_of(rcu_head, struct tsm_base_node, rcu_head);
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
+        tklog_error("in _tsm_tsm_type_free_callback node is not TSM with error code %d\n", tsm_result);
+        return;
+    }
 
     rcu_read_lock();
-    tklog_scope(_tsm_tsm_type_free_children(p_base));
-    tklog_scope(uint32_t nodes_count = tsm_nodes_count(p_base));
+    tklog_scope(tsm_result = _tsm_tsm_type_free_children(p_base));
+    if (tsm_result != TSM_RESULT_SUCCESS) {
+        tklog_error("in _tsm_tsm_type_free_callback _tsm_tsm_type_free_children failed with error code %d\n", tsm_result);
+        rcu_read_unlock();
+        return;
+    }
+    uint64_t nodes_count;
+    tklog_scope(tsm_result = tsm_nodes_count(p_base, &nodes_count));
+    if (tsm_result != TSM_RESULT_SUCCESS) {
+        tklog_error("in _tsm_tsm_type_free_callback tsm_nodes_count failed with error code %d\n", tsm_result);
+        rcu_read_unlock();
+        return;
+    }
     rcu_read_unlock();
 
-    if (nodes_count > 0)
+    if (nodes_count > 0) {
         tklog_error("tsm is not empty before freeing it\n");
+    }
 
-    tsm_key_union_free(p_base->key_union, p_base->key_is_number);
-    tsm_key_union_free(p_base->type_key_union, p_base->type_key_is_number);
+    tsm_key_union_free(p_base->key_union, p_base->key_type);
+    tsm_key_union_free(p_base->type_key_union, p_base->type_key_type);
     struct tsm* p_tsm = caa_container_of(p_base, struct tsm, base);
     tklog_scope(bool free_path_result = tsm_path_free(p_tsm->path));
-    if (!free_path_result)
+    if (!free_path_result) {
         tklog_warning("tsm_free_path failed\n");
+    }
     cds_lfht_destroy(p_tsm->p_ht, NULL);
     free(p_base);
 }
-static bool _tsm_tsm_type_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_base) {
-    (void)p_tsm_base;
+static TSM_Result _tsm_tsm_type_is_valid(struct tsm_base_node* p_parent_tsm_base, struct tsm_base_node* p_tsm_base) {
 
-    if (!p_base) {
-        tklog_error("p_base is NULL\n");
-        return false;
+    if (!p_tsm_base || !p_parent_tsm_base) {
+        tklog_error("NULL arguments\n");
+        return TSM_RESULT_NULL_ARGUMENT;
     }
-    tklog_scope(bool is_tsm = tsm_node_is_tsm(p_base));
-    if (!is_tsm) {
-        tklog_error("p_base is not a TSM\n");
-        return false;
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_parent_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
+        tklog_error("p_parent_tsm_base is not a TSM\n");
+        return tsm_result;
     }
+    tklog_scope(tsm_result = tsm_node_is_tsm(p_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
+        tklog_error("p_tsm_base is not a TSM\n");
+        return tsm_result;
+    }
+
 
     rcu_read_lock();
-    struct cds_lfht_iter* p_iter = calloc(1, sizeof(struct cds_lfht_iter));
-    tklog_scope(bool iter_valid = tsm_iter_first(p_base, p_iter));
-    while (iter_valid) {
-        tklog_scope(struct tsm_base_node* iter_node = tsm_iter_get_node(p_iter));
+
+    struct tsm_key tmp_key = { .key = p_tsm_base->key, .key_type = p_tsm_base->key_type };
+    struct tsm_base_node* p_tmp_tsm_base = NULL; 
+    tklog_scope(tsm_result = tsm_node_get(p_parent_tsm_base, tmp_key, &p_tmp_tsm_base));
+    if (tsm_result != TSM_RESULT_SUCCESS) {
+        tklog_info("given tsm doesnt exist in given parent tsm\n");
+        rcu_read_unlock();
+        return tsm_result;
+    }
+
+    struct cds_lfht_iter iter;
+    tklog_scope(TSM_Result iter_valid = tsm_iter_first(p_tsm_base, &iter));
+    while (iter_valid == TSM_RESULT_SUCCESS) {
+        tklog_scope(struct tsm_base_node* iter_node = tsm_iter_get_node(&iter));
         if (!iter_node) {
             tklog_warning("iter_node is NULL\n");
             break;
         }
-        tklog_scope(bool is_valid = tsm_base_node_is_valid(p_base, iter_node));
-        if (!is_valid) {
+        tklog_scope(TSM_Result is_valid = tsm_base_node_is_valid(p_tsm_base, iter_node));
+        if (is_valid != TSM_RESULT_NODE_VALID) {
             tklog_info("This node is not valid:\n");
-            tklog_scope(tsm_node_print(p_base, iter_node));
-            free(p_iter);
-            p_iter = NULL;
+            tklog_scope(tsm_node_print(p_tsm_base, iter_node));
             rcu_read_unlock();
-            return false;
+            return is_valid;
         }
-        tklog_scope(iter_valid = tsm_iter_next(p_base, p_iter));
+        tklog_scope(iter_valid = tsm_iter_next(p_tsm_base, &iter));
     }
-    free(p_iter);
-    p_iter = NULL;
+    if (iter_valid != TSM_RESULT_ITER_NODE_IS_NULL) {
+        tklog_error("iter_valid is invalid with code%d\n", iter_valid);
+        return iter_valid;
+    }
     rcu_read_unlock();
 
-    return true;
+    return TSM_RESULT_SUCCESS;
 }
 static bool _tsm_tsm_type_print(struct tsm_base_node* p_base) {
     if (!p_base) {
         tklog_error("p_base is NULL\n");
-        return false;
+        return TSM_RESULT_NULL_ARGUMENT;
     }
-    tklog_scope(bool is_tsm = tsm_node_is_tsm(p_base));
-    if (!is_tsm) {
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
         tklog_error("p_base is not a TSM\n");
-        return false;
+        return tsm_result;
     }
 
     tklog_scope(tsm_base_node_print(p_base));
@@ -406,23 +382,25 @@ static bool _tsm_tsm_type_print(struct tsm_base_node* p_base) {
     
     tklog_scope(tsm_path_print(p_tsm->path));
 
-    rcu_read_lock();
-    struct cds_lfht_iter* p_iter = calloc(1, sizeof(struct cds_lfht_iter));
-    tklog_scope(tsm_iter_first(p_base, p_iter));
-    bool iter_next = p_iter != NULL;
-    while (iter_next) {
-        tklog_scope(struct tsm_base_node* iter_node = tsm_iter_get_node(p_iter));
+    struct cds_lfht_iter iter;
+    tklog_scope(TSM_Result iter_valid = tsm_iter_first(p_base, &iter));
+    while (iter_valid == TSM_RESULT_SUCCESS) {
+        tklog_scope(struct tsm_base_node* iter_node = tsm_iter_get_node(&iter));
         if (!iter_node) {
             break;
         }
-        tklog_scope(tsm_node_print(p_base, iter_node));
-        tklog_scope(iter_next = tsm_iter_next(p_base, p_iter));
+        tklog_scope(tsm_result = tsm_node_print(p_base, iter_node));
+        if (tsm_result != TSM_RESULT_SUCCESS) {
+            tklog_waring("tsm_node_print failed with code %d\n", tsm_result);
+        }
+        tklog_scope(iter_valid = tsm_iter_next(p_base, &iter));
     }
-    rcu_read_unlock();
-    free(p_iter);
-    p_iter = NULL;
+    if (iter_valid != TSM_RESULT_ITER_NODE_IS_NULL) {
+        tklog_error("iter_valid is invalid with code %d\n", iter_valid);
+        return iter_valid;
+    }
 
-    return true;
+    return TSM_RESULT_SUCCESS;
 }
 
 // ==========================================================================================
@@ -432,55 +410,59 @@ static bool _tsm_tsm_type_print(struct tsm_base_node* p_base) {
 // ==========================================================================================
 // KEY
 // ==========================================================================================
-union tsm_key_union tsm_key_union_create(uint64_t number_key, const char* string_key, bool key_is_number) {
-    if (!key_is_number && string_key == NULL) {
+union tsm_key_union tsm_key_union_string_create(const char* string_key) {
+
+    if (string_key == NULL) {
         tklog_error("string key is NULL\n");
         return (union tsm_key_union){ .string = NULL };
     }
+
     union tsm_key_union key_union;
-    if (key_is_number) {
-        if (number_key == 0) {
-            number_key = atomic_fetch_add(&g_key_counter, 1);
-            // number_key = rand() % 100000000;
-        }
-        key_union.number = number_key;
-    } else {
-        // Validate and copy string key
-        if (strlen(string_key) == 0) {
-            tklog_error("string key is empty\n");
-            return (union tsm_key_union){ .string = NULL };
-        }
-        
-        size_t key_len = strlen(string_key) + 1;
-        if (key_len > MAX_STRING_KEY_LEN) {
-            tklog_error("string key too long (max %d characters)\n", MAX_STRING_KEY_LEN - 1);
-            return (union tsm_key_union){ .string = NULL };
-        }
-        
-        char* copied_string = calloc(1, key_len);
-        if (!copied_string) {
-            tklog_error("Failed to allocate memory for string key\n");
-            return (union tsm_key_union){ .string = NULL };
-        }
-        
-        if (strncpy(copied_string, string_key, key_len - 1) == NULL) {
-            tklog_error("Failed to copy string key\n");
-            free(copied_string);
-            copied_string = NULL;
-            return (union tsm_key_union){ .string = NULL };
-        }
-        copied_string[key_len - 1] = '\0'; // Ensure null termination
-        
-        key_union.string = copied_string;
+    // Validate and copy string key
+    if (strlen(string_key) == 0) {
+        tklog_error("string key is empty\n");
+        return (union tsm_key_union){ .string = NULL };
     }
+    
+    size_t key_len = strlen(string_key) + 1;
+    if (key_len > MAX_STRING_KEY_LEN) {
+        tklog_error("string key too long (max %d characters)\n", MAX_STRING_KEY_LEN - 1);
+        return (union tsm_key_union){ .string = NULL };
+    }
+    
+    char* copied_string = calloc(1, key_len);
+    if (!copied_string) {
+        tklog_error("Failed to allocate memory for string key\n");
+        return (union tsm_key_union){ .string = NULL };
+    }
+    
+    if (strncpy(copied_string, string_key, key_len - 1) == NULL) {
+        tklog_error("Failed to copy string key\n");
+        free(copied_string);
+        copied_string = NULL;
+        return (union tsm_key_union){ .string = NULL };
+    }
+    copied_string[key_len - 1] = '\0'; // Ensure null termination
+    
+    key_union.string = copied_string;
+
     return key_union;
 }
-bool tsm_key_union_free(union tsm_key_union key_union, bool key_is_number) {
-    if (key_union.number == 0) {
+union tsm_key_union tsm_key_union_uint64_create(uint64_t number_key) {
+    union tsm_key_union key_union;
+    if (number_key == 0) {
+        number_key = atomic_fetch_add(&g_key_counter, 1);
+        // number_key = rand() % 100000000;
+    }
+    key_union.uint64 = number_key;
+    return key_union;
+}
+bool tsm_key_union_free(union tsm_key_union key_union, uint8_t key_type) {
+    if (key_union.uint64 == 0) {
         tklog_error("number key is 0\n");
         return false;
     }
-    if (key_is_number) {
+    if (key_type == TSM_KEY_TYPE_UINT64) {
         return true;
     } else {
         if (key_union.string) {
@@ -491,14 +473,14 @@ bool tsm_key_union_free(union tsm_key_union key_union, bool key_is_number) {
     }
     return false;
 }
-struct tsm_key tsm_key_create(uint64_t number_key, const char* string_key, bool key_is_number) {
+struct tsm_key tsm_key_create(uint64_t number_key, const char* string_key, uint8_t key_type) {
     struct tsm_key return_value = {0};
-    tklog_scope(return_value.key_union = tsm_key_union_create(number_key, string_key, key_is_number));
-    return_value.key_is_number = key_is_number;
+    tklog_scope(return_value.key_union = tsm_key_union_create(number_key, string_key, key_type));
+    return_value.key_type = key_type;
     return return_value;
 }
 struct tsm_key tsm_key_copy(struct tsm_key key) {
-    tklog_scope(struct tsm_key new_key = tsm_key_create(key.key_union.number, key.key_union.string, key.key_is_number));
+    tklog_scope(struct tsm_key new_key = tsm_key_create(key.key_union.uint64, key.key_union.string, key.key_type));
     return new_key;
 }
 bool tsm_key_free(struct tsm_key* key) {
@@ -506,29 +488,29 @@ bool tsm_key_free(struct tsm_key* key) {
         tklog_warning("key is NULL\n");
         return false;
     }
-    tklog_scope(bool free_result = tsm_key_union_free(key->key_union, key->key_is_number));
+    tklog_scope(bool free_result = tsm_key_union_free(key->key_union, key->key_type));
     if (!free_result) {
         tklog_scope("failed to free node\n");
         return false;
     }
-    key->key_union.number = 0;
-    key->key_is_number = true;
+    key->key_union.uint64 = 0;
+    key->key_type == TSM_KEY_TYPE_UINT64;
     return true;
 }
 bool tsm_key_match(struct tsm_key key_1, struct tsm_key key_2) {
     // if not both is string or both is number
-    if (key_1.key_is_number != key_2.key_is_number)
+    if (key_1.key_type != key_2.key_type)
         return false;
     // if both are number
-    if (key_1.key_is_number) 
-        return key_1.key_union.number == key_2.key_union.number;
+    if (key_1.key_type == TSM_KEY_TYPE_UINT64) 
+        return key_1.key_union.uint64 == key_2.key_union.uint64;
     // if both are string
     else 
         return strcmp(key_1.key_union.string, key_2.key_union.string) == 0;
 }
 void tsm_key_print(struct tsm_key key) {
-    if (key.key_is_number) {
-        tklog_info("key: %d\n", key.key_union.number);
+    if (key.key_type == TSM_KEY_TYPE_UINT64) {
+        tklog_info("key: %d\n", key.key_union.uint64);
     } else {
         tklog_info("key: %s\n", key.key_union.string);
     }
@@ -538,12 +520,12 @@ void tsm_key_print(struct tsm_key key) {
 // BASE NODE
 // ==========================================================================================
 struct tsm_base_node* tsm_base_node_create(struct tsm_key key, struct tsm_key type_key, uint32_t this_size_bytes, bool this_is_type, bool this_is_tsm) {
-    if (key.key_union.number == 0) {
-        tklog_error("key.number is 0\n");
+    if (key.key_union.uint64 == 0) {
+        tklog_error("key.uint64 is 0\n");
         return NULL;
     }
-    if (type_key.key_union.number == 0) {
-        tklog_error("type_key.number is 0\n");
+    if (type_key.key_union.uint64 == 0) {
+        tklog_error("type_key.uint64 is 0\n");
         return NULL;
     }
     if (this_size_bytes < sizeof(struct tsm_base_node)) {
@@ -558,23 +540,23 @@ struct tsm_base_node* tsm_base_node_create(struct tsm_key key, struct tsm_key ty
     cds_lfht_node_init(&node->lfht_node);
     
     // Handle key assignment - copy string keys, use number keys directly
-    if (key.key_is_number) {
-        node->key_union.number = key.key_union.number;
+    if (key.key_type == TSM_KEY_TYPE_UINT64) {
+        node->key_union.uint64 = key.key_union.uint64;
     } else {
         // String key is already copied by tsm_key_union_create
         node->key_union.string = key.key_union.string;
     }
     
     // Handle type_key assignment - copy string keys, use number keys directly
-    if (type_key.key_is_number) {
-        node->type_key_union.number = type_key.key_union.number;
+    if (type_key.key_type == TSM_KEY_TYPE_UINT64) {
+        node->type_key_union.uint64 = type_key.key_union.uint64;
     } else {
         // String type_key is already copied by tsm_key_union_create
         node->type_key_union.string = type_key.key_union.string;
     }
     
-    node->key_is_number = key.key_is_number;
-    node->type_key_is_number = type_key.key_is_number;
+    node->key_type = key.key_type;
+    node->type_key_type = type_key.key_type;
     node->this_size_bytes = this_size_bytes;
     node->this_is_type = this_is_type;
     node->this_is_tsm = this_is_tsm;
@@ -585,34 +567,30 @@ bool tsm_base_node_free(struct tsm_base_node* p_base_node) {
         tklog_error("p_base_node is NULL when trying to free it");
         return false;
     }
-    tsm_key_union_free(p_base_node->key_union, p_base_node->key_is_number);
-    tsm_key_union_free(p_base_node->type_key_union, p_base_node->type_key_is_number);
+    tsm_key_union_free(p_base_node->key_union, p_base_node->key_type);
+    tsm_key_union_free(p_base_node->type_key_union, p_base_node->type_key_type);
     free(p_base_node);
     return true;
 }
 bool tsm_base_node_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_base) {
     
-    if (!p_base) {
-        tklog_error("p_base is NULL\n");
-        return false;
+    if (!p_base || !p_tsm_base) {
+        tklog_error("NULL arguments\n");
+        return TSM_RESULT_NULL_ARGUMENT;
     }
-    if (!p_tsm_base) {
-        tklog_error("p_tsm_base is NULL\n");
-        return false;
-    }
-    tklog_scope(bool is_tsm = tsm_node_is_tsm(p_tsm_base));
-    if (!is_tsm) {
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
         tklog_error("p_tsm_base is not TSM\n");
-        return false;
+        return TSM_RESULT_NODE_NOT_TSM;
     }
 
-    struct tsm_key key = { .key_union = p_base->key_union, .key_is_number = p_base->key_is_number};
-    struct tsm_key type_key = { .key_union = p_base->type_key_union, .key_is_number = p_base->type_key_is_number};
+    struct tsm_key key = { .key_union = p_base->key_union, .key_type = p_base->key_type};
+    struct tsm_key type_key = { .key_union = p_base->type_key_union, .key_type = p_base->type_key_type};
 
     tklog_scope(struct tsm_base_node* p_base_copy = tsm_node_get(p_tsm_base, key));
     if (!p_base_copy) {
         tklog_warning("tsm_base_node_is_valid: same p_base node no longer accessible\n");
-        return false;
+        return TSM_RESULT_NODE_REMOVED;
     }
     if (p_base != p_base_copy) {
         tklog_notice("tsm_base_node_is_valid: given p_base and p_base gotten from key in given p_base is not the same\n");
@@ -624,7 +602,7 @@ bool tsm_base_node_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_base_no
         if (!print_result) {
             tklog_error("failed to print p_base node\n");
         }
-        return false;
+        return TSM_RESULT_NODE_NOT_FOUND_SELF;
     }
 
     tklog_scope(struct tsm_base_node* p_base_type = tsm_node_get(p_tsm_base, type_key));
@@ -634,7 +612,7 @@ bool tsm_base_node_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_base_no
         if (!print_result) {
             tklog_error("failed to print p_base node\n");
         }
-        return false;
+        return TSM_RESULT_TYPE_NOT_FOUND;
     }
 
     struct tsm_base_type_node* p_type = caa_container_of(p_base_type, struct tsm_base_type_node, base);
@@ -645,42 +623,44 @@ bool tsm_base_node_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_base_no
         if (!print_result) {
             tklog_error("failed to print p_base node\n");
         }
-        return false;
+        return TSM_RESULT_NODE_SIZE_MISMATCH;
     }
 
     tklog_scope(bool is_removed = tsm_node_is_removed(p_base));
     if (is_removed) {
         tklog_notice("tsm_base_node_is_valid: node is removed and therefore not valid\n");
-        return false;
+        return TSM_RESULT_NODE_REMOVED;
     }
 
-    return true;
+    return TSM_RESULT_NODE_VALID;
 }
-bool tsm_base_node_print(struct tsm_base_node* p_base) {
+TSM_Result tsm_base_node_print(struct tsm_base_node* p_base) {
 
-    tklog_scope(bool is_removed = tsm_node_is_removed(p_base));
-
-    if (p_base->key_is_number) {
-        tklog_info("key: %lld\n", p_base->key_union.number);
+    if (p_base->key_type == TSM_KEY_TYPE_UINT64) {
+        tklog_info("key: %lld\n", p_base->key_union.uint64);
     } else {
         tklog_info("key: %s\n", p_base->key_union.string);
     }
 
-    if (is_removed) {
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_removed(p_base));
+    if (tsm_result == TSM_RESULT_NODE_IS_REMOVED) {
         tklog_info("    is removed\n");
-    } else {
+    } else if (tsm_result == TSM_RESULT_NODE_NOT_REMOVED) {
         tklog_info("    not removed\n");
+    } else {
+        tklog_error("tsm_node_is_removed failed\n");
+        return tsm_result;
     }
 
-    if (p_base->type_key_is_number) {
-        tklog_info("    type_key: %lld\n", p_base->type_key_union.number);
+    if (p_base->type_key_type == TSM_KEY_TYPE_UINT64) {
+        tklog_info("    type_key: %lld\n", p_base->type_key_union.uint64);
     } else {
         tklog_info("    type_key: %s\n", p_base->type_key_union.string);
     }
 
     tklog_info("    size: %d bytes\n", p_base->this_size_bytes);
 
-    return true;
+    return TSM_RESULT_SUCCESS;
 }
 
 // ==========================================================================================
@@ -751,14 +731,14 @@ bool tsm_path_insert_key(struct tsm_path* p_path, struct tsm_key key, int32_t in
     if (pos < 0) {
         pos += length + 1;
     }
-    struct tsm_key* new_array = realloc(p_path->from_gtsm_to_self, (length + 1) * sizeof(struct tsm_key));
+    struct tsm_key* new_array = realloc(p_path->key_chain, (length + 1) * sizeof(struct tsm_key));
     if (!new_array) {
         tklog_error("Failed to realloc path array\n");
         return false;
     }
-    p_path->from_gtsm_to_self = new_array;
-    memmove(&p_path->from_gtsm_to_self[pos + 1], &p_path->from_gtsm_to_self[pos], (length - pos) * sizeof(struct tsm_key));
-    p_path->from_gtsm_to_self[pos] = key;
+    p_path->key_chain = new_array;
+    memmove(&p_path->key_chain[pos + 1], &p_path->key_chain[pos], (length - pos) * sizeof(struct tsm_key));
+    p_path->key_chain[pos] = key;
     p_path->length++;
     return true;
 }
@@ -780,40 +760,41 @@ bool tsm_path_remove_key(struct tsm_path* p_path, int32_t index) {
     if (pos < 0) {
         pos += length;
     }
-    tsm_key_free(&p_path->from_gtsm_to_self[pos]);
-    memmove(&p_path->from_gtsm_to_self[pos], &p_path->from_gtsm_to_self[pos + 1], (length - pos - 1) * sizeof(struct tsm_key));
+    tsm_key_free(&p_path->key_chain[pos]);
+    memmove(&p_path->key_chain[pos], &p_path->key_chain[pos + 1], (length - pos - 1) * sizeof(struct tsm_key));
     p_path->length--;
     if (p_path->length > 0) {
-        struct tsm_key* new_array = realloc(p_path->from_gtsm_to_self, p_path->length * sizeof(struct tsm_key));
+        struct tsm_key* new_array = realloc(p_path->key_chain, p_path->length * sizeof(struct tsm_key));
         if (new_array) {
-            p_path->from_gtsm_to_self = new_array;
+            p_path->key_chain = new_array;
         }
     } else {
-        free(p_path->from_gtsm_to_self);
-        p_path->from_gtsm_to_self = NULL;
+        free(p_path->key_chain);
+        p_path->key_chain = NULL;
     }
     return true;
 }
 struct tsm_path tsm_path_create(struct tsm_base_node* p_parent_tsm_base, struct tsm_base_node* p_base) {
-    struct tsm_path null_path = { .from_gtsm_to_self = NULL, .length = 0 };
+    struct tsm_path null_path = { .key_chain = NULL, .length = 0 };
     if (!p_parent_tsm_base || !p_base) {
         tklog_error("p_parent_tsm_base or p_base is NULL\n");
         return null_path;
     }
-    tklog_scope(bool is_tsm = tsm_node_is_tsm(p_parent_tsm_base));
-    if (!is_tsm) {
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_parent_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
         tklog_error("p_parent_tsm_base is not TSM\n");
-        return null_path;
+        return tsm_result;
     }
 #ifdef TSM_DEBUG
-    if (!tsm_node_is_valid(p_parent_tsm_base, p_base)) {
+    tklog_scope(tsm_result = tsm_node_is_valid(p_parent_tsm_base, p_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_VALID) {
         tklog_error("p_base is not valid\n");
-        return null_path;
+        return tsm_result;
     }
 #endif
     struct tsm* p_parent_tsm = caa_container_of(p_parent_tsm_base, struct tsm, base);
     struct tsm_path path = tsm_path_copy(p_parent_tsm->path);
-    struct tsm_key base_key = { .key_union = p_base->key_union, .key_is_number = p_base->key_is_number };
+    struct tsm_key base_key = { .key_union = p_base->key_union, .key_type = p_base->key_type };
     struct tsm_key base_key_copy = tsm_key_copy(base_key);
     if (!tsm_path_insert_key(&path, base_key_copy, -1)) {
         tklog_error("inserting key into path failed\n");
@@ -824,18 +805,18 @@ struct tsm_path tsm_path_create(struct tsm_base_node* p_parent_tsm_base, struct 
     return path;
 }
 bool tsm_path_free(struct tsm_path path) {
-    if ((path.length == 0) != (path.from_gtsm_to_self == NULL)) {
-        tklog_error("path.length(%u) inconsistent with from_gtsm_to_self(%p)\n", path.length, path.from_gtsm_to_self);
+    if ((path.length == 0) != (path.key_chain == NULL)) {
+        tklog_error("path.length(%u) inconsistent with key_chain(%p)\n", path.length, path.key_chain);
         return false;
     }
     tklog_scope(tsm_path_print(path));
     for (uint32_t i = 0; i < path.length; ++i) {
-        tsm_key_free(&path.from_gtsm_to_self[i]);
+        tsm_key_free(&path.key_chain[i]);
     }
-    if (path.from_gtsm_to_self) {
-        tklog_info("freeing %p\n", path.from_gtsm_to_self);
-        free(path.from_gtsm_to_self);
-        path.from_gtsm_to_self = NULL;
+    if (path.key_chain) {
+        tklog_info("freeing %p\n", path.key_chain);
+        free(path.key_chain);
+        path.key_chain = NULL;
     }
     return true;
 }
@@ -850,10 +831,10 @@ bool tsm_path_print(struct tsm_path path) {
     bool result = true;
     for (uint32_t i = 0; i < path.length; ++i) {
         int len;
-        if (path.from_gtsm_to_self[i].key_is_number) {
-            len = snprintf(ptr, remaining, "%llu -> ", path.from_gtsm_to_self[i].key_union.number);
+        if (path.key_chain[i].key_type == TSM_KEY_TYPE_UINT64) {
+            len = snprintf(ptr, remaining, "%llu -> ", path.key_chain[i].key_union.uint64);
         } else {
-            len = snprintf(ptr, remaining, "%s -> ", path.from_gtsm_to_self[i].key_union.string);
+            len = snprintf(ptr, remaining, "%s -> ", path.key_chain[i].key_union.string);
         }
         if (len < 0 || (size_t)len >= remaining) {
             result = false;
@@ -871,7 +852,7 @@ bool tsm_path_print(struct tsm_path path) {
     return result;
 }
 struct tsm_path tsm_path_copy(struct tsm_path path_to_copy) {
-    struct tsm_path null_path = { .from_gtsm_to_self = NULL, .length = 0 };
+    struct tsm_path null_path = { .key_chain = NULL, .length = 0 };
     if (path_to_copy.length == 0) {
         return null_path;
     }
@@ -881,9 +862,9 @@ struct tsm_path tsm_path_copy(struct tsm_path path_to_copy) {
         return null_path;
     }
     for (uint32_t i = 0; i < path_to_copy.length; ++i) {
-        new_array[i] = tsm_key_copy(path_to_copy.from_gtsm_to_self[i]);
+        new_array[i] = tsm_key_copy(path_to_copy.key_chain[i]);
     }
-    struct tsm_path copy = { .from_gtsm_to_self = new_array, .length = path_to_copy.length };
+    struct tsm_path copy = { .key_chain = new_array, .length = path_to_copy.length };
     return copy;
 }
 struct tsm_base_node* tsm_node_get_by_path(struct tsm_base_node* p_tsm_base, struct tsm_path path) {
@@ -891,17 +872,17 @@ struct tsm_base_node* tsm_node_get_by_path(struct tsm_base_node* p_tsm_base, str
         tklog_error("p_tsm_base is NULL\n");
         return NULL;
     }
-    tklog_scope(bool is_tsm = tsm_node_is_tsm(p_tsm_base));
-    if (!is_tsm) {
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
         tklog_error("p_tsm_base is not a TSM\n");
-        return NULL;
+        return tsm_result;
     }
 
     tklog_timer_start();
 
     struct tsm_base_node* current = p_tsm_base;
     for (uint32_t i = 0; i < path.length; ++i) {
-        struct tsm_key key = path.from_gtsm_to_self[i];
+        struct tsm_key key = path.key_chain[i];
         current = tsm_node_get(current, key);
         if (!current) {
             gtsm_print();
@@ -910,11 +891,11 @@ struct tsm_base_node* tsm_node_get_by_path(struct tsm_base_node* p_tsm_base, str
             tklog_timer_stop();
             return NULL;
         }
-        tklog_scope(is_tsm = tsm_node_is_tsm(current));
-        if (i < path.length - 1 && !is_tsm) {
+        tklog_scope(tsm_result = tsm_node_is_tsm(current));
+        if (i < path.length - 1 && is_tsm != TSM_RESULT_NODE_IS_TSM) {
             tklog_error("Intermediate node at path index %u is not a TSM\n", i);
             tklog_timer_stop();
-            return NULL;
+            return tsm_result;
         }
     }
     tklog_timer_stop();
@@ -933,10 +914,10 @@ struct tsm_base_node* tsm_create(
         tklog_error("p_tsm_parent_base is NULL\n");
         return NULL;
     }
-    tklog_scope(bool is_tsm = tsm_node_is_tsm(p_tsm_parent_base));
-    if (!is_tsm) {
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_tsm_parent_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
         tklog_warning("given tsm is not a TSM\n");
-        return NULL;
+        return tsm_result;
     }
     struct tsm* p_tsm_parent = caa_container_of(p_tsm_parent_base, struct tsm, base);
 
@@ -975,7 +956,7 @@ struct tsm_base_node* tsm_create(
         tsm_base_node_free(p_new_base_type);
         goto free_tsm;
     }
-    uint64_t hash = _tsm_hash_key(p_new_base_type->key_union, p_new_base_type->key_is_number);
+    uint64_t hash = _tsm_hash_key(p_new_base_type->key_union, p_new_base_type->key_type);
     tklog_scope(struct cds_lfht_node* result = cds_lfht_add_unique(p_new_tsm->p_ht, hash, _tsm_key_match, &base_type_key, &p_new_base_type->lfht_node));
     if (result != &p_new_base_type->lfht_node) {
         tklog_error("Failed to insert base_type node into hash table\n");
@@ -998,7 +979,7 @@ struct tsm_base_node* tsm_create(
         tsm_base_node_free(p_new_tsm_type);
         goto free_tsm;
     }
-    hash = _tsm_hash_key(p_new_tsm_type->key_union, p_new_tsm_type->key_is_number);
+    hash = _tsm_hash_key(p_new_tsm_type->key_union, p_new_tsm_type->key_type);
     tklog_scope(result = cds_lfht_add_unique(p_new_tsm->p_ht, hash, _tsm_key_match, &tsm_type_key_copy, &p_new_tsm_type->lfht_node));
     if (result != &p_new_tsm_type->lfht_node) {
         tklog_error("Failed to insert base_type node into hash table\n");
@@ -1028,7 +1009,7 @@ struct tsm_base_node* tsm_create(
     free_tsm:
 
     tklog_scope(TSM_Result defer_free_result = tsm_node_defer_free(p_tsm_parent_base, p_new_tsm_base));
-    if (defer_free_result != TSM_SUCCESS) {
+    if (defer_free_result != TSM_RESULT_SUCCESS) {
         tklog_error("tsm_node_defer_free for half created TSM failed\n");
     }
 
@@ -1040,18 +1021,23 @@ struct tsm_base_node* tsm_node_get(struct tsm_base_node* p_tsm_base, struct tsm_
         tklog_error("p_tsm is NULL\n");
         return NULL;
     }
-    if (key.key_union.number == 0) {
+    if (key.key_union.uint64 == 0) {
         tklog_error("number key is 0\n");
         return NULL;
     }
-    if (key.key_is_number && key.key_union.number == 0) {
+    if (key.key_type == TSM_KEY_TYPE_UINT64 && key.key_union.uint64 == 0) {
         tklog_error("number key is 0\n");
         return NULL;
     }
-    tklog_scope(bool is_tsm = tsm_node_is_tsm(p_tsm_base));
-    if (!is_tsm) {
+    tklog_scope(TSM_Result tsm_result = tsm_key_is_valid(key));
+    if (tsm_result != TSM_RESULT_NODE_IS_VALID) {
+        tklog_error("key is invlaid\n");
+        return tsm_result;
+    }
+    tklog_scope(tsm_result = tsm_node_is_tsm(p_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
         tklog_error("given p_tsm_base is not a TSM\n");
-        return NULL;
+        return tsm_result;
     }
 
     tklog_timer_start();
@@ -1059,7 +1045,7 @@ struct tsm_base_node* tsm_node_get(struct tsm_base_node* p_tsm_base, struct tsm_
     struct tsm* p_tsm = caa_container_of(p_tsm_base, struct tsm, base);
     
     // Calculate hash internally
-    uint64_t hash = _tsm_hash_key(key.key_union, key.key_is_number);
+    uint64_t hash = _tsm_hash_key(key.key_union, key.key_type);
     struct cds_lfht_iter iter = {0};
     cds_lfht_lookup(p_tsm->p_ht, hash, _tsm_key_match, &key, &iter);
     struct cds_lfht_node* lfht_node = cds_lfht_iter_get_node(&iter);
@@ -1072,21 +1058,21 @@ struct tsm_base_node* tsm_node_get(struct tsm_base_node* p_tsm_base, struct tsm_
     tklog_timer_stop();
     return NULL;
 }
-bool tsm_node_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_base) {
+TSM_Result tsm_node_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_base) {
 
     if (!p_base) {
         tklog_notice("getting base node failed\n");
         return false;
     }
-    tklog_scope(bool is_tsm_result = tsm_node_is_tsm(p_tsm_base));
-    if (!is_tsm_result) {
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
         tklog_error("given p_tsm_base is not a TSM\n");
-        return false;
+        return tsm_result;
     }
 
     tklog_timer_start();
 
-    struct tsm_key type_key = { .key_union = p_base->type_key_union, .key_is_number = p_base->type_key_is_number };
+    struct tsm_key type_key = { .key_union = p_base->type_key_union, .key_type = p_base->type_key_type };
     tklog_scope(struct tsm_base_node* p_base_type = tsm_node_get(p_tsm_base, type_key));
     if (!p_base_type) {
         tklog_notice("tried to get type node but got NULL for node: \n");
@@ -1115,9 +1101,12 @@ bool tsm_node_is_valid(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p
 bool tsm_node_is_tsm(struct tsm_base_node* p_base) {
     if (!p_base) {
         tklog_error("p_base is NULL\n");
-        return false;
+        return TSM_RESULT_NULL_ARGUMENT;
     }
-    return p_base->this_is_tsm;
+    if (!p_base->this_is_tsm) {
+        return TSM_RESULT_NODE_NOT_TSM
+    }
+    return TSM_RESULT_NODE_IS_TSM;
 }
 bool tsm_node_is_type(struct tsm_base_node* p_base) {
     if (!p_base) {
@@ -1128,31 +1117,30 @@ bool tsm_node_is_type(struct tsm_base_node* p_base) {
 }
 bool tsm_node_print(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_base) {
 
-    tklog_scope(bool is_tsm_result = tsm_node_is_tsm(p_tsm_base));
-    if (!is_tsm_result) {
-        tklog_error("given p_tsm_base is not a TSM\n");
-        return false;
-    }
-
-    if (!p_base) {
+    if (!p_tsm_base || !p_base) {
         tklog_error("p_base is NULL");
-        return false;
+        return TSM_RESULT_NULL_ARGUMENT;
+    }
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
+        tklog_error("given p_tsm_base is not a TSM\n");
+        return tsm_result;
     }
 
     tklog_timer_start();
 
-    struct tsm_key type_key = { .key_union = p_base->type_key_union, .key_is_number = p_base->type_key_is_number };
+    struct tsm_key type_key = { .key_union = p_base->type_key_union, .key_type = p_base->type_key_type };
     tklog_scope(struct tsm_base_node* p_base_type = tsm_node_get(p_tsm_base, type_key));
 
     if (!p_base_type) {
-        if (p_base->type_key_is_number)
-            if (p_base->key_is_number) 
-                tklog_error("Could not get type node with key %lld for node with key %lld\n", p_base->type_key_union.number, p_base->key_union.number);
+        if (p_base->type_key_type == TSM_KEY_TYPE_UINT64)
+            if (p_base->key_type == TSM_KEY_TYPE_UINT64) 
+                tklog_error("Could not get type node with key %lld for node with key %lld\n", p_base->type_key_union.uint64, p_base->key_union.uint64);
             else 
-                tklog_error("Could not get type node with key %lld for node with key %s\n", p_base->type_key_union.number, p_base->key_union.string);
+                tklog_error("Could not get type node with key %lld for node with key %s\n", p_base->type_key_union.uint64, p_base->key_union.string);
         else
-            if (p_base->key_is_number) 
-                tklog_error("Could not get type node with key %s for node with key %lld\n", p_base->type_key_union.string, p_base->key_union.number);
+            if (p_base->key_type == TSM_KEY_TYPE_UINT64) 
+                tklog_error("Could not get type node with key %s for node with key %lld\n", p_base->type_key_union.string, p_base->key_union.uint64);
             else 
                 tklog_error("Could not get type node with key %s for node with key %s\n", p_base->type_key_union.string, p_base->key_union.string);
         tklog_timer_stop();
@@ -1170,34 +1158,28 @@ bool tsm_node_print(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_ba
 TSM_Result tsm_node_insert(struct tsm_base_node* p_tsm_base, struct tsm_base_node* new_node) {
     if (!new_node || !p_tsm_base) {
         tklog_error("new_node is NULL\n");
-        return TSM_NULL_ARGUMENT;
+        return TSM_RESULT_NULL_ARGUMENT;
     }
-    if (new_node->key_union.number == 0) {
+    if (new_node->key_union.uint64 == 0) {
         tklog_scope(tsm_node_print(p_tsm_base, new_node));
         tklog_error("key number is 0\n");
-        return TSM_KEY_INVALID;
+        return TSM_RESULT_KEY_INVALID;
     }
-    if (new_node->type_key_union.number == 0) {
+    if (new_node->type_key_union.uint64 == 0) {
         tklog_scope(tsm_node_print(p_tsm_base, new_node));
         tklog_error("type_key number is 0\n");
-        return TSM_KEY_INVALID;
+        return TSM_RESULT_KEY_INVALID;
     }
-    tklog_scope(bool is_tsm = tsm_node_is_tsm(p_tsm_base));
-    if (!is_tsm) {
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
         tklog_scope(tsm_node_print(p_tsm_base, new_node));
         tklog_error("given p_tsm_base is not TSM\n");
-        return TSM_NODE_NOT_TSM;
-    }
-    tklog_scope(is_tsm = tsm_node_is_tsm(p_tsm_base));
-    if (!is_tsm) {
-        tklog_scope(tsm_node_print(p_tsm_base , new_node));
-        tklog_error("given p_tsm_base is not TSM\n");
-        return TSM_NODE_NOT_TSM;
+        return tsm_result;
     }
 
     tklog_timer_start();
 
-    struct tsm_key type_key = { .key_union = new_node->type_key_union, .key_is_number = new_node->type_key_is_number };
+    struct tsm_key type_key = { .key_union = new_node->type_key_union, .key_type = new_node->type_key_type };
     tklog_scope(struct tsm_base_node* p_type_node_base = tsm_node_get(p_tsm_base, type_key));
 
     if (!p_type_node_base) {
@@ -1206,7 +1188,7 @@ TSM_Result tsm_node_insert(struct tsm_base_node* p_tsm_base, struct tsm_base_nod
         tklog_scope(tsm_node_print(p_tsm_base, new_node));
         tklog_error("didnt find node_type");
         tklog_timer_stop();
-        return TSM_NODE_NOT_FOUND;
+        return TSM_RESULT_NODE_NOT_FOUND;
     }
 
     struct tsm_base_type_node* p_type_node = caa_container_of(p_type_node_base, struct tsm_base_type_node, base);
@@ -1222,60 +1204,60 @@ TSM_Result tsm_node_insert(struct tsm_base_node* p_tsm_base, struct tsm_base_nod
 
     struct tsm* p_tsm = caa_container_of(p_tsm_base, struct tsm, base);
 
-    uint64_t hash = _tsm_hash_key(new_node->key_union, new_node->key_is_number);
-    struct tsm_key key = { .key_union = new_node->key_union, .key_is_number = new_node->key_is_number };
+    uint64_t hash = _tsm_hash_key(new_node->key_union, new_node->key_type);
+    struct tsm_key key = {RESULT_ .key_union = new_node->key_union, .key_type = new_node->key_type };
     tklog_scope(struct cds_lfht_node* result = cds_lfht_add_unique(p_tsm->p_ht, hash, _tsm_key_match, &key, &new_node->lfht_node));
     
     if (result != &new_node->lfht_node) {
         tklog_scope(tsm_node_print(p_tsm_base, new_node));
         tklog_warning("Somehow node already exists\n");
         tklog_timer_stop();
-        return TSM_NODE_ALREADY_EXISTS;
+        return TSM_RESULT_NODE_EXISTS;
     }
 
     #ifdef TSM_DEBUG
-        tklog_scope(bool is_valid_type_function_result = tsm_node_is_valid(p_tsm_base, new_node));
-        if (!is_valid_type_function_result) {
+        tklog_scope(tsm_result = tsm_node_is_valid(p_tsm_base, new_node));
+        if (tsm_result != TSM_RESULT_NODE_IS_VALID) {
             tklog_error("after inserting then running tsm_node_is_valid for the inserted node it returned false\n");
             tklog_timer_stop();
-            return TSM_NODE_INVALID;
+            return tsm_result;
         }
     #endif
 
-    if (new_node->key_is_number) {
-        tklog_debug("Successfully inserted node with number key %llu\n", new_node->key_union.number);
+    if (new_node->key_type == TSM_KEY_TYPE_UINT64) {
+        tklog_debug("Successfully inserted node with number key %llu\n", new_node->key_union.uint64);
     } else {
         tklog_debug("Successfully inserted node with string key %s\n", new_node->key_union.string);
     }
 
     tklog_timer_stop();
 
-    return TSM_SUCCESS;
+    return TSM_RESULT_SUCCESS;
 }
 TSM_Result tsm_node_update(struct tsm_base_node* p_tsm_base, struct tsm_base_node* new_node) {
     if (!p_tsm_base) {
         tklog_error("p_tsm_base is NULL\n");
-        return TSM_NULL_ARGUMENT;
+        return TSM_RESULT_NULL_ARGUMENT;
     }
     if (!new_node) {
         tklog_error("new_node is NULL\n");
-        return TSM_NULL_ARGUMENT;
+        return TSM_RESULT_NULL_ARGUMENT;
     }
-    if (new_node->key_union.number == 0) {
+    if (new_node->key_union.uint64 == 0) {
         tklog_error("key number is 0\n");
         tklog_scope(tsm_node_print(p_tsm_base, new_node));
-        return TSM_KEY_INVALID;
+        return TSM_RESULT_KEY_INVALID;
     }
-    if (new_node->type_key_union.number == 0) {
+    if (new_node->type_key_union.uint64 == 0) {
         tklog_error("type_key number is 0\n");
         tklog_scope(tsm_node_print(p_tsm_base, new_node));
-        return TSM_KEY_INVALID;
+        return TSM_RESULT_KEY_INVALID;
     }
 
-    tklog_scope(bool is_tsm_result = tsm_node_is_tsm(p_tsm_base));
-    if (!is_tsm_result) {
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
         tklog_error("given p_tsm_base node is not a TSM\n");
-        return TSM_NODE_NOT_TSM;
+        return tsm_result;
     }
 
     tklog_timer_start();
@@ -1283,19 +1265,19 @@ TSM_Result tsm_node_update(struct tsm_base_node* p_tsm_base, struct tsm_base_nod
     struct tsm* p_tsm = caa_container_of(p_tsm_base, struct tsm, base);
     
     // Find the existing node
-    uint64_t                hash = _tsm_hash_key(new_node->key_union, new_node->key_is_number);
-    struct tsm_key key = { .key_union = new_node->key_union, .key_is_number = new_node->key_is_number};
+    uint64_t                hash = _tsm_hash_key(new_node->key_union, new_node->key_type);
+    struct tsm_key key = { .key_union = new_node->key_union, .key_type = new_node->key_type};
     struct cds_lfht_iter    old_iter = {0};
     cds_lfht_lookup(p_tsm->p_ht, hash, _tsm_key_match, &key, &old_iter);
     struct cds_lfht_node*   old_lfht_node = cds_lfht_iter_get_node(&old_iter);
     struct tsm_base_node*   old_node = caa_container_of(old_lfht_node, struct tsm_base_node, lfht_node);
     if (!old_node) {
-        if (new_node->key_is_number)
-            tklog_info("Cannot update - node with number key %llu not found\n", new_node->key_union.number);
+        if (new_node->key_type == TSM_KEY_TYPE_UINT64)
+            tklog_info("Cannot update - node with number key %llu not found\n", new_node->key_union.uint64);
         else
             tklog_info("Cannot update - node with string key %s not found\n", new_node->key_union.string);
         tklog_timer_stop();
-        return TSM_NODE_NOT_FOUND;
+        return TSM_RESULT_NODE_NOT_FOUND;
     }
     if (old_node == new_node) {
         tklog_error("when replacing a node its not allowed to replace with the same node. given new_node == old_node\n");
@@ -1304,8 +1286,8 @@ TSM_Result tsm_node_update(struct tsm_base_node* p_tsm_base, struct tsm_base_nod
     }
  
     // Get the type information
-    struct tsm_key old_type_key = { .key_union = old_node->type_key_union, .key_is_number = old_node->type_key_is_number };
-    struct tsm_key new_type_key = { .key_union = new_node->type_key_union, .key_is_number = new_node->type_key_is_number };
+    struct tsm_key old_type_key = { .key_union = old_node->type_key_union, .key_type = old_node->type_key_type };
+    struct tsm_key new_type_key = { .key_union = new_node->type_key_union, .key_type = new_node->type_key_type };
     if (!tsm_key_match(old_type_key, new_type_key)) {
         tklog_error("key of old and new are not the same\n");
         tklog_error("new:\n");
@@ -1339,7 +1321,7 @@ TSM_Result tsm_node_update(struct tsm_base_node* p_tsm_base, struct tsm_base_nod
         tklog_error("free_callback is NULL\n");
         tklog_scope(tsm_node_print(p_tsm_base, new_node));
         tklog_timer_stop();
-        return TSM_NULL_FUNCTION_POINTER;
+        return TSM_RESULT_NULL_FUNCTION_POINTER;
     }
 
     int32_t replace_result = cds_lfht_replace(p_tsm->p_ht, &old_iter, hash, _tsm_key_match, &key, &new_node->lfht_node);
@@ -1347,7 +1329,7 @@ TSM_Result tsm_node_update(struct tsm_base_node* p_tsm_base, struct tsm_base_nod
     if (replace_result == -ENOENT) {
         tklog_notice("could not replace node because it was removed within the attempt of updating it\n");
         tklog_timer_stop();
-        return TSM_NODE_ALREADY_REMOVED;
+        return TSM_RESULT_NODE_REMOVED;
     } else if (replace_result != 0) {
         tklog_error("Failed to replace node in hash table\n");
         tklog_scope(tsm_node_print(p_tsm_base, new_node));
@@ -1357,80 +1339,80 @@ TSM_Result tsm_node_update(struct tsm_base_node* p_tsm_base, struct tsm_base_nod
 
     // Schedule old node for RCU cleanup
     tklog_scope(call_rcu(&old_node->rcu_head, p_type->fn_free_callback));
-    if (new_node->key_is_number) {
-        tklog_debug("Successfully updated node with number key %llu\n", new_node->key_union.number);
+    if (new_node->key_type == TSM_KEY_TYPE_UINT64) {
+        tklog_debug("Successfully updated node with number key %llu\n", new_node->key_union.uint64);
     } else {
         tklog_debug("Successfully updated node with string key %s\n", new_node->key_union.string);
     }
     tklog_timer_stop();
-    return TSM_SUCCESS;
+    return TSM_RESULT_SUCCESS;
 }
 TSM_Result tsm_node_upsert(struct tsm_base_node* p_tsm_base, struct tsm_base_node* new_node) {
     if (!p_tsm_base) {
         tklog_error("p_tsm_base is NULL\n");
-        return TSM_NULL_ARGUMENT;
+        return TSM_RESULT_NULL_ARGUMENT;
     }
     if (!new_node) {
         tklog_error("new_node is NULL\n");
-        return TSM_NULL_ARGUMENT;
+        return TSM_RESULT_NULL_ARGUMENT;
     }
-    if (new_node->key_union.number == 0) {
+    if (new_node->key_union.uint64 == 0) {
         tklog_error("key number is 0\n");
         tklog_scope(tsm_node_print(p_tsm_base, new_node));
-        return TSM_KEY_INVALID;
+        return TSM_RESULT_KEY_INVALID;
     }
-    if (new_node->type_key_union.number == 0) {
+    if (new_node->type_key_union.uint64 == 0) {
         tklog_error("type_key number is 0\n");
         tklog_scope(tsm_node_print(p_tsm_base, new_node));
-        return TSM_KEY_INVALID;
+        return TSM_RESULT_KEY_INVALID;
     }
 
     tklog_timer_start();
 
-    struct tsm_key key = { .key_union = new_node->key_union, .key_is_number = new_node->key_is_number };
+    struct tsm_key key = { .key_union = new_node->key_union, .key_type = new_node->key_type };
     tklog_scope(struct tsm_base_node* old_node = tsm_node_get(p_tsm_base, key));
 
     if (old_node) {
         tklog_scope(TSM_Result update_result = tsm_node_update(p_tsm_base, new_node));
-        if (update_result == TSM_NODE_NOT_FOUND) {
+        if (update_result == TSM_RESULT_NODE_NOT_FOUND) {
             tklog_warning("Node to update inside upsert function suddenly got deleted\n");
-        } else if (update_result != TSM_SUCCESS && update_result != TSM_NODE_ALREADY_REMOVED) {
+        } else if (update_result != TSM_RESULT_SUCCESS && update_result != TSM_RESULT_NODE_REMOVED) {
             tklog_error("update inside upsert function failed with code %d\n", update_result);
         }
         tklog_timer_stop();
         return update_result;
     } else {
         tklog_scope(TSM_Result insert_result = tsm_node_insert(p_tsm_base, new_node));
-        if (insert_result != TSM_SUCCESS && insert_result != TSM_NODE_ALREADY_EXISTS) {
+        if (insert_result != TSM_RESULT_SUCCESS && insert_result != TSM_RESULT_NODE_EXISTS) {
             tklog_error("insert function inside upsert function failed\n");
         }
         tklog_timer_stop();
         return insert_result;
     }
     tklog_timer_stop();
-    return TSM_SUCCESS;
+    return TSM_RESULT_SUCCESS;
 }
 TSM_Result tsm_node_defer_free(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_base) {
     if (!p_tsm_base || !p_base) {
         tklog_error("NULL arguments not valid\n");
-        return TSM_NULL_ARGUMENT;
+        return TSM_RESULT_NULL_ARGUMENT;
     }
-    tklog_scope(bool is_tsm = tsm_node_is_tsm(p_tsm_base));
-    if (!is_tsm) {
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
         tsm_base_node_print(p_tsm_base);
         tklog_error("given p_tsm_base is not a TSM\n");
-        TSM_NODE_NOT_TSM;
+        return tsm_result;
     }
 
     #ifdef TSM_DEBUG
-        tklog_scope(bool is_valid = tsm_node_is_valid(p_base));
-        if (!is_valid) {
+        tklog_scope(tsm_result = tsm_node_is_valid(p_base));
+        if (tsm_result != TSM_RESULT_NODE_IS_VALID) {
             tklog_error("base node to defer free is not valid\n");
-            return TSM_NODE_INVALID;
+            return tsm_result;
         }
 
-        struct tsm_key base_key = { .key_union = p_base->key_union, .key_is_number = p_base->key_is_number };
-        struct tsm_key base_type_key = { .key_union = p_base->type_key_union, .key_is_number = p_base->type_key_is_number };
+        struct tsm_key base_key = { .key_union = p_base->key_union, .key_type = p_base->key_type };
+        struct tsm_key base_type_key = { .key_union = p_base->type_key_union, .key_type = p_base->type_key_type };
         // if p_base is type and is not base type then we want to check all nodes if this key is found as type key in any other node
         if (tsm_node_is_type(p_base) && !tsm_key_match(base_key, base_type_key)) {
             struct cds_lfht_iter iter;
@@ -1439,15 +1421,15 @@ TSM_Result tsm_node_defer_free(struct tsm_base_node* p_tsm_base, struct tsm_base
                 tklog_scope(struct tsm_base_node* p_iter_base = tsm_iter_get_node(&iter));
                 if (!p_iter_base) {
                     tklog_error("Somehow node is NULL\n");
-                    return TSM_NULL_ITER_NODE;
+                    return TSM_RESULT_ITER_NODE_IS_NULL;
                 }
-                struct tsm_key other_key = { .key_union = p_iter_base->type_key_union, .key_is_number = p_iter_base->type_key_is_number };
+                struct tsm_key other_key = { .key_union = p_iter_base->type_key_union, .key_type = p_iter_base->type_key_type };
                 tklog_scope(bool type_found_in_other_node = tsm_key_match(base_key, other_key));
                 if (type_found_in_other_node) {
                     tsm_node_print(p_tsm_base, p_base);
                     tsm_node_print(p_tsm_base, p_iter_base);
                     tklog_error("trying to free type node but it is found in other nodes\n");
-                    return TSM_TSM_NOT_EMPTY;
+                    return TSM_RESULT_TSM_NOT_EMPTY;
                 }
                 tklog_scope(node_exists = tsm_iter_next(p_tsm_base, &iter));
             }
@@ -1457,7 +1439,7 @@ TSM_Result tsm_node_defer_free(struct tsm_base_node* p_tsm_base, struct tsm_base
     tklog_timer_start();
 
     // schdule node for free callback via call_rcu
-    struct tsm_key type_key = { .key_union.string = p_base->type_key_union.string, .key_is_number = p_base->type_key_is_number };
+    struct tsm_key type_key = { .key_union.string = p_base->type_key_union.string, .key_type = p_base->type_key_type };
     tklog_scope(struct tsm_base_node* p_type_base = tsm_node_get(p_tsm_base, type_key));
     if (!p_type_base) {
         gtsm_print();
@@ -1469,17 +1451,17 @@ TSM_Result tsm_node_defer_free(struct tsm_base_node* p_tsm_base, struct tsm_base
     }
     struct tsm_base_type_node* p_type = caa_container_of(p_type_base, struct tsm_base_type_node, base);
     #ifdef TSM_DEBUG
-        tklog_scope(bool is_valid = tsm_node_is_valid(p_type));
-        if (!is_valid) {
+        tklog_scope(tsm_result = tsm_node_is_valid(p_type));
+        if (tsm_result != TSM_RESULT_NODE_IS_VALID) {
             tklog_error("type node is not valid\n");
             tklog_timer_stop();
-            return TSM_NODE_INVALID;
+            return tsm_result;
         }
         if (!p_type->fn_free_callback) {
             tklog_scope(tsm_node_print(p_tsm_base, p_base));
             tklog_error("free_callback is NULL\n");
             tklog_timer_stop();
-            return TSM_NULL_FUNCTION_POINTER;
+            return TSM_RESULT_NULL_FUNCTION_POINTER;
         }
     #endif
 
@@ -1489,19 +1471,19 @@ TSM_Result tsm_node_defer_free(struct tsm_base_node* p_tsm_base, struct tsm_base
     if (del_result == -ENOENT) {
         tklog_warning("node is already removed\n");
         tklog_timer_stop();
-        return TSM_NODE_ALREADY_REMOVED;
+        return TSM_RESULT_NODE_REMOVED;
     } else if (del_result != 0) {
         tklog_error("Failed to delete node thread safe map. del_result = %d\n", del_result);
         tklog_scope(tsm_node_print(p_tsm_base, p_base));
         tklog_timer_stop();
-        return TSM_UNKNOWN; 
+        return TSM_RESULT_UNKNOWN; 
     }
     #ifdef TSM_DEBUG
-        tklog_scope(bool is_removed = tsm_node_is_removed(p_base));
-        if (!is_removed) {
+        tklog_scope(TSM_Result tsm_result = tsm_node_is_removed(p_base));
+        if (tsm_result != TSM_RESULT_NODE_IS_REMOVED) {
             tklog_error("p_base was not removed\n");
             tklog_timer_stop();
-            return TSM_NODE_NOT_REMOVED;
+            return tsm_result;
         }
     #endif
 
@@ -1510,25 +1492,28 @@ TSM_Result tsm_node_defer_free(struct tsm_base_node* p_tsm_base, struct tsm_base
 
     tklog_timer_stop();
 
-    return TSM_SUCCESS;
+    return TSM_RESULT_SUCCESS;
 }
-bool tsm_node_is_removed(struct tsm_base_node* node) {
+TSM_Result tsm_node_is_removed(struct tsm_base_node* node) {
     if (!node) {
         tklog_warning("given node is NULL\n");
-        return true; // NULL node is considered removed
+        return TSM_RESULT_NULL_ARGUMENT; // NULL node is considered removed
     }
     tklog_scope(bool result = cds_lfht_is_node_deleted(&node->lfht_node));
-    return result;
+    if (!result) {
+        return TSM_RESULT_NODE_REMOVED;
+    }
+    return TSM_RESULT_SUCCESS;
 }
-uint64_t tsm_nodes_count(struct tsm_base_node* p_tsm_base) {
+TSM_Result tsm_nodes_count(struct tsm_base_node* p_tsm_base, uint64_t* p_output_count) {
     if (!p_tsm_base) {
         tklog_error("p_tsm_base is NULL\n");
-        return 0;
+        return TSM_RESULT_SUCCESS;
     }
-    tklog_scope(bool is_tsm = tsm_node_is_tsm(p_tsm_base));
-    if (!is_tsm) {
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
         tklog_error("given p_tsm_base is not TSM\n");
-        return 0;
+        return tsm_result;
     }
 
     tklog_timer_start();
@@ -1536,25 +1521,23 @@ uint64_t tsm_nodes_count(struct tsm_base_node* p_tsm_base) {
     struct tsm* p_tsm = caa_container_of(p_tsm_base, struct tsm, base);
     
     long split_count_before, split_count_after;
-    uint64_t count;
-    
     // cds_lfht_count_nodes MUST be called from within read-side critical section
     // according to URCU specification
-    cds_lfht_count_nodes(p_tsm->p_ht, &split_count_before, &count, &split_count_after);
+    cds_lfht_count_nodes(p_tsm->p_ht, &split_count_before, &p_output_count, &split_count_after);
 
     tklog_timer_stop();
     
-    return count;
+    return TSM_RESULT_SUCCESS;
 }
-bool tsm_print(struct tsm_base_node* p_tsm_base) {
+TSM_Result tsm_print(struct tsm_base_node* p_tsm_base) {
     if (!p_tsm_base) {
         tklog_error("p_tsm_base is NULL\n");
-        return false;
+        return TSM_RESULT_NULL_ARGUMENT;
     }
-    tklog_scope(bool is_tsm = tsm_node_is_tsm(p_tsm_base));
-    if (!is_tsm) {
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
         tklog_error("given p_tsm_base is not TSM\n");
-        return false;
+        return tsm_result;
     }
     struct tsm* p_tsm = caa_container_of(p_tsm_base, struct tsm, base);
 
@@ -1567,7 +1550,7 @@ bool tsm_print(struct tsm_base_node* p_tsm_base) {
         if (!p_base) {
             tklog_error("p_base is NULL\n");
             tklog_timer_stop();
-            return false;
+            return TSM_RESULT_NODE_NOT_FOUND;
         }
 
         tklog_scope(tsm_node_print(p_tsm_base, p_base));
@@ -1577,44 +1560,41 @@ bool tsm_print(struct tsm_base_node* p_tsm_base) {
 
     tklog_timer_stop();
 
-    return true;
+    return TSM_RESULT_SUCCESS;
 }
-bool tsm_iter_first(struct tsm_base_node* p_tsm_base, struct cds_lfht_iter* iter) {
+TSM_Result tsm_iter_first(struct tsm_base_node* p_tsm_base, struct cds_lfht_iter* iter) {
     if (!p_tsm_base) {
         tklog_error("tsm_iter_first called with NULL p_tsm_base\n");
-        return false;
+        return TSM_RESULT_NULL_ARGUMENT;
     }
     if (!iter) {
         tklog_error("iter is NULL\n");
-        return false;
+        return TSM_RESULT_NULL_ARGUMENT;
     }
-    tklog_scope(bool is_tsm = tsm_node_is_tsm(p_tsm_base));
-    if (!is_tsm) {
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
         tklog_error("given p_tsm_base is not TSM\n");
-        return false;
+        return tsm_result;
     }
 
     struct tsm* p_tsm = caa_container_of(p_tsm_base, struct tsm, base);
     
     tklog_scope(cds_lfht_first(p_tsm->p_ht, iter));
-    if (!p_tsm) {
-        return false;
-    }
     if (iter->node == NULL) {
-        return false;
+        return TSM_RESULT_ITER_NODE_IS_NULL;
     }
     
-    return true;
+    return TSM_RESULT_SUCCESS;
 }
-bool tsm_iter_next(struct tsm_base_node* p_tsm_base, struct cds_lfht_iter* iter) {
+TSM_Result tsm_iter_next(struct tsm_base_node* p_tsm_base, struct cds_lfht_iter* iter) {
     if (!p_tsm_base || !iter) {
         tklog_error("tsm_iter_next called with NULL parameters or uninitialized system\n");
-        return false;
+        return TSM_RESULT_NULL_ARGUMENT;
     }
-    tklog_scope(bool is_tsm = tsm_node_is_tsm(p_tsm_base));
-    if (!is_tsm) {
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
         tklog_error("given p_tsm_base is not TSM\n");
-        return false;
+        return TSM_RESULT_SUCCESS;
     }
 
     struct tsm* p_tsm = caa_container_of(p_tsm_base, struct tsm, base);
@@ -1622,55 +1602,53 @@ bool tsm_iter_next(struct tsm_base_node* p_tsm_base, struct cds_lfht_iter* iter)
     tklog_scope(cds_lfht_next(p_tsm->p_ht, iter));
     if (!iter) {
         tklog_error("iter became NULL which it never should be\n");
-        return false;
+        return TSM_RESULT_ITER_IS_NULL;
     }
     if (iter->node == NULL) {
-        return false;
+        return TSM_RESULT_ITER_NODE_IS_NULL;
     }
     
-    return true;
+    return TSM_RESULT_SUCCESS;
 }
-struct tsm_base_node* tsm_iter_get_node(struct cds_lfht_iter* iter) {
-    if (!iter) {
+TSM_Result tsm_iter_get_node(struct cds_lfht_iter* iter, struct tsm_base_node** pp_output_node) {
+    if (!iter || pp_output_node) {
         tklog_error("tsm_iter_next called with NULL parameters or uninitialized system\n");
-        return NULL;
+        return TSM_RESULT_NULL_ARGUMENT;
     }
     if (iter->node == NULL) {
         tklog_warning("iter->node == NULL which means there is no node for this iter\n");
-        return NULL;
+        return TSM_RESULT_ITER_NODE_IS_NULL;
     }
-    
     tklog_scope(struct cds_lfht_node* lfht_node = cds_lfht_iter_get_node(iter));
-
-    
-    if (lfht_node) {
-        return caa_container_of(lfht_node, struct tsm_base_node, lfht_node);
+    if (!lfht_node) {
+        return TSM_RESULT_NODE_NOT_FOUND;
     }
-    return NULL;
+    *pp_output_node = caa_container_of(lfht_node, struct tsm_base_node, lfht_node);
+    return TSM_RESULT_SUCCESS;
 }
-bool tsm_iter_lookup(struct tsm_base_node* p_tsm_base, struct tsm_key key, struct cds_lfht_iter* iter) {
+TSM_Result tsm_iter_lookup(struct tsm_base_node* p_tsm_base, struct tsm_key key, struct cds_lfht_iter* iter) {
     if (!p_tsm_base || !iter) {
         tklog_error("tsm_lookup_iter called with NULL parameters\n");
-        return false;
+        return TSM_RESULT_NULL_ARGUMENT;
     }
-    if (key.key_union.number == 0) {
+    tklog_scope(TSM_Result tsm_result = tsm_key_is_valid(key));
+    if (tsm_result != TSM_RESULT_NODE_IS_VALID) {
         tklog_error("number key is 0\n");
-        return false;
+        return tsm_result;
     }
-    tklog_scope(bool is_tsm = tsm_node_is_tsm(p_tsm_base));
-    if (!is_tsm) {
+    tklog_scope(TSM_Result tsm_result = tsm_node_is_tsm(p_tsm_base));
+    if (tsm_result != TSM_RESULT_NODE_IS_TSM) {
         tklog_error("given p_tsm_base is not TSM\n");
-        return false;
+        return tsm_result;
     }
 
     struct tsm* p_tsm = caa_container_of(p_tsm_base, struct tsm, base);
     
     // Calculate hash
-    uint64_t hash = _tsm_hash_key(key.key_union, key.key_is_number);
+    uint64_t hash = _tsm_hash_key(key.key_union, key.key_type);
     tklog_scope(cds_lfht_lookup(p_tsm->p_ht, hash, _tsm_key_match, &key, iter));
-    tklog_scope(struct cds_lfht_node* lfht_node = cds_lfht_iter_get_node(iter));
     
-    return (lfht_node != NULL);
+    return TSM_RESULT_SUCCESS;
 }
 
 // ==========================================================================================
@@ -1683,7 +1661,7 @@ TSM_Result gtsm_init() {
     if (GTSM_rcu) {
         tklog_info("GTSM is already initialized because its not NULL\n");
         rcu_read_unlock();
-        return TSM_ALREADY_INITIALIZED;
+        return TSM_RESULT_GTSM_ALREADY_INITIALIZED;
     }
     rcu_read_unlock();
 
@@ -1700,17 +1678,17 @@ TSM_Result gtsm_init() {
         tsm_key_free(&gtsm_key);
         tsm_key_free(&gtsm_type_key);
         tklog_error("Failed to create base node for new TSM\n");
-        return TSM_NODE_CREATION_FAILURE;
+        return TSM_RESULT_NODE_CREATION_FAILURE;
     }
     struct tsm* p_new_gtsm = caa_container_of(p_new_gtsm_base, struct tsm, base);
     p_new_gtsm->p_ht = cds_lfht_new(8,8,0,CDS_LFHT_AUTO_RESIZE,NULL);
     if (!p_new_gtsm->p_ht) {
         _tsm_tsm_type_free_callback(&p_new_gtsm_base->rcu_head);
         tklog_error("Failed to create lock free hash table\n");
-        return TSM_UNKNOWN;
+        return TSM_RESULT_UNKNOWN;
     }
     p_new_gtsm->path.length = 0;
-    p_new_gtsm->path.from_gtsm_to_self = NULL;
+    p_new_gtsm->path.key_chain = NULL;
 
 
     // insert base_type into GTSM
@@ -1727,9 +1705,9 @@ TSM_Result gtsm_init() {
         _tsm_tsm_type_free_callback(&p_new_gtsm_base->rcu_head);
         tklog_error("Failed to create base_type node\n");
         rcu_read_unlock();
-        return TSM_NODE_CREATION_FAILURE;
+        return TSM_RESULT_NODE_CREATION_FAILURE;
     }
-    uint64_t hash = _tsm_hash_key(base_type_base->key_union, base_type_base->key_is_number);
+    uint64_t hash = _tsm_hash_key(base_type_base->key_union, base_type_base->key_type);
     rcu_read_lock();
     tklog_scope(struct cds_lfht_node* result = cds_lfht_add_unique(p_new_gtsm->p_ht, hash, _tsm_key_match, &base_key, &base_type_base->lfht_node));
     if (result != &base_type_base->lfht_node) {
@@ -1737,7 +1715,7 @@ TSM_Result gtsm_init() {
         _tsm_tsm_type_free_callback(&p_new_gtsm_base->rcu_head);
         rcu_read_unlock();
         tklog_error("Failed to insert base_type node into hash table\n");
-        return TSM_NODE_INSERTION_FAILURE;
+        return TSM_RESULT_NODE_INSERTION_FAILURE;
     }
     
 
@@ -1755,16 +1733,16 @@ TSM_Result gtsm_init() {
         _tsm_tsm_type_free_callback(&p_new_gtsm_base->rcu_head);
         rcu_read_unlock();
         tklog_error("Failed to create base_type node\n");
-        return TSM_NODE_CREATION_FAILURE;
+        return TSM_RESULT_NODE_CREATION_FAILURE;
     }
-    hash = _tsm_hash_key(tsm_type_base->key_union, tsm_type_base->key_is_number);
+    hash = _tsm_hash_key(tsm_type_base->key_union, tsm_type_base->key_type);
     tklog_scope(result = cds_lfht_add_unique(p_new_gtsm->p_ht, hash, _tsm_key_match, &tsm_type_key, &tsm_type_base->lfht_node));
     if (result != &tsm_type_base->lfht_node) {
         _tsm_base_type_node_free_callback(&tsm_type_base->rcu_head);
         _tsm_tsm_type_free_callback(&p_new_gtsm_base->rcu_head);
         rcu_read_unlock();
         tklog_error("Failed to insert base_type node into hash table\n");
-        return TSM_NODE_INSERTION_FAILURE;
+        return TSM_RESULT_NODE_INSERTION_FAILURE;
     }
 
     // validating inserts
@@ -1774,7 +1752,7 @@ TSM_Result gtsm_init() {
             _tsm_tsm_type_free_callback(&p_new_gtsm_base->rcu_head);
             rcu_read_unlock();
             tklog_error("base_type node not found after initialization\n");
-            return TSM_NODE_NOT_FOUND;
+            return TSM_RESULT_NODE_NOT_FOUND;
         }
 
         tklog_scope(struct tsm_base_node* tsm_type_node = tsm_node_get(p_new_gtsm_base, g_tsm_type_key));
@@ -1782,7 +1760,7 @@ TSM_Result gtsm_init() {
             _tsm_tsm_type_free_callback(&p_new_gtsm_base->rcu_head);
             rcu_read_unlock();
             tklog_error("base_type node not found after initialization\n");
-            return TSM_NODE_NOT_FOUND;
+            return TSM_RESULT_NODE_NOT_FOUND;
         }
     #endif
         
@@ -1791,22 +1769,22 @@ TSM_Result gtsm_init() {
     void* old_pointer = rcu_cmpxchg_pointer(&GTSM, NULL, p_new_gtsm_base);
     if (old_pointer != NULL) {
         tklog_notice("failed to swap pointer\n");
-        return TSM_CMPXCHG_FAILURE;
+        return TSM_RESULT_CMPXCHG_FAILURE;
     }
 
     tklog_debug("Created GTSM and inserted base_type and tsm_type into it\n");
 
-    return TSM_SUCCESS;
+    return TSM_RESULT_SUCCESS;
 }
 struct tsm_base_node* gtsm_get() {
     struct tsm_base_node* GTSM_rcu = rcu_dereference(GTSM);
     return GTSM_rcu;
 }
-bool gtsm_free() {
+TSM_Result gtsm_free() {
     struct tsm_base_node* GTSM_rcu = rcu_dereference(GTSM);
     if (GTSM_rcu == NULL) {
         tklog_info("GTSM is NULL");
-        return false;
+        return TSM_RESULT_GTSM_NOT_INITIALIZED;
     }
 
     // assigning NULL now so that no more nodes can be inserted into GTSM when we try to remove all nodes inside GTSM
@@ -1817,51 +1795,45 @@ bool gtsm_free() {
         if (old_pointer == GTSM_rcu) { break; }
         if (count == 5) {
             tklog_notice("failed to swap pointer to NULL\n");
-            return false;
+            return TSM_RESULT_CMPXCHG_FAILURE;
         }
     }
 
-    tklog_scope(bool is_tsm = tsm_node_is_tsm(GTSM_rcu));
-    if (!is_tsm) {
+    tklog_scope(TSM_Result is_tsm = tsm_node_is_tsm(GTSM_rcu));
+    if (is_tsm != TSM_RESULT_NODE_IS_TSM) {
         tklog_warning("GTSM is not a TSM\n");
-        return false;
+        return is_tsm;
     }
     
     // Schedule for RCU cleanup after successful removal
     call_rcu(&GTSM_rcu->rcu_head, _tsm_tsm_type_free_callback);
 
-    return true;
+    return TSM_RESULT_SUCCESS;
 }
-bool gtsm_print() {
+TSM_Result gtsm_print() {
     struct tsm_base_node* GTSM_rcu = rcu_dereference(GTSM);
     if (!GTSM_rcu) {
         tklog_error("Global thread safe map not initialized\n");
-        return false;
+        return TSM_RESULT_GTSM_NOT_INITIALIZED;
     }
 
     tklog_info("Printing GTSM:\n");
     tklog_scope(tsm_base_node_print(GTSM_rcu));
 
-    bool success = true;
-    rcu_read_lock();
-    struct cds_lfht_iter* p_iter = calloc(1, sizeof(struct cds_lfht_iter));
-    tklog_scope(tsm_iter_first(GTSM_rcu, p_iter));
-    bool iter_next = p_iter != NULL;
-    while (iter_next) {
-        tklog_scope(struct tsm_base_node* iter_node = tsm_iter_get_node(p_iter));
-        tklog_scope(bool print_result = tsm_node_print(GTSM_rcu, iter_node));
-        if (!print_result) {
-            success = false;
+    struct cds_lfht_iter iter;
+    tklog_scope(TSM_Result iter_valid = tsm_iter_first(GTSM_rcu, &iter));
+    while (iter_valid == TSM_RESULT_SUCCESS) {
+        tklog_scope(struct tsm_base_node* iter_node = tsm_iter_get_node(&iter));
+        tklog_scope(TSM_Result print_result = tsm_node_print(GTSM_rcu, iter_node));
+        if (print_result != TSM_RESULT_SUCCESS) {
+            return print_result;
         }
-        tklog_scope(iter_next = tsm_iter_next(GTSM_rcu, p_iter));
+        tklog_scope(iter_valid = tsm_iter_next(GTSM_rcu, &iter));
     }
-    if (!p_iter) {
-        tklog_error("p_iter should not be NULL\n");
-    } else {
-        free(p_iter);
-        p_iter = NULL;
+    if (iter_valid != TSM_RESULT_ITER_NODE_IS_NULL) {
+        tklog_error("iter is unvalid after its used with code %d\n", iter_valid);
+        return iter_valid;
     }
-    rcu_read_unlock();
 
-    return true;
+    return TSM_RESULT_SUCCESS;
 }
