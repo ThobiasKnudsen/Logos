@@ -258,7 +258,6 @@ static void mem_add(void *ptr, size_t size, const char *file, int line)
     }
     pthread_rwlock_unlock(&g_mem_rwlock);
 }
-
 static void mem_update(void *oldptr, void *newptr, size_t newsize)
 {
     pthread_rwlock_wrlock(&g_mem_rwlock);
@@ -271,7 +270,6 @@ static void mem_update(void *oldptr, void *newptr, size_t newsize)
     }
     pthread_rwlock_unlock(&g_mem_rwlock);
 }
-
 static bool mem_remove(void *ptr)
 {
     pthread_rwlock_wrlock(&g_mem_rwlock);
@@ -293,7 +291,6 @@ static bool mem_remove(void *ptr)
     pthread_rwlock_unlock(&g_mem_rwlock);
     return false;
 }
-
 
 /* ------------------------- Time tracing ----------------------------- */
 #ifdef TKLOG_TIMER
@@ -460,7 +457,7 @@ static bool mem_remove(void *ptr)
             free(top);
             return;
         }
-        size_t needed = strlen(top->path) + strlen(top->location) + strlen(ps->buf) + strlen(stop_location) + 10;
+        size_t needed = strlen(top->path) + strlen(top->location) + strlen(ps->buf) + strlen(stop_location) + 20;
         char* call_path = malloc(needed);
         if (!call_path) {
             printf("tklog: out of memory for call_path\n");
@@ -530,7 +527,8 @@ static bool mem_remove(void *ptr)
         int calls_digits = snprintf(NULL, 0, "%" PRIu64, max_calls);
         for (time_tracker_table_itr itr = time_tracker_table_first(&ts->table);
              !time_tracker_table_is_end(itr);
-             itr = time_tracker_table_next(itr)) {
+             itr = time_tracker_table_next(itr)) 
+        {
             const char* start_loc = itr.data->key;
             TimeTracker* tracker = &itr.data->val;
             double avg = tracker->count > 0 ? (double)tracker->total_time_us / tracker->count : 0.0;
@@ -542,7 +540,7 @@ static bool mem_remove(void *ptr)
                 const char* path = cp_itr.data->key;
                 CallPathTime* cpt = &cp_itr.data->val;
                 double cp_avg = cpt->count > 0 ? (double)cpt->total_time_us / cpt->count : 0.0;
-                printf("%*" PRIu64 "ms | %*" PRIu64 " calls | %.3fms avg | %s\n",
+                printf("%*" PRIu64 "ms | %*" PRIu64 " calls | %.3fms avg |     %s\n",
                        time_digits, cpt->total_time_us/1000, calls_digits, cpt->count, cp_avg/1000, path);
             }
         }
@@ -568,6 +566,7 @@ static bool mem_remove(void *ptr)
 
 
 static void signal_handler(int sig) {
+    (void)sig;
     // Minimal message (async-safe: use write() instead of printf)
     const char *msg = "\nCaught signal (likely segfault), dumping memory before exit:\n";
     write(STDERR_FILENO, msg, strlen(msg));
@@ -610,6 +609,7 @@ static void tklog_init_once_impl(void)
     original_free = free;
 #endif
     
+    (void)signal_handler;
 #ifdef TKLOG_MEMORY
     signal(SIGSEGV, signal_handler);
     signal(SIGABRT, signal_handler);
@@ -650,7 +650,7 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
     /* thread */
     if (flags & TKLOG_INIT_F_THREAD) {
         pthread_t tid = pthread_self();
-        n = snprintf(p, sizeof msgbuf - (p - msgbuf), "tid 0x%lX | ", (unsigned long)tid);
+        n = snprintf(p, sizeof msgbuf - (p - msgbuf), "tid %lld | ", (unsigned long long)tid);
         p += n;
     }
 
@@ -766,7 +766,7 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
         for (MemEntry *e = g_mem_head; e; e = e->next) {
             char linebuf[512]; // Increased buffer size for longer paths
             uint64_t t_ms = e->t_ms - g_start_ms;
-            snprintf(linebuf, sizeof linebuf, "\t%" PRIu64 "ms | tid 0x%lX | address %p | %zu bytes | at %s\n",
+            snprintf(linebuf, sizeof linebuf, "\t%" PRIu64 "ms | tid %lld | address %p | %zu bytes | at %s\n",
                           t_ms, (unsigned long)e->tid, e->ptr, e->size, e->path);
             pthread_mutex_lock(&g_tklog_mutex);
             TKLOG_OUTPUT_FN(linebuf, TKLOG_OUTPUT_USERPTR);
@@ -784,6 +784,9 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
 #else /* TKLOG_MEMORY AND TKLOG_MEMORY_PRINT_ON_EXIT not defined */
     void tklog_memory_dump(void)
     {
+        (void)mem_add;
+        (void)mem_remove;
+        (void)mem_update;
         printf("tklog_memory_dump: TKLOG_MEMORY_PRINT_ON_EXIT must be defined to track and dump memory allocations\n");
     }
 #endif /* TKLOG_MEMORY */

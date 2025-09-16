@@ -26,11 +26,13 @@ urcu_node_start_ptr_func_t urcu_safe_get_node_start_ptr_function(void) {
 
 #ifdef URCU_LFHT_SAFETY_ON
 
+/*
 static size_t _default_node_size_function(struct cds_lfht_node* node) {
     (void)node;
     tklog_critical("No node size function set - cannot determine actual node size");
     return 0;
 }
+*/
 
 /* Thread-local safety state for tracking RCU usage */
 typedef struct {
@@ -214,12 +216,11 @@ void _rcu_read_lock_safe(void) {
     
     /* Increment lock count first */
     thread_state.read_lock_count++;
-    int new_depth = thread_state.read_lock_count;
     
     /* Call URCU function */
     urcu_memb_read_lock();
     
-    tklog_debug("Read lock acquired (depth: %d)", new_depth);
+    tklog_debug("Read lock acquired (depth: %d)", thread_state.read_lock_count);
 }
 
 void _rcu_read_unlock_safe(void) {
@@ -262,9 +263,8 @@ void _rcu_read_unlock_safe(void) {
     
     /* Then decrement our counter */
     thread_state.read_lock_count--;
-    int new_depth = thread_state.read_lock_count;
     
-    tklog_debug("Read lock released (depth: %d)", new_depth);
+    tklog_debug("Read lock released (depth: %d)", thread_state.read_lock_count);
 }
 
 void _synchronize_rcu_safe(void) {
@@ -842,9 +842,9 @@ void _cds_lfht_count_nodes_safe(struct cds_lfht *ht,
         } else {
             tklog_error("cds_lfht_count_nodes called with NULL hash table");
         }
-        if (count) tklog_scope(*count = 0);
-        if (approx_before) tklog_scope(*approx_before = 0);
-        if (approx_after) tklog_scope(*approx_after = 0);
+        if (count) *count = 0;
+        if (approx_before) *approx_before = 0;
+        if (approx_after) *approx_after = 0;
         return;
     }
     
@@ -856,9 +856,9 @@ void _cds_lfht_count_nodes_safe(struct cds_lfht *ht,
         } else {
             tklog_critical("cds_lfht_count_nodes called without read lock");
         }
-        if (count) tklog_scope(*count = 0);
-        if (approx_before) tklog_scope(*approx_before = 0);
-        if (approx_after) tklog_scope(*approx_after = 0);
+        if (count) *count = 0;
+        if (approx_before) *approx_before = 0;
+        if (approx_after) *approx_after = 0;
         return;
     }
 
@@ -942,6 +942,8 @@ void* _rcu_xchg_pointer_safe(void** ptr_ptr, void* val, const char* file, int li
 }
 
 void* _rcu_cmpxchg_pointer_safe(void** ptr_ptr, void* old, void* new, const char* file, int line) {
+    (void)file;
+    (void)line;
     tklog_scope(_ensure_thread_state_initialized());
     tklog_scope(void* xchg_result = rcu_cmpxchg_pointer_sym(ptr_ptr, old, new));
     return xchg_result;

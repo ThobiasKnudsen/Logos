@@ -47,7 +47,6 @@
  * - **Restrictions**: Never call `rcu_barrier()`, or `synchronize_rcu()` inside read sections. Avoid deadlocks with mutexes. Never call `rcu_barrier()` within a `call_rcu()` callback.
  * - **Grace Period**: To wait for a grace period after writes (e.g., to ensure deletions are complete), call `synchronize_rcu()`.
  */
-
 // ================================
 // TSM_Result
 // ================================
@@ -58,12 +57,18 @@ typedef enum {
     TSM_RESULT_NULL_FUNCTION_POINTER,           // Required function pointer NULL (e.g., fn_free_callback, fn_is_valid)
     TSM_RESULT_NULL_ITER_NODE,                  // Iterator node is NULL (warning in some cases)
 
-    TSM_RESULT_KEY_VALID,                       // key is valid
-    TSM_RESULT_KEY_INVALID,                     // Invalid key (number=0, string empty/NULL/too long >63 chars)
-    TSM_RESULT_KEYS_NOT_SAME,                   // keys are not the same
+    TSM_RESULT_KEY_IS_VALID,                    // key is valid
+    TSM_RESULT_KEY_NOT_VALID,                   // Invalid key (number=0, string empty/NULL/too long >63 chars)
+    TSM_RESULT_KEY_STRING_EMPTY,                // empty string
+    TSM_RESULT_KEY_STRING_TOO_LARGE,            // key string too large
+    TSM_RESULT_KEY_STRING_COPY_FAILURE,         // String key copy failed (strncpy)
+    TSM_RESULT_KEY_UINT64_IS_ZERO,              // key uint64 should not be 0
+    TSM_RESULT_KEY_STRING_IS_NULL,              // key string should not be NULL
+    TSM_RESULT_KEYS_MATCH,                      // keys match
+    TSM_RESULT_KEYS_DONT_MATCH,                 // keys dont match
 
-    TSM_RESULT_NODE_VALID,                      // node is valid. used in *is_valid functions
-    TSM_RESULT_NODE_INVALID,                    // Node invalid per type validation (fn_is_valid false or base checks)
+    TSM_RESULT_NODE_IS_VALID,                      // node is valid. used in *is_valid functions
+    TSM_RESULT_NODE_NOT_VALID,                    // Node invalid per type validation (fn_is_valid false or base checks)
     TSM_RESULT_NODE_IS_TSM,                     // node is a TSM node
     TSM_RESULT_NODE_NOT_TSM,                    // Given node is not a TSM (tsm_node_is_tsm false)
     TSM_RESULT_NODE_IS_TYPE,                    // node is a type 
@@ -71,8 +76,9 @@ typedef enum {
     TSM_RESULT_NODE_NOT_FOUND,                  // Node/type not found (e.g., tsm_node_get returns NULL)
     TSM_RESULT_NODE_EXISTS,                     // Node already exists (cds_lfht_add_unique fails)
     TSM_RESULT_NODE_SIZE_MISMATCH,              // Size mismatch (this_size_bytes != type_size_bytes or < min size)
+    TSM_RESULT_NODE_SIZE_TO_SMALL,              // Size is to small
     TSM_RESULT_NODE_REPLACING_SAME,             // Replacing node with itself in update
-    TSM_RESULT_NODE_REMOVED,                    // Node is removed/deleted
+    TSM_RESULT_NODE_IS_REMOVED,                    // Node is removed/deleted
     TSM_RESULT_NODE_NOT_REMOVED,                // Not removed from TSM even though it should be
     TSM_RESULT_NODE_CREATION_FAILURE,           // failed to create a node
     TSM_RESULT_NODE_INSERTION_FAILURE,          // failed to insert node
@@ -80,7 +86,7 @@ typedef enum {
     TSM_RESULT_NODE_NOT_FOUND_SELF,             // using keys to a node to get itself and doesnt get itself
 
     TSM_RESULT_ITER_IS_NULL,                    // iter becomes NULL after cds_lfht_next
-    TSM_RESULT_ITER_NODE_IS_NULL,               // iter->node is NULL for some weird reason
+    TSM_RESULT_ITER_END,                        // iter is ended
 
     TSM_RESULT_TSM_CYCLICAL_TYPES,              // Cyclical types in TSM
     TSM_RESULT_TSM_NOT_EMPTY,                   // TSM has nodes before freeing
@@ -101,11 +107,11 @@ typedef enum {
     TSM_RESULT_GTSM_NOT_INITIALIZED,            // GTSM not initialized
 
     TSM_RESULT_ALLOCATION_FAILURE,              // Memory allocation failed (calloc, malloc, realloc)
-    TSM_RESULT_STRING_COPY_FAILURE,             // String key copy failed (strncpy)
     TSM_RESULT_CMPXCHG_FAILURE,                 // rcu_cmpxchg_pointer failed
     TSM_RESULT_PRINT_FAILURE,                   // Print operation failed (e.g., base_node_print)
-    TSM_RESULT_OUT_OF_BOUNDS,                   // Out of bounds
+    TSM_RESULT_OUTSIDE_BOUNDS,                  // Out of bounds
     TSM_RESULT_BUFFER_OVERFLOW,                 // Buffer overflow
+    TSM_RESULT_HASHTABLE_CREATION_FAILURE,      // cds_lfht_new failed
 
     TSM_RESULT_UNKNOWN                          // Generic/uncaught failure (e.g., "failed to free")
 } TSM_Result;
@@ -113,16 +119,16 @@ typedef enum {
 /**
  * @brief when you dont know what the TSM_Result number represents you can use this function to print it
  */
-void tsm_result_print(TSM_Result result);
+TSM_Result tsm_print_result(TSM_Result result);
 
 // ================================
 // tsm_key_union
 // ================================
 typedef enum tsm_key_type {
-    TSM_KEY_TYPE_UINT64 = 0,
-    TSM_KEY_TYPE_STRING = 1,
-    TSM_KEY_TYPE_PARENT = 2, // usefull in path when you want to go to parent instead of a child
-    TSM_KEY_TYPE_NONE = 3
+    TSM_KEY_TYPE_UINT64,
+    TSM_KEY_TYPE_STRING,
+    TSM_KEY_TYPE_PARENT, // usefull in path when you want to go to parent instead of a child
+    TSM_KEY_TYPE_NONE
 } tsm_key_type_t;
 /**
  * @union tsm_key_union
@@ -148,7 +154,7 @@ union tsm_key_union {
  * @note Always pair with a `uint8_t key_type`.
  *       Never directly access the fields inside tsm_key_union manually;
  */
-union tsm_key_union tsm_key_union_uint64_create(uint64_t uint64_key);
+TSM_Result tsm_key_union_uint64_create(uint64_t uint64_key, union tsm_key_union* p_output_key);
 /**
  * @union tsm_key_union
  * @brief Represents a key that can be either a 64-bit number or a string.
@@ -159,7 +165,7 @@ union tsm_key_union tsm_key_union_uint64_create(uint64_t uint64_key);
  *       Never directly access the fields inside tsm_key_union manually;
  *       only use the provided functions on the union. String keys are copied during creation.
  */
-union tsm_key_union tsm_key_union_string_create(const char* string_key);
+TSM_Result tsm_key_union_string_create(const char* string_key, union tsm_key_union* p_output_key);
 /**
  * @brief Creates a tsm_key_union union. Copies string keys if applicable.
  *
@@ -172,7 +178,7 @@ union tsm_key_union tsm_key_union_string_create(const char* string_key);
  * @note Prerequisites: None.
  * @note Call context: Any context (no RCU lock needed).
  */
-bool tsm_key_union_free(union tsm_key_union key_union, uint8_t key_type);
+TSM_Result tsm_key_union_free(union tsm_key_union key_union, uint8_t key_type);
 
 // ================================
 // tsm_key
@@ -200,7 +206,7 @@ struct tsm_key {
  * @note Prerequisites: Same as tsm_key_union_create().
  * @note Call context: Any context.
  */
-struct tsm_key tsm_key_uint64_create(uint64_t uint64_key);
+TSM_Result tsm_key_uint64_create(uint64_t uint64_key, struct tsm_key* p_output_key);
 /**
  * @brief Creates a tsm_key by creating the underlying tsm_key_union.
  *
@@ -212,12 +218,12 @@ struct tsm_key tsm_key_uint64_create(uint64_t uint64_key);
  * @note Calls tsm_key_union_create() internally.
  * @note Prerequisites: Same as tsm_key_union_create().
  * @note Call context: Any context.
- */
-struct tsm_key tsm_key_string_create(const char* string_key);
+ */ 
+TSM_Result tsm_key_string_create(const char* string_key, struct tsm_key* p_output_key);
 /**
  * @breif checks if key is valid and returns TSM_RESULT_SUCCESS if valid
  */
-TSM_Result tsm_key_is_valid(struct tsm_key key);
+TSM_Result tsm_key_is_valid(struct tsm_key* key);
 /**
  * @brief Copies a tsm_key.
  *
@@ -228,7 +234,7 @@ TSM_Result tsm_key_is_valid(struct tsm_key key);
  * @note Prerequisites: key created via tsm_key_create().
  * @note Call context: Any context.
  */
-struct tsm_key tsm_key_copy(struct tsm_key key);
+TSM_Result tsm_key_copy(struct tsm_key key, struct tsm_key* p_output_key);
 /**
  * @brief Frees a tsm_key and its underlying tsm_key_union.
  *
@@ -251,7 +257,7 @@ TSM_Result tsm_key_free(struct tsm_key* key);
  * @note Prerequisites: None.
  * @note Call context: Any context.
  */
-bool tsm_key_match(struct tsm_key key_1, struct tsm_key key_2);
+TSM_Result tsm_key_match(struct tsm_key key_1, struct tsm_key key_2);
 /**
  * @brief Prints the key.
  *
@@ -458,6 +464,10 @@ TSM_Result tsm_path_remove_key(struct tsm_path* p_path, int32_t index);
  */
 TSM_Result tsm_path_create(struct tsm_base_node* p_parent_tsm_base, struct tsm_base_node* p_base, struct tsm_path* p_output_path);
 /**
+ * @brief check if path is valid. will also check all keys in the chain if those are valid as well. will not check if the chain of nodes exist though
+ */
+TSM_Result tsm_path_is_valid(struct tsm_path* p_path);
+/**
  * @brief Frees the path structure and all its contained keys.
  *
  * @param path The tsm_path to free (passed by value).
@@ -467,7 +477,7 @@ TSM_Result tsm_path_create(struct tsm_base_node* p_parent_tsm_base, struct tsm_b
  * @note Prerequisites: Path created via tsm_path_create() or tsm_path_copy().
  * @note Call context: Any context (no RCU lock needed).
  */
-TSM_Result tsm_path_free(struct tsm_path path);
+TSM_Result tsm_path_free(struct tsm_path* path);
 /**
  * @brief Prints the path keys in a human-readable format.
  *
@@ -478,7 +488,7 @@ TSM_Result tsm_path_free(struct tsm_path path);
  * @note Prerequisites: None.
  * @note Call context: Any context.
  */
-TSM_Result tsm_path_print(struct tsm_path path);
+TSM_Result tsm_path_print(struct tsm_path* path);
 /**
  * @brief Creates a deep copy of the given path, including all keys.
  *
@@ -489,7 +499,24 @@ TSM_Result tsm_path_print(struct tsm_path path);
  * @note Prerequisites: path_to_copy must be valid.
  * @note Call context: Any context.
  */
-TSM_Result tsm_path_copy(struct tsm_path path_to_copy, struct tsm_path* p_output_path);
+TSM_Result tsm_path_copy(struct tsm_path* p_path_to_copy, struct tsm_path* p_output_path);
+/**
+ * 
+ */
+TSM_Result tsm_path_get_key_ref(struct tsm_path* p_path, int32_t index, struct tsm_key** pp_key_ref);
+/**
+ * 
+ */
+TSM_Result tsm_path_create_between_paths(struct tsm_path* p_path_1, struct tsm_path* p_path_2, struct tsm_path* p_output_path);
+/**
+ * 
+ */
+TSM_Result tsm_path_insert_path(struct tsm_path* p_dst_path, struct tsm_path* p_src_path, int32_t index);
+/**
+ * 
+ */
+TSM_Result tsm_path_length(struct tsm_path* p_path, uint32_t* p_output_length);
+
 
 // ================================
 // tsm Thread Safe Map
@@ -514,15 +541,14 @@ struct tsm {
  *
  * @param p_tsm_base Parent TSM base node which is the only one you can insert into afterwards.
  * @param tsm_key Key for the new TSM.
- * @return Pointer to new TSM base node or NULL on error.
+ * @param pp_output_node the new tsm node which is not inserted and you have to do manually because you may want to do stuff to it before inserting
+ * @return TSM_Result
  *
  * @note Creates underlying LFHT, sets up path to parent, and inserts "base_type" and "tsm_type"
  * @note Prerequisites: Parent TSM valid, "tsm_type" exists or is created.
  * @note Call context: must be called within rcu_read section
  */
-struct tsm_base_node* tsm_create(
-    struct tsm_base_node* p_parent_tsm_base,
-    struct tsm_key tsm_key);
+TSM_Result tsm_create(struct tsm_base_node* p_parent_tsm_base, struct tsm_key tsm_key, struct tsm_base_node** pp_output_node);
 /**
  * @brief Approximate node count.
  *
@@ -627,10 +653,22 @@ TSM_Result tsm_node_get(struct tsm_base_node* p_tsm_base, struct tsm_key key, st
  * @return TSM_Result
  *
  * @note Each step must resolve to a TSM node except the last.
- * @note Prerequisites: Inside rcu_read_lock()/rcu_read_unlock().
  * @note Call context: Must be inside rcu_read_lock()/rcu_read_unlock().
  */
-TSM_Result tsm_node_get_by_path(struct tsm_base_node* p_tsm_base, struct tsm_path path, struct tsm_base_node** pp_output_node);
+TSM_Result tsm_node_get_by_path(struct tsm_base_node* p_tsm_base, struct tsm_path* p_path, struct tsm_base_node** pp_output_node);
+/**
+ * @brief Retrieves a node by following the given path from the starting TSM until the given depth of the key-chain of the path
+ *
+ * @param p_tsm_base The starting TSM base node (usually GTSM).
+ * @param path The path of keys to follow. Can be negative so that it starts at back
+ * @param depth The index of the key in the key-chain to stop at
+ * @param p_output_node is the node you are getting. it is NULL if return value is not TSM_SUCCESS
+ * @return TSM_Result
+ *
+ * @note Each step must resolve to a TSM node except the last.
+ * @note Call context: Must be inside rcu_read_lock()/rcu_read_unlock().
+ */
+TSM_Result tsm_node_get_by_path_at_depth(struct tsm_base_node* p_tsm_base, struct tsm_path* p_path, int depth, struct tsm_base_node** pp_output_node);
 /**
  * @brief Inserts a new node (fails if key exists).
  *

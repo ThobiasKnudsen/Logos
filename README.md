@@ -1,252 +1,180 @@
-# CPI (Computer Programming Interface)
+# LOGOS
 
-A modern C-based graphics and game development framework focused on high-performance 2D rendering with concurrent data management capabilities.
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/yourusername/logos) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Overview
 
-CPI is a comprehensive graphics programming interface that provides:
-- **High-performance 2D rendering** with GPU acceleration
-- **Lock-free concurrent data structures** using userspace RCU
-- **Modern shader pipeline** with GLSL support
-- **Cross-platform window management** via SDL3
-- **Thread-safe development tools** and logging system
+LOGOS is an open-source, high-performance mathematical computation and visualization tool inspired by GeoGebra and MATLAB. It provides an interactive environment for exploring geometry, algebra, numerical analysis, and vector-based graphics. Built in pure C for maximum efficiency, LOGOS leverages modern concurrency (via Userspace RCU), GPU-accelerated rendering (SDL3 + shaders), and advanced memory management to handle complex computations and visualizations smoothly.
+
+Key highlights:
+- **Interactive Geometry**: Draw and manipulate vector paths, curves, and shapes with real-time feedback.
+- **Numerical Computing**: Compute constants (e.g., π via high-precision methods), solve equations, and perform matrix operations.
+- **Cross-Platform**: Runs on Windows, macOS, and Linux with native performance.
+- **Extensible**: Thread-safe data structures for custom math libraries and plugins.
+- **Visual Rendering**: Shader-based graphics for 2D/3D math visualizations.
+
+LOGOS is designed for educators, students, and researchers who need a lightweight yet powerful alternative to bloated math software.
 
 ## Features
 
-### 🎨 Graphics & Rendering
-- GPU-accelerated 2D rectangle rendering
-- Support for rotation, scaling, and corner radius
-- Multi-texture binding (up to 8 textures)
-- GLSL shader compilation and hot-reloading
-- Cross-platform window management
+- **Core Math Primitives**: Vector operations (`vec.c`), path manipulation (`vec_path.c`), and type-safe data handling (`type.c`).
+- **Concurrent Data Management**: Lock-free hash tables (`tsm.c`) for thread-safe storage of mathematical objects.
+- **High-Precision Logging & Debugging**: Configurable logging (`tklog.c`) with memory tracking and scope tracing.
+- **GPU Integration**: Real-time shader compilation and execution for dynamic visualizations.
+- **Testing Suite**: Built-in unit tests for concurrency safety, memory leaks, and core algorithms.
+- **Offline Builds**: Dependencies fetched once via CMake, then built disconnected for reproducible environments.
 
-### 🔄 Concurrent Programming
-- Lock-free hash tables using userspace RCU
-- Thread-safe global data graph system
-- Type-safe node management
-- Memory-safe concurrent access patterns
+## Requirements
 
-### 🛠️ Development Tools
-- **TKLOG**: Advanced logging system with scope tracking
-- Thread identification and timing
-- Multiple log levels (DEBUG, INFO, WARNING, ERROR, etc.)
-- Memory debugging and leak detection
-- Vector and map data structures
+- **Compiler**: GCC/Clang (C17 standard) or MSVC.
+- **CMake**: Version 3.24 or higher.
+- **Git**: Required for initial dependency fetching.
+- **Platform-Specific**:
+  - **Linux**: `pkg-config`, `libasound2-dev` (for audio, optional).
+  - **macOS**: Xcode Command Line Tools.
+  - **Windows**: Visual Studio 2022 or MinGW-w64.
+- **Optional Sanitizers**: AddressSanitizer (ASan) or ThreadSanitizer (TSan) for debugging (GCC/Clang only).
 
-### 🏗️ Architecture
-- Modular design with clear separation of concerns
-- Resource management with automatic cleanup
-- Error handling and debugging utilities
-- CMake-based build system
-
-## Dependencies
-
-### Required System Packages
-```bash
-# Ubuntu/Debian
-sudo apt install liburcu-dev pkg-config
-
-# Fedora/RHEL
-sudo dnf install userspace-rcu-devel pkg-config
-
-# Arch Linux
-sudo pacman -S liburcu pkg-config
-```
-
-### Build Dependencies (Automatically Downloaded)
-- SDL3 (window management)
-- shaderc (GLSL compilation)
-- SPIRV-Tools (shader optimization)
-- glslang (shader validation)
-- xxHash (fast hashing)
-- userspace-rcu (concurrent data structures)
+No internet required after initial setup—dependencies are vendored via FetchContent.
 
 ## Building
 
-### Prerequisites
-- CMake 3.24 or higher
-- C compiler (GCC, Clang, or MSVC)
-- Git
+LOGOS uses CMake for configuration and supports Debug/Release builds with optional sanitizers.
 
-### Build Instructions
+### Quick Start (Unix-like: Linux/macOS)
 
-```bash
-# Clone the repository
-git clone <repository-url>
-cd CPI_5
+1. Clone the repository:
+   ```
+   git clone https://github.com/yourusername/logos.git
+   cd logos
+   ```
 
-# Create build directory
-mkdir build && cd build
+2. Run the build script:
+   ```
+   ./build.sh --release
+   ```
+   - For Debug mode: `./build.sh --debug`
+   - Enable tests: `./build.sh --tests`
+   - Sanitizers: `./build.sh --asan` or `./build.sh --tsan` (forces Debug mode)
+   - Clean build: `./build.sh --clean`
+   - Install: `./build.sh --install`
+   - Package: `./build.sh --package`
 
-# Configure and build
-cmake ..
-make -j$(nproc)
+   The binary will be in `build/bin/logos` (or `logos.exe` on Windows).
 
-# Run the application
-./bin/main
-```
+### Manual CMake Build
+
+1. Create a build directory:
+   ```
+   mkdir build && cd build
+   ```
+
+2. Configure:
+   ```
+   cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DLOGOS_ADDRESS_SANITIZER=OFF
+   ```
+
+3. Build:
+   ```
+   cmake --build . -j$(nproc)
+   ```
+
+4. Run:
+   ```
+   ./bin/logos
+   ```
+
+### Windows (Visual Studio)
+
+1. Open `CMakeLists.txt` in Visual Studio or use CMake GUI.
+2. Generate project files and build the `logos` target.
+3. Run `bin\logos.exe`.
 
 ### Build Options
 
-```bash
-# Debug build with sanitizers
-cmake -DCMAKE_BUILD_TYPE=Debug ..
+| Option | Description | Default |
+|--------|-------------|---------|
+| `CMAKE_BUILD_TYPE` | `Debug` or `Release` | `Release` |
+| `BUILD_TESTS` | Enable test executables | `OFF` |
+| `LOGOS_ADDRESS_SANITIZER` | Enable ASan for memory debugging | `OFF` |
+| `LOGOS_THREAD_SANITIZER` | Enable TSan for race detection | `OFF` |
+| `LOGOS_INSTALL_HEADERS` | Install headers for development | `OFF` |
 
-# Release build with optimizations
-cmake -DCMAKE_BUILD_TYPE=Release ..
-
-# Custom compiler
-cmake -DCMAKE_C_COMPILER=clang ..
-```
+Tests include:
+- `test_tklog`: Logging validation.
+- `test_urcu_lfht_safety`: Concurrency safety.
+- `test_global_data`: Global data integrity.
+- `test_tsm`: Thread-safe map operations.
 
 ## Usage
 
-### Basic Example
-
-```c
-#include "cpi.h"
-
-int main(void) {
-    // Initialize the CPI system
-    cpi_Initialize();
-    
-    // Create GPU device
-    int gpu_device_id = cpi_GPUDevice_Create();
-    
-    // Create window
-    int window_id = cpi_Window_Create(gpu_device_id, 800, 600, "My App");
-    
-    // Create shaders
-    int vert_id = cpi_Shader_CreateFromGlslFile(gpu_device_id, 
-        "shaders/shader.vert.glsl", "main", shaderc_vertex_shader, true);
-    int frag_id = cpi_Shader_CreateFromGlslFile(gpu_device_id, 
-        "shaders/shader.frag.glsl", "main", shaderc_fragment_shader, true);
-    
-    // Create graphics pipeline
-    int pipeline_id = cpi_GraphicsPipeline_Create(vert_id, frag_id, true);
-    
-    // Show window
-    cpi_Window_Show(window_id, pipeline_id);
-    
-    // Cleanup
-    cpi_GraphicsPipeline_Destroy(&pipeline_id);
-    cpi_Shader_Destroy(&vert_id);
-    cpi_Shader_Destroy(&frag_id);
-    cpi_Window_Destroy(&window_id);
-    
-    return 0;
-}
+Launch the application:
+```
+./bin/logos
 ```
 
-### Concurrent Data Management
+### Basic Commands
 
-```c
-#include "global_data.h"
+LOGOS starts in an interactive mode similar to MATLAB/GeoGebra:
 
-// Initialize global data system
-gd_init();
+- **Compute π**: Use `cpi` module for high-precision calculation (e.g., via Machin-like formulas in `cpi.c`).
+- **Vector Ops**: Define vectors with `vec_new(x, y)` and manipulate paths: `vec_path_add(point)`.
+- **Plotting**: Enter commands like `plot sin(x)` to visualize functions with shader-based rendering.
+- **Data Storage**: Store results in thread-safe maps: `tsm_insert(key, value)`.
+- **Export**: Save visualizations as images or data files.
 
-// Create a node
-uint64_t node_id = gd_create_node(type_key);
+For scripting, pipe commands or use the embedded REPL. Full API docs are in `include/` (generated via Doxygen if enabled).
 
-// Thread-safe access
-void* data = gd_get_unsafe(node_id, type_key);
-
-// Cleanup
-gd_free_node(node_id);
-gd_cleanup();
+Example session:
+```
+$ ./bin/logos
+LOGOS 1.0.0 > compute_pi(1000)
+3.14159265358979323846
+LOGOS 1.0.0 > vec v1 = vec_new(1.0, 2.0)
+LOGOS 1.0.0 > plot_line(v1, vec_new(3.0, 4.0))
+[Rendered: line.png]
 ```
 
-### Logging with TKLOG
+### Keyboard Shortcuts (in GUI Mode)
 
-```c
-#include "tklog.h"
-
-// Log with different levels
-TKLOG_DEBUG("Debug message");
-TKLOG_INFO("Info message");
-TKLOG_WARNING("Warning message");
-TKLOG_ERROR("Error message");
-
-// Scope-based logging
-DEBUG_SCOPE(cpi_Initialize());
-```
-
-## Project Structure
-
-```
-CPI_5/
-├── include/           # Header files
-│   ├── cpi.h         # Main API
-│   ├── global_data.h # Concurrent data structures
-│   ├── tklog.h       # Logging system
-│   └── ...
-├── src/              # Source files
-│   ├── main.c        # Example application
-│   ├── cpi.c         # Core implementation
-│   └── ...
-├── shaders/          # GLSL shader files
-│   ├── shader.vert.glsl
-│   └── shader.frag.glsl
-├── scripts/          # Build and installation scripts
-└── CMakeLists.txt    # Build configuration
-```
+- `Ctrl + Z`: Undo last operation.
+- `F1`: Toggle logging levels.
+- `Esc`: Exit interactive mode.
 
 ## Architecture
 
-### Core Components
-
-1. **CPI Core** (`cpi.c`): High-level graphics API
-2. **Global Data** (`global_data.c`): Concurrent data management
-3. **TKLOG** (`tklog.c`): Logging and debugging system
-4. **Vector/Map** (`vec.c`, `map.c`): Data structures
-5. **URCU Safe** (`urcu_safe.c`): Thread-safe utilities
-
-### Data Flow
-
-```
-Application → CPI API → GPU Device → Shader Pipeline → Window Rendering
-                ↓
-            Global Data → RCU Hash Tables → Concurrent Access
-```
-
-## Development
-
-### Adding New Features
-
-1. **Graphics Features**: Extend `cpi.h` and implement in `cpi.c`
-2. **Data Structures**: Add to `global_data.h` and implement thread-safe operations
-3. **Shaders**: Create new GLSL files in `shaders/` directory
-4. **Utilities**: Add to appropriate utility modules
-
-### Debugging
-
-Enable debug features in CMakeLists.txt:
-```cmake
-target_compile_definitions(main PRIVATE DEBUG)
-```
-
-Use TKLOG for comprehensive logging:
-```c
-TKLOG_DEBUG("Variable value: %d", my_var);
-DEBUG_SCOPE(my_function_call());
-```
+- **Core**: Single-threaded math primitives with optional concurrency via RCU.
+- **Concurrency**: Lock-free hash tables (`tsm.c`) for safe multi-threaded access.
+- **Graphics**: SDL3 for windowing, GLSLang/Shaderc for compute shaders.
+- **Memory**: Mimalloc for fast allocation; optional tracking via TKLog.
+- **Safety**: URCU wrappers (`urcu_lfht_safe.c`) prevent common race conditions.
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
+1. Fork the repo and create a feature branch (`git checkout -b feat/amazing-feature`).
+2. Commit changes (`git commit -m 'Add some feature'`).
+3. Push to the branch (`git push origin feat/amazing-feature`).
+4. Open a Pull Request.
+
+Run tests before submitting:
+```
+./build.sh --tests --debug
+ctest -V
+```
 
 ## License
 
-[Add your license information here]
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 
-- SDL3 team for cross-platform support
-- Khronos Group for Vulkan and SPIR-V standards
-- Google for shaderc compiler
-- Userspace RCU project for concurrent data structures
+- [SDL3](https://github.com/libsdl-org/SDL) for graphics.
+- [Userspace RCU](https://lttng.org/urcu) for concurrency.
+- [xxHash](https://github.com/Cyan4973/xxHash) for fast hashing.
+- Inspired by GeoGebra's interactivity and MATLAB's computation power.
+
+Questions? Contact: thobknu@gmail.com
+
+---
+
+*Built with ❤️ by the LOGOS Team*
