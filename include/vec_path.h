@@ -2,7 +2,6 @@
 #define VEC_PATH_H
 
 #include "vec_path.h"
-#include "debug.h"
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=CPI
+Comment=A cross-platform application
+Exec=@CMAKE_INSTALL_PREFIX@/bin/cpi
+Icon=@CMAKE_INSTALL_PREFIX@/share/cpi/resources/icon.png
+Terminal=false
+Categories=Game;
+Keywords=game;application; 

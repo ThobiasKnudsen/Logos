@@ -1,26 +1,36 @@
 #include "vec_path.h"
-#include "debug.h"
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include "tklog.h"
 
 char* _vec_Path_Combine(const char* path_1, const char* path_2) {
-    DEBUG_ASSERT(path_1, "NULL pointer");
-    DEBUG_ASSERT(path_2, "NULL pointer");
+    if (!path_1) {
+        tklog_error("NULL pointer\n");
+        return NULL;
+    }
+    if (!path_2) {
+        tklog_error("NULL pointer\n");
+        return NULL;
+    }
 
     size_t len1 = strlen(path_1);
     size_t len2 = strlen(path_2);
     /* Allocate enough space: +2 for a possible '/' and the null terminator */
-    DEBUG_SCOPE(char* combined = malloc(len1 + len2 + 2));
-    DEBUG_ASSERT(combined, "malloc failed");
+    tklog_scope(char* combined = malloc(len1 + len2 + 2));
+    if (!combined) {
+        tklog_critical("malloc failed\n");
+        return NULL;
+    }
 
     /* Copy the first path */
     strcpy(combined, path_1);
 
     /* If needed, insert a '/' between path_1 and path_2 */
-    if (len1 && path_1[len1 - 1] != '/' && len2 && path_2[0] != '/')
+    if (len1 && path_1[len1 - 1] != '/' && len2 && path_2[0] != '/'){
         strcat(combined, "/");
+    }
     strcat(combined, path_2);
 
     /* Now simplify the combined path.
@@ -32,8 +42,12 @@ char* _vec_Path_Combine(const char* path_1, const char* path_2) {
 
     int n = (int)strlen(combined);
     /* Worst-case: every character is a token so we need n+1 pointers */
-    DEBUG_SCOPE(char **stack = malloc(sizeof(char*) * (n + 1)));
-    DEBUG_ASSERT(stack, "malloc failed");
+    tklog_scope(char **stack = malloc(sizeof(char*) * (n + 1)));
+    if (!stack) {
+        tklog_error("malloc failed\n");
+        free(combined);
+        return NULL;
+    }
     int sp = 0;  // stack pointer
     int start = 0;
     for (int i = 0; i <= n; i++) {
@@ -83,8 +97,13 @@ char* _vec_Path_Combine(const char* path_1, const char* path_2) {
         }
     }
     
-    DEBUG_SCOPE(char* result = malloc(resLen + 1));
-    DEBUG_ASSERT(result, "malloc failed");
+    tklog_scope(char* result = malloc(resLen + 1));
+    if (!result) {
+        tklog_error("malloc failed\n");
+        free(stack);
+        free(combined);
+        return NULL;
+    }
     
     /* Build the result string in one pass */
     char* p = result;
@@ -92,8 +111,9 @@ char* _vec_Path_Combine(const char* path_1, const char* path_2) {
         /* Absolute path: write the leading '/' */
         *p++ = '/';
         for (int j = 1; j < sp; j++) {
-            if (j > 1)
+            if (j > 1) {
                 *p++ = '/';
+            }
             size_t l = strlen(stack[j]);
             memcpy(p, stack[j], l);
             p += l;
@@ -117,16 +137,17 @@ char* _vec_Path_Combine(const char* path_1, const char* path_2) {
     return result;
 }
 int* vec_Path_ToIndices(const char* path, size_t* const out_indices_count) {
-    DEBUG_ASSERT(path, "NULL pointer");
     if (!path || !out_indices_count) {
-        return NULL; // Handle invalid inputs
+        tklog_error("some arguments are NULL\n");
+        return NULL; 
     }
 
     size_t path_length = strlen(path);
     if (path_length == 0) {
         *out_indices_count = 0;
-        DEBUG_SCOPE(int* indices = alloc(NULL, sizeof(int)));
+        tklog_scope(int* indices = malloc(sizeof(int)));
         if (!indices) {
+            tklog_critical("malloc failed\n");
             return NULL;
         }
         return indices; // Empty path returns empty array
@@ -134,7 +155,7 @@ int* vec_Path_ToIndices(const char* path, size_t* const out_indices_count) {
 
     // Initial capacity: estimate max number of tokens
     size_t capacity = (path_length / 2) + 1;
-    DEBUG_SCOPE(int* indices = alloc(NULL, sizeof(int) * capacity));
+    tklog_scope(int* indices = malloc(sizeof(int) * capacity));
     if (!indices) {
         return NULL; // Handle allocation failure
     }
@@ -160,9 +181,9 @@ int* vec_Path_ToIndices(const char* path, size_t* const out_indices_count) {
             } else {
                 if (count >= capacity) {
                     capacity *= 2;
-                    DEBUG_SCOPE(int* new_indices = realloc(indices, sizeof(int) * capacity));
+                    tklog_scope(int* new_indices = realloc(indices, sizeof(int) * capacity));
                     if (!new_indices) {
-                        DEBUG_SCOPE(free(indices));
+                        free(indices);
                         return NULL;
                     }
                     indices = new_indices;
@@ -186,19 +207,32 @@ int* vec_Path_ToIndices(const char* path, size_t* const out_indices_count) {
         }
 
         // Parse number token
-        DEBUG_ASSERT(*p != '-', "Invalid negative number; use '..' for -1");
-        DEBUG_ASSERT(isdigit((unsigned char)*p), "Expected digit");
+        if (*p == '-') {
+            tklog_error("Invalid negative number; use '..' for -1\n");
+            free(indices);
+            return NULL;
+        }
+        if (!isdigit((unsigned char)*p)) {
+            tklog_error("Expected digit\n");
+            free(indices);
+            return NULL;
+        }
         int number = 0;
         while (p < end && *p != '/') {
-            DEBUG_ASSERT(isdigit((unsigned char)*p), "Invalid character in number");
+            if (!isdigit((unsigned char)*p)) {
+                tklog_error("Invalid character in number\n");
+                free(indices);
+                return NULL;
+            }
             number = number * 10 + (*p - '0');
             p++;
         }
         if (count >= capacity) {
             capacity *= 2;
-            DEBUG_SCOPE(int* new_indices = realloc(indices, sizeof(int) * capacity));
+            tklog_scope(int* new_indices = realloc(indices, sizeof(int) * capacity));
             if (!new_indices) {
-                DEBUG_SCOPE(free(indices));
+                tklog_critical("realloc failed\n");
+                free(indices);
                 return NULL;
             }
             indices = new_indices;
@@ -207,9 +241,10 @@ int* vec_Path_ToIndices(const char* path, size_t* const out_indices_count) {
     }
 
     // Shrink to fit
-    DEBUG_SCOPE(int* final_indices = realloc(indices, sizeof(int) * count));
+    tklog_scope(int* final_indices = realloc(indices, sizeof(int) * count));
     if (!final_indices) {
-        DEBUG_SCOPE(free(indices));
+        tklog_critical("realloc failed\n");
+        free(indices);
         return NULL;
     }
     indices = final_indices;
@@ -219,14 +254,14 @@ int* vec_Path_ToIndices(const char* path, size_t* const out_indices_count) {
 }
 char* vec_Path_FromVaArgs(size_t n_args, ...) {
     if (n_args == 0) {
-        char* empty = alloc(NULL, 1);
+        char* empty = malloc(1);
         if (empty) { empty[0] = '\0'; }
         return empty;
     }
 
     va_list args;
     va_start(args, n_args);
-    int* p_indices = alloc(NULL, n_args * sizeof(int));
+    int* p_indices = malloc(n_args * sizeof(int));
     if (!p_indices) {
         va_end(args);
         return NULL;
@@ -251,8 +286,12 @@ char* vec_Path_FromVaArgs(size_t n_args, ...) {
     }
     total_len += 1; // Null terminator
 
-    char* ptr = alloc(NULL, total_len);
-    if (!ptr) { free(p_indices); return NULL; }
+    char* ptr = malloc(total_len);
+    if (!ptr) { 
+        tklog_critical("malloc failed\n");
+        free(p_indices); 
+        return NULL; 
+    }
     char* p = ptr;
     *p++ = '/';
     for (size_t i = 0; i < n_args; i++) {

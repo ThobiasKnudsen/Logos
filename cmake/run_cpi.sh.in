@@ -1,0 +1,28 @@
+#!/bin/bash
+# CPI Launcher for Unix-like systems (macOS/Linux)
+# This script launches the CPI application
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CPI_EXE="$SCRIPT_DIR/cpi"
+CPI_DATA="$SCRIPT_DIR/../share/cpi"
+
+# Check if executable exists
+if [ ! -f "$CPI_EXE" ]; then
+    echo "Error: CPI executable not found at $CPI_EXE"
+    echo "Please ensure the application is properly installed."
+    exit 1
+fi
+
+# Check if executable is actually executable
+if [ ! -x "$CPI_EXE" ]; then
+    echo "Error: CPI executable is not executable"
+    echo "Please check file permissions."
+    exit 1
+fi
+
+echo "Starting CPI..."
+echo "Executable: $CPI_EXE"
+echo "Data directory: $CPI_DATA"
+
+# Run the application with all arguments passed to this script
+exec "$CPI_EXE" "$@" 

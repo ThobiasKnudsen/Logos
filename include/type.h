@@ -15,7 +15,7 @@ typedef struct Type_Info {
 } Type_Info;
 
 extern Type 			null_type;
-extern Type 			type_type;
+extern Type 			base_type;
 
 // if return = 0 it means it failed
 Type 			type_Create_Safe(
