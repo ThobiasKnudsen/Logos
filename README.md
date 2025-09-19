@@ -4,25 +4,9 @@
 
 ## Overview
 
-LOGOS is an open-source, high-performance mathematical computation and visualization tool inspired by GeoGebra and MATLAB. It provides an interactive environment for exploring geometry, algebra, numerical analysis, and vector-based graphics. Built in pure C for maximum efficiency, LOGOS leverages modern concurrency (via Userspace RCU), GPU-accelerated rendering (SDL3 + shaders), and advanced memory management to handle complex computations and visualizations smoothly.
+IN PROGRESS
 
-Key highlights:
-- **Interactive Geometry**: Draw and manipulate vector paths, curves, and shapes with real-time feedback.
-- **Numerical Computing**: Compute constants (e.g., π via high-precision methods), solve equations, and perform matrix operations.
-- **Cross-Platform**: Runs on Windows, macOS, and Linux with native performance.
-- **Extensible**: Thread-safe data structures for custom math libraries and plugins.
-- **Visual Rendering**: Shader-based graphics for 2D/3D math visualizations.
-
-LOGOS is designed for educators, students, and researchers who need a lightweight yet powerful alternative to bloated math software.
-
-## Features
-
-- **Core Math Primitives**: Vector operations (`vec.c`), path manipulation (`vec_path.c`), and type-safe data handling (`type.c`).
-- **Concurrent Data Management**: Lock-free hash tables (`tsm.c`) for thread-safe storage of mathematical objects.
-- **High-Precision Logging & Debugging**: Configurable logging (`tklog.c`) with memory tracking and scope tracing.
-- **GPU Integration**: Real-time shader compilation and execution for dynamic visualizations.
-- **Testing Suite**: Built-in unit tests for concurrency safety, memory leaks, and core algorithms.
-- **Offline Builds**: Dependencies fetched once via CMake, then built disconnected for reproducible environments.
+LOGOS will be a high-performance mathematical computation and visualization tool inspired by GeoGebra and MATLAB. It provides an interactive environment for exploring geometry, algebra, numerical analysis, and vector-based graphics. The biggest feature will be a clean and logically consisten syntax all the way through at the same time being made in a general way so that coplex problems doesnt become a limitation. Built in pure C and not rust becasue of possible runtime compilation and linking. LOGOS leverages modern concurrency (via Userspace RCU), GPU-accelerated rendering (SDL3 + shaders), and advanced memory management to handle complex computations, visualizations smoothly and multithreaded scenarios.
 
 ## Requirements
 
@@ -110,29 +94,30 @@ Tests include:
 
 Launch the application:
 ```
-./bin/logos
+./bin/logos 
 ```
 
-### Basic Commands
+### Basic Usage
 
-LOGOS starts in an interactive mode similar to MATLAB/GeoGebra:
-
-- **Compute π**: Use `cpi` module for high-precision calculation (e.g., via Machin-like formulas in `cpi.c`).
-- **Vector Ops**: Define vectors with `vec_new(x, y)` and manipulate paths: `vec_path_add(point)`.
-- **Plotting**: Enter commands like `plot sin(x)` to visualize functions with shader-based rendering.
-- **Data Storage**: Store results in thread-safe maps: `tsm_insert(key, value)`.
-- **Export**: Save visualizations as images or data files.
-
-For scripting, pipe commands or use the embedded REPL. Full API docs are in `include/` (generated via Doxygen if enabled).
-
-Example session:
+As example you can write and solve this:
 ```
-$ ./bin/logos
-LOGOS 1.0.0 > compute_pi(1000)
-3.14159265358979323846
-LOGOS 1.0.0 > vec v1 = vec_new(1.0, 2.0)
-LOGOS 1.0.0 > plot_line(v1, vec_new(3.0, 4.0))
-[Rendered: line.png]
+x: axis_x(-10, 10, 0.01)
+y: axis_y(-10, 10, 0.01)
+show(x²+y²<9 and y < x² and ((x=0 and y=-1) or (x=0 and y=1))) # This will show a point at x=0,y=-1
+show(x²+y²<9 and y < x² and y=x)                               # This will show a partial line of y = x
+a: x²+y²<9 and y < x²                                          # we can do the same agin but storing to common part
+show(a and ((x=0 and y=-1) or (x=0 and y=1)))                  # This will show a point at x=0,y=-1
+show(a and y=x)                                                # This will show a partial line of y = x
+
+t: time_seconds(0, 10, 0.016)
+a: x²+y²<t and y < x^t
+show(
+  if (a and x=0 and y=-1) {
+    x=y
+  } else {
+    x=-y
+  }
+)
 ```
 
 ### Keyboard Shortcuts (in GUI Mode)
