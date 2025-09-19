@@ -1,0 +1,202 @@
+==================
+WARNING: ThreadSanitizer: data race (pid=68352)
+  Read of size 1 at 0x7b180000d102 by thread T3:
+    #0 tsm_node_is_type /home/o/Personal/Code/Logos/src/tsm.c:1578 (test_tsm+0x9637)
+    #1 _tsm_base_type_node_is_valid /home/o/Personal/Code/Logos/src/tsm.c:84 (test_tsm+0xa8ec)
+    #2 tsm_node_is_valid /home/o/Personal/Code/Logos/src/tsm.c:1553 (test_tsm+0x9984)
+    #3 tsm_node_defer_free /home/o/Personal/Code/Logos/src/tsm.c:1950 (test_tsm+0xb4cf)
+    #4 _tsm_tsm_type_free_children /home/o/Personal/Code/Logos/src/tsm.c:180 (test_tsm+0xb9cd)
+    #5 _tsm_tsm_type_free_callback /home/o/Personal/Code/Logos/src/tsm.c:297 (test_tsm+0xbf6a)
+    #6 call_rcu_thread /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:375 (liburcu.so.8+0x427c)
+
+  Previous write of size 1 at 0x7b180000d102 by thread T2:
+    [failed to restore the stack]
+
+  Location is heap block of size 88 at 0x7b180000d0e0 allocated by thread T2:
+    #0 calloc ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:667 (libtsan.so.2+0x3ee50)
+    #1 tsm_base_node_create /home/o/Personal/Code/Logos/src/tsm.c:659 (test_tsm+0x6ea4)
+    #2 tsm_base_type_node_create /home/o/Personal/Code/Logos/src/tsm.c:845 (test_tsm+0x743a)
+    #3 create_custom_types /home/o/Personal/Code/Logos/src/tests/test_tsm.c:225 (test_tsm+0x3037)
+    #4 stress_thread /home/o/Personal/Code/Logos/src/tests/test_tsm.c:349 (test_tsm+0x34fb)
+
+  Thread T3 (tid=68356, running) created by thread T2 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1001 (libtsan.so.2+0x5e686)
+    #1 call_rcu_data_init /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:446 (liburcu.so.8+0x297f)
+    #2 tsm_node_defer_free /home/o/Personal/Code/Logos/src/tsm.c:1987 (test_tsm+0xb58a)
+    #3 stress_thread /home/o/Personal/Code/Logos/src/tests/test_tsm.c:549 (test_tsm+0x46a6)
+
+  Thread T2 (tid=68355, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1001 (libtsan.so.2+0x5e686)
+    #1 stress_test /home/o/Personal/Code/Logos/src/tests/test_tsm.c:938 (test_tsm+0x625e)
+    #2 main /home/o/Personal/Code/Logos/src/tests/test_tsm.c:975 (test_tsm+0x64c3)
+
+SUMMARY: ThreadSanitizer: data race /home/o/Personal/Code/Logos/src/tsm.c:1578 in tsm_node_is_type
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=68352)
+  Read of size 1 at 0x7b1400007913 by thread T3:
+    #0 tsm_node_is_tsm /home/o/Personal/Code/Logos/src/tsm.c:1568 (test_tsm+0x8855)
+    #1 _tsm_tsm_type_free_callback /home/o/Personal/Code/Logos/src/tsm.c:290 (test_tsm+0xbf25)
+    #2 call_rcu_thread /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:375 (liburcu.so.8+0x427c)
+
+  Previous write of size 1 at 0x7b1400007913 by thread T2:
+    [failed to restore the stack]
+
+  Location is heap block of size 80 at 0x7b14000078f0 allocated by thread T2:
+    #0 calloc ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:667 (libtsan.so.2+0x3ee50)
+    #1 tsm_base_node_create /home/o/Personal/Code/Logos/src/tsm.c:659 (test_tsm+0x6ea4)
+    #2 tsm_create /home/o/Personal/Code/Logos/src/tsm.c:1267 (test_tsm+0x8bbe)
+    #3 stress_thread /home/o/Personal/Code/Logos/src/tests/test_tsm.c:343 (test_tsm+0x34cb)
+
+  Thread T3 (tid=68356, running) created by thread T2 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1001 (libtsan.so.2+0x5e686)
+    #1 call_rcu_data_init /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:446 (liburcu.so.8+0x297f)
+    #2 tsm_node_defer_free /home/o/Personal/Code/Logos/src/tsm.c:1987 (test_tsm+0xb58a)
+    #3 stress_thread /home/o/Personal/Code/Logos/src/tests/test_tsm.c:549 (test_tsm+0x46a6)
+
+  Thread T2 (tid=68355, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1001 (libtsan.so.2+0x5e686)
+    #1 stress_test /home/o/Personal/Code/Logos/src/tests/test_tsm.c:938 (test_tsm+0x625e)
+    #2 main /home/o/Personal/Code/Logos/src/tests/test_tsm.c:975 (test_tsm+0x64c3)
+
+SUMMARY: ThreadSanitizer: data race /home/o/Personal/Code/Logos/src/tsm.c:1568 in tsm_node_is_tsm
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=68352)
+  Write of size 8 at 0x7b0800002b00 by thread T1:
+    #0 free ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:706 (libtsan.so.2+0x47e82)
+    #1 workqueue_thread /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/workqueue.c:220 (liburcu-cds.so.8+0x30b2)
+
+  Previous write of size 8 at 0x7b0800002b00 by thread T2:
+    #0 malloc ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:647 (libtsan.so.2+0x3ebb8)
+    #1 __cds_lfht_resize_lazy_launch /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/rculfhash.c:2223 (liburcu-cds.so.8+0x3a0c)
+    #2 tsm_node_upsert /home/o/Personal/Code/Logos/src/tsm.c:1838 (test_tsm+0xa055)
+    #3 stress_thread /home/o/Personal/Code/Logos/src/tests/test_tsm.c:894 (test_tsm+0x5965)
+
+  Thread T1 (tid=68354, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1001 (libtsan.so.2+0x5e686)
+    #1 urcu_workqueue_create /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/workqueue.c:300 (liburcu-cds.so.8+0x32b1)
+    #2 gtsm_init /home/o/Personal/Code/Logos/src/tsm.c:2219 (test_tsm+0xc692)
+    #3 stress_test /home/o/Personal/Code/Logos/src/tests/test_tsm.c:926 (test_tsm+0x61c2)
+    #4 main /home/o/Personal/Code/Logos/src/tests/test_tsm.c:975 (test_tsm+0x64c3)
+
+  Thread T2 (tid=68355, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1001 (libtsan.so.2+0x5e686)
+    #1 stress_test /home/o/Personal/Code/Logos/src/tests/test_tsm.c:938 (test_tsm+0x625e)
+    #2 main /home/o/Personal/Code/Logos/src/tests/test_tsm.c:975 (test_tsm+0x64c3)
+
+SUMMARY: ThreadSanitizer: data race /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/workqueue.c:220 in workqueue_thread
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=68352)
+  Read of size 1 at 0x7b1400007eb0 by thread T3:
+    #0 tsm_base_node_free /home/o/Personal/Code/Logos/src/tsm.c:695 (test_tsm+0x709d)
+    #1 _tsm_tsm_type_free_callback /home/o/Personal/Code/Logos/src/tsm.c:322 (test_tsm+0xc048)
+    #2 call_rcu_thread /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:375 (liburcu.so.8+0x427c)
+
+  Previous write of size 1 at 0x7b1400007eb0 by thread T2:
+    [failed to restore the stack]
+
+  Location is heap block of size 80 at 0x7b1400007e90 allocated by thread T2:
+    #0 calloc ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:667 (libtsan.so.2+0x3ee50)
+    #1 tsm_base_node_create /home/o/Personal/Code/Logos/src/tsm.c:659 (test_tsm+0x6ea4)
+    #2 tsm_create /home/o/Personal/Code/Logos/src/tsm.c:1267 (test_tsm+0x8bbe)
+    #3 stress_thread /home/o/Personal/Code/Logos/src/tests/test_tsm.c:343 (test_tsm+0x34cb)
+
+  Thread T3 (tid=68356, running) created by thread T2 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1001 (libtsan.so.2+0x5e686)
+    #1 call_rcu_data_init /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:446 (liburcu.so.8+0x297f)
+    #2 tsm_node_defer_free /home/o/Personal/Code/Logos/src/tsm.c:1987 (test_tsm+0xb58a)
+    #3 stress_thread /home/o/Personal/Code/Logos/src/tests/test_tsm.c:549 (test_tsm+0x46a6)
+
+  Thread T2 (tid=68355, running) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1001 (libtsan.so.2+0x5e686)
+    #1 stress_test /home/o/Personal/Code/Logos/src/tests/test_tsm.c:938 (test_tsm+0x625e)
+    #2 main /home/o/Personal/Code/Logos/src/tests/test_tsm.c:975 (test_tsm+0x64c3)
+
+SUMMARY: ThreadSanitizer: data race /home/o/Personal/Code/Logos/src/tsm.c:695 in tsm_base_node_free
+==================
+==================
+WARNING: ThreadSanitizer: data race (pid=68352)
+  Read of size 1 at 0x7b14000184e1 by thread T3:
+    #0 tsm_base_node_free /home/o/Personal/Code/Logos/src/tsm.c:700 (test_tsm+0x70d1)
+    #1 _tsm_tsm_type_free_callback /home/o/Personal/Code/Logos/src/tsm.c:322 (test_tsm+0xc048)
+    #2 call_rcu_thread /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:375 (liburcu.so.8+0x427c)
+
+  Previous write of size 1 at 0x7b14000184e1 by thread T2:
+    [failed to restore the stack]
+
+  Location is heap block of size 80 at 0x7b14000184c0 allocated by thread T2:
+    #0 calloc ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:667 (libtsan.so.2+0x3ee50)
+    #1 tsm_base_node_create /home/o/Personal/Code/Logos/src/tsm.c:659 (test_tsm+0x6ea4)
+    #2 tsm_create /home/o/Personal/Code/Logos/src/tsm.c:1267 (test_tsm+0x8bbe)
+    #3 stress_thread /home/o/Personal/Code/Logos/src/tests/test_tsm.c:343 (test_tsm+0x34cb)
+
+  Thread T3 (tid=68356, running) created by thread T2 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1001 (libtsan.so.2+0x5e686)
+    #1 call_rcu_data_init /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:446 (liburcu.so.8+0x297f)
+    #2 tsm_node_defer_free /home/o/Personal/Code/Logos/src/tsm.c:1987 (test_tsm+0xb58a)
+    #3 stress_thread /home/o/Personal/Code/Logos/src/tests/test_tsm.c:549 (test_tsm+0x46a6)
+
+  Thread T2 (tid=68355, finished) created by main thread at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1001 (libtsan.so.2+0x5e686)
+    #1 stress_test /home/o/Personal/Code/Logos/src/tests/test_tsm.c:938 (test_tsm+0x625e)
+    #2 main /home/o/Personal/Code/Logos/src/tests/test_tsm.c:975 (test_tsm+0x64c3)
+
+SUMMARY: ThreadSanitizer: data race /home/o/Personal/Code/Logos/src/tsm.c:700 in tsm_base_node_free
+==================
+^C^C==================
+WARNING: ThreadSanitizer: data race (pid=68352)
+  Write of size 8 at 0x7b1400000020 by thread T3:
+    #0 free ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:706 (libtsan.so.2+0x47e82)
+    #1 tsm_base_node_free /home/o/Personal/Code/Logos/src/tsm.c:705 (test_tsm+0x70f3)
+    #2 _tsm_tsm_type_free_callback /home/o/Personal/Code/Logos/src/tsm.c:322 (test_tsm+0xc048)
+    #3 call_rcu_thread /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:375 (liburcu.so.8+0x427c)
+
+  Previous read of size 1 at 0x7b1400000023 by main thread:
+    #0 tsm_node_is_tsm /home/o/Personal/Code/Logos/src/tsm.c:1568 (test_tsm+0x8855)
+    #1 gtsm_free /home/o/Personal/Code/Logos/src/tsm.c:2347 (test_tsm+0xcd31)
+    #2 stress_test /home/o/Personal/Code/Logos/src/tests/test_tsm.c:950 (test_tsm+0x62dc)
+    #3 main /home/o/Personal/Code/Logos/src/tests/test_tsm.c:975 (test_tsm+0x64c3)
+
+  Thread T3 (tid=68356, running) created by thread T2 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1001 (libtsan.so.2+0x5e686)
+    #1 call_rcu_data_init /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:446 (liburcu.so.8+0x297f)
+    #2 tsm_node_defer_free /home/o/Personal/Code/Logos/src/tsm.c:1987 (test_tsm+0xb58a)
+    #3 stress_thread /home/o/Personal/Code/Logos/src/tests/test_tsm.c:549 (test_tsm+0x46a6)
+
+SUMMARY: ThreadSanitizer: data race /home/o/Personal/Code/Logos/src/tsm.c:705 in tsm_base_node_free
+==================
+
+Caught signal (likely segfault), dumping memory before exit:
+==================
+WARNING: ThreadSanitizer: data race (pid=68352)
+  Write of size 8 at 0x7b0800000040 by thread T3:
+    #0 free ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:706 (libtsan.so.2+0x47e82)
+    #1 call_rcu_thread /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:375 (liburcu.so.8+0x427c)
+
+  Previous write of size 8 at 0x7b0800000040 by main thread (mutexes: write M6):
+    #0 calloc ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:667 (libtsan.so.2+0x3ee50)
+    #1 urcu_memb_barrier /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:913 (liburcu.so.8+0x3d8e)
+    #2 urcu_memb_barrier /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:873 (liburcu.so.8+0x3d8e)
+    #3 stress_test /home/o/Personal/Code/Logos/src/tests/test_tsm.c:956 (test_tsm+0x631c)
+    #4 main /home/o/Personal/Code/Logos/src/tests/test_tsm.c:975 (test_tsm+0x64c3)
+
+  Mutex M6 (0x7f1e8708e500) created at:
+    #0 pthread_mutex_lock ../../../../src/libsanitizer/sanitizer_common/sanitizer_common_interceptors.inc:4324 (libtsan.so.2+0x558e1)
+    #1 call_rcu_lock /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:171 (liburcu.so.8+0x37b7)
+    #2 urcu_memb_register_rculfhash_atfork /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:1043 (liburcu.so.8+0x37b7)
+    #3 urcu_memb_register_rculfhash_atfork /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:1039 (liburcu.so.8+0x37b7)
+    #4 gtsm_init /home/o/Personal/Code/Logos/src/tsm.c:2219 (test_tsm+0xc692)
+    #5 stress_test /home/o/Personal/Code/Logos/src/tests/test_tsm.c:926 (test_tsm+0x61c2)
+    #6 main /home/o/Personal/Code/Logos/src/tests/test_tsm.c:975 (test_tsm+0x64c3)
+
+  Thread T3 (tid=68356, running) created by thread T2 at:
+    #0 pthread_create ../../../../src/libsanitizer/tsan/tsan_interceptors_posix.cpp:1001 (libtsan.so.2+0x5e686)
+    #1 call_rcu_data_init /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:446 (liburcu.so.8+0x297f)
+    #2 tsm_node_defer_free /home/o/Personal/Code/Logos/src/tsm.c:1987 (test_tsm+0xb58a)
+    #3 stress_thread /home/o/Personal/Code/Logos/src/tests/test_tsm.c:549 (test_tsm+0x46a6)
+
+SUMMARY: ThreadSanitizer: data race /home/o/Personal/Code/Logos/build/_deps/urcu-src/src/urcu-call-rcu-impl.h:375 in call_rcu_thread
+==================
+ThreadSanitizer: reported 125 warnings

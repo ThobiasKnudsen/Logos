@@ -277,7 +277,7 @@ static TSM_Result _tsm_tsm_type_free_children(struct tsm_base_node* p_tsm_base) 
             }
         }
     }
-    tklog_info("cleaning all children nodes for TSM completed. pointer: %p\n", p_tsm_base);
+    tklog_debug("cleaning all children nodes for TSM completed. pointer: %p\n", p_tsm_base);
     return TSM_RESULT_SUCCESS;
 }
 static void _tsm_tsm_type_free_callback(struct rcu_head* rcu_head) {
@@ -1496,7 +1496,7 @@ TSM_Result tsm_node_get_by_path_at_depth(struct tsm_base_node* p_tsm_base, struc
     for (uint32_t i = 0; i < steps; ++i) {  // 0-based: i=0 to <steps
         struct tsm_key key = p_path->key_chain[i];
         struct tsm_base_node* p_new = NULL;
-        TSM_Result tsm_result = tsm_node_get(current, key, &p_new);
+        tklog_scope(TSM_Result tsm_result = tsm_node_get(current, key, &p_new));
         if (tsm_result != TSM_RESULT_SUCCESS) {
             tklog_scope(TSM_Result print_result = tsm_path_print(p_path));
             if (print_result != TSM_RESULT_SUCCESS) {
@@ -1505,13 +1505,13 @@ TSM_Result tsm_node_get_by_path_at_depth(struct tsm_base_node* p_tsm_base, struc
             tklog_timer_stop();
             return tsm_result;
         }
-        current = p_new;
-        tklog_scope(tsm_result = tsm_node_is_tsm(current));
+        tklog_scope(tsm_result = tsm_node_is_tsm(p_new));
         if (i < steps - 1 && tsm_result != TSM_RESULT_NODE_IS_TSM) {  // Align with first function
-            tklog_error("Intermediate node at p_path index %u is not a TSM\n", i);  // Changed to error for consistency
+            tklog_warning("Intermediate node at p_path index %u is not a TSM\n", i);  // Changed to error for consistency
             tklog_timer_stop();
-            return tsm_result;
+            return TSM_RESULT_NODE_NOT_FOUND;
         }
+        current = p_new;
     }
     *pp_output_node = current;
     tklog_timer_stop();
@@ -2152,14 +2152,14 @@ TSM_Result tsm_iter_get_node(struct cds_lfht_iter* iter, struct tsm_base_node** 
     *pp_output_node = caa_container_of(lfht_node, struct tsm_base_node, lfht_node);
     return TSM_RESULT_SUCCESS;
 }
-TSM_Result tsm_iter_lookup(struct tsm_base_node* p_tsm_base, struct tsm_key key, struct cds_lfht_iter* iter) {
-    if (!p_tsm_base || !iter) {
+TSM_Result tsm_iter_lookup(struct tsm_base_node* p_tsm_base, struct tsm_key* p_key, struct cds_lfht_iter* iter) {
+    if (!p_tsm_base || !iter || !p_key) {
         tklog_error("tsm_lookup_iter called with NULL parameters\n");
         return TSM_RESULT_NULL_ARGUMENT;
     }
-    tklog_scope(TSM_Result tsm_result = tsm_key_is_valid(&key));
+    tklog_scope(TSM_Result tsm_result = tsm_key_is_valid(p_key));
     if (tsm_result != TSM_RESULT_KEY_IS_VALID) {
-        tklog_error("number key is not valid with code %d\n", tsm_result);
+        tklog_error("number p_key is not valid with code %d\n", tsm_result);
         return tsm_result;
     }
     tklog_scope(tsm_result = tsm_node_is_tsm(p_tsm_base));
@@ -2171,8 +2171,8 @@ TSM_Result tsm_iter_lookup(struct tsm_base_node* p_tsm_base, struct tsm_key key,
     struct tsm* p_tsm = caa_container_of(p_tsm_base, struct tsm, base);
     
     // Calculate hash
-    uint64_t hash = _tsm_hash_key(key.key_union, key.key_type);
-    tklog_scope(cds_lfht_lookup(p_tsm->p_ht, hash, _tsm_key_match, &key, iter));
+    uint64_t hash = _tsm_hash_key(p_key->key_union, p_key->key_type);
+    tklog_scope(cds_lfht_lookup(p_tsm->p_ht, hash, _tsm_key_match, p_key, iter));
     
     return TSM_RESULT_SUCCESS;
 }

@@ -149,7 +149,7 @@ void _tklog(uint32_t    flags,
 #define TKLOG_EXIT_ON_TEMPLATE(lvl, label, code, fmt, ...)              \
     do {                                                              \
         _tklog(TKLOG_ACTIVE_FLAGS, (lvl), __LINE__, __TKLOG_FILE_NAME__, label " | " fmt, ##__VA_ARGS__); \
-        exit(code);                                                  \
+        abort();                                                  \
     } while (0)
 
 /* Warning */

@@ -98,6 +98,7 @@ typedef enum {
     TSM_RESULT_PATH_NOTHING_TO_REMOVE,          // Remove from empty path
     TSM_RESULT_PATH_INCONSISTENT,               // Path length inconsistent with pointer (length==0 XOR pointer==NULL)
     TSM_RESULT_PATH_INSERT_KEY_FAILURE,         // Failed to insert key into path
+    TSM_RESULT_PATH_INTERMEDIARY_NODE_NOT_TSM,  // when getting a node through a path a node on the way is not a TSM
 
     TSM_RESULT_TYPE_NOT_FOUND,                  // type node found
     TSM_RESULT_TYPE_STILL_USED,                 // Trying to free type used in other nodes (DEBUG only)
@@ -760,7 +761,7 @@ TSM_Result tsm_iter_get_node(struct cds_lfht_iter* iter, struct tsm_base_node** 
  *
  * @note Call context: Inside `rcu_read_lock()`/`rcu_read_unlock()`.
  */
-TSM_Result tsm_iter_lookup(struct tsm_base_node* p_tsm_base, struct tsm_key key, struct cds_lfht_iter* iter);
+TSM_Result tsm_iter_lookup(struct tsm_base_node* p_tsm_base, struct tsm_key* p_key, struct cds_lfht_iter* iter);
 // ================================
 // gtsm Global Thread Safe Map
 // ================================

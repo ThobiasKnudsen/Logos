@@ -571,11 +571,13 @@ static void signal_handler(int sig) {
     const char *msg = "\nCaught signal (likely segfault), dumping memory before exit:\n";
     write(STDERR_FILENO, msg, strlen(msg));
 
-    tklog_memory_dump();  // Call dump (note: not fully async-safe, but useful for dev)
-
     #ifdef TKLOG_TIMER
         _tklog_timer_print();
         _tklog_timer_clear();
+    #endif
+
+    #ifdef TKLOG_MEMORY_PRINT_ON_EXIT
+        tklog_memory_dump();  // Call dump (note: not fully async-safe, but useful for dev)
     #endif
 
     // Re-raise signal or exit to avoid infinite loops
@@ -597,6 +599,7 @@ static void tklog_init_once(void)
 
 static void tklog_init_once_impl(void)
 {
+    (void)get_time_us;
     pthread_key_create(&g_tls_path, pathstack_free);
     g_start_ms = get_time_ms();
     
@@ -609,16 +612,17 @@ static void tklog_init_once_impl(void)
     original_free = free;
 #endif
     
-    (void)signal_handler;
-#ifdef TKLOG_MEMORY
     signal(SIGSEGV, signal_handler);
     signal(SIGABRT, signal_handler);
     signal(SIGINT, signal_handler);
+
+#ifdef TKLOG_MEMORY_PRINT_ON_EXIT
     atexit(tklog_memory_dump);
 #endif
 
 #ifdef TKLOG_TIMER
     pthread_key_create(&g_tls_timer_state, timer_state_free);
+    atexit(_tklog_timer_clear);
 #endif
 }
 

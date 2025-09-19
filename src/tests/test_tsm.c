@@ -290,7 +290,11 @@ void* stress_thread(void* arg) {
                     tklog_error("somehow the current node is not TSM and is also the ground TSM aka GTSM\n");
                 }
                 tklog_scope(res = tsm_node_get_by_path_at_depth(gtsm_get(), &current_path, -2, &p_tsm));
-                if (res != TSM_RESULT_SUCCESS || !p_tsm) {
+                if (res == TSM_RESULT_NODE_NOT_FOUND) {
+                    tklog_notice("parent TSM node was node found\n");
+                    continue;
+                }
+                else if (res != TSM_RESULT_SUCCESS || !p_tsm) {
                     gtsm_print();
                     tklog_scope(tsm_base_node_print(p_current_node));
                     tklog_scope(tsm_path_print(&current_path));
@@ -298,6 +302,10 @@ void* stress_thread(void* arg) {
                     continue;
                 }
                 tklog_scope(res = tsm_node_is_tsm(p_tsm));
+                if (res == TSM_RESULT_NODE_NOT_TSM) {
+                    tklog_warning("parent node is not a tsm which likely means it was upserted with a non TSM node\n");
+                    continue;
+                }
                 if (res != TSM_RESULT_NODE_IS_TSM) {
                     gtsm_print();
                     tklog_scope(tsm_base_node_print(p_current_node));
@@ -356,6 +364,7 @@ void* stress_thread(void* arg) {
                     }
                 }
             }
+            continue;
         } else if (r < 40) { // Get (adjusted)
             tklog_info("op: %d get\n", op);
             if (current_path.length == 0)
@@ -364,20 +373,27 @@ void* stress_thread(void* arg) {
             if (node == NULL) {
                 tklog_error("p_current_node is NULL for get operation\n");
             }
+            continue;
         } else if (r < 50) { // Validate (adjusted)
             tklog_info("op: %d validate\n", op);
             if (current_path.length == 0)
                 continue;
             struct tsm_base_node* p_parent_tsm = NULL;
             tklog_scope(res = tsm_node_get_by_path_at_depth(gtsm_get(), &current_path, -2, &p_parent_tsm));
-            if (res != TSM_RESULT_SUCCESS || !p_parent_tsm) {
+            if (res == TSM_RESULT_NODE_NOT_FOUND) {
+                continue;
+            } else if (res != TSM_RESULT_SUCCESS || !p_parent_tsm) {
                 gtsm_print();
                 tklog_scope(tsm_base_node_print(p_current_node));
                 tklog_scope(tsm_path_print(&current_path));
                 tklog_error("tsm_node_get_by_path_at_depth failed with code %d for validate\n", res);
             }
             tklog_scope(res = tsm_node_is_tsm(p_parent_tsm));
-            if (res != TSM_RESULT_NODE_IS_TSM) {
+            if (res == TSM_RESULT_NODE_NOT_TSM) {
+                tklog_notice("parent node is not TSM\n");
+                continue;
+            }
+            else if (res != TSM_RESULT_NODE_IS_TSM) {
                 gtsm_print();
                 tklog_scope(tsm_base_node_print(p_current_node));
                 tklog_scope(tsm_path_print(&current_path));
@@ -391,6 +407,7 @@ void* stress_thread(void* arg) {
                     continue;
                 }
             }
+            continue;
         } else if (r < 60) { // Update (adjusted)
             tklog_info("op: %d update\n", op);
             if (current_path.length == 0) {
@@ -398,7 +415,9 @@ void* stress_thread(void* arg) {
             }
             struct tsm_base_node* p_parent_tsm = NULL;
             tklog_scope(res = tsm_node_get_by_path_at_depth(gtsm_get(), &current_path, -2, &p_parent_tsm));
-            if (res != TSM_RESULT_SUCCESS || !p_parent_tsm) {
+            if (res == TSM_RESULT_NODE_NOT_FOUND) {
+                continue;
+            } else if (res != TSM_RESULT_SUCCESS || !p_parent_tsm) {
                 gtsm_print();
                 tklog_scope(tsm_base_node_print(p_current_node));
                 tklog_scope(tsm_path_print(&current_path));
@@ -496,6 +515,7 @@ void* stress_thread(void* arg) {
                 tklog_scope(tsm_key_free(&update_type_key));
             }
             tklog_scope(tsm_key_free(&uk));
+            continue;
         } else if (r < 70) { // Free (adjusted)
             tklog_info("op: %d free\n", op);
             if (current_path.length == 0) {
@@ -504,11 +524,19 @@ void* stress_thread(void* arg) {
             
             struct tsm_base_node* p_parent_tsm = NULL;
             tklog_scope(res = tsm_node_get_by_path_at_depth(gtsm_get(), &current_path, -2, &p_parent_tsm));
-            if (res != TSM_RESULT_SUCCESS || !p_parent_tsm) {
+            if (res == TSM_RESULT_NODE_NOT_FOUND) {
+                continue;
+            }
+            else if (res != TSM_RESULT_SUCCESS || !p_parent_tsm) {
                 gtsm_print();
                 tklog_scope(tsm_base_node_print(p_current_node));
                 tklog_scope(tsm_path_print(&current_path));
                 tklog_error("tsm_node_get_by_path_at_depth failed with code %d for validate\n", res);
+            }
+            tklog_scope(res = tsm_node_is_tsm(p_parent_tsm));
+            if (res == TSM_RESULT_NODE_NOT_TSM) {
+                tklog_notice("p_parent_node is not TSM\n");
+                continue;
             }
             struct tsm_base_node* p_base = p_current_node;
             tklog_scope(res = tsm_node_is_type(p_base));
@@ -527,6 +555,7 @@ void* stress_thread(void* arg) {
             if (res != TSM_RESULT_SUCCESS) {
                 tklog_error("core %d\n", res);
             }
+            continue;
         } else if (r < 71) { // Count (adjusted)
             tklog_info("op: %d count\n", op);
             struct tsm_base_node* p_tsm = NULL;
@@ -535,13 +564,21 @@ void* stress_thread(void* arg) {
                 p_tsm = p_current_node;
             } else if (res == TSM_RESULT_NODE_NOT_TSM) {
                 tklog_scope(res = tsm_node_get_by_path_at_depth(gtsm_get(), &current_path, -2, &p_tsm));
-                if (res != TSM_RESULT_SUCCESS || !p_tsm) {
+                if (res == TSM_RESULT_NODE_NOT_FOUND) {
+                    tklog_notice("parent node not found\n");
+                    continue;
+                } else if (res != TSM_RESULT_SUCCESS || !p_tsm) {
                     gtsm_print();
                     tklog_scope(tsm_base_node_print(p_current_node));
                     tklog_scope(tsm_path_print(&current_path));
                     tklog_error("tsm_node_get_by_path_at_depth failed with code %d for validate\n", res);
                     continue;
                 }
+                tklog_scope(TSM_Result res = tsm_node_is_tsm(p_tsm));
+                if (res != TSM_RESULT_NODE_IS_TSM) {
+                    tklog_notice("parent node is not TSM\n");
+                    continue;
+                }   
             } else {
                 tklog_error("code %d\n", res);
             }
@@ -552,12 +589,17 @@ void* stress_thread(void* arg) {
             } else {
                 tklog_notice("op: %d count = %lu\n", op, count);
             }
-        } else if (r < 75) { // Iterate (adjusted)
+            continue;
+        } else if (r < 72) { // Iterate (adjusted)
             tklog_info("op: %d iterate\n", op);
             struct tsm_base_node* p_tsm = gtsm_get();
             if (current_path.length > 0) {
                 struct tsm_base_node* p_tsm = NULL;
                 tklog_scope(res = tsm_node_get_by_path_at_depth(gtsm_get(), &current_path, -2, &p_tsm));
+                if (res == TSM_RESULT_NODE_NOT_FOUND) {
+                    tklog_notice("tsm_node_get_by_path_at_depth: node not found\n");
+                    continue;
+                }
                 if (res != TSM_RESULT_SUCCESS || !p_tsm) {
                     gtsm_print();
                     tklog_scope(tsm_base_node_print(p_current_node));
@@ -591,10 +633,16 @@ void* stress_thread(void* arg) {
             } else {
                 tklog_error("tsm_iter_first failed with code %d\n", res);
             }
-        } else if (r < 80) { // Navigation: first child (adjusted)
+            continue;
+        } else if (r < 94) { // Navigation: first child (adjusted)
             tklog_info("op: %d nav first child\n", op);
             tklog_scope(res = tsm_node_is_tsm(p_current_node));
-            if (res == TSM_RESULT_NODE_IS_TSM) {
+            if (res == TSM_RESULT_NODE_NOT_TSM) {
+                r = 95;
+            } else if (res != TSM_RESULT_NODE_IS_TSM) {
+                tklog_error("tsm_node_is_tsm failed with code %d\n", res);
+                continue;
+            } else {
                 struct cds_lfht_iter iter;
                 tklog_scope(res = tsm_iter_first(p_current_node, &iter));
                 if (res == TSM_RESULT_SUCCESS) {
@@ -628,80 +676,73 @@ void* stress_thread(void* arg) {
                 } else {
                     tklog_error("tsm_iter_first for first child failed with code %d\n", res);
                 }
-            } else if (res != TSM_RESULT_NODE_NOT_TSM) {
-                tklog_error("tsm_node_is_tsm failed with code %d for nav first child\n", res);
             }
-        } else if (r < 85) { // Navigation: next sibling
-            tklog_info("op: %d nav next sibling\n", op);
-            if (current_path.length == 0) {
+        } if (r < 96) { // Navigation: next sibling
+            tklog_info("op: %d nav next node\n", op);
+            if (current_path.length == 0) continue;
+
+            struct tsm_base_node* p_parent_tsm = NULL;
+            tklog_scope(res = tsm_node_get_by_path_at_depth(gtsm_get(), &current_path, -2, &p_parent_tsm));
+            if (res == TSM_RESULT_NODE_NOT_FOUND) {
+                tklog_notice("tsm_node_get_by_path_at_depth node not found\n");
                 continue;
             }
-            struct tsm_path new_parent = {0};
-            tklog_scope(res = tsm_path_copy(&current_path, &new_parent));
+            if (res != TSM_RESULT_SUCCESS || !p_parent_tsm) {
+                tklog_error("tsm_node_get_by_path for p_parent_tsm failed with code %d\n", res);continue;
+            }
+            tklog_scope(res = tsm_node_is_tsm(p_parent_tsm));
+            if (res == TSM_RESULT_NODE_NOT_TSM) {
+                tklog_notice("parent is not a TSM\n");
+                continue;
+            }
+            struct tsm_key* p_last_key = NULL;
+            tklog_scope(res = tsm_path_get_key_ref(&current_path, -1, &p_last_key));
             if (res != TSM_RESULT_SUCCESS) {
-                tklog_error("tsm_path_copy failed with code %d for next sibling\n", res);
-                continue;
-            }
-            tklog_scope(res = tsm_path_remove_key(&new_parent, -1));
-            if (res != TSM_RESULT_SUCCESS) {
-                tklog_error("tsm_path_remove_key failed with code %d\n", res);
-                tklog_scope(tsm_path_free(&new_parent));
-                continue;
-            }
-            struct tsm_base_node* parent_tsm = NULL;
-            tklog_scope(res = tsm_node_get_by_path(gtsm_get(), &new_parent, &parent_tsm));
-            if (res != TSM_RESULT_SUCCESS || !parent_tsm) {
-                tklog_error("tsm_node_get_by_path for parent_tsm failed with code %d\n", res);
-                tklog_scope(tsm_path_free(&new_parent));
-                continue;
-            }
-            struct tsm_key curr_k = {0};
-            tklog_scope(res = tsm_key_copy(current_path.key_chain[current_path.length - 1], &curr_k));
-            if (res != TSM_RESULT_SUCCESS) {
-                tklog_error("tsm_key_copy for curr_k failed with code %d\n", res);
-                tklog_scope(tsm_path_free(&new_parent));
-                continue;
+                tklog_error("tsm_key_copy for p_last_key failed with code %d\n", res);continue;
             }
             struct cds_lfht_iter iter;
-            tklog_scope(res = tsm_iter_lookup(parent_tsm, curr_k, &iter));
-            tklog_scope(tsm_key_free(&curr_k));
+            tklog_scope(res = tsm_iter_lookup(p_parent_tsm, p_last_key, &iter));
             if (res != TSM_RESULT_SUCCESS) {
-                tklog_error("tsm_iter_lookup failed with code %d\n", res);
-                tklog_scope(tsm_path_free(&new_parent));
-                continue;
+                tklog_error("tsm_iter_lookup failed with code %d\n", res);continue;
             }
-            tklog_scope(res = tsm_iter_next(parent_tsm, &iter));
+            tklog_scope(res = tsm_iter_next(p_parent_tsm, &iter));
             if (res != TSM_RESULT_SUCCESS && res != TSM_RESULT_ITER_END) {
-                tklog_error("Navigation next sibling failed with code %d\n", res);
-                continue;
+                tklog_error("Navigation next sibling failed with code %d\n", res);continue;
             }
             struct tsm_base_node* next_node = NULL;
             tklog_scope(res = tsm_iter_get_node(&iter, &next_node));
+            if (res == TSM_RESULT_ITER_END) {
+                tklog_scope(res = tsm_iter_first(p_parent_tsm, &iter));
+                if (res != TSM_RESULT_SUCCESS) {
+                    tklog_error("tsm_iter_first failed with code %d\n", res);continue;
+                }   
+            }
+            tklog_scope(res = tsm_iter_get_node(&iter, &next_node));
             if (res != TSM_RESULT_SUCCESS || !next_node) {
-                tklog_error("tsm_iter_get_node for next sibling failed with code %d\n", res);
-                continue;
+                tklog_error("tsm_iter_get_node failed with code %d\n", res);continue;
             }
-            struct tsm_key next_k = {0};
-            tklog_scope(res = tsm_key_copy((struct tsm_key){.key_union = next_node->key_union, .key_type = next_node->key_type}, &next_k));
+            struct tsm_key next_key = {0};
+            tklog_scope(res = tsm_node_copy_key(next_node, &next_key));
             if (res != TSM_RESULT_SUCCESS) {
-                tklog_error("tsm_key_copy for next_k failed with code %d\n", res);
-                tklog_scope(tsm_path_free(&new_parent));
-                continue;
+                tklog_error("tsm_key_copy for next_key failed with code %d\n", res);continue;
             }
-            tklog_scope(res = tsm_key_is_valid(&next_k));
+            tklog_scope(res = tsm_key_is_valid(&next_key));
             if (res != TSM_RESULT_KEY_IS_VALID) {
-                tklog_error("tsm_key_is_valid failed with code %d\n", res);
-                continue;
+                tklog_error("tsm_key_is_valid failed with code %d\n", res);continue;
             }
-            tklog_scope(res = tsm_path_insert_key(&new_parent, &next_k, -1));
+            tklog_scope(res = tsm_path_remove_key(&current_path, -1));
+            if (res != TSM_RESULT_SUCCESS) {
+                tklog_error("tsm_path_remove_key failed with code %d\n", res);
+                tklog_scope(tsm_key_free(&next_key));
+                tklog_scope(tsm_path_free(&current_path));
+            }
+            tklog_scope(res = tsm_path_insert_key(&current_path, &next_key, -1));
             if (res != TSM_RESULT_SUCCESS) {
                 tklog_error("tsm_path_insert_key failed with code %d\n", res);
-                tklog_scope(tsm_key_free(&next_k));
-                tklog_scope(tsm_path_free(&new_parent));
+                tklog_scope(tsm_key_free(&next_key));
+                tklog_scope(tsm_path_free(&current_path));
             }
-            tklog_scope(tsm_path_free(&current_path));
-            current_path = new_parent;
-        } else if (r < 90) { // Navigation: parent
+        } else if (r < 97) { // Navigation: parent
             tklog_info("op: %d nav parent\n", op);
             struct tsm_base_node* current_node = p_current_node;
             if (!current_node) {
@@ -729,7 +770,11 @@ void* stress_thread(void* arg) {
             }
             struct tsm_base_node* p_tsm = NULL;
             tklog_scope(res = tsm_node_get_by_path_at_depth(gtsm_get(), &current_path, -2, &p_tsm));
-            if (res != TSM_RESULT_SUCCESS || !p_tsm) {
+            if (res == TSM_RESULT_NODE_NOT_FOUND) {
+
+                continue;
+            }
+            else if (res != TSM_RESULT_SUCCESS || !p_tsm) {
                 gtsm_print();
                 tklog_scope(tsm_base_node_print(p_current_node));
                 tklog_scope(tsm_path_print(&current_path));
@@ -737,7 +782,11 @@ void* stress_thread(void* arg) {
                 continue;
             }
             tklog_scope(res = tsm_node_is_tsm(p_tsm));
-            if (res != TSM_RESULT_NODE_IS_TSM) {
+            if (res == TSM_RESULT_NODE_NOT_TSM) {
+                tklog_notice("parent tsm is no longer a TSM\n");
+                continue;
+            }
+            else if (res != TSM_RESULT_NODE_IS_TSM) {
                 gtsm_print();
                 tklog_scope(tsm_base_node_print(p_current_node));
                 tklog_scope(tsm_path_print(&current_path));
@@ -774,22 +823,14 @@ void* stress_thread(void* arg) {
             struct tsm_key type_key = {0};
             struct tsm_base_node* p_existing_node = NULL;
             tklog_scope(res = tsm_node_get(p_tsm, uk, &p_existing_node));
-            if (res == TSM_RESULT_NODE_NOT_FOUND) {
-                if (!is_new) {
-                    tklog_error("node which should exists doesnt anymore\n");
-                    if (is_new) {
-                        tklog_scope(tsm_key_free(&uk));
-                    }
-                    continue;
-                }
-            } else if (res == TSM_RESULT_SUCCESS) {
+            if (res == TSM_RESULT_SUCCESS) {
                 tklog_scope(res = tsm_node_is_type(p_existing_node));
                 if (res == TSM_RESULT_NODE_IS_TYPE) {
                     tklog_notice("will not upsert type node in test\n");
                     tklog_scope(tsm_key_free(&uk));
                     continue;
                 }
-            } else {
+            } else if (res != TSM_RESULT_NODE_NOT_FOUND) {
                 tklog_error("code %d\n", res);
             }
             if (type == 0) {
@@ -873,7 +914,7 @@ void* stress_thread(void* arg) {
 }
 void stress_test() {
     tklog_info("Starting incremental stress test\n");
-    for (int nthreads = 1; nthreads <= 1; nthreads *= 2) {
+    for (int nthreads = 1; nthreads <= 16; nthreads *= 2) {
         tklog_notice("Stress testing with %d threads ===========================================================================================\n", nthreads);
 
         pthread_t* threads = malloc(nthreads * sizeof(pthread_t));
@@ -935,6 +976,9 @@ int main() {
     // multiple because each callback can defer new callbacks
     rcu_barrier();
     rcu_unregister_thread();
+    tklog_timer_print();
+    tklog_timer_clear();
+    tklog_timer_print();
     tklog_info("Comprehensive test completed\n");
     return 0;
 }
