@@ -766,8 +766,8 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
         for (MemEntry *e = g_mem_head; e; e = e->next) {
             char linebuf[512]; // Increased buffer size for longer paths
             uint64_t t_ms = e->t_ms - g_start_ms;
-            snprintf(linebuf, sizeof linebuf, "\t%" PRIu64 "ms | tid %lld | address %p | %zu bytes | at %s\n",
-                          t_ms, (unsigned long)e->tid, e->ptr, e->size, e->path);
+            snprintf(linebuf, sizeof linebuf, "\t%" PRIu64 "ms | tid %lu | address %p | %zu bytes | at %s\n",
+                                               t_ms, (unsigned long)e->tid, e->ptr, e->size, e->path);
             pthread_mutex_lock(&g_tklog_mutex);
             TKLOG_OUTPUT_FN(linebuf, TKLOG_OUTPUT_USERPTR);
             pthread_mutex_unlock(&g_tklog_mutex);

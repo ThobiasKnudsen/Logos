@@ -74,7 +74,7 @@ typedef enum {
     TSM_RESULT_NODE_IS_TYPE,                    // node is a type 
     TSM_RESULT_NODE_NOT_TYPE,                   // Given node is not a type (tsm_node_is_type false, rare log)
     TSM_RESULT_NODE_NOT_FOUND,                  // Node/type not found (e.g., tsm_node_get returns NULL)
-    TSM_RESULT_NODE_EXISTS,                     // Node already exists (cds_lfht_add_unique fails)
+    TSM_RESULT_NODE_EXISTS,                      // Node already exists (cds_lfht_add_unique fails)
     TSM_RESULT_NODE_SIZE_MISMATCH,              // Size mismatch (this_size_bytes != type_size_bytes or < min size)
     TSM_RESULT_NODE_SIZE_TO_SMALL,              // Size is to small
     TSM_RESULT_NODE_REPLACING_SAME,             // Replacing node with itself in update
@@ -435,7 +435,7 @@ struct tsm_path {
  * @note Prerequisites: p_path must be valid. key must be created via tsm_key_create() or tsm_key_copy().
  * @note Call context: Any context (no RCU lock needed).
  */
-TSM_Result tsm_path_insert_key(struct tsm_path* p_path, struct tsm_key key, int32_t index);
+TSM_Result tsm_path_insert_key(struct tsm_path* p_path, struct tsm_key* p_key, int32_t index);
 /**
  * @brief Removes a key from the given path at the specified index and frees it.
  *
@@ -451,19 +451,6 @@ TSM_Result tsm_path_insert_key(struct tsm_path* p_path, struct tsm_key key, int3
  */
 TSM_Result tsm_path_remove_key(struct tsm_path* p_path, int32_t index);
 /**
- * @brief Creates a new path by copying the parent TSM's path and appending the base node's key.
- *
- * @param p_parent_tsm_base The parent TSM base node.
- * @param p_base The base node whose key to append.
- * @param p_output_path is the newly created path
- * @return TSM_Result
- *
- * @note Takes ownership of the appended key copy if successful.
- * @note Prerequisites: p_parent_tsm_base must be a valid TSM. p_base must be valid.
- * @note Call context: Inside rcu_read_lock()/rcu_read_unlock() if accessing shared data.
- */
-TSM_Result tsm_path_create(struct tsm_base_node* p_parent_tsm_base, struct tsm_base_node* p_base, struct tsm_path* p_output_path);
-/**
  * @brief check if path is valid. will also check all keys in the chain if those are valid as well. will not check if the chain of nodes exist though
  */
 TSM_Result tsm_path_is_valid(struct tsm_path* p_path);
@@ -474,7 +461,7 @@ TSM_Result tsm_path_is_valid(struct tsm_path* p_path);
  * @return true on success, false if the path is in an invalid state.
  *
  * @note Frees each key and the array. Safe to call on null/empty path.
- * @note Prerequisites: Path created via tsm_path_create() or tsm_path_copy().
+ * @note Prerequisites: Path created via tsm_path_copy().
  * @note Call context: Any context (no RCU lock needed).
  */
 TSM_Result tsm_path_free(struct tsm_path* path);
@@ -723,6 +710,14 @@ TSM_Result tsm_node_upsert(struct tsm_base_node* p_tsm_base, struct tsm_base_nod
  * @note Call context: must NOT be called within rcu_read section
  */
 TSM_Result tsm_node_defer_free(struct tsm_base_node* p_tsm_base, struct tsm_base_node* p_base);
+/**
+ * 
+ */
+TSM_Result tsm_node_copy_key(struct tsm_base_node* p_base, struct tsm_key* p_output_key);
+/**
+ * 
+ */
+TSM_Result tsm_node_copy_key_type(struct tsm_base_node* p_base, struct tsm_key* p_output_key);
 /**
  * @brief Initializes iterator to first node.
  *

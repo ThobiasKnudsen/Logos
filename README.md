@@ -177,4 +177,4 @@ Questions? Contact: thobknu@gmail.com
 
 ---
 
-*Built with ❤️ by the LOGOS Team*
+*Built with ❤️*
