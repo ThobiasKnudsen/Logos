@@ -437,8 +437,8 @@ target_compile_definitions(test_tsm PRIVATE
     #TKLOG_TIMER
     #TKLOG_DEBUG
     #TKLOG_INFO
-    #TKLOG_NOTICE
-    #TKLOG_WARNING
+    TKLOG_NOTICE
+    TKLOG_WARNING
     TKLOG_ERROR
     TKLOG_CRITICAL
     TKLOG_ALERT

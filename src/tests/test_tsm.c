@@ -174,7 +174,7 @@ TSM_Result simple_int_create_in_tsm(struct tsm_base_node* p_tsm, int value, stru
     struct simple_int_node* p_node = caa_container_of(p_base, struct simple_int_node, base);
     p_node->value = value;
     rcu_read_lock();
-    tsm_result = tsm_node_insert(p_tsm, p_base);
+    tklog_scope(tsm_result = tsm_node_insert(p_tsm, p_base));
     if (tsm_result != TSM_RESULT_SUCCESS) {
         tklog_scope(TSM_Result free_result = tsm_base_node_free(p_base));
         if (free_result != TSM_RESULT_SUCCESS) {
@@ -323,16 +323,16 @@ void* stress_thread(void* arg) {
             if (type == 0) {
                 tklog_scope(res = node_1_create_in_tsm(p_tsm, (float)(rand() % 100), (float)(rand() % 100), (float)(rand() % 10 + 1), (float)(rand() % 10 + 1),
                                                    rand() % 256, rand() % 256, rand() % 256, rand() % 256, &k));
-                if (res != TSM_RESULT_SUCCESS && res != TSM_RESULT_NODE_EXISTS) {
+                if (res != TSM_RESULT_SUCCESS && res != TSM_RESULT_NODE_EXISTS && res != TSM_RESULT_NODE_IS_REMOVED) {
                     tklog_error("node_1_create_in_tsm failed with code %d\n", res);
                 } else if (res != TSM_RESULT_NODE_EXISTS) {
                     tklog_scope(tsm_key_free(&k));
                 }
             } else if (type == 1) {
                 tklog_scope(res = simple_int_create_in_tsm(p_tsm, rand(), &k));
-                if (res != TSM_RESULT_SUCCESS && res != TSM_RESULT_NODE_EXISTS) {
+                if (res != TSM_RESULT_SUCCESS && res != TSM_RESULT_NODE_EXISTS && res != TSM_RESULT_NODE_IS_REMOVED) {
                     tklog_error("simple_int_create_in_tsm failed with code %d\n", res);
-                } else if (res != TSM_RESULT_NODE_EXISTS) {
+                } else if (res == TSM_RESULT_NODE_EXISTS) {
                     tklog_scope(tsm_key_free(&k));
                 }
             } else {
@@ -353,7 +353,7 @@ void* stress_thread(void* arg) {
                     continue;
                 }
                 tklog_scope(res = tsm_node_insert(p_tsm, new_tsm));
-                if (res != TSM_RESULT_SUCCESS && res != TSM_RESULT_NODE_EXISTS) {
+                if (res != TSM_RESULT_SUCCESS && res != TSM_RESULT_NODE_EXISTS && res != TSM_RESULT_NODE_IS_REMOVED) {
                     tklog_error("tsm_node_insert failed with code %d\n", res);
                     tklog_scope(tsm_node_defer_free(p_tsm, new_tsm));
                     continue;
@@ -914,7 +914,7 @@ void* stress_thread(void* arg) {
 }
 void stress_test() {
     tklog_info("Starting incremental stress test\n");
-    for (int nthreads = 1; nthreads <= 16; nthreads *= 2) {
+    for (int nthreads = 1; nthreads <= 32; nthreads *= 2) {
         tklog_notice("Stress testing with %d threads ===========================================================================================\n", nthreads);
 
         pthread_t* threads = malloc(nthreads * sizeof(pthread_t));

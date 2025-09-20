@@ -1673,7 +1673,11 @@ TSM_Result tsm_node_insert(struct tsm_base_node* p_tsm_base, struct tsm_base_nod
 
     #ifdef TSM_DEBUG
         tklog_scope(tsm_result = tsm_node_is_valid(p_tsm_base, new_node));
-        if (tsm_result != TSM_RESULT_NODE_IS_VALID && tsm_result != TSM_RESULT_NODE_IS_REMOVED && tsm_result != TSM_RESULT_NODE_NOT_FOUND) {
+        if (tsm_result == TSM_RESULT_NODE_IS_REMOVED || tsm_result == TSM_RESULT_NODE_NOT_FOUND || tsm_result == TSM_RESULT_NODE_NOT_FOUND_SELF) {
+            tklog_warning("Node inserted then immedietaly removed\n");
+            return TSM_RESULT_NODE_IS_REMOVED;
+        }
+        if (tsm_result != TSM_RESULT_NODE_IS_VALID) {
             tklog_error("after inserting then running tsm_node_is_valid for the inserted node it returned code: %d\n", tsm_result);
             tklog_timer_stop();
             return tsm_result;
