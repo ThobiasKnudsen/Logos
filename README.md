@@ -101,23 +101,24 @@ Launch the application:
 
 As example you can write and solve this:
 ```
-x: axis_x(-10, 10, 0.01)
-y: axis_y(-10, 10, 0.01)
-show(x²+y²<9 and y < x² and ((x=0 and y=-1) or (x=0 and y=1))) # This will show a point at x=0,y=-1
-show(x²+y²<9 and y < x² and y=x)                               # This will show a partial line of y = x
-a: x²+y²<9 and y < x²                                          # we can do the same agin but storing to common part
-show(a and ((x=0 and y=-1) or (x=0 and y=1)))                  # This will show a point at x=0,y=-1
-show(a and y=x)                                                # This will show a partial line of y = x
+x: axis_x(-10, 10)
+y: axis_y(-10, 10)
+show{x²+y²<9 and y < x² and ((x=0 and y=-1) or (x=0 and y=1))} # This will show a point at x=0,y=-1
+show{x²+y²<9 and y < x² and y=x}                               # This will show a partial line of y = x
+a: x²+y²<9 and y < x²                                          # we can do the same agian but storing the common part
+show{a and ((x=0 and y=-1) or (x=0 and y=1))}                  # This will show a point at x=0,y=-1
+show{a and y=x}                                                # This will show a partial line of y = x
 
-t: time_seconds(0, 10, 0.016)
+ # This will show an animation in 10 seconds
+t: time_seconds(0, 10)
 a: x²+y²<t and y < x^t
-show(
-  if (a and x=0 and y=-1) {
+show{
+  if (a and (x>0 or y<-1)) {
     x=y
   } else {
     x=-y
   }
-)
+}
 ```
 
 ### Keyboard Shortcuts (in GUI Mode)
