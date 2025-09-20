@@ -914,7 +914,7 @@ void* stress_thread(void* arg) {
 }
 void stress_test() {
     tklog_info("Starting incremental stress test\n");
-    for (int nthreads = 1; nthreads <= 16; nthreads *= 2) {
+    for (int nthreads = 1; nthreads <= 32; nthreads *= 2) {
         tklog_notice("Stress testing with %d threads ===========================================================================================\n", nthreads);
 
         pthread_t* threads = malloc(nthreads * sizeof(pthread_t));
