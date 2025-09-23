@@ -51,11 +51,6 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         else()
             set(LOGOS_SANITIZER_FLAGS "-fsanitize=thread" "-fno-omit-frame-pointer")
         endif()
-        # Set environment variable to ensure proper sanitizer loading with suppressions
-        # Use absolute path to suppressions file
-        set(SUPPRESSIONS_FILE "${CMAKE_SOURCE_DIR}/tsan_suppressions.txt")
-        set(ENV{TSAN_OPTIONS} "abort_on_error=1:suppressions=${SUPPRESSIONS_FILE}:history_size=5:verbosity=2")
-        message(STATUS "Thread Sanitizer enabled with suppressions from: ${SUPPRESSIONS_FILE}")
     endif()
 elseif(MSVC)
     set(LOGOS_COMPILER_MSVC ON)
@@ -427,14 +422,14 @@ target_compile_definitions(test_global_data PRIVATE
 target_compile_definitions(test_tsm PRIVATE
     CMM_SANITIZE_THREAD
     URCU_LFHT_SAFETY_ON
-    #TKLOG_MEMORY
-    #TKLOG_MEMORY_PRINT_ON_EXIT
+    TKLOG_MEMORY
+    TKLOG_MEMORY_PRINT_ON_EXIT
     TKLOG_SHOW_LOG_LEVEL
     TKLOG_SHOW_TIME
     TKLOG_SHOW_THREAD
     TKLOG_SHOW_PATH
     TKLOG_SCOPE
-    #TKLOG_TIMER
+    TKLOG_TIMER
     #TKLOG_DEBUG
     #TKLOG_INFO
     TKLOG_NOTICE

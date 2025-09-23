@@ -642,12 +642,12 @@ struct cds_lfht *_cds_lfht_new_safe(unsigned long init_size,
 int _cds_lfht_destroy_safe(struct cds_lfht *ht, pthread_attr_t **attr) {
     
     if (!ht) {
-        tklog_scope(bool test_mode_flag = _rcu_is_test_mode());
-        if (test_mode_flag) {
-            tklog_debug("cds_lfht_destroy called with NULL hash table (test mode)");
-        } else {
-            tklog_error("cds_lfht_destroy called with NULL hash table");
-        }
+        tklog_error("cds_lfht_destroy called with NULL hash table");
+        return -EINVAL;
+    }
+
+    if (!thread_state.registered) {
+        tklog_error("cds_lfht_destroy must be called from a registered thread\n");
         return -EINVAL;
     }
     

@@ -281,6 +281,7 @@ static TSM_Result _tsm_tsm_type_free_children(struct tsm_base_node* p_tsm_base) 
     return TSM_RESULT_SUCCESS;
 }
 static void _tsm_tsm_type_free_callback(struct rcu_head* rcu_head) {
+    tklog_notice("from callback\n");
     if (!rcu_head) {
         tklog_error("rcu_head is NULL\n");
         return;
@@ -318,7 +319,10 @@ static void _tsm_tsm_type_free_callback(struct rcu_head* rcu_head) {
     if (tsm_result != TSM_RESULT_SUCCESS) {
         tklog_error("tsm_free_path failed\n");
     }
-    cds_lfht_destroy(p_tsm->p_ht, NULL);
+    int destroy_result = cds_lfht_destroy(p_tsm->p_ht, NULL);
+    if (destroy_result != 0) {
+        tklog_error("cds_lfht_destroy faied with code %d\n", destroy_result);
+    }
     tklog_scope(tsm_result = tsm_base_node_free(p_base));
     if (tsm_result != TSM_RESULT_SUCCESS) {
         tklog_error("tsm_base_node_free failed with code %d\n", tsm_result);
@@ -387,7 +391,7 @@ static TSM_Result _tsm_tsm_type_print(struct tsm_base_node* p_base) {
         return tsm_result;
     }
 
-    tsm_base_node_print(p_base);
+    tsm_base_node_print(p_base); // this is 
     struct tsm* p_tsm = caa_container_of(p_base, struct tsm, base);
     tsm_path_print(&p_tsm->path);
 
@@ -996,7 +1000,7 @@ TSM_Result tsm_path_print(struct tsm_path* p_path) {
         tklog_info("p_path: (empty)\n");
         return TSM_RESULT_SUCCESS;
     }
-    char full_str[512];
+    char full_str[1024];
     char* ptr = full_str;
     size_t remaining = sizeof(full_str);
     TSM_Result result = TSM_RESULT_SUCCESS;
@@ -2146,7 +2150,7 @@ TSM_Result tsm_iter_get_node(struct cds_lfht_iter* iter, struct tsm_base_node** 
         return TSM_RESULT_NULL_ARGUMENT;
     }
     if (iter->node == NULL) {
-        tklog_warning("iter->node == NULL which means there is no node for this iter\n");
+        tklog_notice("iter->node == NULL which means there is no node for this iter\n");
         return TSM_RESULT_ITER_END;
     }
     tklog_scope(struct cds_lfht_node* lfht_node = cds_lfht_iter_get_node(iter));

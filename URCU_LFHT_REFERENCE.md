@@ -2,71 +2,61 @@
 
 ## RCU Core Functions
 
-### `rcu_init()`
-- **Purpose**: Initializes the RCU subsystem
-- **Prerequisites**: None (must be first RCU function called)
-- **Call context**: Any context
-- **Notes**: Must be called once before any other RCU functions
+### `rcu_init()`  
+**Purpose**: Initializes the RCU subsystem.  
+**Usage Context**: Must be called once before any other RCU functions. No prerequisites beyond being the first RCU function invoked. Can be called from any context.  
+**Notes**: Essential for setting up the RCU environment. In multi-threaded applications, typically called early in the main thread
 
-### `rcu_register_thread()`
-- **Purpose**: Registers current thread with RCU
-- **Prerequisites**: Must be called after `rcu_init()`
-- **Call context**: Any context  
-- **Notes**: Must be called before any `rcu_read_lock()` in this thread. Each thread needs its own registration. In QSBR flavor, threads are online by default after registration, allowing `rcu_quiescent_state()` calls; use `rcu_thread_offline()`/`rcu_thread_online()` for extended quiescence
+### `rcu_register_thread()`  
+**Purpose**: Registers the current thread with RCU.  
+**Usage Context**: Must be called after `rcu_init()`. Required before any `rcu_read_lock()` in the thread. Can be called from any context. Each thread must register individually. In QSBR flavor, threads are online by default after registration.  
+**Notes**: Not needed for threads that never enter RCU read-side critical sections. For "bulletproof" RCU (rcu-bp), registration is automatic
 
-### `rcu_unregister_thread()`
-- **Purpose**: Unregisters current thread from RCU
-- **Prerequisites**: Must be called after `rcu_register_thread()`
-- **Call context**: Must NOT be inside `rcu_read_lock()`/`rcu_read_unlock()` section
-- **Notes**: Must be called before thread exits. In QSBR flavor, thread must be online (not in extended quiescent state via `rcu_thread_offline()`) before unregistering
+### `rcu_unregister_thread()`  
+**Purpose**: Unregisters the current thread from RCU.  
+**Usage Context**: Must be called after `rcu_register_thread()`. Must be called before thread exits. Must not be called inside an RCU critical section. In QSBR flavor, thread must be online before unregistering.  
+**Notes**: Ensures proper cleanup. Failure to unregister can lead to resource leaks.  
 
-### `rcu_read_lock()`
-- **Purpose**: Begins RCU read-side critical section
-- **Prerequisites**: Must be called after `rcu_register_thread()`
-- **Call context**: Any context; in QSBR flavor, must be while thread is online (not after `rcu_thread_offline()` and before `rcu_thread_online()`)
-- **Notes**: Can be nested (multiple calls in same thread). Must be balanced with `rcu_read_unlock()`. In QSBR flavor, cannot call `rcu_quiescent_state()` or `rcu_thread_offline()` inside critical section
+### `rcu_read_lock()`  
+**Purpose**: Begins an RCU read-side critical section.  
+**Usage Context**: Must be called after `rcu_register_thread()`. Can be called from any context and nested. In QSBR flavor, must be called while thread is online.   
+**Notes**: Must be balanced with `rcu_read_unlock()`. Protects data from concurrent updates. Acts as a reader-side primitive; does not block writers.   
 
-### `rcu_read_unlock()`
-- **Purpose**: Ends RCU read-side critical section
-- **Prerequisites**: Must match a previous `rcu_read_lock()`
-- **Call context**: Any context; in QSBR flavor, must be while thread is online (not after `rcu_thread_offline()` and before `rcu_thread_online()`)
-- **Notes**: Must be called before `rcu_unregister_thread()`. In QSBR flavor, cannot call `rcu_quiescent_state()` or `rcu_thread_offline()` inside critical section
+### `rcu_read_unlock()`   
+**Purpose**: Ends an RCU read-side critical section.   
+**Usage Context**: Must match a previous `rcu_read_lock()`. Can be called from any context. In QSBR flavor, must be called while thread is online.   
+**Notes**: Must be called before `rcu_unregister_thread()`. Cannot call `rcu_quiescent_state()` inside critical section (QSBR).   
 
-### `synchronize_rcu()`
-- **Purpose**: Waits for all current RCU read-side critical sections to complete
-- **Prerequisites**: Must be called after `rcu_register_thread()`
-- **Call context**: Must NOT be inside `rcu_read_lock()`/`rcu_read_unlock()` section
-- **Notes**: Blocks calling thread until grace period completes. Can cause deadlock if called while holding mutexes that are also acquired within RCU read-side critical sections. In QSBR flavor, grace periods advance only after threads call `rcu_quiescent_state()` or use `rcu_thread_offline()`/`rcu_thread_online()`; failure to report quiescence stalls this function
+### `synchronize_rcu()`   
+**Purpose**: Waits for all pre-existing RCU read-side critical sections to complete.   
+**Usage Context**: Must be called after `rcu_register_thread()`. Must NOT be called inside an RCU critical section (causes deadlock).   
+**Notes**: Used for synchronization after updates. Can cause deadlock if called while holding mutexes acquired within RCU read-side critical sections. In QSBR, requires periodic quiescent state reporting.   
 
-### `call_rcu(struct rcu_head *head, void (*func)(struct rcu_head *))`
-- **Purpose**: Schedules callback to run after grace period
-- **Prerequisites**: Must be called after `rcu_register_thread()`
-- **Call context**: Can be called inside `rcu_read_lock()`/`rcu_read_unlock()` section. `rcu_barrier()` should not be called within a callback fucntion given to `call_rcu()`
-- **Notes**: Callback function runs outside of critical sections
+### `call_rcu()`   
+**Purpose**: Schedules a callback to run after a grace period.   
+**Signature**: `call_rcu(struct rcu_head *head, void (*func)(struct rcu_head *head))`   
+**Usage Context**: Must be called after `rcu_register_thread()`. Can be called inside an RCU critical section. Should not call `rcu_barrier()` within the callback. For QSBR flavor, caller should be online.   
+**Notes**: Callback runs outside critical sections, typically to free memory. The `rcu_head` is embedded in the structure to be freed. Ensures safe deferred reclamation.   
 
-### `rcu_barrier()`
-- **Purpose**: Waits for all pending `call_rcu()` callbacks to complete
-- **Prerequisites**: Must be called after `rcu_register_thread()`
-- **Call context**: **Must NOT be called from within a `rcu_read_lock()`/`rcu_read_unlock()` section** (generates error: "rcu_barrier() called from within RCU read-side critical section.").  `rcu_barrier()` should not be called within a callback fucntion given to `call_rcu()`
-- **Notes**: Should be called before program cleanup to ensure all pending memory deallocations complete
+### `rcu_barrier()`  
+**Purpose**: Waits for all pending `call_rcu()` callbacks to complete.  
+**Usage Context**: Must be called after `rcu_register_thread()`. Must NOT be called inside an RCU critical section. Should not be called within a `call_rcu()` callback.  
+**Notes**: Useful before program cleanup.  Ensures all deferred operations complete. May invoke `synchronize_rcu()` internally.   
 
-### `rcu_quiescent_state()`
-- **Purpose**: Reports a momentary quiescent state for the current thread
-- **Prerequisites**: Must be called after `rcu_register_thread()`
-- **Call context**: Must NOT be inside `rcu_read_lock()`/`rcu_read_unlock()` section; must be while thread is online (default state)
-- **Notes**: Essential for QSBR flavor to advance grace periods; must be called periodically outside critical sections. No-op in MB and other flavors. Failure to call regularly can stall `synchronize_rcu()` indefinitely
+### `rcu_quiescent_state()`   
+**Purpose**: Reports a momentary quiescent state for the current thread.   
+**Usage Context**: Must be called after `rcu_register_thread()`. Must NOT be called inside an RCU critical section. Must be called while thread is online (QSBR).   
+**Notes**: Essential for QSBR flavor to advance grace periods. No-op in other flavors. Failure to call regularly in QSBR can stall `synchronize_rcu()`.   
 
-### `rcu_thread_offline()`
-- **Purpose**: Begins an extended quiescent state for the current thread
-- **Prerequisites**: Must be called after `rcu_register_thread()`
-- **Call context**: Must NOT be inside `rcu_read_lock()`/`rcu_read_unlock()` section
-- **Notes**: For QSBR flavor only (no-op in others); used for long periods of inactivity (e.g., before sleep/I/O). Must pair with `rcu_thread_online()`. Cannot call RCU read functions or report quiescent states while offline. Threads are online by default after registration
+### `rcu_thread_offline()`   
+**Purpose**: Begins an extended quiescent state for the current thread.   
+**Usage Context**: Must be called after `rcu_register_thread()`. Must NOT be called inside an RCU critical section.   
+**Notes**: QSBR flavor only (no-op in others). For long inactivity periods (e.g., sleep/I/O). Pair with `rcu_thread_online()`. Cannot use RCU read functions while offline.   
 
-### `rcu_thread_online()`
-- **Purpose**: Ends an extended quiescent state for the current thread
-- **Prerequisites**: Must follow a previous `rcu_thread_offline()`
-- **Call context**: Any context
-- **Notes**: For QSBR flavor only (no-op in others); resumes normal RCU operations. Required after `rcu_thread_offline()` to allow read critical sections again. If using in signal handlers, disable signals around calls
+### `rcu_thread_online()`   
+**Purpose**: Ends an extended quiescent state for the current thread.   
+**Usage Context**: Must follow a previous `rcu_thread_offline()`. Can be called from any context.   
+**Notes**: QSBR flavor only (no-op in others). Resumes normal RCU operations. If used in signal handlers, disable signals around calls.   
 
 ---
 
@@ -74,194 +64,371 @@
 
 ### Creation and Destruction
 
-#### `cds_lfht_new(init_size, min_buckets, max_buckets, flags, attr)`
-#### `cds_lfht_new_flavor(init_size, min_buckets, max_buckets, flags, flavor, attr)`
-- **Purpose**: Creates new hash table
-- **Prerequisites**: Must be called after `rcu_init()`
-- **Call context**: No `rcu_read_lock()` required
-- **Parameters**:
-  - `init_size`: Initial number of buckets (must be power of 2)
-  - `min_buckets`: Minimum number of buckets 
-  - `max_buckets`: Maximum number of buckets (0 = unlimited)
-  - `flags`: Combination of:
-    - `CDS_LFHT_AUTO_RESIZE`: Enable automatic resizing
-    - `CDS_LFHT_ACCOUNTING`: Enable node counting
-  - `flavor`: RCU flavor (for `_flavor` variant)
-  - `attr`: Custom memory allocator (can be NULL)
-- **Returns**: Hash table pointer or `NULL` on failure
-- **Notes**: The `_flavor` variant is preferred for explicit RCU flavor control
+#### `cds_lfht_new()` / `cds_lfht_new_flavor()`
 
-#### `cds_lfht_destroy(struct cds_lfht *ht, pthread_attr_t **attr)`
-- **Purpose**: Destroys hash table and frees memory
-- **Prerequisites**: Must be called after `rcu_register_thread()`
-- **Call context**: Any
-- **Notes**: Should call `rcu_barrier()` before this to ensure no pending callbacks. May use worker threads for cleanup
+**Purpose**: Creates a new lock-free RCU hash table.
+
+**Signatures**:
+```c
+struct cds_lfht *cds_lfht_new(
+    unsigned long init_size,
+    unsigned long min_nr_alloc_buckets,
+    unsigned long max_nr_buckets,
+    int flags,
+    pthread_attr_t *attr
+);
+
+struct cds_lfht *cds_lfht_new_flavor(
+    unsigned long init_size,
+    unsigned long min_nr_alloc_buckets,
+    unsigned long max_nr_buckets,
+    int flags,
+    const struct rcu_flavor_struct *flavor,
+    pthread_attr_t *attr
+);
+```
+
+**Parameters**:
+- `init_size`: Initial number of buckets (must be power of 2)
+- `min_nr_alloc_buckets`: Minimum allocated buckets (must be power of 2)
+- `max_nr_buckets`: Maximum buckets (0 for unlimited, must be power of 2)
+- `flags`: Bitwise OR of:
+  - `CDS_LFHT_AUTO_RESIZE`: Enable automatic resizing
+  - `CDS_LFHT_ACCOUNTING`: Enable node counting
+- `flavor`: RCU flavor struct (for `_flavor` variant)
+- `attr`: Optional pthread attributes for resize worker thread
+
+**Usage Context**: 
+- Must be called after `rcu_init()`
+- No `rcu_read_lock()` required
+- Can be called before thread registration
+
+**Returns**: Pointer to `struct cds_lfht` on success, `NULL` on failure
+
+#### `cds_lfht_destroy()`
+
+**Purpose**: Destroys the hash table and frees its memory.
+
+**Signature**: 
+```c
+int cds_lfht_destroy(struct cds_lfht *ht, pthread_attr_t **attr)
+```
+
+**Usage Context**: 
+- Must be called after `rcu_register_thread()`
+- Should call `rcu_barrier()` beforehand
+- Since liburcu 0.10, can be called from RCU critical sections
+
+**Returns**: 0 on success, negative error on failure
 
 ### Node Initialization
 
-#### `cds_lfht_node_init(struct cds_lfht_node *node)`
-- **Purpose**: Initializes hash table node
-- **Prerequisites**: Must be called before adding node to any hash table
-- **Call context**: No RCU functions required around this
-- **Notes**: Node must not be reused between hash tables without reinitialization
+#### `cds_lfht_node_init()`
 
-#### `cds_lfht_node_init_deleted(struct cds_lfht_node *node)`
-- **Purpose**: Initializes node to deleted state
-- **Prerequisites**: Must be called before using node with `cds_lfht_is_node_deleted()`
-- **Call context**: No RCU functions required around this
+**Purpose**: Initializes a hash table node.
+
+**Usage Context**: 
+- Must be called before adding node to any hash table
+- No RCU functions required
+
+**Notes**: 
+- Node must not be reused without reinitialization
+- Node should be aligned on 8-byte boundaries
+
+#### `cds_lfht_node_init_deleted()`
+
+**Purpose**: Initializes a node to the "deleted" state.
+
+**Usage Context**: 
+- Must be called before using with `cds_lfht_is_node_deleted()`
+- No RCU functions required
 
 ### Adding Nodes
 
-#### `cds_lfht_add(struct cds_lfht *ht, unsigned long hash, struct cds_lfht_node *node)`
-- **Purpose**: Adds node to hash table (allows duplicates)
-- **Prerequisites**: Must call `cds_lfht_node_init()` on node first
-- **Call context**: Must be inside `rcu_read_lock()`/`rcu_read_unlock()` section
-- **Notes**: Thread must be registered with `rcu_register_thread()`. Always succeeds (no return value)
+#### `cds_lfht_add()`
 
-#### `cds_lfht_add_unique(struct cds_lfht *ht, unsigned long hash, match_func, key, struct cds_lfht_node *node)`
-- **Purpose**: Adds node only if key doesn't exist
-- **Prerequisites**: Must call `cds_lfht_node_init()` on node first
-- **Call context**: Must be inside `rcu_read_lock()`/`rcu_read_unlock()` section
-- **Returns**: New node if added, existing node if key already exists
-- **Notes**: Thread must be registered with `rcu_register_thread()`. If existing node returned, caller's node was not added
+**Purpose**: Adds a node to the hash table (allows duplicates).
 
-#### `cds_lfht_add_replace(struct cds_lfht *ht, unsigned long hash, match_func, key, struct cds_lfht_node *node)`
-- **Purpose**: Replaces existing node or adds new one
-- **Prerequisites**: Must call `cds_lfht_node_init()` on new node first
-- **Call context**: Must be inside `rcu_read_lock()`/`rcu_read_unlock()` section
-- **Returns**: Old node if replaced, `NULL` if new addition
-- **Notes**: If returns old node, must use `call_rcu()` to free it later
+**Usage Context**: 
+- Must be inside an RCU critical section
+- Thread must be registered
+- Node must be initialized first
+
+**Notes**: 
+- Always succeeds (no return value)
+- Issues full memory barriers before/after
+
+#### `cds_lfht_add_unique()`
+
+**Purpose**: Adds a node only if the key does not exist.
+
+**Usage Context**: 
+- Must be inside an RCU critical section
+- Thread must be registered
+- Node must be initialized first
+
+**Returns**: 
+- Added node on success
+- Existing node if key already present
+
+**Notes**: Ensures no duplicates if used exclusively for additions
+
+#### `cds_lfht_add_replace()`
+
+**Purpose**: Replaces an existing node with same key or adds if absent.
+
+**Usage Context**: 
+- Must be inside an RCU critical section
+- Thread must be registered
+- New node must be initialized first
+
+**Returns**: 
+- Old node if replaced (defer free with `call_rcu()`)
+- `NULL` if new addition
 
 ### Replacing Nodes
 
-#### `cds_lfht_replace(struct cds_lfht *ht, struct cds_lfht_iter *old_iter, unsigned long hash, match_func, key, struct cds_lfht_node *new_node)`
-- **Purpose**: Replaces node found by iterator
-- **Prerequisites**: Must call `cds_lfht_node_init()` on new node first
-- **Call context**: Must be inside same `rcu_read_lock()`/`rcu_read_unlock()` section as the lookup that filled `old_iter`
-- **Returns**: 0 on success, negative value on failure
-- **Notes**: Must use `call_rcu()` to free old node after successful replacement. Iterator must point to a valid, non-deleted node
+#### `cds_lfht_replace()`
+
+**Purpose**: Replaces a node pointed to by the iterator.
+
+**Usage Context**: 
+- Must be inside same RCU critical section as lookup
+- Thread must be registered
+- New node must be initialized first
+
+**Returns**: 
+- 0 on success
+- Negative on failure (-ENOENT, -EINVAL)
 
 ### Lookup and Iteration
 
-#### `cds_lfht_lookup(struct cds_lfht *ht, unsigned long hash, match_func, key, struct cds_lfht_iter *iter)`
-- **Purpose**: Finds first node matching key, stores result in iterator
-- **Prerequisites**: Thread must be registered with `rcu_register_thread()`
-- **Call context**: Must be inside `rcu_read_lock()`/`rcu_read_unlock()` section
-- **Notes**: Use `cds_lfht_iter_get_node()` to get node from iterator. Which node is found among duplicates is unspecified
+#### `cds_lfht_lookup()`
 
-#### `cds_lfht_next_duplicate(struct cds_lfht *ht, match_func, key, struct cds_lfht_iter *iter)`
-- **Purpose**: Finds next node with same key, updates iterator
-- **Prerequisites**: Iterator must be initialized by `cds_lfht_lookup()` first
-- **Call context**: Must be inside same `rcu_read_lock()`/`rcu_read_unlock()` section as initial lookup
-- **Notes**: Use `cds_lfht_iter_get_node()` to get node from iterator
+**Purpose**: Finds the first node matching the key.
 
-#### `cds_lfht_first(struct cds_lfht *ht, struct cds_lfht_iter *iter)`
-- **Purpose**: Gets first node in table, stores in iterator
-- **Prerequisites**: Thread must be registered with `rcu_register_thread()`
-- **Call context**: Must be inside `rcu_read_lock()`/`rcu_read_unlock()` section
-- **Notes**: Use `cds_lfht_iter_get_node()` to get node from iterator. Order is unspecified
+**Usage Context**: 
+- Must be inside an RCU critical section
+- Thread must be registered
 
-#### `cds_lfht_next(struct cds_lfht *ht, struct cds_lfht_iter *iter)`
-- **Purpose**: Gets next node in table, updates iterator
-- **Prerequisites**: Iterator must be initialized by `cds_lfht_first()` or previous `cds_lfht_next()`
-- **Call context**: Must be inside same `rcu_read_lock()`/`rcu_read_unlock()` section as `cds_lfht_first()`
-- **Notes**: Use `cds_lfht_iter_get_node()` to get node from iterator
+**Notes**: 
+- Use `cds_lfht_iter_get_node()` to extract node
+- Acts as `rcu_dereference()`
+
+#### `cds_lfht_next_duplicate()`
+
+**Purpose**: Finds the next node with the same key.
+
+**Usage Context**: 
+- Must be inside same RCU critical section as initial lookup
+- Iterator must be initialized by `cds_lfht_lookup()`
+
+#### `cds_lfht_first()`
+
+**Purpose**: Gets the first node in the table.
+
+**Usage Context**: 
+- Must be inside an RCU critical section
+- Thread must be registered
+
+#### `cds_lfht_next()`
+
+**Purpose**: Gets the next node in the table.
+
+**Usage Context**: 
+- Must be inside same RCU critical section as `cds_lfht_first()`
+- Iterator must be initialized
 
 ### Iteration Macros
 
-#### `cds_lfht_for_each(struct cds_lfht *ht, struct cds_lfht_iter *iter, struct cds_lfht_node *node)`
-- **Purpose**: Iterates over all nodes in hash table
-- **Prerequisites**: Thread must be registered with `rcu_register_thread()`
-- **Call context**: Must be inside `rcu_read_lock()`/`rcu_read_unlock()` section
-- **Notes**: Macro that expands to a for loop. Iteration order is unspecified
+#### `cds_lfht_for_each()`
 
-#### `cds_lfht_for_each_entry(struct cds_lfht *ht, struct cds_lfht_iter *iter, type, member)`
-- **Purpose**: Iterates over all container structures in hash table
-- **Prerequisites**: Thread must be registered with `rcu_register_thread()`
-- **Call context**: Must be inside `rcu_read_lock()`/`rcu_read_unlock()` section
-- **Parameters**:
-  - `type`: Container structure type
-  - `member`: Name of `cds_lfht_node` member in container
-- **Notes**: Macro that expands to a for loop. More convenient than `cds_lfht_for_each`
+**Purpose**: Iterates over all nodes in the hash table.
+
+**Syntax**: 
+```c
+cds_lfht_for_each(ht, iter, node)
+```
+
+**Usage Context**: Must be inside an RCU critical section
+
+#### `cds_lfht_for_each_duplicate()`
+
+**Purpose**: Iterates over all nodes with the same key.
+
+**Syntax**: 
+```c
+cds_lfht_for_each_duplicate(ht, hash, match, key, iter, node)
+```
+
+#### `cds_lfht_for_each_entry()`
+
+**Purpose**: Iterates over all container structures in the hash table.
+
+**Syntax**: 
+```c
+cds_lfht_for_each_entry(ht, iter, pos, member)
+```
+
+**Parameters**:
+- `pos`: Pointer to container type
+- `member`: Name of `cds_lfht_node` member in container
+
+#### `cds_lfht_for_each_entry_duplicate()`
+
+**Purpose**: Iterates over all container structures with the same key.
+
+**Syntax**: 
+```c
+cds_lfht_for_each_entry_duplicate(ht, hash, match, key, iter, pos, member)
+```
 
 ### Deletion and Status
 
-#### `cds_lfht_del(struct cds_lfht *ht, struct cds_lfht_node *node)`
-- **Purpose**: Removes node from hash table
-- **Prerequisites**: Node must have been found by lookup in same critical section
-- **Call context**: Must be inside `rcu_read_lock()`/`rcu_read_unlock()` section
-- **Returns**: 0 on success, negative value if node already deleted
-- **Notes**: Must use `call_rcu()` to free node after successful deletion. Node becomes logically deleted but physically present
+#### `cds_lfht_del()`
 
-#### `cds_lfht_is_node_deleted(struct cds_lfht_node *node)`
-- **Purpose**: Checks if node has been deleted
-- **Prerequisites**: Node must have been found by lookup in same critical section
-- **Call context**: Must be inside `rcu_read_lock()`/`rcu_read_unlock()` section
-- **Returns**: Non-zero if deleted, 0 otherwise
+**Purpose**: Removes a node from the hash table.
+
+**Usage Context**: 
+- Must be inside an RCU critical section
+- Node must be found by lookup in same section
+- Thread must be registered
+
+**Returns**: 
+- 0 on success
+- Negative if node already deleted or NULL
+
+**Notes**: 
+- Marks node as logically deleted
+- On success, defer free with `call_rcu()`
+
+#### `cds_lfht_is_node_deleted()`
+
+**Purpose**: Checks if a node is deleted.
+
+**Usage Context**: 
+- Must be inside an RCU critical section
+- Node must be found by lookup in same section
+
+**Returns**: Non-zero if deleted, 0 otherwise
 
 ### Utility Functions
 
-#### `cds_lfht_iter_get_node(struct cds_lfht_iter *iter)`
-- **Purpose**: Extracts node pointer from iterator
-- **Prerequisites**: Iterator must be filled by lookup/iteration functions first
-- **Call context**: Must be inside `rcu_read_lock()`/`rcu_read_unlock()` section
-- **Returns**: Node pointer or `NULL` if iterator contains no node
+#### `cds_lfht_iter_get_node()`
 
-#### `cds_lfht_resize(struct cds_lfht *ht, unsigned long new_size)`
-- **Purpose**: Forces hash table resize to specified size
-- **Prerequisites**: Must be called after `rcu_register_thread()`
-- **Call context**: Must NOT be inside `rcu_read_lock()`/`rcu_read_unlock()` section
-- **Notes**: May trigger worker thread activity
+**Purpose**: Extracts the node pointer from an iterator.
 
-#### `cds_lfht_count_nodes(struct cds_lfht *ht, long *before, unsigned long *count, long *after)`
-- **Purpose**: Counts nodes in hash table (approximation)
-- **Prerequisites**: Thread must be registered with `rcu_register_thread()`
-- **Call context**: Must be inside `rcu_read_lock()`/`rcu_read_unlock()` section
-- **Notes**: Results are approximate due to concurrent operations. `before`/`after` indicate nodes added/removed during counting
+**Usage Context**: 
+- Must be inside an RCU critical section
+- Iterator must be filled by lookup/iteration
+
+**Returns**: Node pointer or `NULL`
+
+#### `cds_lfht_resize()`
+
+**Purpose**: Forces a hash table resize to specified size.
+
+**Usage Context**: 
+- Must be called after `rcu_register_thread()`
+- Must NOT be called inside an RCU critical section
+
+**Notes**: 
+- May trigger worker threads
+- `new_size` must be power of 2
+
+#### `cds_lfht_count_nodes()`
+
+**Purpose**: Counts nodes in the hash table (approximate).
+
+**Usage Context**: 
+- Must be inside an RCU critical section
+- Thread must be registered
+- Requires `CDS_LFHT_ACCOUNTING` flag
 
 ---
 
 ## Critical Ordering Rules
 
-1. **Program startup**: `rcu_init()` → `rcu_register_thread()` → hash table operations
-2. **Read operations**: `rcu_read_lock()` → lookup/iteration → `rcu_read_unlock()`
-3. **Write operations**: `rcu_read_lock()` → add/delete/replace → `rcu_read_unlock()` → `call_rcu()` (for deletions)
-4. **Thread cleanup**: finish all operations → `rcu_read_unlock()` → `rcu_unregister_thread()`
-5. **Program cleanup**: `rcu_barrier()` → `cds_lfht_destroy()` → `rcu_unregister_thread()`
+1. **Program startup**: 
+   ```
+   rcu_init() → rcu_register_thread() → hash table operations
+   ```
+
+2. **Read operations**: 
+   ```
+   rcu_read_lock() → lookup/iteration → rcu_read_unlock()
+   ```
+
+3. **Write operations**: 
+   ```
+   rcu_read_lock() → add/delete/replace → rcu_read_unlock() → call_rcu()
+   ```
+
+4. **Thread cleanup**: 
+   ```
+   finish operations → rcu_read_unlock() → rcu_unregister_thread()
+   ```
+
+5. **Program cleanup**: 
+   ```
+   rcu_barrier() → cds_lfht_destroy() → rcu_unregister_thread()
+   ```
+
+---
 
 ## Important Restrictions and Warnings
 
 ### RCU Read-Side Critical Section Restrictions
-- **NEVER** call `rcu_barrier()` from within `rcu_read_lock()`/`rcu_read_unlock()`
-- **NEVER** call `synchronize_rcu()` from within `rcu_read_lock()`/`rcu_read_unlock()`
-- **NEVER** call `rcu_unregister_thread()` from within `rcu_read_lock()`/`rcu_read_unlock()`
-- **NEVER** call `cds_lfht_destroy()` from within `rcu_read_lock()`/`rcu_read_unlock()`
-- **NEVER** call `cds_lfht_resize()` from within `rcu_read_lock()`/`rcu_read_unlock()`
+
+**NEVER call these from within `rcu_read_lock()`/`rcu_read_unlock()`:**
+- `rcu_barrier()`
+- `synchronize_rcu()`
+- `rcu_unregister_thread()`
+- `cds_lfht_resize()`
+- `cds_lfht_destroy()` (allowed since liburcu 0.10, but avoid)
 
 ### Iterator Safety
-- Iterators are only valid within the RCU read-side critical section where they were created
-- **NEVER** reuse iterators across different hash tables
-- **NEVER** use iterators after their originating RCU read-side critical section ends
-- Iterator debugging can be enabled with `--enable-cds-lfht-iter-debug` (changes ABI)
+
+- Iterators are valid only within originating RCU critical section
+- Never reuse iterators across different hash tables
+- Never use iterators after their RCU critical section ends
+- Enable debugging with `--enable-cds-lfht-iter-debug`
 
 ### Memory Management
-- Always use `call_rcu()` to defer freeing deleted nodes
-- Call `rcu_barrier()` before program exit to ensure all callbacks complete
-- Hash table destruction may use worker threads; ensure proper cleanup
+
+- Always defer freeing deleted/replaced nodes with `call_rcu()`
+- Call `rcu_barrier()` before program exit
+- Hash table destruction may use worker threads
 
 ### Deadlock Prevention
-- Avoid holding mutexes when calling `synchronize_rcu()` if those mutexes are also acquired within RCU read-side critical sections
-- This applies especially to QSBR flavor where threads are "online" by default
+
+- Avoid holding mutexes in `synchronize_rcu()` if acquired in RCU read-side sections
+- In QSBR, manage quiescence to avoid stalls
+
+### Additional RCU APIs
+
+- **Non-blocking grace period checks**: 
+  - `start_poll_synchronize_rcu()`
+  - `poll_state_synchronize_rcu()`
+  
+- **Custom `call_rcu` threads**:
+  - `create_call_rcu_data()`
+  - `get_call_rcu_data()`
+  
+- **Fork handling**:
+  - `call_rcu_before_fork_parent()`
+
+---
 
 ## Common Call Patterns
 
 ### Safe Lookup Pattern
+
 ```c
 rcu_read_lock();
 cds_lfht_lookup(ht, hash, match, key, &iter);
 node = cds_lfht_iter_get_node(&iter);
 if (node) {
-    // Use node data here
     struct mydata *data = caa_container_of(node, struct mydata, ht_node);
     // Process data...
 }
@@ -269,74 +436,87 @@ rcu_read_unlock();
 ```
 
 ### Safe Deletion Pattern
+
 ```c
 rcu_read_lock();
 cds_lfht_lookup(ht, hash, match, key, &iter);
 node = cds_lfht_iter_get_node(&iter);
-if (node) {
-    ret = cds_lfht_del(ht, node);
+if (node && cds_lfht_del(ht, node) == 0) {
+    // Node deleted successfully
 }
 rcu_read_unlock();
-if (node && ret == 0) {
-    call_rcu(&my_data->rcu_head, free_callback);
+if (node) {
+    call_rcu(&container_of(node, struct mydata, ht_node)->rcu_head, 
+             free_callback);
 }
 ```
 
 ### Safe Iteration Pattern
+
 ```c
 rcu_read_lock();
 cds_lfht_for_each_entry(ht, &iter, my_struct, ht_node) {
-    // Process each node
     if (!cds_lfht_is_node_deleted(&my_struct->ht_node)) {
-        // Use my_struct...
+        // Process my_struct...
     }
 }
 rcu_read_unlock();
 ```
 
 ### Safe Hash Table Creation
+
 ```c
 // With explicit flavor
-ht = cds_lfht_new_flavor(1, 1, 0,
+ht = cds_lfht_new_flavor(1 << 10, 1 << 10, 0,
     CDS_LFHT_AUTO_RESIZE | CDS_LFHT_ACCOUNTING,
-    &urcu_memb_flavor, NULL);
+    &rcu_flavor, NULL);
 
 // Or with default flavor
-ht = cds_lfht_new(1, 1, 0, CDS_LFHT_AUTO_RESIZE, NULL);
+ht = cds_lfht_new(1 << 10, 1 << 10, 0,
+    CDS_LFHT_AUTO_RESIZE | CDS_LFHT_ACCOUNTING, NULL);
 ```
 
 ### Program Cleanup Sequence
+
 ```c
 // Stop adding new nodes...
 
-// Wait for all call_rcu() callbacks to complete
+// Wait for all call_rcu() callbacks
 rcu_barrier();
 
-// Destroy hash table (may trigger worker threads)
+// Destroy hash table
 cds_lfht_destroy(ht, NULL);
 
 // Unregister thread
 rcu_unregister_thread();
 ```
 
+---
+
 ## Debugging and Development
 
 ### Build-Time Options
+
 - `--enable-cds-lfht-iter-debug`: Enables iterator validation (changes ABI)
 - `--enable-rcu-debug`: Enables internal RCU debugging (performance penalty)
-- `DEBUG_YIELD`: Adds random delays for testing race conditions
+- `DEBUG_YIELD`: Adds random delays for race condition testing
 
 ### Common Errors
-- "rcu_barrier() called from within RCU read-side critical section" → Move `rcu_barrier()` outside critical section
-- Iterator reuse across hash tables → Use separate iterators or reinitialize
-- Memory leaks after deletion → Ensure `call_rcu()` is used for cleanup
-- Deadlocks with mutexes → Review mutex acquisition patterns vs. RCU critical sections
 
-## Performance Considerations
+| Error | Solution |
+|-------|----------|
+| "rcu_barrier() called from within RCU read-side critical section" | Move `rcu_barrier()` outside critical section |
+| Iterator reuse across tables | Use separate iterators |
+| Memory leaks post-deletion | Ensure `call_rcu()` for cleanup |
+| Deadlocks with mutexes | Avoid mutexes in grace period waits |
+| Stalls in QSBR | Call `rcu_quiescent_state()` periodically |
 
-- **QSBR flavor**: Fastest read-side performance, requires explicit quiescent state management
-- **Memory barrier flavor**: Good general purpose choice
-- **Signal flavor**: Moderate performance, requires dedicated signal
-- **Bulletproof flavor**: Slowest but requires minimal application changes
-- Auto-resize can cause temporary performance impacts during resize operations
-- Node counting (accounting) adds small overhead but enables `cds_lfht_count_nodes()`
+### Performance Considerations
+
+- **QSBR flavor**: Fastest reads; requires explicit quiescence management
+- **Memory barrier flavor**: Balanced; good for general use
+- **Signal flavor**: Moderate; needs dedicated signal
+- **Bulletproof flavor**: Easiest but slowest; minimal app changes
+- **Auto-resize**: May cause temporary slowdowns
+- **Accounting**: Adds minor overhead but enables counting
+- **Long bucket chains**: Possible if resizes starved; prioritize workers appropriately

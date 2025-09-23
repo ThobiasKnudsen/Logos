@@ -348,7 +348,7 @@ static bool mem_remove(void *ptr)
     static TimerState *get_timer_state(void) {
         TimerState *ts = pthread_getspecific(g_tls_timer_state);
         if (!ts) {
-            ts = calloc(1, sizeof(TimerState));
+            ts = calloc(1, sizeof(TimerState)); // somehow this is not freed
             if (!ts) {
                 printf("tklog: out of memory for TimerState\n");
                 return NULL;
@@ -390,7 +390,7 @@ static bool mem_remove(void *ptr)
         }
         time_tracker_table_itr itr = time_tracker_table_get(&ts->table, temp_location);
         if (time_tracker_table_is_end(itr)) {
-            char* key = strdup(temp_location);
+            char* key = strdup(temp_location); // someway this is not freed
             if (!key) {
                 printf("tklog: out of memory for strdup\n");
                 return;
@@ -458,7 +458,7 @@ static bool mem_remove(void *ptr)
             return;
         }
         size_t needed = strlen(top->path) + strlen(top->location) + strlen(ps->buf) + strlen(stop_location) + 20;
-        char* call_path = malloc(needed);
+        char* call_path = malloc(needed); // some way this is not freed
         if (!call_path) {
             printf("tklog: out of memory for call_path\n");
             free(top->location);
@@ -559,6 +559,8 @@ static bool mem_remove(void *ptr)
                 free(top);
             }
         }
+        free(ts); 
+        pthread_setspecific(g_tls_timer_state, NULL);
     }
 #endif
 

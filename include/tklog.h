@@ -214,8 +214,8 @@ void _tklog(uint32_t    flags,
     void _tklog_timer_print();
     void _tklog_timer_clear();
     #define tklog_timer_init() _tklog_timer_init()
-    #define tklog_timer_start() _tklog_timer_start(__LINE__, __TKLOG_FILE_NAME__)
-    #define tklog_timer_stop() _tklog_timer_stop(__LINE__, __TKLOG_FILE_NAME__)
+    #define tklog_timer_start() tklog_scope(_tklog_timer_start(__LINE__, __TKLOG_FILE_NAME__))
+    #define tklog_timer_stop() tklog_scope(_tklog_timer_stop(__LINE__, __TKLOG_FILE_NAME__))
     #define tklog_timer_print() _tklog_timer_print()
     #define tklog_timer_clear() _tklog_timer_clear()
 #else
