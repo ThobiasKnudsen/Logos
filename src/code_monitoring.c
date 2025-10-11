@@ -1,8 +1,8 @@
-/*  tklog.c – implementation for the tklogging facility declared in tklog.h
+/*  cm.c – implementation for the cmging facility declared in cm.h
  *
  *  Compile‑time‑only configuration: the header decides everything through
- *  macros.  This implementation simply honours TKLOG_FLAGS, the selected
- *  TKLOG_OUTPUT_FN, and TKLOG_OUTPUT_USERPTR.
+ *  macros.  This implementation simply honours CM_FLAGS, the selected
+ *  CM_OUTPUT_FN, and CM_OUTPUT_USERPTR.
  *
  *  Cross-platform support:
  *  - Uses pthread for threading (available on Linux, macOS, Windows via MinGW-w64)
@@ -12,8 +12,8 @@
  *  - Uses standard C memory functions (malloc, free, etc.)
  */
 
+#include "code_monitoring.h"
 #include <stdlib.h>
-#include "tklog.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
@@ -35,12 +35,12 @@
 /* -------------------------------------------------------------------------
  *  Internal helpers / globals
  * ------------------------------------------------------------------------- */
-static pthread_mutex_t g_tklog_mutex = PTHREAD_MUTEX_INITIALIZER;   /* serialises _tklog() and memory db */
+static pthread_mutex_t g_cm_mutex = PTHREAD_MUTEX_INITIALIZER;   /* serialises _cm() and memory db */
 static pthread_rwlock_t g_mem_rwlock = PTHREAD_RWLOCK_INITIALIZER;  /* guards the allocation map       */
 static uint64_t         g_start_ms   = 0;                           /* program start in ms             */
 
 /* Store original memory functions to avoid recursion */
-#ifdef TKLOG_MEMORY
+#ifdef CM_SHOW_MEMORY
 static void *(*original_malloc)(size_t) = NULL;
 static void *(*original_calloc)(size_t, size_t) = NULL;
 static void *(*original_realloc)(void *, size_t) = NULL;
@@ -49,8 +49,8 @@ static void (*original_free)(void *) = NULL;
 #endif
 
 /* Forward declarations */
-static void tklog_init_once_impl(void);
-static void tklog_init_once(void);
+static void cm_init_once_impl(void);
+static void cm_init_once(void);
 
 /* ==============================  PATH TLS  ============================== */
 typedef struct PathStack {
@@ -66,7 +66,7 @@ static void pathstack_free(void *ptr)
 {
     PathStack *ps = (PathStack*)ptr;
     if (ps) {
-#ifdef TKLOG_MEMORY
+#ifdef CM_SHOW_MEMORY
         original_free(ps->buf);
         original_free(ps);
 #else
@@ -80,7 +80,7 @@ static PathStack *pathstack_get(void)
 {
     PathStack *ps = pthread_getspecific(g_tls_path);
     if (!ps) {
-#ifdef TKLOG_MEMORY
+#ifdef CM_SHOW_MEMORY
         ps = (PathStack*)original_calloc(1, sizeof *ps);
         if (!ps) return NULL; /* out‑of‑mem: just skip tracing */
         ps->cap = PATHSTACK_CAPACITY;
@@ -117,7 +117,7 @@ static void pathstack_push(const char *file, int line)
     if (need > ps->cap) {
         size_t newcap = ps->cap * 2;
         while (newcap < need) newcap *= 2;
-#ifdef TKLOG_MEMORY
+#ifdef CM_SHOW_MEMORY
         char *newbuf = (char*)original_realloc(ps->buf, newcap);
 #else
         char *newbuf = (char*)realloc(ps->buf, newcap);
@@ -230,7 +230,7 @@ static void mem_add(void *ptr, size_t size, const char *file, int line)
 {
     if (!ptr) return;
     pthread_rwlock_wrlock(&g_mem_rwlock);
-#ifdef TKLOG_MEMORY
+#ifdef CM_SHOW_MEMORY
     MemEntry *e = (MemEntry*)original_malloc(sizeof *e);
 #else
     MemEntry *e = (MemEntry*)malloc(sizeof *e);
@@ -244,7 +244,7 @@ static void mem_add(void *ptr, size_t size, const char *file, int line)
         // Get the full call path from PathStack
         PathStack *ps = pathstack_get();
         if (ps && ps->buf[0]) {
-            // Show call stack path + current file:line (same format as _tklog)
+            // Show call stack path + current file:line (same format as _cm)
             snprintf(e->path, sizeof e->path, "%s -> %s:%d", ps->buf, file, line);
         } else {
             // Show just current file:line when no call stack
@@ -276,7 +276,7 @@ static bool mem_remove(void *ptr)
         if ((*pp)->ptr == ptr) {
             MemEntry *dead = *pp;
             *pp = dead->next;
-#ifdef TKLOG_MEMORY
+#ifdef CM_SHOW_MEMORY
             original_free(dead);
 #else
             free(dead);
@@ -291,7 +291,7 @@ static bool mem_remove(void *ptr)
 }
 
 /* ------------------------- Time tracing ----------------------------- */
-#ifdef TKLOG_TIMER
+#ifdef CM_SHOW_TIMER
     static void vt_free_str(char *str) { free(str); }
     typedef struct CallPathTime {
         uint64_t total_time_us;
@@ -346,7 +346,7 @@ static bool mem_remove(void *ptr)
         if (!ts) {
             ts = calloc(1, sizeof(TimerState));
             if (!ts) {
-                printf("tklog: out of memory for TimerState\n");
+                printf("code_monitoring: out of memory for TimerState\n");
                 return NULL;
             }
             time_tracker_table_init(&ts->table);
@@ -355,8 +355,8 @@ static bool mem_remove(void *ptr)
         }
         return ts;
     }
-    void _tklog_timer_init() {
-        tklog_init_once();
+    void _cm_timer_init() {
+        cm_init_once();
         TimerState *ts = get_timer_state();
         if (ts) {
             time_tracker_table_cleanup(&ts->table);
@@ -368,21 +368,21 @@ static bool mem_remove(void *ptr)
             }
         }
     }
-    void _tklog_timer_start(int line, const char* file) {
-        tklog_init_once();
+    void _cm_timer_start(int line, const char* file) {
+        cm_init_once();
         TimerState *ts = get_timer_state();
         if (!ts) return;
         char temp_location[PATH_CAPACITY];
         int n = snprintf(temp_location, sizeof temp_location, "%s:%d", file, line);
         if (n < 0) {
-            printf("tklog: internal error. snprintf failed\n");
+            printf("code_monitoring: internal error. snprintf failed\n");
             return;
         }
         time_tracker_table_itr itr = time_tracker_table_get(&ts->table, temp_location);
         if (time_tracker_table_is_end(itr)) {
             char* key = strdup(temp_location);
             if (!key) {
-                printf("tklog: out of memory for strdup\n");
+                printf("code_monitoring: out of memory for strdup\n");
                 return;
             }
             TimeTracker tracker = {0};
@@ -391,19 +391,19 @@ static bool mem_remove(void *ptr)
             call_path_time_table_init(&tracker.call_paths);
             itr = time_tracker_table_insert(&ts->table, key, tracker);
             if (time_tracker_table_is_end(itr)) {
-                printf("tklog: time_table is out of memory because time_tracker_table_insert failed\n");
+                printf("code_monitoring: time_table is out of memory because time_tracker_table_insert failed\n");
                 free(key);
                 return;
             }
         }
         TimerEntry* entry = malloc(sizeof(TimerEntry));
         if (!entry) {
-            printf("tklog: out of memory for TimerEntry\n");
+            printf("code_monitoring: out of memory for TimerEntry\n");
             return;
         }
         entry->location = strdup(temp_location);
         if (!entry->location) {
-            printf("tklog: out of memory for strdup\n");
+            printf("code_monitoring: out of memory for strdup\n");
             free(entry);
             return;
         }
@@ -411,13 +411,13 @@ static bool mem_remove(void *ptr)
         entry->next = ts->stack;
         ts->stack = entry;
     }
-    void _tklog_timer_stop(int line, const char* file) {
-        tklog_init_once();
+    void _cm_timer_stop(int line, const char* file) {
+        cm_init_once();
         uint64_t end_time = get_time_us();
         TimerState *ts = get_timer_state();
         if (!ts) return;
         if (!ts->stack) {
-            printf("tklog: tklog_timer_stop is called without a corresponding tklog_timer_start beforehand\n");
+            printf("code_monitoring: cm_timer_stop is called without a corresponding cm_timer_start beforehand\n");
             return;
         }
         TimerEntry *top = ts->stack;
@@ -426,7 +426,7 @@ static bool mem_remove(void *ptr)
         char stop_location[PATH_CAPACITY];
         int n = snprintf(stop_location, sizeof stop_location, "%s:%d", file, line);
         if (n < 0) {
-            printf("tklog: internal error. snprintf failed\n");
+            printf("code_monitoring: internal error. snprintf failed\n");
             free(top->location);
             free(top);
             return;
@@ -434,7 +434,7 @@ static bool mem_remove(void *ptr)
         size_t needed = strlen(top->location) + strlen(stop_location) + 5;
         char* call_path = malloc(needed);
         if (!call_path) {
-            printf("tklog: out of memory for call_path\n");
+            printf("code_monitoring: out of memory for call_path\n");
             free(top->location);
             free(top);
             return;
@@ -442,7 +442,7 @@ static bool mem_remove(void *ptr)
         snprintf(call_path, needed, "%s to %s", top->location, stop_location);
         time_tracker_table_itr itr = time_tracker_table_get(&ts->table, top->location);
         if (time_tracker_table_is_end(itr)) {
-            printf("tklog: internal error. no tracker for start location\n");
+            printf("code_monitoring: internal error. no tracker for start location\n");
             free(call_path);
             free(top->location);
             free(top);
@@ -458,7 +458,7 @@ static bool mem_remove(void *ptr)
             cpt.count = 1;
             cp_itr = call_path_time_table_insert(&tracker->call_paths, call_path, cpt);
             if (call_path_time_table_is_end(cp_itr)) {
-                printf("tklog: call_paths is out of memory because call_path_time_table_insert failed\n");
+                printf("code_monitoring: call_paths is out of memory because call_path_time_table_insert failed\n");
                 free(call_path);
             }
         } else {
@@ -470,7 +470,7 @@ static bool mem_remove(void *ptr)
         free(top->location);
         free(top);
     }
-    void tklog_timer_print() {
+    void _cm_timer_print() {
         TimerState *ts = get_timer_state();
         if (!ts) return;
         uint64_t max_time_ms = 0;
@@ -513,8 +513,8 @@ static bool mem_remove(void *ptr)
             }
         }
     }
-    void _tklog_timer_clear() {
-        tklog_init_once();
+    void _cm_timer_clear() {
+        cm_init_once();
         TimerState *ts = get_timer_state();
         if (ts) {
             time_tracker_table_cleanup(&ts->table);
@@ -539,39 +539,39 @@ static void signal_handler(int sig) {
     const char *msg = "\nCaught signal. dumping memory before exit:\n";
     write(STDERR_FILENO, msg, strlen(msg));
 
-    #ifdef TKLOG_TIMER
-        _tklog_timer_print();
-        _tklog_timer_clear();
+    #ifdef CM_SHOW_TIMER
+        _cm_timer_print();
+        _cm_timer_clear();
     #endif
 
-    #ifdef TKLOG_MEMORY_PRINT_ON_EXIT
-        tklog_memory_dump();  // Call dump (note: not fully async-safe, but useful for dev)
+    #ifdef CM_SHOW_MEMORY_PRINT_ON_EXIT
+        cm_memory_dump();  // Call dump (note: not fully async-safe, but useful for dev)
     #endif
 
     // Re-raise signal or exit to avoid infinite loops
     _exit(EXIT_FAILURE);
 }
 
-bool tklog_output_stdio(const char *msg, void *user)
+bool cm_output_stdio(const char *msg, void *user)
 {
     (void)user;
     printf("%s", msg);
     return true;
 }
 
-static void tklog_init_once(void)
+static void cm_init_once(void)
 {
     static pthread_once_t once_control = PTHREAD_ONCE_INIT;
-    pthread_once(&once_control, tklog_init_once_impl);
+    pthread_once(&once_control, cm_init_once_impl);
 }
 
-static void tklog_init_once_impl(void)
+static void cm_init_once_impl(void)
 {
     (void)get_time_us;
     pthread_key_create(&g_tls_path, pathstack_free);
     g_start_ms = get_time_ms();
     
-#ifdef TKLOG_MEMORY
+#ifdef CM_SHOW_MEMORY
     /* Store original memory functions before they get redefined */
     original_malloc = malloc;
     original_calloc = calloc;
@@ -584,50 +584,46 @@ static void tklog_init_once_impl(void)
     signal(SIGABRT, signal_handler);
     signal(SIGINT, signal_handler);
 
-#ifdef TKLOG_MEMORY_PRINT_ON_EXIT
-    atexit(tklog_memory_dump);
+#ifdef CM_SHOW_MEMORY_PRINT_ON_EXIT
+    atexit(cm_memory_dump);
 #endif
 
-#ifdef TKLOG_TIMER
+#ifdef CM_SHOW_TIMER
     pthread_key_create(&g_tls_timer_state, timer_state_free);
-    atexit(_tklog_timer_clear);
+    atexit(_cm_timer_clear);
 #endif
 }
 
-void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, const char *fmt, ...)
+void _cm_print(uint32_t flags, const char* identifyer, int line, const char *file, const char *fmt, ...)
 {
-    tklog_init_once();
-
-    static const char *levelstr[] = {
-        "DEBUG    ", "INFO     ", "NOTICE   ", "WARNING  ",
-        "ERROR    ", "CRITICAL ", "ALERT    ", "EMERGENCY" };
+    cm_init_once();
 
     char msgbuf[2048];
     char *p = msgbuf;
     size_t n = 0;
 
-    /* level */
-    if (flags & TKLOG_INIT_F_LEVEL) {
-        n = snprintf(p, sizeof msgbuf, "%s | ", levelstr[level]);
+    /* section */
+    if (flags & CM_INIT_F_LEVEL) {
+        n = snprintf(p, sizeof msgbuf, "%s | ", identifyer);
         p += n;
     }
 
     /* time */
-    if (flags & TKLOG_INIT_F_TIME) {
+    if (flags & CM_INIT_F_TIME) {
         uint64_t t_ms = get_time_ms() - g_start_ms;
         n = snprintf(p, sizeof msgbuf - (p - msgbuf), "%" PRIu64 "ms | ", (uint64_t)t_ms);
         p += n;
     }
 
     /* thread */
-    if (flags & TKLOG_INIT_F_THREAD) {
+    if (flags & CM_INIT_F_THREAD) {
         pthread_t tid = pthread_self();
         n = snprintf(p, sizeof msgbuf - (p - msgbuf), "tid %lld | ", (unsigned long long)tid);
         p += n;
     }
 
     /* path */
-    if (flags & TKLOG_INIT_F_PATH) {
+    if (flags & CM_INIT_F_PATH) {
         PathStack *ps = pathstack_get();
         if (ps && ps->buf[0]) {
             /* Show call stack path + current file:line */
@@ -654,40 +650,40 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
     }
 
     /* lock, write, unlock */
-    pthread_mutex_lock(&g_tklog_mutex);
-    TKLOG_OUTPUT_FN(msgbuf, TKLOG_OUTPUT_USERPTR);
-    pthread_mutex_unlock(&g_tklog_mutex);
+    pthread_mutex_lock(&g_cm_mutex);
+    CM_OUTPUT_FN(msgbuf, CM_OUTPUT_USERPTR);
+    pthread_mutex_unlock(&g_cm_mutex);
 }
 
 /* -------------------------  Scope tracing  ----------------------------- */
-#ifdef TKLOG_SCOPE
-    void _tklog_scope_start(int line, const char *file) { tklog_init_once(); pathstack_push(file, line); }
-    void _tklog_scope_end  (void)                       { pathstack_pop(); }
+#ifdef CM_SHOW_SCOPE
+    void _cm_scope_start(int line, const char *file) { cm_init_once(); pathstack_push(file, line); }
+    void _cm_scope_end  (void)                       { pathstack_pop(); }
 #endif
 
 /* -------------------------  Memory API  -------------------------------- */
-#ifdef TKLOG_MEMORY
-    void *tklog_malloc(size_t size, const char *file, int line)
+#ifdef CM_SHOW_MEMORY
+    void *cm_malloc(size_t size, const char *file, int line)
     {
         void *p = original_malloc(size);
         mem_add(p, size, file, line);
         return p;
     }
 
-    void *tklog_calloc(size_t nmemb, size_t size, const char *file, int line)
+    void *cm_calloc(size_t nmemb, size_t size, const char *file, int line)
     {
         void *p = original_calloc(nmemb, size);
         mem_add(p, nmemb * size, file, line);
         return p;
     }
-    void *tklog_realloc(void *ptr, size_t size, const char *file, int line)
+    void *cm_realloc(void *ptr, size_t size, const char *file, int line)
     {
         if (size == 0) {
-            tklog_free(ptr, file, line);
+            cm_free(ptr, file, line);
             return NULL;
         }
         if (ptr == NULL) {
-            return tklog_malloc(size, file, line);
+            return cm_malloc(size, file, line);
         }
         void *newp = original_realloc(ptr, size);
         if (newp != NULL) {
@@ -695,7 +691,7 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
         }
         return newp;
     }
-    char *tklog_strdup(const char *str, const char *file, int line) {
+    char *cm_strdup(const char *str, const char *file, int line) {
         if (!str) str = "";
         size_t len = strlen(str) + 1;
         char *p = (char *)original_malloc(len);
@@ -705,34 +701,36 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
         }
         return p;
     }
-    void tklog_free(void *ptr, const char *file, int line)
+    void cm_free(void *ptr, const char *file, int line)
     {
+        (void)line;
+        (void)file;
         // Add NULL pointer check
         if (!ptr) {
-            _tklog(TKLOG_FLAGS, TKLOG_LEVEL_ERROR, line, file, "you tried to free NULL ptr");
+            CM_LOG_ERROR("you tried to free NULL ptr");
             exit(EXIT_FAILURE);
         }
         
         // Check if pointer exists in tracking (detects double-free)
         bool found = mem_remove(ptr);
         if (!found) {
-            _tklog(TKLOG_FLAGS, TKLOG_LEVEL_ERROR, line, file, "you tried to free a pointer that was not allocated");
+            CM_LOG_ERROR("you tried to free a pointer that was not allocated");
             exit(EXIT_FAILURE);
         }
         
         original_free(ptr);
     }
 #endif 
-#if defined(TKLOG_MEMORY) && defined(TKLOG_MEMORY_PRINT_ON_EXIT)
-    void tklog_memory_dump(void)
+#if defined(CM_SHOW_MEMORY) && defined(CM_SHOW_MEMORY_PRINT_ON_EXIT)
+    void cm_memory_dump(void)
     {
         pthread_rwlock_rdlock(&g_mem_rwlock);
         
         // Print header like debug.c does
         char header[] = "\nunfreed memory:\n";
-        pthread_mutex_lock(&g_tklog_mutex);
-        TKLOG_OUTPUT_FN(header, TKLOG_OUTPUT_USERPTR);
-        pthread_mutex_unlock(&g_tklog_mutex);
+        pthread_mutex_lock(&g_cm_mutex);
+        CM_OUTPUT_FN(header, CM_OUTPUT_USERPTR);
+        pthread_mutex_unlock(&g_cm_mutex);
         
         // Print each memory entry with time, thread, and full path
         for (MemEntry *e = g_mem_head; e; e = e->next) {
@@ -740,25 +738,25 @@ void _tklog(uint32_t flags, tklog_level_t level, int line, const char *file, con
             uint64_t t_ms = e->t_ms - g_start_ms;
             snprintf(linebuf, sizeof linebuf, "\t%" PRIu64 "ms | tid %lu | address %p | %zu bytes | at %s\n",
                                                t_ms, (unsigned long)e->tid, e->ptr, e->size, e->path);
-            pthread_mutex_lock(&g_tklog_mutex);
-            TKLOG_OUTPUT_FN(linebuf, TKLOG_OUTPUT_USERPTR);
-            pthread_mutex_unlock(&g_tklog_mutex);
+            pthread_mutex_lock(&g_cm_mutex);
+            CM_OUTPUT_FN(linebuf, CM_OUTPUT_USERPTR);
+            pthread_mutex_unlock(&g_cm_mutex);
         }
         
         // Print trailing newline like debug.c does
         char footer[] = "\n";
-        pthread_mutex_lock(&g_tklog_mutex);
-        TKLOG_OUTPUT_FN(footer, TKLOG_OUTPUT_USERPTR);
-        pthread_mutex_unlock(&g_tklog_mutex);
+        pthread_mutex_lock(&g_cm_mutex);
+        CM_OUTPUT_FN(footer, CM_OUTPUT_USERPTR);
+        pthread_mutex_unlock(&g_cm_mutex);
         
         pthread_rwlock_unlock(&g_mem_rwlock);
     }
-#else /* TKLOG_MEMORY AND TKLOG_MEMORY_PRINT_ON_EXIT not defined */
-    void tklog_memory_dump(void)
+#else /* CM_SHOW_MEMORY AND CM_SHOW_MEMORY_PRINT_ON_EXIT not defined */
+    void cm_memory_dump(void)
     {
         (void)mem_add;
         (void)mem_remove;
         (void)mem_update;
-        printf("tklog_memory_dump: TKLOG_MEMORY_PRINT_ON_EXIT must be defined to track and dump memory allocations\n");
+        printf("cm_memory_dump: CM_SHOW_MEMORY_PRINT_ON_EXIT must be defined to track and dump memory allocations\n");
     }
-#endif /* TKLOG_MEMORY */
+#endif /* CM_SHOW_MEMORY */

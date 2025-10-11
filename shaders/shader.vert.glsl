@@ -65,3 +65,4 @@ void main() {
     fragCornerRadiusWidth = inCornerRadius / inSize.x;
     fragCornerRadiusHeight = inCornerRadius / inSize.y;
 }
+

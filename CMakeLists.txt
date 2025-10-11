@@ -42,9 +42,33 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         else()
             set(LOGOS_SANITIZER_FLAGS "-fsanitize=address" "-fno-omit-frame-pointer")
         endif()
-        # Set environment variable to ensure proper sanitizer loading
+        # Base ASAN_OPTIONS for leak detection and error handling
         set(ENV{ASAN_OPTIONS} "detect_leaks=1:abort_on_error=1")
         message(STATUS "Address Sanitizer enabled")
+        if(LOGOS_PLATFORM_LINUX)
+            # Generate LSAN suppression file for known SDL3/X11 leaks
+            set(LSAN_SUPPRESSIONS_FILE "${CMAKE_CURRENT_BINARY_DIR}/sdl3_asan_suppressions.lsan")
+            file(WRITE ${LSAN_SUPPRESSIONS_FILE}
+                "leak:SDL_VideoInit\n"
+                "leak:SDL_InitSubSystem\n"
+                "leak:XOpenDisplay\n"
+                "leak:XCreateWindow\n"
+                "leak:XInternAtom\n"
+                "leak:glXGetProcAddress\n"
+                "leak:eglGetDisplay\n"
+                "leak:XCBConnect\n"
+                "leak:xcb_poll_for_event\n"
+                "leak:libGL\n"  # Fallback if symbols resolve partially
+            )
+            # Set LSAN_OPTIONS with suppressions (leak-specific)
+            set(ENV{LSAN_OPTIONS} "suppressions=${LSAN_SUPPRESSIONS_FILE}:print_suppressions=0")
+            # Extract LSAN_OPTIONS value to avoid nested ENV{} parsing issue
+            set(LSAN_OPTIONS_VALUE "$ENV{LSAN_OPTIONS}")
+            # Append LSAN to ASAN_OPTIONS (colon-separated for runtime chaining)
+            string(APPEND ENV{ASAN_OPTIONS} ":LSAN_OPTIONS=${LSAN_OPTIONS_VALUE}")
+            message(STATUS "LSAN suppressions enabled for SDL3/X11 leaks: ${LSAN_SUPPRESSIONS_FILE}")
+            message(STATUS "To apply at runtime: export ASAN_OPTIONS='${ASAN_OPTIONS_FOR_MSG}' before running binaries (e.g., ./bin/test_asan_demo)")
+        endif()
     elseif(LOGOS_THREAD_SANITIZER)
         if(CMAKE_C_COMPILER_ID MATCHES "Clang")
             set(LOGOS_SANITIZER_FLAGS "-fsanitize=thread" "-fno-omit-frame-pointer")
@@ -196,55 +220,32 @@ configure_file(
 # Add executables
 add_executable(logos
     src/main.c
-    src/cpi.c
-    src/tklog.c
-    src/vec.c
-    src/vec_path.c
-    src/type.c
-    src/map.c
-    src/global_data/core.c
+    src/code_monitoring.c
+    src/sdl3/core.c
+    src/sdl3/gpu_device.c
+    src/sdl3/shader.c
+    src/sdl3/graphics_pipeline.c
+    src/sdl3/window.c
     src/urcu_lfht_safe.c
     src/tsm.c)
-add_executable(logos_prev
-    src/main_2.c
-    src/cpi.c
-    src/tklog.c
-    src/vec.c
-    src/vec_path.c
-    src/type.c
-    src/map.c
-    src/global_data/core.c
-    src/urcu_lfht_safe.c)
-add_executable(test_tklog
-    src/tests/test_tklog.c
-    src/tklog.c)
 add_executable(test_urcu_lfht_safety
     src/tests/test_urcu_lfht_safety.c
     src/urcu_lfht_safe.c
-    src/tklog.c)
-add_executable(test_global_data
-    src/tests/test_global_data_2.c
-    src/global_data/core.c
-    src/urcu_lfht_safe.c
-    src/tklog.c)
+    src/code_monitoring.c)
 add_executable(test_tsm
     src/tests/test_tsm.c
     src/tsm.c
     src/urcu_lfht_safe.c
-    src/tklog.c)
+    src/code_monitoring.c)
 add_executable(test_asan_demo
     src/tests/test_asan_demo.c)
 
 target_sources(logos PRIVATE ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c) 
-target_sources(logos_prev PRIVATE ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c) 
 set(DISABLE_MIMALLOC OFF)
 if(NOT LOGOS_ADDRESS_SANITIZER AND NOT LOGOS_THREAD_SANITIZER AND NOT DISABLE_MIMALLOC)
     # Add mimalloc objects for override
     target_sources(logos PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
-    target_sources(logos_prev PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
-    target_sources(test_tklog PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
     target_sources(test_urcu_lfht_safety PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
-    target_sources(test_global_data PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
     target_sources(test_tsm PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
     target_sources(test_asan_demo PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
 endif()
@@ -252,28 +253,19 @@ endif()
 # Enable LTO for release builds if supported
 if(ipo_supported)
     set_property(TARGET logos PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-    set_property(TARGET logos_prev PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-    set_property(TARGET test_tklog PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET test_urcu_lfht_safety PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-    set_property(TARGET test_global_data PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET test_tsm PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET test_asan_demo PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 # Apply compiler flags to
 if(LOGOS_COMPILER_GCC_CLANG)
     target_compile_options(logos PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
-    target_compile_options(logos_prev PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
-    target_compile_options(test_tklog PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
     target_compile_options(test_urcu_lfht_safety PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
-    target_compile_options(test_global_data PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
     target_compile_options(test_tsm PRIVATE ${LOGOS_COMMON_FLAGS} -Wall -Wextra $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
     target_compile_options(test_asan_demo PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS} -Wno-stringop-overflow)
 elseif(LOGOS_COMPILER_MSVC)
     target_compile_options(logos PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
-    target_compile_options(logos_prev PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
-    target_compile_options(test_tklog PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
     target_compile_options(test_urcu_lfht_safety PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
-    target_compile_options(test_global_data PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
     target_compile_options(test_tsm PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
     target_compile_options(test_asan_demo PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
 endif()
@@ -285,24 +277,9 @@ target_include_directories(logos PRIVATE
     ${spirv-reflect_SOURCE_DIR}
     ${URCU_INCLUDE_DIRS}
     ${mimalloc_SOURCE_DIR}/include)  # Added for mimalloc (optional but safe)
-target_include_directories(logos_prev PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/shaders
-    ${verstable_SOURCE_DIR}
-    ${spirv-reflect_SOURCE_DIR}
-    ${URCU_INCLUDE_DIRS}
-    ${mimalloc_SOURCE_DIR}/include)  # Added for mimalloc (optional but safe)
-target_include_directories(test_tklog PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${mimalloc_SOURCE_DIR}/include)  # Added for mimalloc (optional but safe)
 target_include_directories(test_urcu_lfht_safety PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${URCU_INCLUDE_DIRS}
-    ${mimalloc_SOURCE_DIR}/include)  # Already had; kept for consistency
-target_include_directories(test_global_data PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${URCU_INCLUDE_DIRS}
-    ${verstable_SOURCE_DIR}
     ${mimalloc_SOURCE_DIR}/include)  # Already had; kept for consistency
 target_include_directories(test_tsm PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -314,67 +291,18 @@ target_include_directories(test_asan_demo PRIVATE
     ${mimalloc_SOURCE_DIR}/include)  # Added for project includes and mimalloc (optional but safe)
 # Compile definitions
 target_compile_definitions(logos PRIVATE
-    TKLOG_SHOW_LOG_LEVEL
-    TKLOG_SHOW_TIME
-    TKLOG_SHOW_THREAD
-    TKLOG_SHOW_PATH
-    TKLOG_SCOPE
-    TKLOG_INFO
-    TKLOG_NOTICE
-    TKLOG_WARNING
-    TKLOG_ERROR
-    TKLOG_CRITICAL
-    TKLOG_ALERT
-    TKLOG_EMERGENCY
-    TKLOG_EXIT_ON_ERROR
-    TKLOG_EXIT_ON_CRITICAL
-    TKLOG_EXIT_ON_ALERT
-    TKLOG_EXIT_ON_EMERGENCY
+    CMM_SANITIZE_THREAD
     URCU_LFHT_SAFETY_ON
-    RPMALLOC_FIRST_CLASS_HEAPS=1
-    $<$<CONFIG:Debug>:DEBUG_RCU> # Fine-grained RCU debug
-    $<$<CONFIG:Debug>:DEBUG_YIELD> # Add random delays for testing races
-)
-target_compile_definitions(logos_prev PRIVATE
-    TKLOG_SHOW_LOG_LEVEL
-    TKLOG_SHOW_TIME
-    TKLOG_SHOW_THREAD
-    TKLOG_SHOW_PATH
-    TKLOG_SCOPE
-    TKLOG_INFO
-    TKLOG_NOTICE
-    TKLOG_WARNING
-    TKLOG_ERROR
-    TKLOG_CRITICAL
-    TKLOG_ALERT
-    TKLOG_EMERGENCY
-    TKLOG_EXIT_ON_ERROR
-    TKLOG_EXIT_ON_CRITICAL
-    TKLOG_EXIT_ON_ALERT
-    TKLOG_EXIT_ON_EMERGENCY
-    URCU_LFHT_SAFETY_ON
-    RPMALLOC_FIRST_CLASS_HEAPS=1
-    $<$<CONFIG:Debug>:DEBUG_RCU> # Fine-grained RCU debug
-    $<$<CONFIG:Debug>:DEBUG_YIELD> # Add random delays for testing races
-)
-target_compile_definitions(test_tklog PRIVATE
-    TKLOG_SHOW_LOG_LEVEL
-    TKLOG_SHOW_TIME
-    TKLOG_SHOW_THREAD
-    TKLOG_SHOW_PATH
-    TKLOG_SCOPE
-    TKLOG_MEMORY
-    TKLOG_INFO
-    TKLOG_NOTICE
-    TKLOG_WARNING
-    TKLOG_ERROR
-    TKLOG_CRITICAL
-    TKLOG_ALERT
-    TKLOG_EMERGENCY
-    TKLOG_EXIT_ON_ERROR
-    TKLOG_EXIT_ON_CRITICAL
-    TKLOG_EXIT_ON_ALERT
-    TKLOG_EXIT_ON_EMERGENCY
+    CM_SHOW_MEMORY
+    CM_SHOW_MEMORY_PRINT_ON_EXIT
+    CM_SHOW_LOG_LEVEL
+    CM_SHOW_TIME
+    CM_SHOW_THREAD
+    CM_SHOW_PATH
+    CM_SHOW_SCOPE
+    CM_SHOW_TIMER
+    $<$<CONFIG:Debug>:DEBUG_RCU>
+    $<$<CONFIG:Debug>:DEBUG_YIELD>
 )
 target_compile_definitions(test_urcu_lfht_safety PRIVATE
     URCU_LFHT_SAFETY_ON
@@ -397,114 +325,53 @@ target_compile_definitions(test_urcu_lfht_safety PRIVATE
     $<$<CONFIG:Debug>:DEBUG_RCU>
     $<$<CONFIG:Debug>:DEBUG_YIELD>
 )
-target_compile_definitions(test_global_data PRIVATE
-    URCU_LFHT_SAFETY_ON
-    # TKLOG_MEMORY
-    # TKLOG_MEMORY_PRINT_ON_EXIT
-    TKLOG_SHOW_LOG_LEVEL
-    TKLOG_SHOW_TIME
-    TKLOG_SHOW_THREAD
-    TKLOG_SHOW_PATH
-    TKLOG_SCOPE
-    TKLOG_INFO
-    TKLOG_NOTICE
-    TKLOG_WARNING
-    TKLOG_ERROR
-    TKLOG_CRITICAL
-    TKLOG_ALERT
-    TKLOG_EMERGENCY
-    TKLOG_EXIT_ON_CRITICAL
-    TKLOG_EXIT_ON_ALERT
-    TKLOG_EXIT_ON_EMERGENCY
-    $<$<CONFIG:Debug>:DEBUG_RCU>
-    $<$<CONFIG:Debug>:DEBUG_YIELD>
-)
 target_compile_definitions(test_tsm PRIVATE
     CMM_SANITIZE_THREAD
     URCU_LFHT_SAFETY_ON
-    TKLOG_MEMORY
-    TKLOG_MEMORY_PRINT_ON_EXIT
-    TKLOG_SHOW_LOG_LEVEL
-    TKLOG_SHOW_TIME
-    TKLOG_SHOW_THREAD
-    TKLOG_SHOW_PATH
-    TKLOG_SCOPE
-    TKLOG_TIMER
-    #TKLOG_DEBUG
-    #TKLOG_INFO
-    TKLOG_NOTICE
-    TKLOG_WARNING
-    TKLOG_ERROR
-    TKLOG_CRITICAL
-    TKLOG_ALERT
-    TKLOG_EMERGENCY
-    TKLOG_EXIT_ON_ERROR
-    TKLOG_EXIT_ON_CRITICAL
-    TKLOG_EXIT_ON_ALERT
-    TKLOG_EXIT_ON_EMERGENCY
+    CM_SHOW_MEMORY
+    CM_SHOW_MEMORY_PRINT_ON_EXIT
+    CM_SHOW_LOG_LEVEL
+    CM_SHOW_TIME
+    CM_SHOW_THREAD
+    CM_SHOW_PATH
+    CM_SHOW_SCOPE
+    CM_SHOW_TIMER
     $<$<CONFIG:Debug>:DEBUG_RCU>
     $<$<CONFIG:Debug>:DEBUG_YIELD>
 )
 # Add output name
 if(LOGOS_PLATFORM_WINDOWS)
     set_target_properties(logos PROPERTIES OUTPUT_NAME "logos.exe")
-    set_target_properties(logos_prev PROPERTIES OUTPUT_NAME "logos_prev.exe")
-    set_target_properties(test_tklog PROPERTIES OUTPUT_NAME "test_tklog.exe")
     set_target_properties(test_urcu_lfht_safety PROPERTIES OUTPUT_NAME "test_urcu_lfht_safety.exe")
-    set_target_properties(test_global_data PROPERTIES OUTPUT_NAME "test_global_data.exe")
     set_target_properties(test_tsm PROPERTIES OUTPUT_NAME "test_tsm.exe")
     set_target_properties(test_asan_demo PROPERTIES OUTPUT_NAME "test_asan_demo.exe")
 else()
     set_target_properties(logos PROPERTIES OUTPUT_NAME "logos")
-    set_target_properties(logos_prev PROPERTIES OUTPUT_NAME "logos_prev")
-    set_target_properties(test_tklog PROPERTIES OUTPUT_NAME "test_tklog")
     set_target_properties(test_urcu_lfht_safety PROPERTIES OUTPUT_NAME "test_urcu_lfht_safety")
-    set_target_properties(test_global_data PROPERTIES OUTPUT_NAME "test_global_data")
     set_target_properties(test_tsm PROPERTIES OUTPUT_NAME "test_tsm")
     set_target_properties(test_asan_demo PROPERTIES OUTPUT_NAME "test_asan_demo")
 endif()
 # Add sanitizer libraries if enabled (must be first)
 if(LOGOS_ADDRESS_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
     target_link_libraries(logos PRIVATE asan)
-    target_link_libraries(logos_prev PRIVATE asan)
-    target_link_libraries(test_tklog PRIVATE asan)
     target_link_libraries(test_urcu_lfht_safety PRIVATE asan)
-    target_link_libraries(test_global_data PRIVATE asan)
     target_link_libraries(test_tsm PRIVATE asan)
     target_link_libraries(test_asan_demo PRIVATE asan)
 elseif(LOGOS_THREAD_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
     target_link_libraries(logos PRIVATE tsan)
-    target_link_libraries(logos_prev PRIVATE tsan)
-    target_link_libraries(test_tklog PRIVATE tsan)
     target_link_libraries(test_urcu_lfht_safety PRIVATE tsan)
-    target_link_libraries(test_global_data PRIVATE tsan)
     target_link_libraries(test_tsm PRIVATE tsan)
     target_link_libraries(test_asan_demo PRIVATE tsan)
 endif()
+
 # Link libraries (after sanitizer libraries)
-if(WIN32)
-    # On Windows, pthread is provided by MinGW-w64 or similar
-    target_link_libraries(test_tklog PRIVATE)
-else()
-    target_link_libraries(test_tklog PRIVATE pthread)  # For mimalloc threads
-    target_link_libraries(logos PRIVATE pthread)  # Added for mimalloc
-    target_link_libraries(logos_prev PRIVATE pthread)  # Added for mimalloc
-    target_link_libraries(test_urcu_lfht_safety PRIVATE pthread)  # Added for mimalloc
-    target_link_libraries(test_global_data PRIVATE pthread)  # Added for mimalloc
-    target_link_libraries(test_tsm PRIVATE pthread)  # Added for mimalloc
-    target_link_libraries(test_asan_demo PRIVATE pthread)  # Added for mimalloc
-endif()
+target_link_libraries(logos PRIVATE pthread)  # Added for mimalloc
+target_link_libraries(test_urcu_lfht_safety PRIVATE pthread)  # Added for mimalloc
+target_link_libraries(test_tsm PRIVATE pthread)  # Added for mimalloc
+target_link_libraries(test_asan_demo PRIVATE pthread)  # Added for mimalloc
+
 # Link other libraries
 target_link_libraries(logos PRIVATE
-    SDL3::SDL3
-    xxhash
-    ${LOGOS_PLATFORM_LIBS}
-    ${URCU_LIBRARIES}
-    SDL3_shadercross::SDL3_shadercross
-    shaderc_combined
-    stdc++
-)
-target_link_libraries(logos_prev PRIVATE
     SDL3::SDL3
     xxhash
     ${LOGOS_PLATFORM_LIBS}
@@ -516,27 +383,16 @@ target_link_libraries(logos_prev PRIVATE
 target_link_libraries(test_urcu_lfht_safety PRIVATE
     ${URCU_LIBRARIES}
     SDL3::SDL3)
-target_link_libraries(test_global_data PRIVATE
-    ${URCU_LIBRARIES}
-    SDL3::SDL3
-    xxhash)
 target_link_libraries(test_tsm PRIVATE
     ${URCU_LIBRARIES}
     SDL3::SDL3
     xxhash)  # Removed mimalloc-static; using objects instead
 # Make executables depend on URCU build
 add_dependencies(logos urcu)
-add_dependencies(logos_prev urcu)
 add_dependencies(test_urcu_lfht_safety urcu)
-add_dependencies(test_global_data urcu)
 add_dependencies(test_tsm urcu)
 # Install rules
 install(TARGETS logos
-    RUNTIME DESTINATION bin
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
-)
-install(TARGETS logos_prev
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib

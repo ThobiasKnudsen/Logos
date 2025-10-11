@@ -1,6 +1,8 @@
 #ifndef LFHT_SAFE_H
 #define LFHT_SAFE_H
 
+#include "code_monitoring.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <pthread.h>
@@ -144,31 +146,31 @@ bool _validate_gd_node_field(void* field_ptr, void* node_ptr, const char* field_
 /* -------------------------------------------------------------------------
  * Macro Overrides
  * These macros replace the standard RCU/LFHT functions with safety wrappers.
- * They use tklog_scope for proper logging context.
+ * They use CM_SCOPE for proper logging context.
  * ------------------------------------------------------------------------- */
 
 #ifndef LFHT_SAFE_INTERNAL
 
 /* Helper macros for different return types */
 #define _URCU_SAFE_VOID_CALL(func, ...) do { \
-    tklog_scope(func(__VA_ARGS__)); \
+    CM_SCOPE(func(__VA_ARGS__)); \
 } while(0)
 
 #define _URCU_SAFE_BOOL_CALL(func, ...) ({ \
     bool _result; \
-    tklog_scope(_result = func(__VA_ARGS__)); \
+    CM_SCOPE(_result = func(__VA_ARGS__)); \
     _result; \
 })
 
 #define _URCU_SAFE_INT_CALL(func, ...) ({ \
     int _result; \
-    tklog_scope(_result = func(__VA_ARGS__)); \
+    CM_SCOPE(_result = func(__VA_ARGS__)); \
     _result; \
 })
 
 #define _URCU_SAFE_PTR_CALL(func, ...) ({ \
     void *_result; \
-    tklog_scope(_result = func(__VA_ARGS__)); \
+    CM_SCOPE(_result = func(__VA_ARGS__)); \
     _result; \
 })
 
@@ -222,18 +224,18 @@ bool _validate_gd_node_field(void* field_ptr, void* node_ptr, const char* field_
 #endif
 
 /* Define our safety wrappers that override the original URCU functions */
-#define rcu_init() tklog_scope(_rcu_init_safe())
-#define rcu_read_lock() tklog_scope(_rcu_read_lock_safe())
-#define rcu_read_unlock() tklog_scope(_rcu_read_unlock_safe())
-#define rcu_register_thread() tklog_scope(_rcu_register_thread_safe())
-#define rcu_unregister_thread() tklog_scope(_rcu_unregister_thread_safe())
-#define synchronize_rcu() tklog_scope(_synchronize_rcu_safe())
-#define rcu_barrier() tklog_scope(_rcu_barrier_safe())
-#define call_rcu(head, func) tklog_scope(_call_rcu_safe(head, func))
+#define rcu_init() CM_SCOPE(_rcu_init_safe())
+#define rcu_read_lock() CM_SCOPE(_rcu_read_lock_safe())
+#define rcu_read_unlock() CM_SCOPE(_rcu_read_unlock_safe())
+#define rcu_register_thread() CM_SCOPE(_rcu_register_thread_safe())
+#define rcu_unregister_thread() CM_SCOPE(_rcu_unregister_thread_safe())
+#define synchronize_rcu() CM_SCOPE(_synchronize_rcu_safe())
+#define rcu_barrier() CM_SCOPE(_rcu_barrier_safe())
+#define call_rcu(head, func) CM_SCOPE(_call_rcu_safe(head, func))
 
 /* RCU pointer function overrides with comprehensive validation */
 #define rcu_dereference(ptr) ({ \
-    tklog_scope(void* _temp = _rcu_dereference_safe((void*)(ptr), __FILE__, __LINE__)); \
+    CM_SCOPE(void* _temp = _rcu_dereference_safe((void*)(ptr), __FILE__, __LINE__)); \
     (typeof((ptr) + 0))_temp; \
 })
 #define rcu_assign_pointer(ptr_ptr, val) _rcu_assign_pointer_safe((void**)&(ptr_ptr), (void*)(val), __FILE__, __LINE__)
