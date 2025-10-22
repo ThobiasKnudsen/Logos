@@ -1,6 +1,6 @@
 # LOGOS
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/yourusername/logos) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/ThobiasKnudsen/logos) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Overview
 
@@ -29,7 +29,7 @@ LOGOS uses CMake for configuration and supports Debug/Release builds with option
 
 1. Clone the repository:
    ```
-   git clone https://github.com/yourusername/logos.git
+   git clone https://github.com/ThobiasKnudsen/logos.git
    cd logos
    ```
 
