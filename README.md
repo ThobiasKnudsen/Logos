@@ -1,4 +1,5 @@
 # LOGOS
+With Logos you can easily make this:
 ![Video](./resources/demo_video.gif)  
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/ThobiasKnudsen/logos) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
