@@ -1,5 +1,5 @@
 # LOGOS
-
+![Video](./resources/demo_video.mp4)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/ThobiasKnudsen/logos) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## Overview
