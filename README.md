@@ -48,23 +48,10 @@ LOGOS uses CMake for configuration and supports Debug/Release builds with option
 
 ### Manual CMake Build
 
-1. Create a build directory:
+Build and run:
    ```
-   mkdir build && cd build
-   ```
-
-2. Configure:
-   ```
-   cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DLOGOS_ADDRESS_SANITIZER=OFF
-   ```
-
-3. Build:
-   ```
-   cmake --build . -j$(nproc)
-   ```
-
-4. Run:
-   ```
+   ./scripts/build.sh --release
+   cd build
    ./bin/logos
    ```
 
