@@ -33,6 +33,13 @@ LOGOS uses CMake for configuration and supports Debug/Release builds with option
    cd logos
    ```
 
+2. Make sure these are installed:
+   ```
+   sudo apt update
+   sudo apt install libxcursor-dev libx11-dev libxext-dev libxi-dev libxrender-dev libxrandr-dev libxss-dev libxcursor-dev libxinerama-dev libxfixes-dev libxxf86vm-dev
+   sudo apt install libgl1-mesa-dev
+   ```
+
 2. Run the build script:
    ```
    ./build.sh --release

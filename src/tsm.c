@@ -887,6 +887,7 @@ CM_RES tsm_path_length(const struct tsm_path* p_path, uint32_t* p_output_length)
 // ==========================================================================================
 CM_RES tsm_node_get(const struct tsm_base_node* p_tsm_base, const struct tsm_key* p_key, const struct tsm_base_node** pp_output_node) {
 
+
     CM_ASSERT(p_tsm_base && p_key && pp_output_node);
     *pp_output_node = NULL;
     CM_ASSERT(CM_RES_TSM_KEY_IS_VALID == tsm_key_is_valid(p_key));
@@ -896,9 +897,11 @@ CM_RES tsm_node_get(const struct tsm_base_node* p_tsm_base, const struct tsm_key
     
     // Calculate hash internally
     uint64_t hash = _tsm_hash_key(p_key->key_union, p_key->key_type);
+    CM_TIMER_START();
     struct cds_lfht_iter iter = {0};
     cds_lfht_lookup(p_tsm->p_ht, hash, _tsm_key_match, p_key, &iter);
     struct cds_lfht_node* lfht_node = cds_lfht_iter_get_node(&iter);
+    CM_TIMER_STOP();
     
     if (!lfht_node) {
         CM_LOG_INFO("node is not found because lfht_node = NULL");
@@ -1145,10 +1148,11 @@ CM_RES tsm_node_update(const struct tsm_base_node* p_tsm_base, struct tsm_base_n
     struct cds_lfht_node*   old_lfht_node = cds_lfht_iter_get_node(&old_iter);
     struct tsm_base_node*   old_node = caa_container_of(old_lfht_node, struct tsm_base_node, lfht_node);
     if (!old_node) {
-        if (new_node->key_type == TSM_KEY_TYPE_UINT64)
+        if (new_node->key_type == TSM_KEY_TYPE_UINT64) {
             CM_LOG_INFO("Cannot update - node with number key %lu not found\n", new_node->key_union.uint64);
-        else
+        } else {
             CM_LOG_INFO("Cannot update - node with string key %s not found\n", new_node->key_union.string);
+        }
         CM_TIMER_STOP();
         return CM_RES_TSM_NODE_NOT_FOUND;
     }

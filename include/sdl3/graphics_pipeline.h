@@ -16,6 +16,10 @@ CM_RES sdl3_graphics_pipeline_create(
 	const struct tsm_key* p_key,
 	const struct tsm_key* p_vertex_key,
 	const struct tsm_key* p_fragment_key);
+CM_RES sdl3_graphics_pipeline_create_1(
+    const struct tsm_key* p_key,
+    const struct tsm_key* p_vertex_key,
+    const struct tsm_key* p_fragment_key);
 CM_RES sdl3_graphics_pipeline_get(
 	const struct tsm_key* p_key,
 	const struct tsm_base_node** p_output_pipeline);

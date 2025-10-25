@@ -186,9 +186,12 @@ void* stress_thread(void* arg) {
     srand(time(NULL) ^ (intptr_t)pthread_self() ^ (intptr_t)arg);
     memset(&current_path, 0, sizeof(current_path)); // Start at GTSM root
     rcu_read_lock(); CM_TIMER_START();
-    for (int op = 0; op < 1000; op++) {
+    for (int op = 0; op < 70000; op++) {
+        CM_TIMER_START();
         rcu_read_unlock();
-        rcu_read_lock(); CM_TIMER_START();
+        rcu_read_lock(); 
+        CM_TIMER_STOP();
+        CM_TIMER_START();
         CM_ASSERT(CM_RES_TSM_PATH_VALID == tsm_path_is_valid(&current_path));
         const struct tsm_base_node* p_current_node = NULL;
         CM_SCOPE(CM_RES res = tsm_node_get_by_path(gtsm_get(), &current_path, &p_current_node));
@@ -420,7 +423,7 @@ void* stress_thread(void* arg) {
             }
             CM_TIMER_STOP();
             continue;
-        } else if (r < 94) { // Navigation: first child (adjusted)
+        } else if (r < 73) { // Navigation: first child (adjusted)
             CM_LOG_DEBUG("op: %d nav first child\n", op);
             CM_SCOPE(res = tsm_node_is_tsm(p_current_node));
             if (res == CM_RES_TSM_NODE_NOT_TSM) {
@@ -441,7 +444,7 @@ void* stress_thread(void* arg) {
                 tsm_key_free(&child_key);
                 CM_ASSERT(CM_RES_TSM_PATH_VALID == tsm_path_is_valid(&current_path));
             }
-        } if (r < 96) { // Navigation: next sibling
+        } else if (r < 74) { // Navigation: next sibling
             CM_LOG_DEBUG("op: %d nav next node\n", op);
             if (current_path.length == 0) {
                 CM_TIMER_STOP();
@@ -482,7 +485,7 @@ void* stress_thread(void* arg) {
             CM_ASSERT(CM_RES_SUCCESS == tsm_key_free(&next_key));
             CM_TIMER_STOP();
         } else if (r < 97) { // Navigation: parent
-            CM_LOG_DEBUG("op: %d nav parent\n", op);
+            CM_LOG_NOTICE("op: %d nav parent\n", op);
             const struct tsm_base_node* current_node = p_current_node;
             if (!current_node) {
                 CM_TIMER_STOP();
@@ -574,15 +577,16 @@ void* stress_thread(void* arg) {
         }
     }
     CM_ASSERT(CM_RES_SUCCESS == tsm_path_free(&current_path));
-    rcu_read_unlock(); CM_TIMER_STOP();
+    rcu_read_unlock(); 
+    CM_TIMER_STOP();
     rcu_unregister_thread();
-    // CM_TIMER_PRINT();
+    CM_TIMER_PRINT();
     CM_TIMER_CLEAR();
     return NULL;
 }
 void stress_test() {
     CM_LOG_INFO("Starting incremental stress test\n");
-    for (int nthreads = 1; nthreads <= 32; nthreads *= 2) {
+    for (int nthreads = 1; nthreads <= 8; nthreads *= 2) {
         CM_LOG_NOTICE("Stress testing with %d threads ===========================================================================================\n", nthreads);
 
         pthread_t* threads = malloc(nthreads * sizeof(pthread_t));

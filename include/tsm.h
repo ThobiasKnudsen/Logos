@@ -49,11 +49,6 @@
  * - **Grace Period**: To wait for a grace period after writes (e.g., to ensure deletions are complete), call `synchronize_rcu()`.
  */
 
-/**
- * @brief when you dont know what the CM_RES number represents you can use this function to print it
- */
-CM_RES tsm_print_result(CM_RES result);
-
 // ================================
 // tsm_key_union
 // ================================

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(LOGOS LANGUAGES C VERSION 1.0.0)
+project(LOGOS LANGUAGES C CXX VERSION 1.0.0)
 # Add this after the project declaration to enable offline builds after initial fetch
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL "Prevent FetchContent from updating sources")
 # Ensure Git is found to perform direct population at configure time (avoids deferred fetches during build)
@@ -33,7 +33,7 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     set(LOGOS_COMPILER_GCC_CLANG ON)
     set(LOGOS_COMMON_FLAGS "-Werror" "-Werror=return-type") # "-Wall" "-Wextra"
     set(LOGOS_DEBUG_FLAGS "-g" "-O1" "-DDEBUG")
-    set(LOGOS_RELEASE_FLAGS "-Ofast" "-march=native" "-DNDEBUG")
+    set(LOGOS_RELEASE_FLAGS "-Ofast" "-march=native" "-flto" "-DNDEBUG")
    
     # Sanitizer flags
     if(LOGOS_ADDRESS_SANITIZER)
@@ -80,7 +80,7 @@ elseif(MSVC)
     set(LOGOS_COMPILER_MSVC ON)
     set(LOGOS_COMMON_FLAGS "/W4" "/WX" "/D_CRT_SECURE_NO_WARNINGS")
     set(LOGOS_DEBUG_FLAGS "/Zi" "/Od" "/DDEBUG")
-    set(LOGOS_RELEASE_FLAGS "/O2" "/DNDEBUG")
+    set(LOGOS_RELEASE_FLAGS "/O3" "/march=native" "/DNDEBUG")
    
     # Sanitizers not supported on MSVC
     if(LOGOS_ADDRESS_SANITIZER OR LOGOS_THREAD_SANITIZER)
@@ -212,6 +212,19 @@ set(MI_OVERRIDE ON CACHE BOOL "Enable malloc override")
 set(MI_BUILD_OBJECT ON CACHE BOOL "Build mimalloc as object file for static override")  # Added for object-based override
 set(MI_SECURE ON CACHE BOOL "Enable secure mode with guards and encryption")
 FetchContent_MakeAvailable(mimalloc)
+# c++ htrie
+FetchContent_Declare(
+    htrie
+    GIT_REPOSITORY https://github.com/Tessil/hat-trie.git
+    GIT_TAG master)
+FetchContent_MakeAvailable(htrie)
+# Boost::Unordered
+FetchContent_Declare(
+    boost_unordered
+    GIT_REPOSITORY https://github.com/boostorg/unordered.git
+    GIT_TAG master)
+FetchContent_MakeAvailable(boost_unordered)
+
 # Configure version header
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/include/version.h.in"
@@ -239,6 +252,12 @@ add_executable(test_tsm
     src/code_monitoring.c)
 add_executable(test_asan_demo
     src/tests/test_asan_demo.c)
+add_executable(test_ast
+    src/ast/tokenize.c
+    src/ast/char32_trie.c
+    src/ast/htrie_wchar.cpp
+    src/code_monitoring.c
+    src/tests/test_ast.c)
 
 target_sources(logos PRIVATE ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c) 
 set(DISABLE_MIMALLOC OFF)
@@ -248,6 +267,7 @@ if(NOT LOGOS_ADDRESS_SANITIZER AND NOT LOGOS_THREAD_SANITIZER AND NOT DISABLE_MI
     target_sources(test_urcu_lfht_safety PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
     target_sources(test_tsm PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
     target_sources(test_asan_demo PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
+    target_sources(test_ast PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
 endif()
 
 # Enable LTO for release builds if supported
@@ -256,6 +276,7 @@ if(ipo_supported)
     set_property(TARGET test_urcu_lfht_safety PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET test_tsm PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     set_property(TARGET test_asan_demo PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET test_ast PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
 # Apply compiler flags to
 if(LOGOS_COMPILER_GCC_CLANG)
@@ -263,11 +284,22 @@ if(LOGOS_COMPILER_GCC_CLANG)
     target_compile_options(test_urcu_lfht_safety PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
     target_compile_options(test_tsm PRIVATE ${LOGOS_COMMON_FLAGS} -Wall -Wextra $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
     target_compile_options(test_asan_demo PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS} -Wno-stringop-overflow)
+    target_compile_options(test_tsm PRIVATE ${LOGOS_COMMON_FLAGS} -Wall -Wextra $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}> ${LOGOS_SANITIZER_FLAGS})
+
+    # Apply sanitizer flags to linking (pulls in libtsan/libasan)
+    if(LOGOS_ADDRESS_SANITIZER OR LOGOS_THREAD_SANITIZER)
+        target_link_options(logos PRIVATE ${LOGOS_SANITIZER_FLAGS})
+        target_link_options(test_urcu_lfht_safety PRIVATE ${LOGOS_SANITIZER_FLAGS})
+        target_link_options(test_tsm PRIVATE ${LOGOS_SANITIZER_FLAGS})
+        target_link_options(test_asan_demo PRIVATE ${LOGOS_SANITIZER_FLAGS})
+        target_link_options(test_ast PRIVATE ${LOGOS_SANITIZER_FLAGS})
+    endif()
 elseif(LOGOS_COMPILER_MSVC)
     target_compile_options(logos PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
     target_compile_options(test_urcu_lfht_safety PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
     target_compile_options(test_tsm PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
     target_compile_options(test_asan_demo PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
+    target_compile_options(test_ast PRIVATE ${LOGOS_COMMON_FLAGS} $<$<CONFIG:Release>:${LOGOS_RELEASE_FLAGS}> $<$<CONFIG:Debug>:${LOGOS_DEBUG_FLAGS}>)
 endif()
 # Include directories
 target_include_directories(logos PRIVATE
@@ -289,9 +321,13 @@ target_include_directories(test_tsm PRIVATE
 target_include_directories(test_asan_demo PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${mimalloc_SOURCE_DIR}/include)  # Added for project includes and mimalloc (optional but safe)
+target_include_directories(test_ast PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${verstable_SOURCE_DIR}
+    ${mimalloc_SOURCE_DIR}/include)  # Added for project includes and mimalloc (optional but safe)
 # Compile definitions
 target_compile_definitions(logos PRIVATE
-    CMM_SANITIZE_THREAD
+    $<$<BOOL:${LOGOS_THREAD_SANITIZER}>:CMM_SANITIZE_THREAD>
     URCU_LFHT_SAFETY_ON
     CM_SHOW_MEMORY
     CM_SHOW_MEMORY_PRINT_ON_EXIT
@@ -326,18 +362,28 @@ target_compile_definitions(test_urcu_lfht_safety PRIVATE
     $<$<CONFIG:Debug>:DEBUG_YIELD>
 )
 target_compile_definitions(test_tsm PRIVATE
-    CMM_SANITIZE_THREAD
-    URCU_LFHT_SAFETY_ON
-    CM_SHOW_MEMORY
-    CM_SHOW_MEMORY_PRINT_ON_EXIT
+    $<$<BOOL:${LOGOS_THREAD_SANITIZER}>:CMM_SANITIZE_THREAD>
+    #URCU_LFHT_SAFETY_ON
+    #CM_SHOW_MEMORY
+    #CM_SHOW_MEMORY_PRINT_ON_EXIT
+    #CM_SHOW_LOG_LEVEL
+    #CM_SHOW_TIME
+    #CM_SHOW_THREAD
+    #CM_SHOW_PATH
+    #CM_SHOW_SCOPE
+    CM_SHOW_TIMER
+    #$<$<CONFIG:Debug>:DEBUG_RCU>
+    #$<$<CONFIG:Debug>:DEBUG_YIELD>
+)
+target_compile_definitions(test_ast PRIVATE
+    #CM_SHOW_MEMORY
+    #CM_SHOW_MEMORY_PRINT_ON_EXIT
     CM_SHOW_LOG_LEVEL
     CM_SHOW_TIME
     CM_SHOW_THREAD
     CM_SHOW_PATH
     CM_SHOW_SCOPE
     CM_SHOW_TIMER
-    $<$<CONFIG:Debug>:DEBUG_RCU>
-    $<$<CONFIG:Debug>:DEBUG_YIELD>
 )
 # Add output name
 if(LOGOS_PLATFORM_WINDOWS)
@@ -345,11 +391,13 @@ if(LOGOS_PLATFORM_WINDOWS)
     set_target_properties(test_urcu_lfht_safety PROPERTIES OUTPUT_NAME "test_urcu_lfht_safety.exe")
     set_target_properties(test_tsm PROPERTIES OUTPUT_NAME "test_tsm.exe")
     set_target_properties(test_asan_demo PROPERTIES OUTPUT_NAME "test_asan_demo.exe")
+    set_target_properties(test_ast PROPERTIES OUTPUT_NAME "test_ast.exe")
 else()
     set_target_properties(logos PROPERTIES OUTPUT_NAME "logos")
     set_target_properties(test_urcu_lfht_safety PROPERTIES OUTPUT_NAME "test_urcu_lfht_safety")
     set_target_properties(test_tsm PROPERTIES OUTPUT_NAME "test_tsm")
     set_target_properties(test_asan_demo PROPERTIES OUTPUT_NAME "test_asan_demo")
+    set_target_properties(test_ast PROPERTIES OUTPUT_NAME "test_ast")
 endif()
 # Add sanitizer libraries if enabled (must be first)
 if(LOGOS_ADDRESS_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
@@ -357,11 +405,13 @@ if(LOGOS_ADDRESS_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
     target_link_libraries(test_urcu_lfht_safety PRIVATE asan)
     target_link_libraries(test_tsm PRIVATE asan)
     target_link_libraries(test_asan_demo PRIVATE asan)
+    target_link_libraries(test_ast PRIVATE asan)
 elseif(LOGOS_THREAD_SANITIZER AND LOGOS_COMPILER_GCC_CLANG)
     target_link_libraries(logos PRIVATE tsan)
     target_link_libraries(test_urcu_lfht_safety PRIVATE tsan)
     target_link_libraries(test_tsm PRIVATE tsan)
     target_link_libraries(test_asan_demo PRIVATE tsan)
+    target_link_libraries(test_ast PRIVATE tsan)
 endif()
 
 # Link libraries (after sanitizer libraries)
@@ -369,6 +419,7 @@ target_link_libraries(logos PRIVATE pthread)  # Added for mimalloc
 target_link_libraries(test_urcu_lfht_safety PRIVATE pthread)  # Added for mimalloc
 target_link_libraries(test_tsm PRIVATE pthread)  # Added for mimalloc
 target_link_libraries(test_asan_demo PRIVATE pthread)  # Added for mimalloc
+target_link_libraries(test_ast PRIVATE pthread)  # Added for mimalloc
 
 # Link other libraries
 target_link_libraries(logos PRIVATE
@@ -386,7 +437,9 @@ target_link_libraries(test_urcu_lfht_safety PRIVATE
 target_link_libraries(test_tsm PRIVATE
     ${URCU_LIBRARIES}
     SDL3::SDL3
-    xxhash)  # Removed mimalloc-static; using objects instead
+    xxhash)
+target_link_libraries(test_ast PRIVATE
+    tsl::hat_trie)
 # Make executables depend on URCU build
 add_dependencies(logos urcu)
 add_dependencies(test_urcu_lfht_safety urcu)

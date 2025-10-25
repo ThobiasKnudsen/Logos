@@ -1,75 +1,67 @@
 #version 450
+
 layout(set = 3, binding = 0, std140) uniform FragmentUBO {
     float time;
+    float padding;
+    vec2 res;
+    float min_x;
+    float max_x;
+    float min_y;
+    float max_y;
 } fubo;
+
 layout(location = 0) in vec2 frag_uv;
-layout(location = 1) in vec4 frag_color;
-layout(location = 2) in float frag_corner_radius;
-layout(location = 3) flat in uint frag_tex_index;
-layout(location = 4) in vec2 frag_tex_coord;
+
 layout(location = 0) out vec4 out_color;
 
-#define BASE_ITER 10
-#define MANDELBROT_INITIAL_ZOOM 0.2LF
-#define MANDELBROT_INITIAL_CENTER dvec2(-0.7LF, 0.0LF)
-#define MANDELBROT_TARGET_CENTER dvec2(-0.74364501LF, 0.131827LF)
-#define ZOOM_SPEED 0.7LF // Reduced speed for longer zoom duration
-#define BAILOUT 4.0LF
+#define BASE_ITER 16 
+#define BAILOUT 4.0f
+#define MAX_ITER_CAP 512
+#define INITIAL_ZOOM 0.2f
+#define ROOT_SAMPLES 3
 
-vec3 mandelbrot_color(double mu) {
-    float t = float(mu * 5.0LF); // Increased frequency for more colorful bands
-    vec3 phase = vec3(0.0, 0.6, 1.0);
-    float base = 3.0 + t * 0.15;
-    vec3 arg = vec3(base) + phase;
-    vec3 res = 0.5 + 0.5 * cos(arg);
-    return res;
+vec3 supersample_mandelbrot(float base_uv_x, float base_uv_y) {
+    int num_samples = ROOT_SAMPLES * ROOT_SAMPLES;
+    float avg_r = 0.0f, avg_g = 0.0f, avg_b = 0.0f;
+    float width_x = fubo.max_x - fubo.min_x;
+    float width_y = fubo.max_y - fubo.min_y;
+    float effective_zoom = 1.0f / width_y;
+    for (int s = 0; s < num_samples; ++s) {
+        float jitter_x = (float(s % ROOT_SAMPLES) + float((s * 7 + 3) % 100) / 99.0f) / float(ROOT_SAMPLES) - 0.5f;
+        float input_x = base_uv_x + jitter_x / fubo.res.x;
+        float c_x = fubo.min_x + input_x * width_x;
+        float jitter_y = (float(s / ROOT_SAMPLES) + float((s * 13 + 5) % 100) / 99.0f) / float(ROOT_SAMPLES) - 0.5f;
+        float input_y = base_uv_y + jitter_y / fubo.res.y;
+        float c_y = fubo.min_y + input_y * width_y;
+        float z_x = 0.0f, z_y = 0.0f, sq = 0.0f;
+        int max_iter = min(BASE_ITER + int(40.0f * log(effective_zoom / INITIAL_ZOOM + 1.0f)), MAX_ITER_CAP); 
+        int iter = 0;
+        while (iter < max_iter && (sq = z_x * z_x + z_y * z_y) < BAILOUT) {
+            float zy2 = z_y * z_y;
+            z_y = 2.0f * z_x * z_y + c_y;
+            z_x = z_x * z_x - zy2 + c_x;
+            iter++;
+        }
+        if (iter < max_iter) {
+            float uhh = (float(iter) + 1.0f - log(0.5f * log(sq) / log(2.0f)) / log(2.0f));
+            avg_r += (0.9f + 0.1f * cos(0.05f * uhh + 0.5f * fubo.time)) * ((1.0f - (0.8f + 0.2f * sin(0.1f * uhh + fubo.time))) + (0.8f + 0.2f * sin(0.1f * uhh + fubo.time)) * clamp(abs(fract(fract(0.05f * uhh + 0.3f * fubo.time) + 1.0f / 2.0f) * 6.0f - 3.0f) - 1.0f, 0.0f, 1.0f));
+            avg_g += (0.9f + 0.1f * cos(0.05f * uhh + 0.5f * fubo.time)) * ((1.0f - (0.8f + 0.2f * sin(0.1f * uhh + fubo.time))) + (0.8f + 0.2f * sin(0.1f * uhh + fubo.time)) * clamp(abs(fract(fract(0.05f * uhh + 0.2f * fubo.time) + 1.0f / 3.0f) * 6.0f - 3.0f) - 1.0f, 0.0f, 1.0f));
+            avg_b += (0.9f + 0.1f * cos(0.05f * uhh + 0.5f * fubo.time)) * ((1.0f - (0.8f + 0.2f * sin(0.1f * uhh + fubo.time))) + (0.8f + 0.2f * sin(0.1f * uhh + fubo.time)) * clamp(abs(fract(fract(0.05f * uhh + 0.1f * fubo.time) + 1.0f / 5.0f) * 6.0f - 3.0f) - 1.0f, 0.0f, 1.0f));
+        }
+    }
+    vec3 col = vec3(avg_r / float(num_samples), avg_g / float(num_samples), avg_b / float(num_samples));
+    col = mix(col, col.yxz, sin(fubo.time * 0.3f) * 0.5f + 0.5f);
+    return col;
 }
 
 void main() {
-    // Use double precision for deeper zoom without precision artifacts
-    double dtime = double(fubo.time);
-    float fdtime = float(dtime);
-
-    // Compute dynamic zoom and center for animated zoom into a beautiful region (Seahorse Valley)
-    double zoom = MANDELBROT_INITIAL_ZOOM * double(exp(fdtime * float(ZOOM_SPEED)));
-    dvec2 center = MANDELBROT_INITIAL_CENTER + (MANDELBROT_TARGET_CENTER - MANDELBROT_INITIAL_CENTER) * (1.0LF - MANDELBROT_INITIAL_ZOOM / zoom);
-
-    // Compute max iterations based on zoom level for deeper detail; more aggressive scaling
-    double log_zoom = double(log(float(zoom / MANDELBROT_INITIAL_ZOOM + 1.0LF))); // +1 to avoid log(0)
-    int max_iter = BASE_ITER + int(16.0LF * log_zoom); // Increased scaling for deeper iterations
-
-    dvec2 c = center + dvec2(frag_uv - 0.5) / zoom;
-    dvec2 z = dvec2(0.0LF);
-    int iter = 0;
-    for (int i = 0; i < 16384; ++i) { // Increased upper limit to allow deeper iterations
-        if (iter >= max_iter) break;
-        z = dvec2(z.x * z.x - z.y * z.y, 2.0LF * z.x * z.y) + c;
-        if (dot(z, z) > BAILOUT) break;
-        ++iter;
-    }
     vec3 col;
-    if (iter == max_iter) {
-        col = vec3(0.0); // Black for points inside the set
+    // Safeguard: If res invalid (e.g., (0,0) from UBO mismatch), fall back to single sample to avoid NaN
+    if (fubo.res.x <= 0.0f || fubo.res.y <= 0.0f) {
+        col = vec3(1.0f, 0.0f, 0.0f);
     } else {
-        // Smooth coloring for beautiful gradients, using double for precision
-        double dz2 = dot(z, z);
-        float fdz2 = float(dz2);
-        float log_bail = log(float(BAILOUT));
-        double mu = double(iter) + 1.0LF - double(log(log(fdz2) - log_bail)) / double(log(2.0));
-        col = mandelbrot_color(mu);
+        //col = supersample(frag_uv, ROOT_SAMPLES, time, max_iter, fubo.res, center, zoom);
+        col = supersample_mandelbrot(frag_uv.x, frag_uv.y);
     }
-    // Add some time-based hue shift
-    col = mix(col, col.yxz, float(sin(fdtime * 0.3)) * 0.5 + 0.5);
     out_color = vec4(col, 1.0);
-
-    // Optional: if you want to use texture or color, uncomment below
-    // if (frag_tex_index > 0u) {
-    // out_color = texture(tex_sampler[frag_tex_index - 1u], frag_tex_coord) * frag_color;
-    // } else {
-    // out_color = frag_color;
-    // }
-    // // Apply rounded corners if needed (note: ubo.resolution.x requires passing resolution to fragment UBO too)
-    // vec2 q = abs(frag_uv * 2.0 - 1.0) - 1.0 + frag_corner_radius / 1000.0; // Approximate, or add resolution to fubo
-    // float rounded = min(min(q.x, q.y), 0.0) + length(max(q, 0.0)) - frag_corner_radius / 1000.0;
-    // if (rounded > 0.0) discard;
 }

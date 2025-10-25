@@ -561,6 +561,7 @@ bool cm_output_stdio(const char *msg, void *user)
 
 static void cm_init_once(void)
 {
+    (void)pathstack_push;
     static pthread_once_t once_control = PTHREAD_ONCE_INIT;
     pthread_once(&once_control, cm_init_once_impl);
 }
@@ -568,6 +569,8 @@ static void cm_init_once(void)
 static void cm_init_once_impl(void)
 {
     (void)get_time_us;
+    (void)pathstack_push;
+    (void)pathstack_pop;
     pthread_key_create(&g_tls_path, pathstack_free);
     g_start_ms = get_time_ms();
     

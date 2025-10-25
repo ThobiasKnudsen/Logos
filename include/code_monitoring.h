@@ -48,6 +48,7 @@ typedef enum {
     CM_RES_TSM_NODE_REPLACEMENT_FAILURE,        // failed to replace node
     CM_RES_TSM_NODE_NOT_FOUND_SELF,             // using keys to a node to get itself and doesnt get itself
 
+    // 31
     CM_RES_BENIGN_RACE_NOT_FOUND,
     CM_RES_BENIGN_RACE_EXISTS,
     CM_RES_BENIGN_RACE_NOT_REMOVED,
@@ -61,6 +62,7 @@ typedef enum {
     CM_RES_TSM_TOO_MANY_TYPES,              // should never actually receive this error but there is a static limit which can be easily increased
     CM_RES_TSM_NON_TYPES_STILL_REMAINING,   // in removing all children after all non-types should have been removed there was registered a non-type
 
+    // 41
     CM_RES_TSM_PATH_VALID,                      // path is valid
     CM_RES_TSM_PATH_INVALID,                    // Invalid path
     CM_RES_TSM_PATH_NOTHING_TO_REMOVE,          // Remove from empty path
@@ -88,6 +90,12 @@ typedef enum {
     CM_RES_SDL3_GPU_DEVICE_INITIALIZED,
     CM_RES_SDL3_GPU_DEVICE_NOT_INITIALIZED,
     CM_RES_SDL3_UNKOWN_SHADER_KIND,
+    CM_RES_SDL3_TOO_MANY_VERTEX_BUFFERS,
+
+    CM_RES_HTRIE_INVALID_KEY,
+    CM_RES_HTRIE_NODE_NOT_FOUND,
+    CM_RES_HTRIE_NODE_FOUND,
+    CM_RES_HTRIE_INTERNAL_ERROR,
 
     CM_RES_UNKNOWN                          // Generic/uncaught failure
 } CM_RES;
@@ -162,7 +170,7 @@ void _cm_print( uint32_t    flags,
 #define CM_PRINT(identifyer, fmt, ...)          _cm_print(CM_FLAGS, identifyer, __LINE__, __CM_FILE_NAME__, fmt, ##__VA_ARGS__)
 
 #define CM_LOG_DEBUG(fmt, ...)      //CM_PRINT("DEBUG    ", fmt, ##__VA_ARGS__)
-#define CM_LOG_INFO(fmt, ...)       CM_PRINT("INFO     ", fmt, ##__VA_ARGS__)
+#define CM_LOG_INFO(fmt, ...)       //CM_PRINT("INFO     ", fmt, ##__VA_ARGS__)
 #define CM_LOG_NOTICE(fmt, ...)     CM_PRINT("NOTICE   ", fmt, ##__VA_ARGS__)
 #define CM_LOG_WARNING(fmt, ...)    CM_PRINT("WARNING  ", fmt, ##__VA_ARGS__)
 #define CM_LOG_ERROR(fmt, ...) do { CM_PRINT("ERROR    ", fmt, ##__VA_ARGS__); abort(); } while(0);
@@ -223,7 +231,7 @@ void _cm_print( uint32_t    flags,
  * If this function gets a false value then it will log an error. Your definition of the CM_LOG_ERROR should abort
  */
 #define CM_ASSERT(bool_expression) do { \
-    _cm_scope_start(__LINE__, __CM_FILE_NAME__); bool bool_1703961674309579167853 = bool_expression; _cm_scope_end(); \
+    CM_SCOPE(bool bool_1703961674309579167853 = bool_expression); \
     if (!bool_1703961674309579167853) { \
         CM_LOG_ERROR("expression is false: '%s'\n", #bool_expression); \
     } \

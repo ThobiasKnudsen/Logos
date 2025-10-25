@@ -61,7 +61,7 @@ CM_RES main(void) {
 	    CM_TIMER_START();
 	    	struct tsm_key graphics_pipeline_key = {0};
 	    	CM_ASSERT(CM_RES_SUCCESS == tsm_key_uint64_create(0, &graphics_pipeline_key));
-	    	CM_ASSERT(CM_RES_SUCCESS == sdl3_graphics_pipeline_create(&graphics_pipeline_key, &vert_key, &frag_key));
+	    	CM_ASSERT(CM_RES_SUCCESS == sdl3_graphics_pipeline_create_1(&graphics_pipeline_key, &vert_key, &frag_key));
 	    CM_TIMER_STOP();
 
 	    CM_TIMER_START();
@@ -73,15 +73,11 @@ CM_RES main(void) {
 	    CM_TIMER_START();
 	    	struct tsm_key window_key = {0};
 	    	CM_ASSERT(CM_RES_SUCCESS == tsm_key_uint64_create(0, &window_key));
-	    	CM_ASSERT(CM_RES_SUCCESS == sdl3_window_create(&window_key, 800, 600, "Λόγος"));
+	    	CM_ASSERT(CM_RES_SUCCESS == sdl3_window_create(&window_key, 1000, 1000, "Λόγος"));
 	    CM_TIMER_STOP();
 
 	    CM_TIMER_START();
-	    	CM_ASSERT(CM_RES_SUCCESS == sdl3_window_show(&window_key, &graphics_pipeline_key));
-	    CM_TIMER_STOP();
-
-	    CM_TIMER_START();
-	    	CM_ASSERT(CM_RES_SUCCESS == sdl3_window_show_1(&window_key, &mandel_graphics_pipeline_key));
+	    	CM_ASSERT(CM_RES_SUCCESS == sdl3_window_show(&window_key, &mandel_graphics_pipeline_key));
 	    CM_TIMER_STOP();
     rcu_read_unlock();
 

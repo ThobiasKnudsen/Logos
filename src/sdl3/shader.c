@@ -270,7 +270,7 @@ CM_RES _sdl3_shader_format_size(SDL_GPUVertexElementFormat format, unsigned int*
     *p_dst_size = result;
     return CM_RES_SUCCESS;
 }
-SDL_GPUVertexElementFormat _sdl3_shader_SPV_REFLECT_format_to_SDL_GPU_format(SpvReflectFormat format) {
+SDL_GPUVertexElementFormat _sdl3_shader_SPV_REFLECT_format_to_SDL_GPU_TEXTUREFORMAT(SpvReflectFormat format) {
     switch(format) {
         case SPV_REFLECT_FORMAT_R16G16_UINT: return SDL_GPU_VERTEXELEMENTFORMAT_USHORT2;
         case SPV_REFLECT_FORMAT_R16G16_SINT: return SDL_GPU_VERTEXELEMENTFORMAT_SHORT2;
@@ -306,7 +306,7 @@ CM_RES _sdl3_shader_print_attribute_descriptions(SDL_GPUVertexAttribute* p_attri
     }
     return CM_RES_SUCCESS;
 }
-CM_RES sdl3_shader_create_vertex_input_attribute_descriptions(
+CM_RES sdl3_shader_create_vertex_input_attribute_descriptions_1(
     const struct tsm_key* p_vertex_key,
     unsigned int* p_attribute_count, 
     unsigned int* p_binding_stride,
@@ -345,21 +345,22 @@ CM_RES sdl3_shader_create_vertex_input_attribute_descriptions(
         	continue;
         attribute_descriptions[attribute_index].location = refl_var->location;
         attribute_descriptions[attribute_index].buffer_slot = 0; // ASSUMES ONLY ONE SLOT
-        CM_SCOPE(attribute_descriptions[attribute_index].format = _sdl3_shader_SPV_REFLECT_format_to_SDL_GPU_format(refl_var->format));
+        CM_SCOPE(attribute_descriptions[attribute_index].format = _sdl3_shader_SPV_REFLECT_format_to_SDL_GPU_TEXTUREFORMAT(refl_var->format));
         attribute_descriptions[attribute_index].offset = 0; // WILL CALCULATE OFFSET LATER
         attribute_index++;
     }
 
     // Update the attribute count
     *p_attribute_count = attribute_index;
-
-    // Sort attributes by location
-    for (unsigned int i = 0; i < attribute_index - 1; ++i) {
-        for (unsigned int j = 0; j < attribute_index - i - 1; ++j) {
-            if (attribute_descriptions[j].location > attribute_descriptions[j + 1].location) {
-                SDL_GPUVertexAttribute temp = attribute_descriptions[j];
-                attribute_descriptions[j] = attribute_descriptions[j + 1];
-                attribute_descriptions[j+1] = temp;
+    // Sort attributes by location (guarded to prevent underflow when <=1 attrs)
+    if (attribute_index >= 2) {
+        for (unsigned int i = 0; i < attribute_index - 1; ++i) {
+            for (unsigned int j = 0; j < attribute_index - i - 1; ++j) {
+                if (attribute_descriptions[j].location > attribute_descriptions[j + 1].location) {
+                    SDL_GPUVertexAttribute temp = attribute_descriptions[j];
+                    attribute_descriptions[j] = attribute_descriptions[j + 1];
+                    attribute_descriptions[j + 1] = temp;
+                }
             }
         }
     }
@@ -381,6 +382,252 @@ CM_RES sdl3_shader_create_vertex_input_attribute_descriptions(
     // CM_ASSERT(CM_RES_SUCCESS == _sdl3_shader_print_attribute_descriptions(attribute_descriptions, *p_attribute_count));
 
     *pp_output_attribs = attribute_descriptions;
+    return CM_RES_SUCCESS;  
+}
+CM_RES sdl3_shader_create_vertex_input_attribute_descriptions(
+    const struct tsm_key* p_vertex_key,
+    const struct tsm_key* p_fragment_key,  // Optional: NULL if no fragment reflection
+    unsigned int* p_attribute_count, 
+    SDL_GPUVertexAttribute** pp_output_attribs,
+    unsigned int* p_num_vertex_buffers,
+    SDL_GPUVertexBufferDescription** pp_vertex_buffer_descriptions,
+    SDL_GPUGraphicsPipelineTargetInfo* p_target_info)  // Optional: NULL if no target reflection
+{
+    CM_ASSERT(p_vertex_key && p_attribute_count && pp_output_attribs && p_num_vertex_buffers && pp_vertex_buffer_descriptions);
+    // p_fragment_key and p_target_info optional
+
+    *p_attribute_count = 0;
+    *pp_output_attribs = NULL;
+    *p_num_vertex_buffers = 0;
+    *pp_vertex_buffer_descriptions = NULL;
+    if (p_target_info) {
+        p_target_info->num_color_targets = 0;
+        p_target_info->color_target_descriptions = NULL;
+        // depth_stencil_target remains {0}
+    }
+
+    // Get vertex shader
+    const struct tsm_base_node* p_shader_base = NULL;
+    CM_SCOPE(CM_RES res = sdl3_shader_get(p_vertex_key, &p_shader_base));
+    if (res != CM_RES_SUCCESS) {
+        CM_LOG_WARNING("Vertex shader node not found with code %d\n", res);
+        return res;
+    }
+    const struct sdl3_shader* p_shader = caa_container_of(p_shader_base, struct sdl3_shader, base);
+    CM_ASSERT(p_shader->reflect_shader_module.shader_stage == SPV_REFLECT_SHADER_STAGE_VERTEX_BIT);
+
+    // Enumerate input variables
+    unsigned int input_var_count = 0;
+    CM_ASSERT(SPV_REFLECT_RESULT_SUCCESS == spvReflectEnumerateInputVariables(&p_shader->reflect_shader_module, &input_var_count, NULL));
+
+    if (input_var_count == 0) {
+        return CM_RES_SUCCESS;  // Valid: no inputs (e.g., procedural verts)
+    }
+
+    // Allocate and enumerate input vars (array of pointers)
+    SpvReflectInterfaceVariable** input_vars = malloc(input_var_count * sizeof(SpvReflectInterfaceVariable*));
+    CM_ASSERT(input_vars);
+    CM_ASSERT(SPV_REFLECT_RESULT_SUCCESS == spvReflectEnumerateInputVariables(&p_shader->reflect_shader_module, &input_var_count, input_vars));
+
+    // Phase 1: Count total attributes, blocks, and loose
+    unsigned int total_attribs = 0;
+    unsigned int num_blocks = 0;
+    bool has_loose = false;
+    for (unsigned int i = 0; i < input_var_count; ++i) {
+        SpvReflectInterfaceVariable* refl_var = input_vars[i];
+        if (refl_var->decoration_flags & SPV_REFLECT_DECORATION_BUILT_IN) continue;
+        if (refl_var->member_count > 0) {
+            num_blocks++;
+            for (unsigned int j = 0; j < refl_var->member_count; ++j) {
+                if (!(input_vars[i]->members[j].decoration_flags & SPV_REFLECT_DECORATION_BUILT_IN)) {
+                    total_attribs++;
+                }
+            }
+        } else {
+            has_loose = true;
+            total_attribs++;
+        }
+    }
+
+    unsigned int num_buffers = (has_loose ? 1 : 0) + num_blocks;
+    if (num_buffers > 32 || total_attribs > 32) {  // Vulkan limits
+        free(input_vars);
+        return CM_RES_SDL3_TOO_MANY_VERTEX_BUFFERS;
+    }
+
+    // Alloc outputs
+    CM_SCOPE(SDL_GPUVertexAttribute* attribute_descriptions = malloc(total_attribs * sizeof(SDL_GPUVertexAttribute)));
+    CM_ASSERT(attribute_descriptions);
+    CM_SCOPE(SDL_GPUVertexBufferDescription* buffer_descriptions = malloc(num_buffers * sizeof(SDL_GPUVertexBufferDescription)));
+    CM_ASSERT(buffer_descriptions);
+
+    // Phase 2: Fill attributes and buffers
+    unsigned int attr_idx = 0;
+    unsigned int buf_idx = 0;
+    unsigned int current_slot = 0;
+
+    // Loose attributes (packed, slot 0)
+    if (has_loose) {
+        unsigned int loose_offset = 0;
+        for (unsigned int i = 0; i < input_var_count; ++i) {
+            SpvReflectInterfaceVariable* refl_var = input_vars[i];
+            if (refl_var->decoration_flags & SPV_REFLECT_DECORATION_BUILT_IN) continue;
+            if (refl_var->member_count > 0) continue;  // Blocks later
+            // Loose
+            attribute_descriptions[attr_idx].location = refl_var->location;
+            attribute_descriptions[attr_idx].buffer_slot = current_slot;
+            attribute_descriptions[attr_idx].format = _sdl3_shader_SPV_REFLECT_format_to_SDL_GPU_TEXTUREFORMAT(refl_var->format);
+            unsigned int fsize = 0;
+            CM_ASSERT(CM_RES_SUCCESS == _sdl3_shader_format_size(attribute_descriptions[attr_idx].format, &fsize));
+            attribute_descriptions[attr_idx].offset = loose_offset;
+            loose_offset += fsize;
+            unsigned int alignment = 4;
+            loose_offset = (loose_offset + (alignment - 1)) & ~(alignment - 1);
+            attr_idx++;
+        }
+        // Buffer desc for slot 0
+        buffer_descriptions[buf_idx].slot = current_slot;
+        buffer_descriptions[buf_idx].pitch = loose_offset;
+        buffer_descriptions[buf_idx].input_rate = SDL_GPU_VERTEXINPUTRATE_INSTANCE;  // Per-instance for procedural quads
+        buffer_descriptions[buf_idx].instance_step_rate = 1;
+        buf_idx++;
+        current_slot++;
+    }
+
+    // Blocks (sequential slots)
+    for (unsigned int i = 0; i < input_var_count; ++i) {
+        SpvReflectInterfaceVariable* refl_var = input_vars[i];
+        if (refl_var->decoration_flags & SPV_REFLECT_DECORATION_BUILT_IN) continue;
+        if (refl_var->member_count == 0) continue;  // Loose done
+        // Block
+        unsigned int block_offset = 0;
+        unsigned int block_max = 0;
+        for (unsigned int j = 0; j < refl_var->member_count; ++j) {
+            SpvReflectInterfaceVariable member = refl_var->members[j];
+            if (member.decoration_flags & SPV_REFLECT_DECORATION_BUILT_IN) continue;
+            attribute_descriptions[attr_idx].location = member.location;
+            attribute_descriptions[attr_idx].buffer_slot = current_slot;
+            attribute_descriptions[attr_idx].format = _sdl3_shader_SPV_REFLECT_format_to_SDL_GPU_TEXTUREFORMAT(member.format);
+            attribute_descriptions[attr_idx].offset = block_offset;  // Cumulative offset (bytes)
+            unsigned int fsize = 0;
+            CM_ASSERT(CM_RES_SUCCESS == _sdl3_shader_format_size(attribute_descriptions[attr_idx].format, &fsize));
+            block_offset += fsize;
+            unsigned int alignment = 4;  // Align for next member (matches loose case)
+            block_offset = (block_offset + (alignment - 1)) & ~(alignment - 1);
+            block_max = SDL_max(block_max, block_offset);
+            attr_idx++;
+        }
+        // Buffer desc (align to 16 for vec4 blocks)
+        unsigned int alignment = 16;
+        block_max = (block_max + (alignment - 1)) & ~(alignment - 1);
+        buffer_descriptions[buf_idx].slot = current_slot;
+        buffer_descriptions[buf_idx].pitch = block_max;
+        buffer_descriptions[buf_idx].input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        buffer_descriptions[buf_idx].instance_step_rate = 0;
+        buf_idx++;
+        current_slot++;
+    }
+
+    free(input_vars);
+
+    // Sort attributes by location
+    unsigned int final_count = attr_idx;  // May be less if all built-in
+    if (final_count >= 2) {
+        for (unsigned int i = 0; i < final_count - 1; ++i) {
+            for (unsigned int j = 0; j < final_count - i - 1; ++j) {
+                if (attribute_descriptions[j].location > attribute_descriptions[j + 1].location) {
+                    SDL_GPUVertexAttribute temp = attribute_descriptions[j];
+                    attribute_descriptions[j] = attribute_descriptions[j + 1];
+                    attribute_descriptions[j + 1] = temp;
+                }
+            }
+        }
+    }
+
+    *p_attribute_count = final_count;
+    *pp_output_attribs = attribute_descriptions;
+    *p_num_vertex_buffers = num_buffers;
+    *pp_vertex_buffer_descriptions = buffer_descriptions;
+
+    // Optional: Fragment reflection for targets
+    if (p_fragment_key && p_target_info) {
+        const struct tsm_base_node* p_frag_base = NULL;
+        CM_SCOPE(res = sdl3_shader_get(p_fragment_key, &p_frag_base));
+        if (res == CM_RES_SUCCESS) {
+            const struct sdl3_shader* p_frag_shader = caa_container_of(p_frag_base, struct sdl3_shader, base);
+            CM_ASSERT(p_frag_shader->reflect_shader_module.shader_stage == SPV_REFLECT_SHADER_STAGE_FRAGMENT_BIT);
+
+            unsigned int output_var_count = 0;
+            CM_ASSERT(SPV_REFLECT_RESULT_SUCCESS == spvReflectEnumerateOutputVariables(&p_frag_shader->reflect_shader_module, &output_var_count, NULL));
+
+            unsigned int out_count = 0;
+            if (output_var_count > 0) {
+                SpvReflectInterfaceVariable** output_vars = malloc(output_var_count * sizeof(SpvReflectInterfaceVariable*));
+                CM_ASSERT(output_vars);
+                CM_ASSERT(SPV_REFLECT_RESULT_SUCCESS == spvReflectEnumerateOutputVariables(&p_frag_shader->reflect_shader_module, &output_var_count, output_vars));
+
+                for (unsigned int i = 0; i < output_var_count; ++i) {
+                    if (!(output_vars[i]->decoration_flags & SPV_REFLECT_DECORATION_BUILT_IN)) out_count++;
+                }
+                free(output_vars);
+            }
+
+            if (out_count > 0) {
+                SDL_GPUColorTargetDescription *descs = malloc(out_count * sizeof(SDL_GPUColorTargetDescription));
+                CM_ASSERT(descs);
+                unsigned int out_idx = 0;
+                // Re-enumerate to fill (or cache, but simple re-do for clarity)
+                CM_ASSERT(SPV_REFLECT_RESULT_SUCCESS == spvReflectEnumerateOutputVariables(&p_frag_shader->reflect_shader_module, &output_var_count, NULL));
+                SpvReflectInterfaceVariable** output_vars = malloc(output_var_count * sizeof(SpvReflectInterfaceVariable*));
+                CM_ASSERT(output_vars);
+                CM_ASSERT(SPV_REFLECT_RESULT_SUCCESS == spvReflectEnumerateOutputVariables(&p_frag_shader->reflect_shader_module, &output_var_count, output_vars));
+
+                for (unsigned int i = 0; i < output_var_count; ++i) {
+                    SpvReflectInterfaceVariable* out_var = output_vars[i];
+                    if (out_var->decoration_flags & SPV_REFLECT_DECORATION_BUILT_IN) continue;
+                    descs[out_idx].format = SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;  // Hardcode to swapchain format (shader output is always float, SDL converts)
+                    // Set default blend and write mask (unchanged)
+                    descs[out_idx].blend_state.enable_blend = true;
+                    descs[out_idx].blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+                    descs[out_idx].blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+                    descs[out_idx].blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+                    descs[out_idx].blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+                    descs[out_idx].blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+                    descs[out_idx].blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+                    descs[out_idx].blend_state.color_write_mask = SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G | SDL_GPU_COLORCOMPONENT_B | SDL_GPU_COLORCOMPONENT_A;
+                    descs[out_idx].blend_state.enable_color_write_mask = true;
+                    out_idx++;
+                }
+                free(output_vars);
+                p_target_info->color_target_descriptions = (const SDL_GPUColorTargetDescription*) descs;
+            }
+            p_target_info->num_color_targets = out_count;
+            if (out_count == 0) {
+                // Fallback: Assume single standard output (common for swapchain rendering)
+                p_target_info->num_color_targets = 1;
+                SDL_GPUColorTargetDescription *fallback_desc = malloc(sizeof(SDL_GPUColorTargetDescription));
+                CM_ASSERT(fallback_desc);
+                fallback_desc[0].format = SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
+                fallback_desc[0].blend_state.enable_blend = true;
+                fallback_desc[0].blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+                fallback_desc[0].blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+                fallback_desc[0].blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+                fallback_desc[0].blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+                fallback_desc[0].blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+                fallback_desc[0].blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+                fallback_desc[0].blend_state.color_write_mask = SDL_GPU_COLORCOMPONENT_R |
+                                                                SDL_GPU_COLORCOMPONENT_G |
+                                                                SDL_GPU_COLORCOMPONENT_B |
+                                                                SDL_GPU_COLORCOMPONENT_A;
+                fallback_desc[0].blend_state.enable_color_write_mask = true;
+                p_target_info->color_target_descriptions = (const SDL_GPUColorTargetDescription*) fallback_desc;
+            }
+        }
+    }
+
+    // Optional print
+    // CM_ASSERT(CM_RES_SUCCESS == _sdl3_shader_print_attribute_descriptions(attribute_descriptions, *p_attribute_count));
+
     return CM_RES_SUCCESS;  
 }
 CM_RES _sdl3_shader_create_spv_reflect_module(struct sdl3_shader* p_shader) {
