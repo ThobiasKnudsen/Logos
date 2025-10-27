@@ -4,9 +4,16 @@ project(LOGOS LANGUAGES C CXX VERSION 1.0.0)
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL "Prevent FetchContent from updating sources")
 # Ensure Git is found to perform direct population at configure time (avoids deferred fetches during build)
 find_package(Git REQUIRED)
+
 # Set C standard
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+
+# Set C++ standard (required for Boost unordered_flat_map in regex_trie.cpp)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)  # Use pure C++20, not GNU extensions
+
 # Build options (SAFE DEFAULTS)
 option(LOGOS_ADDRESS_SANITIZER "Enable Address Sanitizer" OFF)
 option(LOGOS_THREAD_SANITIZER "Enable Thread Sanitizer" OFF)
@@ -172,6 +179,9 @@ else()
 endif()
 set(SDLSHADERCROSS_CLI OFF CACHE BOOL "Disable building the CLI tool")
 FetchContent_MakeAvailable(SDL3_shadercross)
+if(TARGET SPIRV-Tools-static)
+    target_compile_options(SPIRV-Tools-static PRIVATE -Wno-restrict)
+endif()
 # Makes SPIRV-Headers and SPIRV-Tools available
 set(FETCHCONTENT_SOURCE_DIR_SPIRV-Headers "${sdl3_shadercross_SOURCE_DIR}/external/SPIRV-Headers")
 set(FETCHCONTENT_SOURCE_DIR_SPIRV-Tools "${sdl3_shadercross_SOURCE_DIR}/external/SPIRV-Tools")
@@ -212,18 +222,31 @@ set(MI_OVERRIDE ON CACHE BOOL "Enable malloc override")
 set(MI_BUILD_OBJECT ON CACHE BOOL "Build mimalloc as object file for static override")  # Added for object-based override
 set(MI_SECURE ON CACHE BOOL "Enable secure mode with guards and encryption")
 FetchContent_MakeAvailable(mimalloc)
+
 # c++ htrie
 FetchContent_Declare(
     htrie
     GIT_REPOSITORY https://github.com/Tessil/hat-trie.git
     GIT_TAG master)
 FetchContent_MakeAvailable(htrie)
-# Boost::Unordered
+
+# Boost.Unordered (standalone version—no external Boost deps)
 FetchContent_Declare(
     boost_unordered
-    GIT_REPOSITORY https://github.com/boostorg/unordered.git
-    GIT_TAG master)
+    GIT_REPOSITORY https://github.com/MikePopoloski/boost_unordered.git
+    GIT_TAG v1.85.0  # Or 'master' for latest; use a tag for reproducibility
+    GIT_SHALLOW ON)  # Optional: Faster clone
 FetchContent_MakeAvailable(boost_unordered)
+
+# RE/flex
+FetchContent_Declare(
+    reflex
+    GIT_REPOSITORY https://github.com/Genivia/RE-flex.git
+    GIT_TAG master
+)
+set(BUILD_TESTING OFF CACHE BOOL "Disable building tests")
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Static build")
+FetchContent_MakeAvailable(reflex)
 
 # Configure version header
 configure_file(
@@ -254,8 +277,9 @@ add_executable(test_asan_demo
     src/tests/test_asan_demo.c)
 add_executable(test_ast
     src/ast/tokenize.c
-    src/ast/char32_trie.c
-    src/ast/htrie_wchar.cpp
+    src/ast/regex_trie.c
+    src/ast/regex_trie_1.cpp
+    src/ast/regex_trie_2.c
     src/code_monitoring.c
     src/tests/test_ast.c)
 
@@ -324,7 +348,8 @@ target_include_directories(test_asan_demo PRIVATE
 target_include_directories(test_ast PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${verstable_SOURCE_DIR}
-    ${mimalloc_SOURCE_DIR}/include)  # Added for project includes and mimalloc (optional but safe)
+    ${mimalloc_SOURCE_DIR}/include
+    ${reflex_SOURCE_DIR}/include)
 # Compile definitions
 target_compile_definitions(logos PRIVATE
     $<$<BOOL:${LOGOS_THREAD_SANITIZER}>:CMM_SANITIZE_THREAD>
@@ -439,7 +464,9 @@ target_link_libraries(test_tsm PRIVATE
     SDL3::SDL3
     xxhash)
 target_link_libraries(test_ast PRIVATE
-    tsl::hat_trie)
+    tsl::hat_trie
+    ReflexLibStatic
+    boost_unordered)
 # Make executables depend on URCU build
 add_dependencies(logos urcu)
 add_dependencies(test_urcu_lfht_safety urcu)

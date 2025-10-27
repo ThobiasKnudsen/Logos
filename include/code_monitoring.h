@@ -16,6 +16,7 @@ typedef enum {
     CM_RES_SUCCESS,                         // General success (e.g., operation completed without issues)
 
     CM_RES_NULL_ARGUMENT,                   // NULL pointer for required argument (common, e.g., p_base, p_tsm_base, rcu_head)
+    CM_RES_INVALID_ARGUMENT,
     CM_RES_NULL_FIELDS, 
     CM_RES_NULL_FUNCTION_POINTER,           // Required function pointer NULL (e.g., fn_free_callback, fn_is_valid)
     CM_RES_NULL_ITER_NODE,                  // Iterator node is NULL (warning in some cases)
@@ -92,10 +93,10 @@ typedef enum {
     CM_RES_SDL3_UNKOWN_SHADER_KIND,
     CM_RES_SDL3_TOO_MANY_VERTEX_BUFFERS,
 
-    CM_RES_HTRIE_INVALID_KEY,
-    CM_RES_HTRIE_NODE_NOT_FOUND,
-    CM_RES_HTRIE_NODE_FOUND,
-    CM_RES_HTRIE_INTERNAL_ERROR,
+    CM_RES_REGEX_TRIE_INVALID_KEY,
+    CM_RES_REGEX_TRIE_NODE_NOT_FOUND,
+    CM_RES_REGEX_TRIE_NODE_FOUND,
+    CM_RES_REGEX_TRIE_DESTROY_FAILED, 
 
     CM_RES_UNKNOWN                          // Generic/uncaught failure
 } CM_RES;
