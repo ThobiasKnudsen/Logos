@@ -222,23 +222,7 @@ set(MI_OVERRIDE ON CACHE BOOL "Enable malloc override")
 set(MI_BUILD_OBJECT ON CACHE BOOL "Build mimalloc as object file for static override")  # Added for object-based override
 set(MI_SECURE ON CACHE BOOL "Enable secure mode with guards and encryption")
 FetchContent_MakeAvailable(mimalloc)
-
-# c++ htrie
-FetchContent_Declare(
-    htrie
-    GIT_REPOSITORY https://github.com/Tessil/hat-trie.git
-    GIT_TAG master)
-FetchContent_MakeAvailable(htrie)
-
-# Boost.Unordered (standalone version—no external Boost deps)
-FetchContent_Declare(
-    boost_unordered
-    GIT_REPOSITORY https://github.com/MikePopoloski/boost_unordered.git
-    GIT_TAG v1.85.0  # Or 'master' for latest; use a tag for reproducibility
-    GIT_SHALLOW ON)  # Optional: Faster clone
-FetchContent_MakeAvailable(boost_unordered)
-
-# RE/flex
+# RE/flex for the most efficient regex engine
 FetchContent_Declare(
     reflex
     GIT_REPOSITORY https://github.com/Genivia/RE-flex.git
@@ -277,11 +261,10 @@ add_executable(test_asan_demo
     src/tests/test_asan_demo.c)
 add_executable(test_ast
     src/ast/tokenize.c
-    src/ast/regex_trie.c
-    src/ast/regex_trie_1.cpp
-    src/ast/regex_trie_2.c
+    src/ast/regex_literal_splitting.cpp
+    src/ast/regex_trie.cpp
     src/code_monitoring.c
-    src/tests/test_ast.c)
+    src/tests/test_ast.cpp)
 
 target_sources(logos PRIVATE ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c) 
 set(DISABLE_MIMALLOC OFF)
@@ -407,7 +390,7 @@ target_compile_definitions(test_ast PRIVATE
     CM_SHOW_TIME
     CM_SHOW_THREAD
     CM_SHOW_PATH
-    CM_SHOW_SCOPE
+    #CM_SHOW_SCOPE
     CM_SHOW_TIMER
 )
 # Add output name
@@ -464,9 +447,7 @@ target_link_libraries(test_tsm PRIVATE
     SDL3::SDL3
     xxhash)
 target_link_libraries(test_ast PRIVATE
-    tsl::hat_trie
-    ReflexLibStatic
-    boost_unordered)
+    ReflexLibStatic)
 # Make executables depend on URCU build
 add_dependencies(logos urcu)
 add_dependencies(test_urcu_lfht_safety urcu)
