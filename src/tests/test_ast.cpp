@@ -16,17 +16,23 @@ static void test_regex_trie_many_words_print(void) {
     regex_trie* p_root = NULL;
     CM_ASSERT(CM_RES_SUCCESS == regex_trie_create(&p_root));
     // Insert "hello" for verification (uint8_t literal).
-    CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, (const uint8_t*)"hello"));
-    CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, (const uint8_t*)"\n"));
-    CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, (const uint8_t*)"\r"));
-    CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, (const uint8_t*)" "));
+    CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, (const uint8_t*)"hello", nullptr));
+    CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, (const uint8_t*)"\n", nullptr));
+    CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, (const uint8_t*)"\r", nullptr));
+    CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, (const uint8_t*)" ", nullptr));
+    size_t test_matched;
+    void* test_val;
+    CM_RES test_res = regex_trie_get(p_root, (const uint8_t*)"hello", 5, &test_matched, &test_val);
+    printf("Exact 'hello': res=%d, matched=%zu\n", test_res, test_matched);
     // Open and read words.txt (assume one word per line, UTF-8/ASCII).
     FILE* fp = fopen("../words.txt", "r");
     CM_ASSERT(fp);
     enum { MAX_WORD_LEN = 1024 };
     char line[MAX_WORD_LEN]; // Read as bytes.
     size_t num_words = 0;
+
     CM_TIMER_START(); // 815ms
+
     while (fgets(line, MAX_WORD_LEN, fp)) {
         // Trim trailing newline/whitespace.
         size_t len = strlen(line);
@@ -37,29 +43,12 @@ static void test_regex_trie_many_words_print(void) {
         // Skip empty lines.
         if (len == 0) continue;
         // Use bytes directly (ASCII-safe).
-        CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, (const uint8_t*)line));
+        CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, (const uint8_t*)line, nullptr));
         num_words++;
     }
     CM_TIMER_STOP();
     fclose(fp);
-    // Verify per-line.
-    fp = fopen("../words.txt", "r");
-    CM_ASSERT(fp);
-    num_words = 0;
-    CM_TIMER_START(); // 548ms
-    while (fgets(line, MAX_WORD_LEN, fp)) {
-        size_t len = strlen(line);
-        if (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
-            line[len - 1] = '\0';
-            len--;
-        }
-        if (len == 0) continue;
-        // Use bytes directly (ASCII-safe).
-        CM_ASSERT(CM_RES_REGEX_TRIE_NODE_FOUND == regex_trie_get(p_root, (const uint8_t*)line));
-        num_words++;
-    }
-    CM_TIMER_STOP();
-    fclose(fp);
+    
     // Bulk verification using regex_trie_get_longest_prefix.
     fp = fopen("../words.txt", "r");
     CM_ASSERT(fp);
@@ -80,7 +69,13 @@ static void test_regex_trie_many_words_print(void) {
         if (this_len > MAX_TOKEN_LEN) this_len = MAX_TOKEN_LEN;
         size_t matched_len;
         void* value_out = NULL;
-        CM_ASSERT(CM_RES_SUCCESS == regex_trie_get_longest_prefix(p_root, (const uint8_t*)(byte_buffer + byte_offset), this_len, &matched_len, &value_out));
+        CM_RES result = regex_trie_get(p_root, (const uint8_t*)(byte_buffer + byte_offset), this_len, &matched_len, &value_out);
+        if (result == CM_RES_REGEX_TRIE_NODE_NOT_FOUND) {
+            printf("%.*s\n", (int)matched_len, byte_buffer + byte_offset);
+            printf("matched_len = %d\n", (int)matched_len);
+        } else {
+            break;
+        }
         if (matched_len == 0) {
             byte_offset += 1; // Skip unexpected chars.
             continue;

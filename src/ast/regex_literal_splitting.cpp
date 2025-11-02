@@ -288,7 +288,7 @@ std::vector<std::vector<Segment>> parseTerm(const std::string& s, size_t& pos) {
 }
 
 std::vector<std::vector<Segment>> parseConcat(const std::string& s, size_t& pos) {
-    std::vector<Paths> sub_groups;
+    std::vector<std::vector<std::vector<Segment>>> sub_groups;
     while (pos < s.size() && s[pos] != '|' && s[pos] != ')') {
         std::vector<std::vector<Segment>> sub = parseTerm(s, pos);
         if (!sub.empty()) {

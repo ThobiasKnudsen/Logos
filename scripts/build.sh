@@ -110,6 +110,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+sudo apt update
+sudo apt install build-essential git make pkg-config cmake ninja-build \
+  gnome-desktop-testing libasound2-dev libpulse-dev libfribidi-dev libjack-jackd2-dev \
+  libsndio-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev \
+  libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libdrm-dev libgbm-dev \
+  libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev libdbus-1-dev libibus-1.0-dev \
+  libudev-dev libpipewire-0.3-dev libwayland-dev libdecor-0-dev liburing-dev
+
 # Validate sanitizer options
 if [ "$ADDRESS_SANITIZER" = "ON" ] && [ "$THREAD_SANITIZER" = "ON" ]; then
     print_error "Cannot use both Address Sanitizer and Thread Sanitizer simultaneously"

@@ -111,7 +111,7 @@ FetchContent_Declare(
 )
 FetchContent_GetProperties(urcu)
 if(NOT urcu_POPULATED)
-    FetchContent_Populate(urcu)
+    FetchContent_MakeAvailable(urcu)
 endif()
 set(URCU_DEBUG_FLAGS "")
 if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -132,7 +132,7 @@ ExternalProject_Add(urcu
 FetchContent_Declare(
     SDL3
     GIT_REPOSITORY https://github.com/libsdl-org/SDL
-    GIT_TAG release-3.2.0
+    GIT_TAG main
 )
 set(SDL_SHARED OFF CACHE BOOL "Build SDL3 as a static library" FORCE)
 set(SDL_STATIC ON CACHE BOOL "Build SDL3 as a static library" FORCE)
@@ -232,6 +232,17 @@ set(BUILD_TESTING OFF CACHE BOOL "Disable building tests")
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Static build")
 FetchContent_MakeAvailable(reflex)
 
+# Declare PCRE2
+FetchContent_Declare(
+  pcre2
+  GIT_REPOSITORY https://github.com/PCRE2Project/pcre2.git
+  GIT_TAG pcre2-10.44  # Use the latest stable tag; check repo for updates
+)
+set(PCRE2_SUPPORT_JIT ON CACHE BOOL "Enable JIT compilation" FORCE)
+set(PCRE2_SUPPORT_UNICODE ON CACHE BOOL "Enable Unicode support" FORCE)  # Optional, but recommended
+set(PCRE2_BUILD_SHARED OFF CACHE BOOL "Build static libs" FORCE)  # Optional: prefer static for embedding
+FetchContent_MakeAvailable(pcre2)
+
 # Configure version header
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/include/version.h.in"
@@ -270,9 +281,9 @@ target_sources(logos PRIVATE ${spirv-reflect_SOURCE_DIR}/spirv_reflect.c)
 set(DISABLE_MIMALLOC OFF)
 if(NOT LOGOS_ADDRESS_SANITIZER AND NOT LOGOS_THREAD_SANITIZER AND NOT DISABLE_MIMALLOC)
     # Add mimalloc objects for override
-    target_sources(logos PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
+    target_sources(logos PRIVATE $<TARGET_OBJECTS:mimalloc-obj> ${xxhash_SOURCE_DIR}/xxhash.c)
     target_sources(test_urcu_lfht_safety PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
-    target_sources(test_tsm PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
+    target_sources(test_tsm PRIVATE $<TARGET_OBJECTS:mimalloc-obj> ${xxhash_SOURCE_DIR}/xxhash.c)
     target_sources(test_asan_demo PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
     target_sources(test_ast PRIVATE $<TARGET_OBJECTS:mimalloc-obj>)
 endif()
@@ -315,6 +326,8 @@ target_include_directories(logos PRIVATE
     ${verstable_SOURCE_DIR}
     ${spirv-reflect_SOURCE_DIR}
     ${URCU_INCLUDE_DIRS}
+    ${xxhash_SOURCE_DIR}
+    ${shaderc_SOURCE_DIR}/libshaderc/include
     ${mimalloc_SOURCE_DIR}/include)  # Added for mimalloc (optional but safe)
 target_include_directories(test_urcu_lfht_safety PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -324,6 +337,7 @@ target_include_directories(test_tsm PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${URCU_INCLUDE_DIRS}
     ${verstable_SOURCE_DIR}
+    ${xxhash_SOURCE_DIR}
     ${mimalloc_SOURCE_DIR}/include)  # Already had; kept for consistency
 target_include_directories(test_asan_demo PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -432,7 +446,6 @@ target_link_libraries(test_ast PRIVATE pthread)  # Added for mimalloc
 # Link other libraries
 target_link_libraries(logos PRIVATE
     SDL3::SDL3
-    xxhash
     ${LOGOS_PLATFORM_LIBS}
     ${URCU_LIBRARIES}
     SDL3_shadercross::SDL3_shadercross
@@ -444,10 +457,9 @@ target_link_libraries(test_urcu_lfht_safety PRIVATE
     SDL3::SDL3)
 target_link_libraries(test_tsm PRIVATE
     ${URCU_LIBRARIES}
-    SDL3::SDL3
-    xxhash)
+    SDL3::SDL3)
 target_link_libraries(test_ast PRIVATE
-    ReflexLibStatic)
+    pcre2-8)
 # Make executables depend on URCU build
 add_dependencies(logos urcu)
 add_dependencies(test_urcu_lfht_safety urcu)
