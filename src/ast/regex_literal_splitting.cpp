@@ -9,6 +9,9 @@
 #include <algorithm> // for std::min
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h> // For opt-in validation.
+
+#define MAX_PATHS 1000
+
 namespace {
 std::pair<size_t, size_t> get_quant_n(const std::string& quant_str) {
     static const size_t INF = std::numeric_limits<size_t>::max();
@@ -302,15 +305,19 @@ std::vector<std::vector<Segment>> parseConcat(const std::string& s, size_t& pos)
     std::vector<std::vector<Segment>> current{{}};
     for (const auto& group : sub_groups) {
         std::vector<std::vector<Segment>> new_current;
+        new_current.reserve(current.size() * group.size());  // Pre-reserve
         for (const auto& prefix : current) {
             for (const auto& suffix_group : group) {
+                if (new_current.size() >= MAX_PATHS) break;  // Cap here
                 std::vector<Segment> new_path = prefix;
                 new_path.insert(new_path.end(), suffix_group.begin(), suffix_group.end());
                 merge_adjacent_segments(new_path);
                 new_current.push_back(std::move(new_path));
             }
+            if (new_current.size() >= MAX_PATHS) break;
         }
         current = std::move(new_current);
+        if (current.empty()) return {};  // Early bail
     }
     return current;
 }

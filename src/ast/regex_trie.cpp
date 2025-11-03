@@ -8,9 +8,8 @@
 #include <string>
 #include <sstream> // For ostringstream.
 #include <algorithm> // For std::sort.
-#include <reflex/matcher.h>
-#include <exception> // For std::exception.
-#include <utility> // For std::pair.
+#define PCRE2_CODE_UNIT_WIDTH 8
+#include <pcre2.h> // PCRE2 header.
 // Define Verstable table type (prefixed to avoid conflict).
 #define NAME internal_regex_trie
 #define KEY_TY uint8_t
@@ -22,7 +21,8 @@ struct regex_trie {
     // leaf nodes will be identified by '\0' character
     internal_regex_trie trie_children; // Verstable map.
     void* p_leaf_value; // nullptr if not leaf
-    reflex::Matcher* matcher; // Compiled combined RE/flex pattern (nullptr if not updated).
+    pcre2_code* compiled_regex; // Compiled combined PCRE2 pattern (nullptr if not updated).
+    pcre2_match_data* match_data; // Reusable match data.
     std::vector<std::pair<regex_trie*, std::string>>
                         regexes; // the strings are combined with '|' between for the matcher
     bool matcher_updated; // if false the matcher has to be lazily recreated when used later
@@ -156,13 +156,25 @@ static CM_RES regex_trie_update_matcher(regex_trie* p_trie) {
     CM_ASSERT(p_trie);
     CM_ASSERT(!p_trie->matcher_updated);
     // Free existing if any.
-    if (p_trie->matcher) {
-        delete p_trie->matcher;
-        p_trie->matcher = nullptr;
+    if (p_trie->compiled_regex) {
+        pcre2_code_free(p_trie->compiled_regex);
+        p_trie->compiled_regex = nullptr;
     }
-    std::string pattern_str;
+    if (p_trie->match_data) {
+        pcre2_match_data_free(p_trie->match_data);
+        p_trie->match_data = nullptr;
+    }
     if (p_trie->regexes.empty()) {
-        pattern_str = "^(?!)";
+        int errcode;
+        PCRE2_SIZE erroffset;
+        p_trie->compiled_regex = pcre2_compile(PCRE2_SPTR("^(?!)"), PCRE2_ZERO_TERMINATED, PCRE2_UTF | PCRE2_UCP, &errcode, &erroffset, NULL);
+        if (!p_trie->compiled_regex) {
+            // Log error; for now, return fail.
+            PCRE2_UCHAR errbuf[256];
+            pcre2_get_error_message(errcode, errbuf, sizeof(errbuf));
+            fprintf(stderr, "PCRE2 compile fail: %s\n", (char*)errbuf);
+            return CM_RES_ALLOCATION_FAILURE; // Or custom RES.
+        }
     } else {
         std::ostringstream oss;
         oss << "^";
@@ -170,12 +182,26 @@ static CM_RES regex_trie_update_matcher(regex_trie* p_trie) {
             if (i > 0) oss << "|";
             oss << "(" << p_trie->regexes[i].second << ")";
         }
-        pattern_str = oss.str();
+        std::string pattern_str = oss.str();
+        int errcode;
+        PCRE2_SIZE erroffset;
+        p_trie->compiled_regex = pcre2_compile(reinterpret_cast<PCRE2_SPTR>(pattern_str.c_str()), pattern_str.length(), PCRE2_UTF | PCRE2_UCP, &errcode, &erroffset, NULL);
+        if (!p_trie->compiled_regex) {
+            PCRE2_UCHAR errbuf[256];
+            pcre2_get_error_message(errcode, errbuf, sizeof(errbuf));
+            fprintf(stderr, "PCRE2 compile fail: %s at offset %zu\n", (char*)errbuf, erroffset);
+            return CM_RES_ALLOCATION_FAILURE;
+        }
+        // Optional: JIT for speed.
+        int jit_rc = pcre2_jit_compile(p_trie->compiled_regex, 0);
+        if (jit_rc < 0) {
+            fprintf(stderr, "PCRE2 JIT compile fail: %d\n", jit_rc);
+        }
     }
-    try {
-        p_trie->matcher = new reflex::Matcher(pattern_str.c_str());
-    } catch (const std::exception& e) {
-        fprintf(stderr, "RE/flex compile fail: %s\n", e.what());
+    p_trie->match_data = pcre2_match_data_create_from_pattern(p_trie->compiled_regex, NULL);
+    if (!p_trie->match_data) {
+        pcre2_code_free(p_trie->compiled_regex);
+        p_trie->compiled_regex = nullptr;
         return CM_RES_ALLOCATION_FAILURE;
     }
     p_trie->matcher_updated = true;
@@ -195,7 +221,8 @@ CM_RES regex_trie_create(regex_trie** pp_output_trie) {
     // Explicitly init C/POD members (vector already handled).
     internal_regex_trie_init(&p_new->trie_children);
     p_new->p_leaf_value = nullptr;
-    p_new->matcher = nullptr;
+    p_new->compiled_regex = nullptr;
+    p_new->match_data = nullptr;
     p_new->matcher_updated = true; // Initially "updated" (empty).
     *pp_output_trie = p_new;
     return CM_RES_SUCCESS;
@@ -280,7 +307,6 @@ CM_RES regex_trie_insert(regex_trie* p_trie, const uint8_t* p_regex, void* p_val
 // Returns FOUND if any EOW prefix (>0), else NOT_FOUND; sets matched=0 if none.
 CM_RES regex_trie_get(regex_trie* p_trie, const uint8_t* p_string, size_t input_len, size_t* p_output_matched_total, void** pp_output_value) {
     CM_ASSERT(p_trie && p_string && p_output_matched_total && pp_output_value && input_len > 0);
-    //CM_TIMER_START();
     *p_output_matched_total = 0;
     *pp_output_value = nullptr;
     regex_trie* current = p_trie;
@@ -309,41 +335,37 @@ CM_RES regex_trie_get(regex_trie* p_trie, const uint8_t* p_string, size_t input_
             if (!current->matcher_updated) {
                 CM_RES update_res = regex_trie_update_matcher(current);
                 if (update_res != CM_RES_SUCCESS) {
-                    CM_TIMER_STOP();
                     return update_res; // Propagate failure.
                 }
             }
-            if (!current->matcher) {
+            if (!current->compiled_regex) {
                 break; // Shouldn't happen post-update.
-            }
-            // Set input to remaining string.
-            //CM_TIMER_START();
-            reflex::Input rinput(static_cast<const char*>(static_cast<const void*>(p_string + pos)), input_len - pos);
-            current->matcher->input(rinput);
-            current->matcher->reset();
-            //CM_TIMER_STOP();
-            //CM_TIMER_START();
+            }   
             // Match combined anchored pattern on remaining input.
-            size_t accept_val = current->matcher->find();
-            //CM_TIMER_STOP();
-            //CM_TIMER_START();
-            if (accept_val == 0) {
-                break; // No match.
+            int rc = pcre2_match(current->compiled_regex,
+                                 (PCRE2_SPTR)(p_string + pos),
+                                 input_len - pos,
+                                 0, // Start offset.
+                                 0, // Options.
+                                 current->match_data,
+                                 NULL);
+            if (rc < 0 || rc == PCRE2_ERROR_NOMATCH) {
+                break; // No match or error.
             }
-            if (current->matcher->first() != 0 || current->matcher->size() == 0) {
+            PCRE2_SIZE* ovector = pcre2_get_ovector_pointer(current->match_data);
+            if (ovector[0] != 0 || ovector[1] == 0) {
                 break; // Not anchored at start or empty match.
             }
-            size_t regex_len = current->matcher->size();
-            // Identify which alternative matched (loop over groups like PCRE2).
+            size_t regex_len = (size_t)ovector[1];
+            // Identify which alternative matched (via first set capturing group).
             size_t which = current->regexes.size(); // Invalid default.
             for (size_t g = 1; g <= current->regexes.size(); ++g) {
-                std::pair<const char*, size_t> group = (*current->matcher)[g];
-                if (group.second > 0) {
+                PCRE2_SIZE group_start = ovector[2 * g];
+                if (group_start != PCRE2_UNSET) {
                     which = g - 1;
                     break; // Left-to-right: first matching alt.
                 }
             }
-            //CM_TIMER_STOP();
             if (which >= current->regexes.size()) {
                 break; // Matched but no group? Rare/corrupt.
             }
@@ -365,10 +387,8 @@ CM_RES regex_trie_get(regex_trie* p_trie, const uint8_t* p_string, size_t input_
     if (max_matched > 0) {
         *p_output_matched_total = max_matched;
         *pp_output_value = max_value;
-        //CM_TIMER_STOP();
         return CM_RES_REGEX_TRIE_NODE_FOUND;
     }
-    //CM_TIMER_STOP();
     return CM_RES_REGEX_TRIE_NODE_NOT_FOUND;
 }
 // Recursive destroy: Cleans trie_children and internals.
@@ -391,8 +411,11 @@ CM_RES regex_trie_destroy(regex_trie* p_trie) {
             }
         }
     }
-    if (p_trie->matcher) {
-        delete p_trie->matcher;
+    if (p_trie->compiled_regex) {
+        pcre2_code_free(p_trie->compiled_regex);
+    }
+    if (p_trie->match_data) {
+        pcre2_match_data_free(p_trie->match_data);
     }
     internal_regex_trie_cleanup(&p_trie->trie_children);
     // Destruct C++ members before free (cleans vector).
