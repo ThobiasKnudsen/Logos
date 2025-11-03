@@ -232,6 +232,16 @@ set(BUILD_TESTING OFF CACHE BOOL "Disable building tests")
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Static build")
 FetchContent_MakeAvailable(reflex)
 
+# RE/flex
+FetchContent_Declare(
+    reflex
+    GIT_REPOSITORY https://github.com/Genivia/RE-flex.git
+    GIT_TAG master
+)
+set(BUILD_TESTING OFF CACHE BOOL "Disable building tests")
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Static build")
+FetchContent_MakeAvailable(reflex)
+
 # Declare PCRE2
 FetchContent_Declare(
   pcre2
@@ -459,6 +469,7 @@ target_link_libraries(test_tsm PRIVATE
     ${URCU_LIBRARIES}
     SDL3::SDL3)
 target_link_libraries(test_ast PRIVATE
+    ReflexLibStatic
     pcre2-8)
 # Make executables depend on URCU build
 add_dependencies(logos urcu)

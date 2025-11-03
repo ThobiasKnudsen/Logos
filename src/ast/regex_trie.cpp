@@ -7,9 +7,10 @@
 #include <vector>
 #include <string>
 #include <sstream> // For ostringstream.
-#define PCRE2_CODE_UNIT_WIDTH 8
-#include <pcre2.h> // PCRE2 header.
-
+#include <algorithm> // For std::sort.
+#include <reflex/matcher.h>
+#include <exception> // For std::exception.
+#include <utility> // For std::pair.
 // Define Verstable table type (prefixed to avoid conflict).
 #define NAME internal_regex_trie
 #define KEY_TY uint8_t
@@ -17,102 +18,151 @@
 #define HASH_FN vt_hash_integer
 #define CMPR_FN vt_cmpr_integer
 #include <verstable.h> // Or your _deps path.
-
 struct regex_trie {
     // leaf nodes will be identified by '\0' character
     internal_regex_trie trie_children; // Verstable map.
     void* p_leaf_value; // nullptr if not leaf
-    pcre2_code* compiled_regex; // Compiled combined PCRE2 pattern (nullptr if not updated).
-    pcre2_match_data* match_data; // Reusable match data.
+    reflex::Matcher* matcher; // Compiled combined RE/flex pattern (nullptr if not updated).
     std::vector<std::pair<regex_trie*, std::string>>
                         regexes; // the strings are combined with '|' between for the matcher
     bool matcher_updated; // if false the matcher has to be lazily recreated when used later
 };
-
-// Trichotomy comparator for qsort (sorting keys for print).
-static int cmp_uint8(const void* lhs, const void* rhs) {
-    uint8_t l = *(const uint8_t*)lhs;
-    uint8_t r = *(const uint8_t*)rhs;
-    return (l > r) - (l < r);
-}
-
-// Recursive helper to print words: Builds prefix in buffer, prints when EOW hit.
-static void print_words_recursive(const regex_trie* p_trie, uint8_t* word_buffer, size_t* current_len, size_t buffer_size) {
-    if (!p_trie) return;
-    // Step 1: Check for EOW sentinel at this node.
+struct ChainInfo {
+    std::string label;
+    const regex_trie* target_node;
+};
+static bool check_eow(const regex_trie* p_trie) {
+    CM_ASSERT(p_trie);
     internal_regex_trie_itr end_itr = internal_regex_trie_get(&((regex_trie*)p_trie)->trie_children, (uint8_t)'\0');
-    if (!internal_regex_trie_is_end(end_itr) && end_itr.data->val == nullptr) {
-        // Null-terminate and print the current word.
-        if (*current_len < buffer_size - 1) {
-            word_buffer[*current_len] = '\0';
-            printf("%s\n", (const char*)word_buffer);
-        } else {
-            // Rare: Word too long; truncate and print.
-            word_buffer[buffer_size - 1] = '\0';
-            printf("%s... (truncated)\n", (const char*)word_buffer);
-        }
-    }
-    // Step 2: Collect non-sentinel child keys for sorted iteration.
-    enum { MAX_CHILDREN_PRINT = 1024 };
-    uint8_t keys[MAX_CHILDREN_PRINT];
-    size_t num_keys = 0;
+    return !internal_regex_trie_is_end(end_itr) && end_itr.data->val == nullptr;
+}
+static bool has_children(const regex_trie* p_trie) {
+    CM_ASSERT(p_trie);
+    size_t num_lit = 0;
     for (internal_regex_trie_itr itr = internal_regex_trie_first(&((regex_trie*)p_trie)->trie_children);
          !internal_regex_trie_is_end(itr);
-         itr = internal_regex_trie_next(itr))
-    {
+         itr = internal_regex_trie_next(itr)) {
         uint8_t key = itr.data->key;
-        void* val = itr.data->val;
-        if (key != (uint8_t)'\0' && val != nullptr && num_keys < MAX_CHILDREN_PRINT) { // Non-sentinel child.
-            keys[num_keys++] = key;
-        } else if (num_keys >= MAX_CHILDREN_PRINT) {
-            fprintf(stderr, "Warning: Node has >%d trie_children; truncating print.\n", MAX_CHILDREN_PRINT);
-            break;
+        if (key != (uint8_t)'\0' && itr.data->val != nullptr) {
+            num_lit++;
         }
     }
-    // Sort keys lexicographically.
-    qsort(keys, num_keys, sizeof(uint8_t), cmp_uint8);
-    // Step 3: Recurse on sorted trie_children.
-    for (size_t i = 0; i < num_keys; ++i) {
-        uint8_t key = keys[i];
-        if (*current_len >= buffer_size - 1) {
-            fprintf(stderr, "Warning: Word buffer overflow; skipping branch.\n");
-            continue;
+    return num_lit > 0 || !p_trie->regexes.empty();
+}
+static ChainInfo get_literal_chain(const regex_trie* node) {
+    ChainInfo ci;
+    ci.label = "";
+    const regex_trie* curr = node;
+    while (true) {
+        std::vector<uint8_t> keys;
+        for (internal_regex_trie_itr itr = internal_regex_trie_first(&((regex_trie*)curr)->trie_children);
+             !internal_regex_trie_is_end(itr);
+             itr = internal_regex_trie_next(itr)) {
+            uint8_t key = itr.data->key;
+            if (key != (uint8_t)'\0' && itr.data->val != nullptr) {
+                keys.push_back(key);
+            }
         }
-        // Append key to buffer.
-        word_buffer[(*current_len)++] = key;
-        // Recurse.
-        internal_regex_trie_itr child_itr = internal_regex_trie_get(&((regex_trie*)p_trie)->trie_children, key);
-        if (!internal_regex_trie_is_end(child_itr)) {
-            print_words_recursive((const regex_trie*)child_itr.data->val, word_buffer, current_len, buffer_size);
+        if (keys.size() != 1) break;
+        if (!curr->regexes.empty()) break;
+        uint8_t c = keys[0];
+        ci.label += static_cast<char>(c);
+        internal_regex_trie_itr child_itr = internal_regex_trie_get(&((regex_trie*)curr)->trie_children, c);
+        if (internal_regex_trie_is_end(child_itr)) break;
+        curr = static_cast<const regex_trie*>(child_itr.data->val);
+        if (!curr) break;
+    }
+    ci.target_node = curr;
+    return ci;
+}
+static void print_branches(const regex_trie* p_trie, size_t indent);
+static void print_trie_recursive(const regex_trie* p_trie, size_t indent) {
+    if (!p_trie) return;
+    ChainInfo ci = get_literal_chain(p_trie);
+    if (!ci.label.empty()) {
+        for (size_t i = 0; i < indent * 4; ++i) printf(" ");
+        printf("%s (lit)", ci.label.c_str());
+        bool target_eow = check_eow(ci.target_node);
+        bool target_leaf = !has_children(ci.target_node);
+        if (target_eow && target_leaf) {
+            printf(" (EOW)\n");
+            return;
         }
-        // Pop: Backtrack.
-        (*current_len)--;
+        printf("\n");
+        print_trie_recursive(ci.target_node, indent + 1);
+        return;
+    }
+    if (check_eow(p_trie)) {
+        for (size_t i = 0; i < indent * 4; ++i) printf(" ");
+        printf("(EOW)\n");
+    }
+    print_branches(p_trie, indent);
+}
+static void print_branches(const regex_trie* p_trie, size_t indent) {
+    if (!p_trie) return;
+    // Regex branches first, sorted.
+    if (!p_trie->regexes.empty()) {
+        std::vector<std::pair<std::string, const regex_trie*>> regex_list;
+        for (const auto& pr : p_trie->regexes) {
+            regex_list.emplace_back(pr.second, pr.first);
+        }
+        std::sort(regex_list.begin(), regex_list.end());
+        for (const auto& r : regex_list) {
+            const std::string& rstr = r.first;
+            const regex_trie* rchild = r.second;
+            for (size_t i = 0; i < (indent + 1) * 4; ++i) printf(" ");
+            printf("%s (regex)", rstr.c_str());
+            bool child_eow = check_eow(rchild);
+            bool child_leaf = !has_children(rchild);
+            if (child_eow && child_leaf) {
+                printf(" (EOW)\n");
+            } else {
+                printf("\n");
+                print_trie_recursive(rchild, indent + 2);
+            }
+        }
+    }
+    // Literal branches, sorted.
+    std::vector<uint8_t> lit_keys;
+    for (internal_regex_trie_itr itr = internal_regex_trie_first(&((regex_trie*)p_trie)->trie_children);
+         !internal_regex_trie_is_end(itr);
+         itr = internal_regex_trie_next(itr)) {
+        uint8_t key = itr.data->key;
+        if (key != (uint8_t)'\0' && itr.data->val != nullptr) {
+            lit_keys.push_back(key);
+        }
+    }
+    std::sort(lit_keys.begin(), lit_keys.end());
+    for (uint8_t c : lit_keys) {
+        internal_regex_trie_itr c_itr = internal_regex_trie_get(&((regex_trie*)p_trie)->trie_children, c);
+        if (internal_regex_trie_is_end(c_itr)) continue;
+        const regex_trie* child = static_cast<const regex_trie*>(c_itr.data->val);
+        ChainInfo ci = get_literal_chain(child);
+        std::string full_label = std::string(1, static_cast<char>(c)) + ci.label;
+        const regex_trie* target = ci.target_node;
+        for (size_t i = 0; i < (indent + 1) * 4; ++i) printf(" ");
+        printf("%s (lit)", full_label.c_str());
+        bool t_eow = check_eow(target);
+        bool t_leaf = !has_children(target);
+        if (t_eow && t_leaf) {
+            printf(" (EOW)\n");
+        } else {
+            printf("\n");
+            print_trie_recursive(target, indent + 2);
+        }
     }
 }
-
 static CM_RES regex_trie_update_matcher(regex_trie* p_trie) {
     CM_ASSERT(p_trie);
     CM_ASSERT(!p_trie->matcher_updated);
     // Free existing if any.
-    if (p_trie->compiled_regex) {
-        pcre2_code_free(p_trie->compiled_regex);
-        p_trie->compiled_regex = nullptr;
+    if (p_trie->matcher) {
+        delete p_trie->matcher;
+        p_trie->matcher = nullptr;
     }
-    if (p_trie->match_data) {
-        pcre2_match_data_free(p_trie->match_data);
-        p_trie->match_data = nullptr;
-    }
+    std::string pattern_str;
     if (p_trie->regexes.empty()) {
-        int errcode;
-        PCRE2_SIZE erroffset;
-        p_trie->compiled_regex = pcre2_compile(PCRE2_SPTR("^(?!)"), PCRE2_ZERO_TERMINATED, PCRE2_UTF | PCRE2_UCP, &errcode, &erroffset, NULL);
-        if (!p_trie->compiled_regex) {
-            // Log error; for now, return fail.
-            PCRE2_UCHAR errbuf[256];
-            pcre2_get_error_message(errcode, errbuf, sizeof(errbuf));
-            fprintf(stderr, "PCRE2 compile fail: %s\n", (char*)errbuf);
-            return CM_RES_ALLOCATION_FAILURE; // Or custom RES.
-        }
+        pattern_str = "^(?!)";
     } else {
         std::ostringstream oss;
         oss << "^";
@@ -120,32 +170,17 @@ static CM_RES regex_trie_update_matcher(regex_trie* p_trie) {
             if (i > 0) oss << "|";
             oss << "(" << p_trie->regexes[i].second << ")";
         }
-        std::string pattern_str = oss.str();
-        int errcode;
-        PCRE2_SIZE erroffset;
-        p_trie->compiled_regex = pcre2_compile(reinterpret_cast<PCRE2_SPTR>(pattern_str.c_str()), pattern_str.length(), PCRE2_UTF | PCRE2_UCP, &errcode, &erroffset, NULL);
-        if (!p_trie->compiled_regex) {
-            PCRE2_UCHAR errbuf[256];
-            pcre2_get_error_message(errcode, errbuf, sizeof(errbuf));
-            fprintf(stderr, "PCRE2 compile fail: %s at offset %zu\n", (char*)errbuf, erroffset);
-            return CM_RES_ALLOCATION_FAILURE;
-        }
-        // Optional: JIT for speed.
-        int jit_rc = pcre2_jit_compile(p_trie->compiled_regex, 0);
-        if (jit_rc < 0) {
-            fprintf(stderr, "PCRE2 JIT compile fail: %d\n", jit_rc);
-        }
+        pattern_str = oss.str();
     }
-    p_trie->match_data = pcre2_match_data_create_from_pattern(p_trie->compiled_regex, NULL);
-    if (!p_trie->match_data) {
-        pcre2_code_free(p_trie->compiled_regex);
-        p_trie->compiled_regex = nullptr;
+    try {
+        p_trie->matcher = new reflex::Matcher(pattern_str.c_str());
+    } catch (const std::exception& e) {
+        fprintf(stderr, "RE/flex compile fail: %s\n", e.what());
         return CM_RES_ALLOCATION_FAILURE;
     }
     p_trie->matcher_updated = true;
     return CM_RES_SUCCESS;
 }
-
 extern "C" {
 // Create/initialize an empty root trie node.
 CM_RES regex_trie_create(regex_trie** pp_output_trie) {
@@ -160,13 +195,11 @@ CM_RES regex_trie_create(regex_trie** pp_output_trie) {
     // Explicitly init C/POD members (vector already handled).
     internal_regex_trie_init(&p_new->trie_children);
     p_new->p_leaf_value = nullptr;
-    p_new->compiled_regex = nullptr;
-    p_new->match_data = nullptr;
+    p_new->matcher = nullptr;
     p_new->matcher_updated = true; // Initially "updated" (empty).
     *pp_output_trie = p_new;
     return CM_RES_SUCCESS;
 }
-
 // Insert a string into the trie, creating nodes as needed.
 // Returns CM_RES_SUCCESS on success, or error (e.g., out of memory).
 CM_RES regex_trie_insert(regex_trie* p_trie, const uint8_t* p_regex, void* p_value) {
@@ -243,41 +276,101 @@ CM_RES regex_trie_insert(regex_trie* p_trie, const uint8_t* p_regex, void* p_val
     }
     return CM_RES_SUCCESS;
 }
-
-// Longest prefix match (literal-only; updates on sentinel for exact words/delims).
+// Longest prefix match (now handles literal + regex branches; updates on sentinel for exact words/delims).
 // Returns FOUND if any EOW prefix (>0), else NOT_FOUND; sets matched=0 if none.
 CM_RES regex_trie_get(regex_trie* p_trie, const uint8_t* p_string, size_t input_len, size_t* p_output_matched_total, void** pp_output_value) {
     CM_ASSERT(p_trie && p_string && p_output_matched_total && pp_output_value && input_len > 0);
+    //CM_TIMER_START();
     *p_output_matched_total = 0;
     *pp_output_value = nullptr;
-    regex_trie* current = p_trie;  // Non-const for verstable access.
+    regex_trie* current = p_trie;
+    size_t pos = 0;
     size_t max_matched = 0;
     void* max_value = nullptr;
-    for (size_t i = 0; i < input_len; ++i) {
-        uint8_t c = p_string[i];
-        internal_regex_trie_itr itr = internal_regex_trie_get(&current->trie_children, c);
-        if (internal_regex_trie_is_end(itr)) {
-            break;  // No further literal path.
+    while (pos < input_len) {
+        uint8_t c = p_string[pos];
+        // Try literal child first.
+        internal_regex_trie_itr lit_itr = internal_regex_trie_get(&current->trie_children, c);
+        bool advanced = false;
+        size_t advance_len = 0;
+        if (!internal_regex_trie_is_end(lit_itr)) {
+            regex_trie* next_current = (regex_trie*)lit_itr.data->val;
+            if (next_current) {
+                current = next_current;
+                advance_len = 1;
+                advanced = true;
+            }
         }
-        current = (regex_trie*)itr.data->val;
-        if (!current) {
-            break;  // Corrupt.
+        if (!advanced) {
+            // No literal: Try regex branches.
+            if (current->regexes.empty()) {
+                break;
+            }
+            if (!current->matcher_updated) {
+                CM_RES update_res = regex_trie_update_matcher(current);
+                if (update_res != CM_RES_SUCCESS) {
+                    CM_TIMER_STOP();
+                    return update_res; // Propagate failure.
+                }
+            }
+            if (!current->matcher) {
+                break; // Shouldn't happen post-update.
+            }
+            // Set input to remaining string.
+            //CM_TIMER_START();
+            reflex::Input rinput(static_cast<const char*>(static_cast<const void*>(p_string + pos)), input_len - pos);
+            current->matcher->input(rinput);
+            current->matcher->reset();
+            //CM_TIMER_STOP();
+            //CM_TIMER_START();
+            // Match combined anchored pattern on remaining input.
+            size_t accept_val = current->matcher->find();
+            //CM_TIMER_STOP();
+            //CM_TIMER_START();
+            if (accept_val == 0) {
+                break; // No match.
+            }
+            if (current->matcher->first() != 0 || current->matcher->size() == 0) {
+                break; // Not anchored at start or empty match.
+            }
+            size_t regex_len = current->matcher->size();
+            // Identify which alternative matched (loop over groups like PCRE2).
+            size_t which = current->regexes.size(); // Invalid default.
+            for (size_t g = 1; g <= current->regexes.size(); ++g) {
+                std::pair<const char*, size_t> group = (*current->matcher)[g];
+                if (group.second > 0) {
+                    which = g - 1;
+                    break; // Left-to-right: first matching alt.
+                }
+            }
+            //CM_TIMER_STOP();
+            if (which >= current->regexes.size()) {
+                break; // Matched but no group? Rare/corrupt.
+            }
+            current = current->regexes[which].first;
+            advance_len = regex_len;
+            advanced = true;
         }
-        // Check EOW sentinel after advance (update max only if hit).
+        if (!advanced) {
+            break;
+        }
+        pos += advance_len;
+        // Check EOW sentinel after advance.
         internal_regex_trie_itr end_itr = internal_regex_trie_get(&current->trie_children, (uint8_t)'\0');
         if (!internal_regex_trie_is_end(end_itr) && end_itr.data->val == nullptr) {
-            max_matched = i + 1;
+            max_matched = pos;
             max_value = current->p_leaf_value;
         }
     }
     if (max_matched > 0) {
         *p_output_matched_total = max_matched;
         *pp_output_value = max_value;
+        //CM_TIMER_STOP();
         return CM_RES_REGEX_TRIE_NODE_FOUND;
     }
+    //CM_TIMER_STOP();
     return CM_RES_REGEX_TRIE_NODE_NOT_FOUND;
 }
-
 // Recursive destroy: Cleans trie_children and internals.
 CM_RES regex_trie_destroy(regex_trie* p_trie) {
     CM_ASSERT(p_trie);
@@ -298,11 +391,8 @@ CM_RES regex_trie_destroy(regex_trie* p_trie) {
             }
         }
     }
-    if (p_trie->compiled_regex) {
-        pcre2_code_free(p_trie->compiled_regex);
-    }
-    if (p_trie->match_data) {
-        pcre2_match_data_free(p_trie->match_data);
+    if (p_trie->matcher) {
+        delete p_trie->matcher;
     }
     internal_regex_trie_cleanup(&p_trie->trie_children);
     // Destruct C++ members before free (cleans vector).
@@ -313,16 +403,11 @@ CM_RES regex_trie_destroy(regex_trie* p_trie) {
     }
     return CM_RES_SUCCESS;
 }
-
 // Print all words in the trie, one per line, in lexicographic order.
 // (depth param ignored for this flat output.)
-CM_RES regex_trie_print(const regex_trie* p_trie, int depth) {
-    (void)depth; // Unused.
+CM_RES regex_trie_print(const regex_trie* p_trie) {
     CM_ASSERT(p_trie);
-    enum { MAX_WORD_LEN = 1024 };
-    uint8_t word_buffer[MAX_WORD_LEN];
-    size_t current_len = 0;
-    print_words_recursive(p_trie, word_buffer, &current_len, MAX_WORD_LEN);
+    print_trie_recursive(p_trie, 0);
     return CM_RES_SUCCESS;
 }
 } // extern "C"
