@@ -1,0 +1,95 @@
+const std = @import("std");
+const dvui = @import("dvui");
+const SDLBackend = @import("sdl3");
+
+const ui = @import("ui/ui.zig");
+const session = @import("session/session.zig");
+const renderer = @import("renderer/renderer.zig");
+
+pub const App = struct {
+    allocator: std.mem.Allocator,
+    session_manager: session.SessionManager,
+    graph_renderer: renderer.GraphRenderer,
+
+    pub fn init(allocator: std.mem.Allocator) !App {
+        var session_manager = session.SessionManager.init(allocator);
+        errdefer session_manager.deinit();
+
+        // Create initial session
+        try session_manager.createSession("Untitled");
+
+        return .{
+            .allocator = allocator,
+            .session_manager = session_manager,
+            .graph_renderer = renderer.GraphRenderer.init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *App) void {
+        self.graph_renderer.deinit();
+        self.session_manager.deinit();
+    }
+
+    pub fn run(self: *App) !void {
+        SDLBackend.enableSDLLogging();
+
+        // Init SDL backend (creates OS window)
+        var backend = try SDLBackend.initWindow(.{
+            .allocator = self.allocator,
+            .title = "Logos",
+            .size = .{ .w = 1400, .h = 900 },
+            .min_size = .{ .w = 800, .h = 600 },
+            .vsync = true,
+        });
+        defer backend.deinit();
+
+        // Init dvui Window
+        var win = try dvui.Window.init(@src(), self.allocator, backend.backend(), .{
+            .theme = switch (backend.preferredColorScheme() orelse .dark) {
+                .light => dvui.Theme.builtin.adwaita_light,
+                .dark => dvui.Theme.builtin.adwaita_dark,
+            },
+        });
+        defer win.deinit();
+
+        var interrupted = false;
+
+        main_loop: while (true) {
+            // beginWait coordinates with waitTime to run frames only when needed
+            const nstime = win.beginWait(interrupted);
+
+            // Begin dvui frame
+            try win.begin(nstime);
+
+            // Send SDL events to dvui
+            try backend.addAllEvents(&win);
+
+            // Clear previous frame
+            _ = SDLBackend.c.SDL_SetRenderDrawColor(backend.renderer, 22, 27, 34, 255);
+            _ = SDLBackend.c.SDL_RenderClear(backend.renderer);
+
+            // Render the main UI
+            const keep_running = ui.views.mainView(self);
+            if (!keep_running) break :main_loop;
+
+            // Update graph renderer with current session's content
+            if (self.session_manager.activeSession()) |active| {
+                self.graph_renderer.update(active);
+            }
+
+            // End dvui frame
+            const end_micros = try win.end(.{});
+
+            // Cursor management
+            try backend.setCursor(win.cursorRequested());
+            try backend.textInputRect(win.textInputRequested());
+
+            // Render to screen
+            try backend.renderPresent();
+
+            // Variable framerate handling
+            const wait_event_micros = win.waitTime(end_micros);
+            interrupted = try backend.waitEventTimeout(wait_event_micros);
+        }
+    }
+};

@@ -1,0 +1,24 @@
+.{
+    .name = .Logos,
+    .version = "0.1.0",
+    .fingerprint = 0x5e952f4b0e6bda99,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+    .dependencies = .{
+        .pcrez = .{
+            .url = "git+https://github.com/qaptoR-zig/PCREz.git#master",
+            .hash = "pcrez-0.0.1-f7US7d5mAAAc5cCItlm3je4CImRplBhVxouIORmkmmoN",
+        },
+        .pcre2 = .{
+            .url = "https://github.com/qaptoR-support/pcre2/archive/refs/tags/zig0.14.tar.gz",
+            .hash = "N-V-__8AAN0G3wA6horCZYad-eyYofHQ4Q9D7m9nSWiCqbXb",
+        },
+        .dvui = .{
+            .url = "git+https://github.com/david-vanderson/dvui.git#main",
+            .hash = "dvui-0.4.0-dev-AQFJmd882gB-TLZwmOmU1MFVJx6ICV853cDvCeCpZxoE",
+        },
+    },
+}
