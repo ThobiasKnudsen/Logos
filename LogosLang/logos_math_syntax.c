@@ -1,91 +1,107 @@
 
 // RESERVED START
-axis_1.val
-axis_1.min
-axis_1.max
-axis_1.res
-axis_2.val
-axis_2.min
-axis_2.max
-axis_2.res
-axis_3.val
-axis_3.min
-axis_3.max
-axis_3.res
-time.s
-time.ms
-time.us
-red 
-green
-blue
-var(min max res)
+    axis1
+    axis1.min
+    axis1.max
+    axis1.res
+
+    axis2
+    axis2.min
+    axis2.max
+    axis2.res
+
+    axis3
+    axis3.min
+    axis3.max
+    axis3.res
+
+    time.s
+    time.ms
+    time.us
+
+    red
+    green
+    blue
+    alpha
+
+    var(min, max, res)
 // RESERVED END
 
-BASE_ITER = 16 
-BAILOUT = 4.0  
-MAX_ITER_CAP = 512
-INITIAL_ZOOM = 0.2
-ROOT_SAMPLES = 3  
+BASE_ITER: 16, 
+BAILOUT: 4.0,
+MAX_ITER_CAP: 512,
+INITIAL_ZOOM: 0.2,
+ROOT_SAMPLES: 3,
 
-mandelbrot(x, y):
-    i32 num_samples = ROOT_SAMPLES * ROOT_SAMPLES
-    f32 avg_r = 0.0, avg_g = 0.0, avg_b = 0.0
-    f32 width_x = max_x - min_x
-    f32 width_y = max_y - min_y
-    f32 effective_zoom = 1.0 / width_y
-    for (i32 s = 0; s < num_samples; s++)
-        f32 jitter_x = (f32(s % ROOT_SAMPLES) + f32((s * 7 + 3) % 100) / 99.0) / f32(ROOT_SAMPLES) - 0.5
-        f32 input_x = x + jitter_x / res.x
-        f32 c_x = min_x + input_x * width_x
-        f32 jitter_y = (f32(s / ROOT_SAMPLES) + f32((s * 13 + 5) % 100) / 99.0) / f32(ROOT_SAMPLES) - 0.5
-        f32 input_y = y + jitter_y / res.y
-        f32 c_y = min_y + input_y * width_y
-        f32 z_x = 0.0, z_y = 0.0, sq = 0.0
-        i32 max_iter = min(BASE_ITER + (40.0 * log(effective_zoom / INITIAL_ZOOM + 1.0)), MAX_ITER_CAP)
-        i32 iter = 0
-        while (iter < max_iter && (sq = z_x * z_x + z_y * z_y) < BAILOUT):
-            f32 zy2 = z_y * z_y
-            z_y = 2.0 * z_x * z_y + c_y
-            z_x = z_x * z_x - zy2 + c_x
-            iter++
-        if (iter < max_iter):
-            f32 uhh = (f32(iter)+1.0-log(0.5*log(sq)/log(2.0))/log(2.0))
-            uhh2(val):
-                (0.9+0.1*cos(0.05*uhh+0.5*time_s))*((1.0-(0.8+0.2*sin(0.1*uhh+time_s)))+(0.8+0.2*sin(0.1*uhh+time_s))*clamp(abs(fract(fract(0.05*uhh+0.3*time_s)+val)*6.0-3.0)-1.0,0.0,1.0));
-            avg_r += uhh2(1.0/2.0)
-            avg_g += uhh2(1.0/3.0)
-            avg_b += uhh2(1.0/4.0)
-    f32 a = sin(time_s * 0.3) * 0.5 + 0.5
-    f32 r = avg_r / num_samples
-    f32 g = avg_g / num_samples
-    f32 b = avg_b / num_samples
+sum(A): (
+    sum_A: 0,
+    for (i: 0, i < len(A), i:i+1) (
+        sum_A: sum_A + A[i],
+    )
+    sum_A
+),
+mandelbrot_color(iter, sq): (
+    mu: f32(iter) + 1.0 - log(0.5 * log(sq) / log(2.0)) / log(2.0),
+    base_mod: 0.05 * mu + 0.3 * time_s,
+    hue_mod: 0.1 * mu + time_s,
+    color_base: 0.9 + 0.1 * cos(0.05 * mu + 0.5 * time_s),
+    fade: 0.8 + 0.2 * sin(hue_mod),
+    triwave_channel(offset): (
+        color_base * ((1.0 - fade) + fade * clamp(
+            abs(fract(fract(base_mod) + offset) * 6.0 - 3.0) - 1.0,
+            0.0,
+            1.0
+        ))
+    ),
+    (triwave_channel(0.5), triwave_channel(1.0/3.0), triwave_channel(0.25), 1.0)
+),
+mandelbrot(x, y): (
+    (width_x, width_y): (x.max-x.min, y.max-y.min),
+    effective_zoom:     1.0 / width_y,
+    (c_x, c_y):         (x.min + x * width_x, y.min + y * width_y),
+    (z_x, z_y):         (0.0, 0.0),
+    sq:                 0.0,
+    max_iter:           min(BASE_ITER + (40.0 * log(effective_zoom / INITIAL_ZOOM + 1.0)), MAX_ITER_CAP),
+    iter:               0,
+    while (iter < max_iter and (sq: z_x * z_x + z_y * z_y, sq) < BAILOUT) (
+        zy2:    z_y * z_y,
+        z_y:    2.0 * z_x * z_y + c_y,
+        z_x:    z_x * z_x - zy2 + c_x,
+        iter:   iter+1
+    ),
+    if (iter < max_iter) (
+        mandelbrot_color(iter, sq)
+    ) else (
+        (0.0, 0.0, 0.0, 1.0)
+    )
+),
 
-    red == r*(1-a) + g*x && green == g*(1-a) + r*x && blue == b*(1-a) + b*a
+x: axis1,
+y: axis2,
+(red, green, blue, alpha): mandelbrot(x, y),
 
-mandelbrot(axis_1.val, axis_2.val)
+x²+y²=9 and ((x>y² or x<y) and x+y!=3),
 
-x²+y²==9 and ((x>y² or x<y) and x+y!=3)
-
-f32 d_x = (x.max-x.min)/(2.0*x.res)
-f32 d_y = (y.max-y.min)/(2.0*y.res)
-b8 v1_1 = (x-dx)²+(y-dy)²>9;
-b8 v1_2 = (x-dx)²+(y+dy)²>9;
-b8 v1_3 = (x+dx)²+(y-dy)²>9;
-b8 v1_4 = (x+dx)²+(y+dy)²>9;
-b8 v1 = !(v1_1==v1_2 && v1_2==a3 && v1_3==v1_4);
-b8 v2_1 = (x-dx)>(y-dy)²;
-b8 v2_2 = (x-dx)>(y+dy)²;
-b8 v2_3 = (x+dx)>(y-dy)²;
-b8 v2_4 = (x+dx)>(y+dy)²;
-b8 v2_2 = v2_1==true && v2_1==v2_2 && v2_2==v2_3 && v2_3==v2_4;
-b8 v3_1 = (x-dx)<(y-dy);
-b8 v3_2 = (x-dx)<(y+dy);
-b8 v3_3 = (x+dx)<(y-dy);
-b8 v3_4 = (x+dx)<(y+dy);
-b8 v3 = v3_1==true && v3_1==v3_2 && v3_2==b3 && v3_3==v3_4;
-b8 v4_1 = (x-dx)+(y-dy)>3;
-b8 v4_2 = (x-dx)+(y+dy)>3;
-b8 v4_3 = (x+dx)+(y-dy)>3;
-b8 v4_4 = (x+dx)+(y+dy)>3;
-b8 v4 = v4_1==v4_2 && v4_2==v4_3 && v4_3==v4_4;
-v1 && ((v2 || v3) && v4)
+dx: (x.max-x.min)/(2.0*x.res),
+dy: (y.max-y.min)/(2.0*y.res),
+v1_1: (x-dx)²+(y-dy)²>9,
+v1_2: (x-dx)²+(y+dy)²>9,
+v1_3: (x+dx)²+(y-dy)²>9,
+v1_4: (x+dx)²+(y+dy)²>9,
+v1: !(v1_1=v1_2 and v1_2=a3 and v1_3=v1_4),
+v2_1: (x-dx)>(y-dy)²,
+v2_2: (x-dx)>(y+dy)²,
+v2_3: (x+dx)>(y-dy)²,
+v2_4: (x+dx)>(y+dy)²,
+v2: v2_1=true and v2_1=v2_2 and v2_2=v2_3 and v2_3=v2_4,
+v3_1: (x-dx)<(y-dy),
+v3_2: (x-dx)<(y+dy),
+v3_3: (x+dx)<(y-dy),
+v3_4: (x+dx)<(y+dy),
+v3: v3_1=true and v3_1=v3_2 and v3_2=b3 and v3_3=v3_4,
+v4_1: (x-dx)+(y-dy)>3,
+v4_2: (x-dx)+(y+dy)>3,
+v4_3: (x+dx)+(y-dy)>3,
+v4_4: (x+dx)+(y+dy)>3,
+v4: v4_1=v4_2 and v4_2=v4_3 and v4_3=v4_4,
+v1 and ((v2 or v3) and v4)

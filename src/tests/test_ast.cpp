@@ -15,12 +15,12 @@ static void test_regex_trie_many_words(void) {
     regex_trie* p_root = NULL;
     CM_ASSERT(CM_RES_SUCCESS == regex_trie_create(&p_root));
     // Insert "hello" for verification (uint8_t literal).
-    CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, (const uint8_t*)"hello", nullptr));
-    CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, (const uint8_t*)"\n", nullptr));
-    CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, (const uint8_t*)"\r", nullptr));
-    CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, (const uint8_t*)" ", nullptr));
+    CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, regex_trie_value_create("hello", 5, sizeof(regex_trie_value))));
+    CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, regex_trie_value_create("\n", 1, sizeof(regex_trie_value))));
+    CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, regex_trie_value_create("\r", 1, sizeof(regex_trie_value))));
+    CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, regex_trie_value_create(" ", 1, sizeof(regex_trie_value))));
     size_t test_matched;
-    void* test_val;
+    regex_trie_value* test_val;
     CM_RES test_res = regex_trie_get(p_root, (const uint8_t*)"hello", 5, &test_matched, &test_val);
     printf("Exact 'hello': res=%d, matched=%zu\n", test_res, test_matched);
     // Open and read words.txt (assume one word per line, UTF-8/ASCII).
@@ -39,7 +39,7 @@ static void test_regex_trie_many_words(void) {
         // Skip empty lines.
         if (len == 0) continue;
         // Use bytes directly (ASCII-safe).
-        CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, (const uint8_t*)line, nullptr));
+        CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, regex_trie_value_create(line, len, sizeof(regex_trie_value))));
         num_words++;
     }
     CM_TIMER_STOP();
@@ -64,7 +64,7 @@ static void test_regex_trie_many_words(void) {
         size_t this_len = read_bytes - byte_offset;
         if (this_len > MAX_TOKEN_LEN) this_len = MAX_TOKEN_LEN;
         size_t matched_len;
-        void* value_out = NULL;
+        regex_trie_value* value_out = NULL;
         CM_RES result = regex_trie_get(p_root, (const uint8_t*)(byte_buffer + byte_offset), this_len, &matched_len, &value_out);
         CM_ASSERT(result == CM_RES_REGEX_TRIE_NODE_FOUND || result == CM_RES_REGEX_TRIE_NODE_NOT_FOUND);
         if (matched_len == 0) {
@@ -120,14 +120,12 @@ static void test_regex_trie_many_regexes(void) {
         // Skip empty lines.
         if (len == 0) continue;
         // Use bytes directly as regex pattern.
-        CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, (const uint8_t*)line, nullptr));
+        CM_ASSERT(CM_RES_SUCCESS == regex_trie_insert(p_root, regex_trie_value_create(line, len, sizeof(regex_trie_value))));
         num_regexes++;
     }
     CM_TIMER_STOP();
     fclose(fp);
     CM_LOG_NOTICE("Inserted %zu regex patterns into trie.\n", num_regexes);
-
-    CM_ASSERT(CM_RES_SUCCESS == regex_trie_print(p_root));
 
     // Bulk "verification" using regex_trie_get on sample text (words.txt as proxy input).
     // Counts total tokens matched (any >0 length); no assert as expected count unknown.
@@ -151,12 +149,12 @@ static void test_regex_trie_many_regexes(void) {
             size_t this_len = read_bytes - byte_offset;
             if (this_len > MAX_TOKEN_LEN) this_len = MAX_TOKEN_LEN;
             size_t matched_len;
-            void* value_out = NULL;
+            regex_trie_value* value_out = NULL;
             CM_RES result = regex_trie_get(p_root, (const uint8_t*)(byte_buffer + byte_offset), this_len, &matched_len, &value_out);
             CM_ASSERT(result == CM_RES_REGEX_TRIE_NODE_FOUND || result == CM_RES_REGEX_TRIE_NODE_NOT_FOUND);
             if (matched_len > 0) {
                 // Optional: Log first few matches for debug.
-                if (bulk_num_tokens < 5) {
+                if (bulk_num_tokens < 0) {
                     char temp_str[matched_len + 1];
                     memcpy(temp_str, byte_buffer + byte_offset, matched_len);
                     temp_str[matched_len] = '\0';

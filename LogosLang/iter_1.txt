@@ -40,4 +40,31 @@
 		scope(1,1)=«(»,
 	),
 	«token» = ?,
+
+	«(» is (
+		semantics is (
+			this is consumable,
+			
+		)
+	)
+
+	« « «» » is «» » is (
+		semantics is (
+			this is not consumable,
+			this.regex.count is 2,
+			this.regex[0].count is 1,
+			consumes this.regex[0],
+			consumes this.regex[1],
+		)
+	)
+	«+» is (
+		semantics is (
+			this is consumable,
+			this.regex.count is 0,
+			var1 consumes this.token[1] at precedence 1,
+			var2 consumes this.token[-1] at precedence 1,
+			var1 is consumable,
+			var2 is consumable
+		)
+	)
 },

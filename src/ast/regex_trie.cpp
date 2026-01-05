@@ -10,6 +10,7 @@
 #include <algorithm> // For std::sort.
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h> // PCRE2 header.
+
 // Define Verstable table type (prefixed to avoid conflict).
 #define NAME internal_regex_trie
 #define KEY_TY uint8_t
@@ -17,20 +18,23 @@
 #define HASH_FN vt_hash_integer
 #define CMPR_FN vt_cmpr_integer
 #include <verstable.h> // Or your _deps path.
+
 struct regex_trie {
     // leaf nodes will be identified by '\0' character
     internal_regex_trie trie_children; // Verstable map.
-    void* p_leaf_value; // nullptr if not leaf
-    pcre2_code* compiled_regex; // Compiled combined PCRE2 pattern (nullptr if not updated).
-    pcre2_match_data* match_data; // Reusable match data.
+    regex_trie_value*   p_leaf_value; // nullptr if not leaf
+    pcre2_code*         compiled_regex; // Compiled combined PCRE2 pattern (nullptr if not updated).
+    pcre2_match_data*   match_data; // Reusable match data.
     std::vector<std::pair<regex_trie*, std::string>>
                         regexes; // the strings are combined with '|' between for the matcher
-    bool matcher_updated; // if false the matcher has to be lazily recreated when used later
+    bool                matcher_updated; // if false the matcher has to be lazily recreated when used later
 };
+
 struct ChainInfo {
     std::string label;
     const regex_trie* target_node;
 };
+
 static bool check_eow(const regex_trie* p_trie) {
     CM_ASSERT(p_trie);
     internal_regex_trie_itr end_itr = internal_regex_trie_get(&((regex_trie*)p_trie)->trie_children, (uint8_t)'\0');
@@ -208,6 +212,19 @@ static CM_RES regex_trie_update_matcher(regex_trie* p_trie) {
     return CM_RES_SUCCESS;
 }
 extern "C" {
+
+regex_trie_value* regex_trie_value_create(const char* p_regex_key, size_t regex_len, size_t value_size_bytes) {
+    CM_ASSERT(p_regex_key);
+    CM_ASSERT(value_size_bytes >= sizeof(regex_trie_value));
+    CM_ASSERT(strlen(p_regex_key) >= regex_len);
+    regex_trie_value* p_new_value = (regex_trie_value*)malloc(value_size_bytes);
+    p_new_value->p_regex_key = NULL;
+    p_new_value->p_regex_key = (uint8_t*)malloc(regex_len+1);
+    CM_ASSERT(p_new_value->p_regex_key);
+    memcpy((void*)p_new_value->p_regex_key, (void*)p_regex_key, regex_len);
+    p_new_value->p_regex_key[regex_len] = '\0';
+    return p_new_value;
+}
 // Create/initialize an empty root trie node.
 CM_RES regex_trie_create(regex_trie** pp_output_trie) {
     CM_ASSERT(pp_output_trie);
@@ -229,10 +246,11 @@ CM_RES regex_trie_create(regex_trie** pp_output_trie) {
 }
 // Insert a string into the trie, creating nodes as needed.
 // Returns CM_RES_SUCCESS on success, or error (e.g., out of memory).
-CM_RES regex_trie_insert(regex_trie* p_trie, const uint8_t* p_regex, void* p_value) {
-    CM_ASSERT(p_trie && p_regex);
+CM_RES regex_trie_insert(regex_trie* p_trie, regex_trie_value* p_key_value) {
+    CM_ASSERT(p_trie && p_key_value);
+    CM_ASSERT(p_key_value->p_regex_key);
     //CM_TIMER_START();
-    std::string str(reinterpret_cast<const char*>(p_regex));
+    std::string str(reinterpret_cast<const char*>(p_key_value->p_regex_key));
     std::vector<std::vector<Segment>> paths = regex_literal_splitting(str);
     //CM_TIMER_STOP();
     for (std::vector<Segment> path : paths) {
@@ -299,20 +317,117 @@ CM_RES regex_trie_insert(regex_trie* p_trie, const uint8_t* p_regex, void* p_val
         if (internal_regex_trie_is_end(end_itr)) {
             return CM_RES_ALLOCATION_FAILURE;
         }
-        p_current_trie->p_leaf_value = p_value;
+        p_current_trie->p_leaf_value = p_key_value;
     }
+    return CM_RES_SUCCESS;
+}
+struct PathStep {
+    regex_trie* node; // The parent node
+    bool is_literal;
+    uint8_t lit_key;
+    size_t regex_index;
+};
+CM_RES regex_trie_remove(regex_trie* p_trie, const char* p_regex_key, regex_trie_value** pp_output_value) {
+    CM_ASSERT(p_trie);
+    CM_ASSERT(p_regex_key);
+    CM_ASSERT(pp_output_value);
+    *pp_output_value = nullptr;
+    std::string str(p_regex_key);
+    std::vector<std::vector<Segment>> paths = regex_literal_splitting(str);
+    bool all_removed = true;
+    regex_trie_value* removed_value = nullptr;
+    for (const auto& path : paths) {
+        std::vector<PathStep> stack;
+        regex_trie* current = p_trie;
+        bool path_found = true;
+        for (size_t seg = 0; seg < path.size() && path_found; ++seg) {
+            const Segment& s = path[seg];
+            if (s.is_lit) {
+                for (size_t i = 0; i < s.str.size() && path_found; ++i) {
+                    uint8_t c = static_cast<uint8_t>(s.str[i]);
+                    internal_regex_trie_itr itr = internal_regex_trie_get(&current->trie_children, c);
+                    if (internal_regex_trie_is_end(itr)) {
+                        path_found = false;
+                    } else {
+                        regex_trie* child = static_cast<regex_trie*>(itr.data->val);
+                        stack.push_back({current, true, c, size_t(-1)});
+                        current = child;
+                    }
+                }
+            } else {
+                size_t found_idx = size_t(-1);
+                for (size_t j = 0; j < current->regexes.size(); ++j) {
+                    if (current->regexes[j].second == s.str) {
+                        found_idx = j;
+                        break;
+                    }
+                }
+                if (found_idx == size_t(-1)) {
+                    path_found = false;
+                } else {
+                    regex_trie* child = current->regexes[found_idx].first;
+                    stack.push_back({current, false, uint8_t(0), found_idx});
+                    current = child;
+                }
+            }
+        }
+        if (!path_found || !check_eow(current)) {
+            all_removed = false;
+            continue;
+        }
+        if (current->p_leaf_value == nullptr || strcmp(reinterpret_cast<const char*>(current->p_leaf_value->p_regex_key), p_regex_key) != 0) {
+            all_removed = false;
+            continue;
+        }
+        // Save the value (assume same for all paths)
+        if (removed_value == nullptr) {
+            removed_value = current->p_leaf_value;
+        } else {
+            // Check pointer is the same for every endpoint
+            if (removed_value != current->p_leaf_value) {
+                all_removed = false;
+                continue;
+            }
+        }
+        // Remove the leaf marker
+        current->p_leaf_value = nullptr;
+        internal_regex_trie_erase(&current->trie_children, static_cast<uint8_t>('\0'));
+        // Prune upwards if possible
+        while (!stack.empty()) {
+            if (has_children(current) || current->p_leaf_value != nullptr || check_eow(current)) {
+                break; // Node is not prunable
+            }
+            PathStep ps = stack.back();
+            stack.pop_back();
+            regex_trie* parent = ps.node;
+            if (ps.is_literal) {
+                internal_regex_trie_erase(&parent->trie_children, ps.lit_key);
+            } else {
+                parent->matcher_updated = false;
+                parent->regexes.erase(parent->regexes.begin() + ps.regex_index);
+            }
+            // Destroy the pruned node
+            regex_trie_destroy(current);
+            // Move up
+            current = parent;
+        }
+    }
+    if (!all_removed) {
+        return CM_RES_REGEX_TRIE_NODE_NOT_FOUND;
+    }
+    *pp_output_value = removed_value;
     return CM_RES_SUCCESS;
 }
 // Longest prefix match (now handles literal + regex branches; updates on sentinel for exact words/delims).
 // Returns FOUND if any EOW prefix (>0), else NOT_FOUND; sets matched=0 if none.
-CM_RES regex_trie_get(regex_trie* p_trie, const uint8_t* p_string, size_t input_len, size_t* p_output_matched_total, void** pp_output_value) {
+CM_RES regex_trie_get(regex_trie* p_trie, const uint8_t* p_string, size_t input_len, size_t* p_output_matched_total, regex_trie_value** pp_output_value) {
     CM_ASSERT(p_trie && p_string && p_output_matched_total && pp_output_value && input_len > 0);
     *p_output_matched_total = 0;
     *pp_output_value = nullptr;
     regex_trie* current = p_trie;
     size_t pos = 0;
     size_t max_matched = 0;
-    void* max_value = nullptr;
+    regex_trie_value* max_value = nullptr;
     while (pos < input_len) {
         uint8_t c = p_string[pos];
         // Try literal child first.
@@ -338,9 +453,7 @@ CM_RES regex_trie_get(regex_trie* p_trie, const uint8_t* p_string, size_t input_
                     return update_res; // Propagate failure.
                 }
             }
-            if (!current->compiled_regex) {
-                break; // Shouldn't happen post-update.
-            }   
+            CM_ASSERT(current->compiled_regex);
             // Match combined anchored pattern on remaining input.
             int rc = pcre2_match(current->compiled_regex,
                                  (PCRE2_SPTR)(p_string + pos),
@@ -385,6 +498,11 @@ CM_RES regex_trie_get(regex_trie* p_trie, const uint8_t* p_string, size_t input_
         }
     }
     if (max_matched > 0) {
+        CM_ASSERT(max_value);
+        CM_ASSERT(max_value->p_regex_key);
+        bool is_same = true;
+        size_t regex_key_len = strlen((const char*)max_value->p_regex_key);
+        CM_ASSERT(regex_key_len <= input_len);
         *p_output_matched_total = max_matched;
         *pp_output_value = max_value;
         return CM_RES_REGEX_TRIE_NODE_FOUND;

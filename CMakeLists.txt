@@ -222,25 +222,6 @@ set(MI_OVERRIDE ON CACHE BOOL "Enable malloc override")
 set(MI_BUILD_OBJECT ON CACHE BOOL "Build mimalloc as object file for static override")  # Added for object-based override
 set(MI_SECURE ON CACHE BOOL "Enable secure mode with guards and encryption")
 FetchContent_MakeAvailable(mimalloc)
-# RE/flex for the most efficient regex engine
-FetchContent_Declare(
-    reflex
-    GIT_REPOSITORY https://github.com/Genivia/RE-flex.git
-    GIT_TAG master
-)
-set(BUILD_TESTING OFF CACHE BOOL "Disable building tests")
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "Static build")
-FetchContent_MakeAvailable(reflex)
-
-# RE/flex
-FetchContent_Declare(
-    reflex
-    GIT_REPOSITORY https://github.com/Genivia/RE-flex.git
-    GIT_TAG master
-)
-set(BUILD_TESTING OFF CACHE BOOL "Disable building tests")
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "Static build")
-FetchContent_MakeAvailable(reflex)
 
 # Declare PCRE2
 FetchContent_Declare(
@@ -284,6 +265,7 @@ add_executable(test_ast
     src/ast/tokenize.c
     src/ast/regex_literal_splitting.cpp
     src/ast/regex_trie.cpp
+    src/ast/ast.c
     src/code_monitoring.c
     src/tests/test_ast.cpp)
 
@@ -469,7 +451,6 @@ target_link_libraries(test_tsm PRIVATE
     ${URCU_LIBRARIES}
     SDL3::SDL3)
 target_link_libraries(test_ast PRIVATE
-    ReflexLibStatic
     pcre2-8)
 # Make executables depend on URCU build
 add_dependencies(logos urcu)
