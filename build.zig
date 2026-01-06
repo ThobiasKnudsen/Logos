@@ -16,14 +16,14 @@ pub fn build(b: *std.Build) void {
 
     exe.linkLibC();
 
-    // ── DVUI with SDL3 backend ──────────────────────────────────────────
+    // ── DVUI with SDL3GPU backend ──────────────────────────────────────────
     const dvui_dep = b.dependency("dvui", .{
         .target = target,
         .optimize = optimize,
-        .backend = .sdl3, // Use SDL3 backend
+        .backend = .sdl3gpu, // Use SDL3 GPU API backend
     });
-    exe.root_module.addImport("dvui", dvui_dep.module("dvui_sdl3"));
-    exe.root_module.addImport("sdl3", dvui_dep.module("sdl3"));
+    exe.root_module.addImport("dvui", dvui_dep.module("dvui_sdl3gpu"));
+    exe.root_module.addImport("sdl3gpu", dvui_dep.module("sdl3"));
 
     // ── PCREz (Zig wrapper for PCRE2) ─────────────────────────────────
     const pcrez_dep = b.lazyDependency("pcrez", .{

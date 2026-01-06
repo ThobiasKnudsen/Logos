@@ -1,6 +1,6 @@
 const std = @import("std");
 const dvui = @import("dvui");
-const SDLBackend = @import("sdl3");
+const SDLBackend = @import("sdl3gpu");
 
 const ui = @import("ui/ui.zig");
 const session = @import("session/session.zig");
@@ -62,11 +62,7 @@ pub const App = struct {
             try win.begin(nstime);
 
             // Send SDL events to dvui
-            try backend.addAllEvents(&win);
-
-            // Clear previous frame
-            _ = SDLBackend.c.SDL_SetRenderDrawColor(backend.renderer, 22, 27, 34, 255);
-            _ = SDLBackend.c.SDL_RenderClear(backend.renderer);
+            _ = try backend.addAllEvents(&win);
 
             // Render the main UI
             const keep_running = ui.views.mainView(self);

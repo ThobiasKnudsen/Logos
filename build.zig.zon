@@ -18,7 +18,7 @@
         },
         .dvui = .{
             .url = "git+https://github.com/david-vanderson/dvui.git#main",
-            .hash = "dvui-0.4.0-dev-AQFJmd882gB-TLZwmOmU1MFVJx6ICV853cDvCeCpZxoE",
+            .hash = "dvui-0.4.0-dev-AQFJmeVS2gBr_UZImna5jjqJewaW2LBD6fve0Lt9Lc70",
         },
     },
 }
