@@ -9,74 +9,112 @@ const theme = @import("../theme.zig");
 const session = @import("../../session/session.zig");
 
 pub const EditorPanel = struct {
+    // Shared styling constants
+    const gutter_width: f32 = 48;
+    const separator_color = dvui.Color{ .r = 60, .g = 70, .b = 85, .a = 255 };
+    const line_number_color = dvui.Color{ .r = 100, .g = 110, .b = 130, .a = 255 };
+    const content_padding_x: f32 = 8;
+    const content_padding_y: f32 = 4;
+
+    // Custom theme for text entry with transparent focus (to hide focus border)
+    const no_focus_theme = blk: {
+        var t = dvui.Theme.builtin.adwaita_dark;
+        t.focus = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 }; // Transparent focus
+        break :blk t;
+    };
+
     pub fn render(active_session: *session.TabSession) void {
-        // Editor container - no background/border, just layout
-        var editor_box = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        // Outer scroll area - handles scrolling for both line numbers and text
+        var scroll = dvui.scrollArea(@src(), .{}, .{
+            .expand = .both,
+            .background = false,
+        });
+        defer scroll.deinit();
+
+        // Content row containing line numbers and text entry
+        var content_row = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .both,
         });
-        defer editor_box.deinit();
+        defer content_row.deinit();
 
-        // Line number gutter - same background as editor
-        // Padding must match the text entry padding exactly for alignment
-        {
-            var gutter = dvui.box(@src(), .{ .dir = .vertical }, .{
-                .min_size_content = .{ .w = 40 },
-                .padding = .{ .x = 8, .y = 4, .w = 4, .h = 4 },
-                .expand = .vertical,
-            });
-            defer gutter.deinit();
-
-            const line_count = countLines(active_session.content.items);
-            for (1..line_count + 1) |line_num| {
-                var buf: [16]u8 = undefined;
-                const line_str = std.fmt.bufPrint(&buf, "{d: >3}", .{line_num}) catch "???";
-                // Use mono font, muted color - padding matches text entry line height
-                dvui.labelNoFmt(@src(), line_str, .{}, .{
-                    .id_extra = line_num,
-                    .font = .theme(.mono),
-                    .color_text = dvui.Color{ .r = 100, .g = 110, .b = 130, .a = 255 },
-                    .padding = .{}, // No extra padding - let natural line height work
-                });
-            }
-        }
+        // Line number gutter
+        renderLineNumbers(active_session);
 
         // Vertical separator line between gutter and text
-        {
-            var sep = dvui.box(@src(), .{}, .{
-                .min_size_content = .{ .w = 1 },
-                .expand = .vertical,
-                .color_fill = dvui.Color{ .r = 60, .g = 70, .b = 85, .a = 255 },
-                .background = true,
+        renderSeparator();
+
+        // Main text area
+        renderTextArea(active_session);
+    }
+
+    fn renderLineNumbers(active_session: *session.TabSession) void {
+        // Get the mono font to calculate line height
+        const font_opts: dvui.Options = .{ .font = .theme(.mono) };
+        const mono_font = font_opts.fontGet();
+        const line_height = mono_font.lineHeight();
+
+        var gutter = dvui.box(@src(), .{ .dir = .vertical }, .{
+            .min_size_content = .{ .w = gutter_width },
+            .padding = .{ .x = content_padding_x, .y = content_padding_y, .w = 4, .h = content_padding_y },
+        });
+        defer gutter.deinit();
+
+        const line_count = countLines(active_session.content.items);
+        for (1..line_count + 1) |line_num| {
+            var buf: [16]u8 = undefined;
+            const line_str = std.fmt.bufPrint(&buf, "{d: >3}", .{line_num}) catch "???";
+            // Use mono font with explicit min height matching TextLayoutWidget's line height
+            dvui.labelNoFmt(@src(), line_str, .{}, .{
+                .id_extra = line_num,
+                .font = .theme(.mono),
+                .color_text = line_number_color,
+                .padding = .{},
+                .margin = .{},
+                .min_size_content = .{ .h = line_height }, // Match TextLayoutWidget line height
             });
-            sep.deinit();
         }
+    }
 
-        // Main text area - no visible border or focus highlight
-        {
-            // Text entry using ArrayList backing for dynamic content
-            var text_entry = dvui.textEntry(@src(), .{
-                .text = .{
-                    .array_list = .{
-                        .backing = &active_session.content,
-                        .allocator = active_session.allocator,
-                    },
+    fn renderSeparator() void {
+        var sep = dvui.box(@src(), .{}, .{
+            .min_size_content = .{ .w = 1 },
+            .expand = .vertical,
+            .color_fill = separator_color,
+            .background = true,
+        });
+        sep.deinit();
+    }
+
+    fn renderTextArea(active_session: *session.TabSession) void {
+        // Text entry with internal scroll disabled - parent scrollArea handles scrolling
+        // Using custom theme with transparent focus to hide the focus border
+        var text_entry = dvui.textEntry(@src(), .{
+            .text = .{
+                .array_list = .{
+                    .backing = &active_session.content,
+                    .allocator = active_session.allocator,
                 },
-                .multiline = true,
-                .scroll_vertical = true,
-            }, .{
-                .expand = .both,
-                .padding = .{ .x = 8, .y = 4, .w = 8, .h = 4 },
-                .border = .{}, // No border
-                .corner_radius = .{}, // No corner radius
-                .color_border = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 }, // Transparent border (removes focus highlight)
-            });
-            defer text_entry.deinit();
+            },
+            .multiline = true,
+            .scroll_vertical = false, // Let parent scrollArea handle scrolling
+            .scroll_horizontal = false,
+        }, .{
+            .expand = .both,
+            .margin = .{}, // Remove default 4px margin
+            .padding = .{ .x = content_padding_x, .y = content_padding_y, .w = content_padding_x, .h = content_padding_y },
+            .border = .{}, // No border
+            .corner_radius = .{}, // No corner radius
+            .background = false, // No background drawing
+            .color_border = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 }, // Transparent border
+            .font = .theme(.mono), // Use mono font to match line numbers
+            .theme = &no_focus_theme, // Use theme with transparent focus
+        });
+        defer text_entry.deinit();
 
-            // Mark as modified if text changed
-            if (text_entry.text_changed) {
-                active_session.is_modified = true;
-                active_session.render_state.needs_update = true;
-            }
+        // Mark as modified if text changed
+        if (text_entry.text_changed) {
+            active_session.is_modified = true;
+            active_session.render_state.needs_update = true;
         }
     }
 

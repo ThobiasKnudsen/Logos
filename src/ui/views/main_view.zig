@@ -19,6 +19,10 @@ const components = @import("../components/components.zig");
 
 const App = @import("../../app.zig").App;
 
+/// Auto-save state
+var last_auto_save_time: i64 = 0;
+const auto_save_interval_ms: i64 = 2000; // Save every 2 seconds if modified
+
 /// Persistent state for the split view
 var split_view: components.SplitView = .{};
 
@@ -46,6 +50,15 @@ pub fn mainView(app: *App) bool {
     // Main content area - split view (editor | graph)
     if (app.session_manager.activeSession()) |active_session| {
         split_view.render(active_session, &app.graph_renderer);
+
+        // Auto-save logic: save non-Untitled tabs when modified
+        if (active_session.file_path != null and active_session.is_modified) {
+            const now = std.time.milliTimestamp();
+            if (now - last_auto_save_time > auto_save_interval_ms) {
+                active_session.saveToFile() catch {};
+                last_auto_save_time = now;
+            }
+        }
     } else {
         // No sessions - show empty state
         renderEmptyState(app);
@@ -77,7 +90,12 @@ fn handleMenuAction(app: *App, action: components.MenuBar.Action) bool {
     switch (action) {
         .none => {},
         .new_session => {
-            app.session_manager.createSession("Untitled") catch {};
+            // Create new untitled session and start editing its name
+            if (app.session_manager.createUntitledSession()) |new_idx| {
+                if (app.session_manager.sessions.items[new_idx].name.len > 0) {
+                    components.TabBar.startEditing(new_idx, app.session_manager.sessions.items[new_idx].name);
+                }
+            } else |_| {}
         },
         .close_tab => {
             if (app.session_manager.activeSession() != null) {
@@ -96,16 +114,58 @@ fn handleTabAction(app: *App, action: components.TabBar.Action) void {
     switch (action) {
         .none => {},
         .add_tab => {
-            const count = app.session_manager.sessions.items.len;
-            var name_buf: [32]u8 = undefined;
-            const name = std.fmt.bufPrint(&name_buf, "Untitled {d}", .{count + 1}) catch "Untitled";
-            app.session_manager.createSession(name) catch {};
+            // Create new untitled session and start editing its name
+            if (app.session_manager.createUntitledSession()) |new_idx| {
+                if (app.session_manager.sessions.items[new_idx].name.len > 0) {
+                    components.TabBar.startEditing(new_idx, app.session_manager.sessions.items[new_idx].name);
+                }
+            } else |_| {}
         },
         .select_tab => |idx| {
             app.session_manager.setActive(idx);
         },
         .close_tab => |idx| {
+            // Cancel any editing if we're closing the tab being edited
+            if (components.TabBar.isEditing(idx)) {
+                components.TabBar.cancelEditing();
+            }
+            // Auto-save before closing if it has a file path
+            app.session_manager.autoSaveSession(idx) catch {};
             app.session_manager.closeSession(idx);
+        },
+        .start_edit => |idx| {
+            // Start editing the tab name
+            if (idx < app.session_manager.sessions.items.len) {
+                const current_name = app.session_manager.sessions.items[idx].name;
+                components.TabBar.startEditing(idx, current_name);
+            }
+        },
+        .finish_edit => |edit_info| {
+            // Finish editing - rename the tab
+            if (edit_info.new_name.len > 0) {
+                app.session_manager.renameSession(edit_info.index, edit_info.new_name) catch {};
+            }
+            components.TabBar.cancelEditing();
+        },
+        .cancel_edit => {
+            components.TabBar.cancelEditing();
+        },
+        .change_folder => |idx| {
+            // Open native folder picker dialog
+            if (idx < app.session_manager.sessions.items.len) {
+                const current_dir = if (app.session_manager.sessions.items[idx].file_path) |path|
+                    std.fs.path.dirname(path)
+                else
+                    app.session_manager.getDefaultDocsDirectory();
+
+                if (dvui.dialogNativeFolderSelect(app.allocator, .{
+                    .title = "Select Folder for File",
+                    .path = current_dir,
+                }) catch null) |selected_dir| {
+                    defer app.allocator.free(selected_dir);
+                    app.session_manager.setSessionDirectory(idx, selected_dir) catch {};
+                }
+            }
         },
     }
 }
@@ -130,6 +190,11 @@ fn renderEmptyState(app: *App) void {
         .padding = .{ .x = 16, .y = 8, .w = 16, .h = 8 },
         .corner_radius = dvui.Rect{ .x = 4, .y = 4, .w = 4, .h = 4 },
     })) {
-        app.session_manager.createSession("Untitled") catch {};
+        // Create new untitled session and start editing its name
+        if (app.session_manager.createUntitledSession()) |new_idx| {
+            if (app.session_manager.sessions.items[new_idx].name.len > 0) {
+                components.TabBar.startEditing(new_idx, app.session_manager.sessions.items[new_idx].name);
+            }
+        } else |_| {}
     }
 }
