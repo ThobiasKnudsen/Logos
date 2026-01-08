@@ -20,15 +20,20 @@ pub const RegexTrieError = error{
 
 pub const RegexTrieValue = struct {
     regex_key: []const u8,
+    /// Generic value pointer - cast to your type when retrieving
+    /// Example: const token_type = @as(*TokenType, @ptrCast(@alignCast(value.data))).*
+    data: ?*anyopaque,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *RegexTrieValue) void {
         self.allocator.free(self.regex_key);
+        // Note: Does NOT free data - caller is responsible for managing data lifetime
     }
 
-    pub fn create(allocator: std.mem.Allocator, regex_key: []const u8) !*RegexTrieValue {
+    pub fn create(allocator: std.mem.Allocator, regex_key: []const u8, data: ?*anyopaque) !*RegexTrieValue {
         const value = try allocator.create(RegexTrieValue);
         value.regex_key = try allocator.dupe(u8, regex_key);
+        value.data = data;
         value.allocator = allocator;
         return value;
     }

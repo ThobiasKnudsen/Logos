@@ -4,6 +4,7 @@
 //! for one "document" the user is working on.
 
 const std = @import("std");
+const parse_state = @import("parse_state.zig");
 
 pub const TabSession = struct {
     allocator: std.mem.Allocator,
@@ -20,9 +21,8 @@ pub const TabSession = struct {
     /// Has content been modified since last save?
     is_modified: bool,
 
-    /// Parsed/analyzed representation of the content
-    /// (placeholder for your AST/expression data)
-    parsed_data: ?ParsedData,
+    /// Parse state for lexing, parsing, and GLSL generation
+    parse_state: parse_state.ParseState,
 
     /// Render state for the graph visualization
     render_state: RenderState,
@@ -31,14 +31,6 @@ pub const TabSession = struct {
     cursor_index: usize = 0,
     cursor_line: usize = 1,
     cursor_col: usize = 1,
-
-    /// Placeholder for parsed data - replace with your actual AST type
-    pub const ParsedData = struct {
-        // TODO: Replace with actual parsed representation
-        // e.g., expressions, functions, data series, etc.
-        is_valid: bool = false,
-        error_message: ?[]const u8 = null,
-    };
 
     /// State for the graph renderer
     pub const RenderState = struct {
@@ -66,7 +58,7 @@ pub const TabSession = struct {
             .file_path = null,
             .content = .{ .items = &.{}, .capacity = 0 },
             .is_modified = false,
-            .parsed_data = null,
+            .parse_state = parse_state.ParseState.init(allocator),
             .render_state = .{},
         };
     }
@@ -87,7 +79,7 @@ pub const TabSession = struct {
             .file_path = owned_path,
             .content = .{ .items = &.{}, .capacity = 0 },
             .is_modified = false,
-            .parsed_data = null,
+            .parse_state = parse_state.ParseState.init(allocator),
             .render_state = .{},
         };
 
@@ -171,11 +163,7 @@ pub const TabSession = struct {
             self.allocator.free(path);
         }
         self.content.deinit(self.allocator);
-        if (self.parsed_data) |*data| {
-            if (data.error_message) |msg| {
-                self.allocator.free(msg);
-            }
-        }
+        self.parse_state.deinit();
     }
 
     /// Get content as a slice
@@ -203,13 +191,15 @@ pub const TabSession = struct {
     }
 
     /// Parse the content into the structured representation
+    /// Currently just updates the content hash - actual lexing/parsing is triggered separately
     fn parseContent(self: *TabSession) void {
-        // TODO: Implement actual parsing using your AST module
-        // For now, just mark as valid if non-empty
-        self.parsed_data = .{
-            .is_valid = self.content.items.len > 0,
-            .error_message = null,
-        };
+        // Check if content has changed and needs re-processing
+        const content = self.content.items;
+        if (self.parse_state.shouldRelex(content)) {
+            // Content changed - lexing will be needed on next debounce timeout
+            // This is just a notification that content changed
+            self.parse_state.status = .idle;
+        }
     }
 
     /// Mark session as saved
