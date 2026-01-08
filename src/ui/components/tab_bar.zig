@@ -24,7 +24,7 @@ pub const TabBar = struct {
     const bg_color = dvui.Color{ .r = 30, .g = 36, .b = 45, .a = 255 };
     const active_bg = dvui.Color{ .r = 40, .g = 48, .b = 60, .a = 255 };
     const hover_bg = dvui.Color{ .r = 35, .g = 42, .b = 52, .a = 255 };
-    const text_color = dvui.Color{ .r = 200, .g = 210, .b = 225, .a = 255 };
+    const text_color = dvui.Color{ .r = 255, .g = 255, .b = 255, .a = 255 }; // Pure white for active tab
     const text_muted = dvui.Color{ .r = 140, .g = 150, .b = 170, .a = 255 };
     const close_hover = dvui.Color{ .r = 180, .g = 80, .b = 80, .a = 255 };
 
@@ -37,6 +37,7 @@ pub const TabBar = struct {
     var editing_tab_index: ?usize = null;
     var edit_buffer: [256]u8 = undefined;
     var edit_len: usize = 0;
+    var edit_had_focus: bool = false; // Track if text entry has been focused at least once
 
     // Right-click context menu state
     var context_menu_tab: ?usize = null;
@@ -48,6 +49,7 @@ pub const TabBar = struct {
         edit_len = @min(current_name.len, edit_buffer.len - 1); // Leave room for null terminator
         @memcpy(edit_buffer[0..edit_len], current_name[0..edit_len]);
         edit_buffer[edit_len] = 0; // Null terminate
+        edit_had_focus = false; // Reset focus tracking for new edit session
     }
 
     /// Stop editing without saving
@@ -205,12 +207,12 @@ pub const TabBar = struct {
                 .text = .{ .buffer = &edit_buffer },
             }, .{
                 .id_extra = idx,
-                .margin = .{},
-                .padding = .{ .x = tab_padding_x, .y = tab_padding_y, .w = 0.2, .h = tab_padding_y },
+                .margin = .{ .x = tab_padding_x, .y = tab_padding_y, .w = 0.2, .h = tab_padding_y },
+                .padding = .{},
                 .border = .{},
                 .corner_radius = .{},
                 .background = false,
-                .min_size_content = .{ .w = 60 },
+                .min_size_content = .{ .w = 60, .h = 16 },
                 .color_text = text_color,
                 .gravity_y = 0.5,
             });
@@ -237,6 +239,23 @@ pub const TabBar = struct {
                         action = .cancel_edit;
                         e.handled = true;
                     }
+                }
+            }
+
+            // Track focus state and detect focus loss
+            const has_focus = text_entry.data().id == dvui.focusedWidgetId();
+            if (has_focus) {
+                edit_had_focus = true;
+            } else if (!edit_had_focus) {
+                // First frame of editing - auto-focus the text entry
+                dvui.focusWidget(text_entry.data().id, null, null);
+            } else if (action == null) {
+                // Lost focus after having it - finish editing
+                const new_name = edit_buffer[0..edit_len];
+                if (new_name.len > 0) {
+                    action = .{ .finish_edit = .{ .index = idx, .new_name = new_name } };
+                } else {
+                    action = .cancel_edit;
                 }
             }
         } else {
@@ -316,20 +335,51 @@ pub const TabBar = struct {
         }
 
         // Show tooltip with file path when hovering over the tab (below the tab)
+        const tooltip_text_color = dvui.Color{ .r = 200, .g = 210, .b = 220, .a = 255 }; // Light text
+        const tooltip_border_color = dvui.Color{ .r = 50, .g = 58, .b = 70, .a = 255 }; // Subtle grey border
+        const tooltip_bg_color = dvui.Color{ .r = 30, .g = 36, .b = 45, .a = 255 }; // Dark background
         if (sess.file_path) |path| {
-            dvui.tooltip(@src(), .{
+            var tt: dvui.FloatingTooltipWidget = undefined;
+            tt.init(@src(), .{
                 .active_rect = tab_box.data().borderRectScale().r,
                 .position = .vertical,
-            }, "{s}", .{path}, .{
+            }, .{
                 .id_extra = idx,
+                .color_border = tooltip_border_color,
+                .color_fill = tooltip_bg_color,
+                .border = .all(1),
             });
+            if (tt.shown()) {
+                var tl = dvui.textLayout(@src(), .{}, .{
+                    .background = false,
+                    .color_text = tooltip_text_color,
+                    .font = dvui.Font.theme(.body).withSize(14), // Smaller font
+                });
+                tl.format("{s}", .{path}, .{});
+                tl.deinit();
+            }
+            tt.deinit();
         } else {
-            dvui.tooltip(@src(), .{
+            var tt: dvui.FloatingTooltipWidget = undefined;
+            tt.init(@src(), .{
                 .active_rect = tab_box.data().borderRectScale().r,
                 .position = .vertical,
-            }, "NOT SAVED", .{}, .{
+            }, .{
                 .id_extra = idx,
+                .color_border = tooltip_border_color,
+                .color_fill = tooltip_bg_color,
+                .border = .all(1),
             });
+            if (tt.shown()) {
+                var tl = dvui.textLayout(@src(), .{}, .{
+                    .background = false,
+                    .color_text = tooltip_text_color,
+                    .font = dvui.Font.theme(.body).withSize(14), // Smaller font
+                });
+                tl.format("NOT SAVED", .{}, .{});
+                tl.deinit();
+            }
+            tt.deinit();
         }
 
         return action;
@@ -344,6 +394,19 @@ pub const TabBar = struct {
             .id_extra = idx,
         });
         defer fw.deinit();
+
+        // Check for mouse clicks outside the menu to close it
+        const menu_rect = fw.data().borderRectScale().r;
+        for (dvui.events()) |*e| {
+            if (e.evt == .mouse and e.evt.mouse.action == .press) {
+                if (!menu_rect.contains(e.evt.mouse.p)) {
+                    // Clicked outside menu - close it
+                    fw.close();
+                    context_menu_tab = null;
+                    return null;
+                }
+            }
+        }
 
         if (dvui.menuItemLabel(@src(), "Change Folder Path...", .{}, .{ .expand = .horizontal }) != null) {
             fw.close();
