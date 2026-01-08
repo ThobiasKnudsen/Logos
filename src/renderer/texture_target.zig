@@ -65,7 +65,9 @@ pub const TextureTarget = struct {
 
     /// End rendering to this texture, restore default target
     pub fn endRender(self: *TextureTarget) void {
-        self.backend.renderTarget(null) catch {};
+        self.backend.renderTarget(null) catch |err| {
+            std.log.warn("Failed to restore render target: {}", .{err});
+        };
     }
 
     /// Get the texture for display in dvui

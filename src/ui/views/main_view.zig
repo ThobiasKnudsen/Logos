@@ -55,7 +55,9 @@ pub fn mainView(app: *App) bool {
         if (active_session.file_path != null and active_session.is_modified) {
             const now = std.time.milliTimestamp();
             if (now - last_auto_save_time > auto_save_interval_ms) {
-                active_session.saveToFile() catch {};
+                active_session.saveToFile() catch |err| {
+                    std.log.err("Auto-save failed: {}", .{err});
+                };
                 last_auto_save_time = now;
             }
         }
@@ -142,16 +144,22 @@ fn handleMenuAction(app: *App, action: components.MenuBar.Action) bool {
                 // Create new session from file
                 const TabSession = @import("../../session/tab_session.zig").TabSession;
                 if (TabSession.initFromFile(app.allocator, selected_file)) |sess| {
-                    app.session_manager.sessions.append(app.allocator, sess) catch {};
+                    app.session_manager.sessions.append(app.allocator, sess) catch |err| {
+                        std.log.err("Failed to add session: {}", .{err});
+                    };
                     app.session_manager.active_index = app.session_manager.sessions.items.len - 1;
-                } else |_| {}
+                } else |err| {
+                    std.log.err("Failed to open file '{s}': {}", .{selected_file, err});
+                }
             }
         },
         .save => {
             if (app.session_manager.activeSession()) |active_session| {
                 if (active_session.file_path != null) {
                     // Save to existing file
-                    active_session.saveToFile() catch {};
+                    active_session.saveToFile() catch |err| {
+                        std.log.err("Failed to save file: {}", .{err});
+                    };
                 } else {
                     // No file path - show save dialog
                     const default_dir = app.session_manager.getDefaultDocsDirectory();
@@ -171,10 +179,16 @@ fn handleMenuAction(app: *App, action: components.MenuBar.Action) bool {
 
                             // Update tab name to match filename
                             const new_name = std.fs.path.basename(owned_path);
-                            app.session_manager.renameSession(app.session_manager.active_index, new_name) catch {};
+                            app.session_manager.renameSession(app.session_manager.active_index, new_name) catch |err| {
+                                std.log.err("Failed to rename session: {}", .{err});
+                            };
 
-                            active_session.saveToFile() catch {};
-                        } else |_| {}
+                            active_session.saveToFile() catch |err| {
+                                std.log.err("Failed to save file: {}", .{err});
+                            };
+                        } else |err| {
+                            std.log.err("Failed to duplicate path: {}", .{err});
+                        }
                     }
                 }
             }
@@ -201,7 +215,9 @@ fn handleTabAction(app: *App, action: components.TabBar.Action) void {
                 if (app.session_manager.sessions.items[new_idx].name.len > 0) {
                     components.TabBar.startEditing(new_idx, app.session_manager.sessions.items[new_idx].name);
                 }
-            } else |_| {}
+            } else |err| {
+                std.log.err("Failed to create new session: {}", .{err});
+            }
         },
         .select_tab => |idx| {
             app.session_manager.setActive(idx);
@@ -212,7 +228,9 @@ fn handleTabAction(app: *App, action: components.TabBar.Action) void {
                 components.TabBar.cancelEditing();
             }
             // Auto-save before closing if it has a file path
-            app.session_manager.autoSaveSession(idx) catch {};
+            app.session_manager.autoSaveSession(idx) catch |err| {
+                std.log.err("Failed to auto-save before closing session: {}", .{err});
+            };
             app.session_manager.closeSession(idx);
         },
         .start_edit => |idx| {
@@ -225,7 +243,9 @@ fn handleTabAction(app: *App, action: components.TabBar.Action) void {
         .finish_edit => |edit_info| {
             // Finish editing - rename the tab
             if (edit_info.new_name.len > 0) {
-                app.session_manager.renameSession(edit_info.index, edit_info.new_name) catch {};
+                app.session_manager.renameSession(edit_info.index, edit_info.new_name) catch |err| {
+                    std.log.err("Failed to rename session: {}", .{err});
+                };
             }
             components.TabBar.cancelEditing();
         },
@@ -245,7 +265,9 @@ fn handleTabAction(app: *App, action: components.TabBar.Action) void {
                     .path = current_dir,
                 }) catch null) |selected_dir| {
                     defer app.allocator.free(selected_dir);
-                    app.session_manager.setSessionDirectory(idx, selected_dir) catch {};
+                    app.session_manager.setSessionDirectory(idx, selected_dir) catch |err| {
+                        std.log.err("Failed to set session directory: {}", .{err});
+                    };
                 }
             }
         },

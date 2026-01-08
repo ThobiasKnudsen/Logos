@@ -77,7 +77,9 @@ pub const Jit = struct {
 
     pub fn deinit(self: *Jit) void {
         // delete the temp folder. It should be created again on every new Jit.init function
-        std.fs.cwd().deleteTree(self.temp_dir_path) catch {};
+        std.fs.cwd().deleteTree(self.temp_dir_path) catch |err| {
+            std.log.warn("Failed to delete JIT temp directory: {}", .{err});
+        };
         self.allocator.free(self.zig_compiler_path);
         self.allocator.free(self.temp_dir_path);
     }
