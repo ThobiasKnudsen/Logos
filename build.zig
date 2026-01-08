@@ -31,12 +31,22 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     }) orelse @panic("PCREz dependency failed");
+
+    // Get PCRE2 dependency for headers
+    const pcre2_dep = b.dependency("pcre2", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const pcrez_mod = b.addModule("pcrez", .{
         .root_source_file = pcrez_dep.path("src/regex.zig"),
         .target = target,
         .optimize = optimize,
     });
+    pcrez_mod.linkLibrary(pcre2_dep.artifact("pcre2-8"));
+
     exe.root_module.addImport("pcrez", pcrez_mod);
+    exe.linkLibrary(pcre2_dep.artifact("pcre2-8"));
 
     // ── Run step ───────────────────────────────────────────────────────
     const run_cmd = b.addRunArtifact(exe);
@@ -61,28 +71,26 @@ pub fn build(b: *std.Build) void {
     zig_compiler_step.dependOn(&download.step);
 
     // ── Tests ─────────────────────────────────────────────────────────────
+    // Create regex_splitting module with pcrez import
+    const regex_splitting_mod = b.createModule(.{
+        .root_source_file = b.path("src/ast/regex_splitting.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    regex_splitting_mod.addImport("pcrez", pcrez_mod);
+
     const regex_trie_test_mod = b.createModule(.{
         .root_source_file = b.path("src/ast/regex_trie_test.zig"),
         .target = target,
         .optimize = optimize,
     });
     regex_trie_test_mod.addImport("pcrez", pcrez_mod);
-    regex_trie_test_mod.addImport("regex_splitting", b.createModule(.{
-        .root_source_file = b.path("src/ast/regex_splitting.zig"),
-        .target = target,
-        .optimize = optimize,
-    }));
+    regex_trie_test_mod.addImport("regex_splitting", regex_splitting_mod);
 
     const regex_trie_tests = b.addTest(.{
         .root_module = regex_trie_test_mod,
     });
     regex_trie_tests.linkLibC();
-
-    // Link PCRE2 library (required by PCREz)
-    const pcre2_dep = b.dependency("pcre2", .{
-        .target = target,
-        .optimize = optimize,
-    });
     regex_trie_tests.linkLibrary(pcre2_dep.artifact("pcre2-8"));
 
     const run_regex_trie_tests = b.addRunArtifact(regex_trie_tests);
