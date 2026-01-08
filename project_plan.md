@@ -27,11 +27,15 @@ flowchart TB
     subgraph session [Session Layer]
         SessionMgr["SessionManager"]
         TabSession["TabSession"]
+        ParseState["parse_state.zig (NEW)"]
     end
 
     subgraph ast [AST Layer]
         RegexTrie["regex_trie.zig"]
         RegexSplit["regex_splitting.zig"]
+        Lexer["lexer.zig (NEW)"]
+        Parser["parser.zig (NEW)"]
+        AstNodes["ast_nodes.zig (NEW)"]
     end
 
     subgraph render [Renderer]
@@ -49,6 +53,10 @@ flowchart TB
     MainView --> MenuBar & TabBar & SplitView & StatusBar
     SplitView --> EditorToolbar & EditorPanel & RenderToolbar & GraphRenderer
     TabBar & EditorPanel --> SessionMgr --> TabSession
+    TabSession --> ParseState
+    EditorToolbar -->|Play button| ParseState
+    ParseState --> Lexer --> Parser --> AstNodes
+    ParseState --> GraphRenderer
     GraphRenderer --> AxisRenderer & TextureTarget & Shaders
 ```
 
@@ -350,17 +358,283 @@ dvui's TextLayoutWidget is fundamentally line-based with sequential character fl
 
 ---
 
-## Integration: TabSession with AST
+## Feature 16: Per-Tab Parsing System Architecture
 
-Update [`TabSession`](src/session/tab_session.zig) to include:
+**Status**: Design finalized, implementation pending
 
-- **ast field**: Optional pointer to the parsed AstNode tree (replaces placeholder ParsedData)
-- **generated_glsl field**: Optional slice containing generated shader code
-- **parse_errors field**: List of error positions and messages for error highlighting
+This feature defines the complete architecture for parsing user input in each tab, including lexing for syntax highlighting and full AST parsing for shader generation.
 
-Add methods:
-- **parseContent()**: Tokenizes content using the lexer, then parses tokens into AST, storing any errors
-- **generateShader()**: If AST exists, runs GLSL generator and stores result
+### Architecture Overview
+
+```mermaid
+flowchart TB
+    subgraph main_thread [Main Thread - Single Threaded]
+        UI["UI Events"]
+        Debounce["Debounce Timer (300ms)"]
+        Lexer["Lexer"]
+        Highlight["Syntax Highlighting"]
+        PlayBtn["Play Button"]
+        Parser["Parser"]
+        GLSLGen["GLSL Generator"]
+        GPUSubmit["GPU Submit + Fence"]
+        GPUPoll["GPU Poll Completion"]
+    end
+
+    subgraph session [TabSession]
+        ParseState["ParseState"]
+        ContentHash["Content Hash"]
+        Tokens["Cached Tokens"]
+        AST["AST (Arena)"]
+        GLSL["Generated GLSL"]
+    end
+
+    subgraph gpu [GPU - Async via Fence]
+        GPUWork["Heavy Shader Work"]
+        ResultTex["Result Texture"]
+    end
+
+    UI -->|text change| Debounce
+    Debounce -->|timeout| Lexer
+    Lexer -->|writes| Tokens
+    Tokens --> Highlight
+    PlayBtn --> Parser
+    Parser -->|reads| Tokens
+    Parser -->|writes| AST
+    AST --> GLSLGen
+    GLSLGen -->|writes| GLSL
+    GLSL --> GPUSubmit
+    GPUSubmit -->|non-blocking| GPUWork
+    GPUWork --> ResultTex
+    GPUPoll -->|check fence| ResultTex
+```
+
+### Design Decisions
+
+#### 1. Trigger Mechanism: Debounced Lexing
+
+- **Lexing**: Triggered after 300ms of no input (debounced)
+- **Parsing + GLSL generation**: Triggered only when user clicks Play button
+- **Rationale**: Provides immediate syntax highlighting feedback while deferring expensive AST construction until explicitly requested
+
+#### 2. State Location: Separate ParseState Struct
+
+Create a `ParseState` struct that encapsulates all parsing-related state, owned by `TabSession`:
+
+```zig
+pub const ParseState = struct {
+    /// Hash of content when last lexed (for cache invalidation)
+    content_hash: u64,
+    
+    /// Cached token stream from lexer
+    tokens: ?[]Token,
+    
+    /// Parsed AST (allocated in parse_arena)
+    ast: ?*AstNode,
+    
+    /// Generated GLSL shader code
+    generated_glsl: ?[]const u8,
+    
+    /// Parse errors for display
+    errors: std.ArrayList(ParseError),
+    
+    /// Arena allocator for this parse cycle
+    parse_arena: std.heap.ArenaAllocator,
+    
+    /// Parsing status
+    status: enum { idle, lexing, parsing, ready, error },
+};
+```
+
+#### 3. Lexer/Parser Separation
+
+- **Lexer** runs on main thread during debounce timeout → produces tokens for syntax highlighting
+- **Parser** runs on main thread when Play is clicked → produces AST from tokens
+- **Rationale**: Keeps architecture simple; parsing math expressions is typically fast
+
+#### 4. Single-Threaded Architecture
+
+**Design Choice**: All parsing and GLSL generation happens on the main thread.
+
+**Why single-threaded**:
+- Simpler implementation, no synchronization complexity
+- Math expressions are typically short (parsing is fast)
+- Heavy computation is offloaded to GPU via async fence-based rendering
+- Easier to debug and reason about
+
+**Main loop flow when Play is clicked**:
+1. Parse tokens → AST (fast, on main thread)
+2. Generate GLSL from AST (fast, on main thread)
+3. Compile shader (GPU, may have small sync cost)
+4. Submit render work with fence (returns immediately)
+5. Continue UI loop, poll fence each frame
+
+#### Non-Blocking GPU Rendering with Fences
+
+SDL3 GPU provides fence synchronization for async rendering. The main thread submits GPU work and continues immediately without waiting:
+
+```zig
+pub const AsyncRenderState = struct {
+    pending_fence: ?*sdl.GPU_Fence = null,
+    result_texture: *sdl.GPU_Texture,
+    iteration: usize = 0,
+    
+    /// Submit render work to GPU, returns immediately
+    pub fn submitIteration(self: *AsyncRenderState, device: *sdl.GPU_Device, cmd: *sdl.GPU_CommandBuffer) void {
+        // Submit and get fence - returns immediately!
+        self.pending_fence = sdl.submitGPUCommandBufferAndAcquireFence(cmd);
+        self.iteration += 1;
+    }
+    
+    /// Non-blocking check - call each frame
+    pub fn pollCompletion(self: *AsyncRenderState, device: *sdl.GPU_Device) bool {
+        if (self.pending_fence) |fence| {
+            if (sdl.queryGPUFence(device, fence)) {
+                sdl.releaseGPUFence(device, fence);
+                self.pending_fence = null;
+                return true;  // GPU work complete!
+            }
+        }
+        return false;
+    }
+};
+```
+
+**Main loop integration**:
+
+```zig
+while (running) {
+    ui.processEvents();
+    ui.render();
+    
+    // Check if GPU finished previous work (non-blocking)
+    if (render_state.pollCompletion(device)) {
+        displayTexture(render_state.result_texture);
+        if (should_continue_iterating) {
+            render_state.submitIteration(device, cmd);
+        }
+    }
+    
+    backend.present();
+}
+```
+
+**Key SDL3 GPU functions**:
+| Function | Purpose |
+|----------|---------|
+| `SDL_SubmitGPUCommandBufferAndAcquireFence()` | Submit GPU work, get fence (non-blocking) |
+| `SDL_QueryGPUFence()` | Check if GPU signaled fence (non-blocking) |
+| `SDL_ReleaseGPUFence()` | Free fence after use |
+
+This ensures the UI is **never blocked** during heavy shader work.
+
+#### 5. Error Handling: Fail-Fast with Extensibility
+
+Initial implementation uses fail-fast (stop at first error). The error type is designed to support future strategies:
+
+```zig
+pub const ParseError = struct {
+    byte_start: usize,
+    byte_end: usize,
+    message: []const u8,
+    severity: enum { error, warning, hint },
+};
+
+pub const ParseResult = union(enum) {
+    success: struct {
+        ast: *AstNode,
+        glsl: []const u8,
+    },
+    /// Fail-fast: single error
+    fail_fast: ParseError,
+    /// Future: all collected errors
+    // collected_errors: []ParseError,
+    /// Future: partial AST with error nodes
+    // partial: struct { ast: *AstNode, errors: []ParseError },
+};
+```
+
+#### 6. Caching: Content Hash
+
+Before lexing, compute hash of content. Skip re-lexing if hash matches cached value:
+
+```zig
+fn shouldRelex(self: *ParseState, content: []const u8) bool {
+    const new_hash = std.hash.Wyhash.hash(0, content);
+    if (new_hash == self.content_hash) return false;
+    self.content_hash = new_hash;
+    return true;
+}
+```
+
+#### 7. Token Types: Enum in RegexTrieValue
+
+Extend `RegexTrieValue` in [`regex_trie.zig`](src/ast/regex_trie.zig):
+
+```zig
+pub const TokenType = enum {
+    keyword,        // if, else, for, while, fn, let, etc.
+    identifier,     // variable/function names
+    number,         // integer and float literals
+    operator,       // +, -, *, /, ^, =, ==, etc.
+    string,         // "..." string literals
+    comment,        // // or /* */ comments
+    punctuation,    // (, ), {, }, [, ], ,, ;
+    whitespace,     // spaces, tabs, newlines
+    unknown,        // unrecognized characters
+};
+
+pub const RegexTrieValue = struct {
+    regex_key: []const u8,
+    token_type: TokenType,  // NEW
+    allocator: std.mem.Allocator,
+    // ...
+};
+```
+
+#### 8. GLSL Generation: On-Demand via Play Button
+
+GLSL generation happens synchronously on the main thread when Play is clicked:
+
+1. User clicks Play button
+2. Parse tokens → AST (fast)
+3. Generate GLSL from AST (fast)
+4. Store in `ParseState.generated_glsl`
+5. Compile shader and submit GPU render with fence (returns immediately)
+6. Continue UI loop, poll fence each frame for completion
+
+#### 9. Memory Management: Arena Per Parse
+
+Each parse cycle uses a dedicated arena allocator:
+
+```zig
+pub fn startNewParse(self: *ParseState) void {
+    // Reset arena, freeing all previous AST nodes
+    _ = self.parse_arena.reset(.retain_capacity);
+    self.ast = null;
+    self.generated_glsl = null;
+    self.errors.clearRetainingCapacity();
+}
+```
+
+**Benefits**:
+- No individual `free()` calls needed for AST nodes
+- Fast bulk deallocation on re-parse
+- No memory leaks from complex AST structures
+- Arena can retain capacity for next parse (avoids repeated allocation)
+
+### Files to Create/Modify
+
+| File | Action | Purpose |
+|------|--------|---------|
+| `src/session/parse_state.zig` | Create | ParseState struct definition |
+| `src/session/tab_session.zig` | Modify | Add `parse_state: ParseState` field |
+| `src/ast/regex_trie.zig` | Modify | Add `TokenType` enum and field |
+| `src/ast/lexer.zig` | Create | Lexer struct wrapping RegexTrie |
+| `src/ast/parser.zig` | Create | Parser producing AST from tokens |
+| `src/ast/ast_nodes.zig` | Create | AST node type definitions |
+| `src/ui/components/editor_panel.zig` | Modify | Integrate debounced lexing + highlighting |
+| `src/ui/components/editor_toolbar.zig` | Modify | Play button triggers parse + render |
+| `src/renderer/graph_renderer.zig` | Modify | Add GPU fence-based async rendering |
 
 ---
 
@@ -383,6 +657,7 @@ Add methods:
 | Editor toolbar | Not started | New editor_toolbar.zig, split_view.zig | Medium |
 | Render toolbar | Not started | New render_toolbar.zig, split_view.zig | Medium |
 | Math symbol positioning | Not supported | Deferred | High |
+| **Per-tab parsing system** | **Design complete** | **parse_state.zig, lexer.zig, parser.zig** | **Medium** |
 
 ---
 
@@ -391,12 +666,41 @@ Add methods:
 1. **File management** (Features 1-3) - Foundation for everything else
 2. **Tab improvements** (Features 4, 6) - Quick wins, improve UX
 3. **Status bar** (Feature 5) - Standard editor UI element
-4. **Toolbars** (Features 13-14) - UI infrastructure for controls
-5. **Lexer + Syntax highlighting** (Feature 7) - Core editing experience
-6. **Coordinate axes** (Feature 12) - Essential for math visualization
-7. **Parsing error display** (Feature 11) - Better developer experience
-8. **AST parser** (Feature 9) - Needed for shader gen
-9. **GLSL codegen** (Feature 10) - The main goal
-10. **Custom GPU rendering** (Feature 8) - Display generated shaders
+4. **Toolbars** (Features 13-14) - UI infrastructure for controls (Play button needed for parsing)
+5. **TokenType enum** (Feature 16 prerequisite) - Extend RegexTrieValue
+6. **Lexer + Syntax highlighting** (Features 7, 16) - Debounced lexing with token cache
+7. **ParseState** (Feature 16) - Simple state struct for caching parse results
+8. **AST nodes + Parser** (Features 9, 16) - Build AST from tokens on Play
+9. **GLSL codegen** (Feature 10) - Generate shaders from AST
+10. **GPU fence-based rendering** (Feature 16) - Non-blocking GPU work
+11. **Parsing error display** (Feature 11) - Show errors inline
+12. **Coordinate axes** (Feature 12) - Essential for math visualization
+13. **Custom GPU rendering** (Feature 8) - Display generated shaders
 
-**Conclusion**: The codebase structure is **excellent** for all planned features. The separation between UI, session, AST, and renderer layers is clean. The regex_trie foundation is solid for tokenization. dvui's manual `addText()` API makes syntax highlighting straightforward. Native file dialogs are available. Math symbol positioning requires future custom work.
+### Implementation Dependencies
+
+```mermaid
+flowchart LR
+    Toolbar["Toolbars (13-14)"]
+    TokenType["TokenType enum"]
+    Lexer["Lexer (7)"]
+    ParseState["ParseState (16)"]
+    Parser["Parser (9)"]
+    GLSL["GLSL Gen (10)"]
+    GPUFence["GPU Fence Render"]
+    Errors["Error Display (11)"]
+    Axes["Axes (12)"]
+    GPU["GPU Render (8)"]
+
+    Toolbar --> ParseState
+    TokenType --> Lexer
+    Lexer --> ParseState
+    ParseState --> Parser
+    Parser --> GLSL
+    Parser --> Errors
+    GLSL --> GPUFence
+    GPUFence --> GPU
+    Axes --> GPU
+```
+
+**Conclusion**: The codebase structure is **excellent** for all planned features. The separation between UI, session, AST, and renderer layers is clean. The regex_trie foundation is solid for tokenization. dvui's manual `addText()` API makes syntax highlighting straightforward. Native file dialogs are available. The **single-threaded architecture** keeps implementation simple while GPU fence-based async rendering ensures the UI is never blocked during heavy shader work. Math symbol positioning requires future custom work.
