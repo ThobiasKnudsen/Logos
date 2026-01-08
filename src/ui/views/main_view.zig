@@ -64,11 +64,43 @@ pub fn mainView(app: *App) bool {
         renderEmptyState(app);
     }
 
-    // Check for window close events
+    // Check for keyboard shortcuts and window events
+    var keyboard_action: components.MenuBar.Action = .none;
     for (dvui.events()) |*e| {
+        if (e.evt == .key and e.evt.key.action == .down) {
+            const ctrl_pressed = e.evt.key.mod.has(.lcontrol) or e.evt.key.mod.has(.rcontrol);
+            if (ctrl_pressed) {
+                switch (e.evt.key.code) {
+                    .n => {
+                        keyboard_action = .new_session;
+                        e.handled = true;
+                    },
+                    .o => {
+                        keyboard_action = .open_file;
+                        e.handled = true;
+                    },
+                    .s => {
+                        keyboard_action = .save;
+                        e.handled = true;
+                    },
+                    .w => {
+                        keyboard_action = .close_tab;
+                        e.handled = true;
+                    },
+                    .q => {
+                        keyboard_action = .quit;
+                        e.handled = true;
+                    },
+                    else => {},
+                }
+            }
+        }
         if (e.evt == .window and e.evt.window.action == .close) return false;
         if (e.evt == .app and e.evt.app.action == .quit) return false;
     }
+
+    // Handle keyboard shortcuts
+    if (!handleMenuAction(app, keyboard_action)) return false;
 
     return true;
 }
@@ -96,6 +128,56 @@ fn handleMenuAction(app: *App, action: components.MenuBar.Action) bool {
                     components.TabBar.startEditing(new_idx, app.session_manager.sessions.items[new_idx].name);
                 }
             } else |_| {}
+        },
+        .open_file => {
+            // Open native file picker dialog
+            const default_dir = app.session_manager.getDefaultDocsDirectory();
+            if (dvui.dialogNativeFileOpen(app.allocator, .{
+                .title = "Open File",
+                .path = default_dir,
+                .filters = &[_][]const u8{"*.logos"},
+            }) catch null) |selected_file| {
+                defer app.allocator.free(selected_file);
+
+                // Create new session from file
+                const TabSession = @import("../../session/tab_session.zig").TabSession;
+                if (TabSession.initFromFile(app.allocator, selected_file)) |sess| {
+                    app.session_manager.sessions.append(app.allocator, sess) catch {};
+                    app.session_manager.active_index = app.session_manager.sessions.items.len - 1;
+                } else |_| {}
+            }
+        },
+        .save => {
+            if (app.session_manager.activeSession()) |active_session| {
+                if (active_session.file_path != null) {
+                    // Save to existing file
+                    active_session.saveToFile() catch {};
+                } else {
+                    // No file path - show save dialog
+                    const default_dir = app.session_manager.getDefaultDocsDirectory();
+                    if (dvui.dialogNativeFileSave(app.allocator, .{
+                        .title = "Save File",
+                        .path = default_dir,
+                        .filters = &[_][]const u8{"*.logos"},
+                    }) catch null) |selected_path| {
+                        defer app.allocator.free(selected_path);
+
+                        // Set file path and save
+                        if (app.allocator.dupe(u8, selected_path)) |owned_path| {
+                            if (active_session.file_path) |old_path| {
+                                app.allocator.free(old_path);
+                            }
+                            active_session.file_path = owned_path;
+
+                            // Update tab name to match filename
+                            const new_name = std.fs.path.basename(owned_path);
+                            app.session_manager.renameSession(app.session_manager.active_index, new_name) catch {};
+
+                            active_session.saveToFile() catch {};
+                        } else |_| {}
+                    }
+                }
+            }
         },
         .close_tab => {
             if (app.session_manager.activeSession() != null) {

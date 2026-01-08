@@ -15,6 +15,7 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.linkLibC();
+    b.installArtifact(exe);
 
     // ── DVUI with SDL3GPU backend ──────────────────────────────────────────
     const dvui_dep = b.dependency("dvui", .{
