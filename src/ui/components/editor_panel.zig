@@ -116,6 +116,9 @@ pub const EditorPanel = struct {
             active_session.is_modified = true;
             active_session.render_state.needs_update = true;
         }
+
+        // Update cursor position in session for status bar display
+        active_session.updateCursorPosition(text_entry.textLayout.selection.cursor);
     }
 
     fn countLines(text: []const u8) usize {

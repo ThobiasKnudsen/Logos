@@ -27,6 +27,11 @@ pub const TabSession = struct {
     /// Render state for the graph visualization
     render_state: RenderState,
 
+    /// Editor cursor position (updated by EditorPanel)
+    cursor_index: usize = 0,
+    cursor_line: usize = 1,
+    cursor_col: usize = 1,
+
     /// Placeholder for parsed data - replace with your actual AST type
     pub const ParsedData = struct {
         // TODO: Replace with actual parsed representation
@@ -136,6 +141,28 @@ pub const TabSession = struct {
     /// Check if this is an untitled session (no file path, name starts with "Untitled")
     pub fn isUntitled(self: *const TabSession) bool {
         return self.file_path == null and std.mem.startsWith(u8, self.name, "Untitled");
+    }
+
+    /// Update cursor position from byte index
+    pub fn updateCursorPosition(self: *TabSession, cursor_idx: usize) void {
+        self.cursor_index = cursor_idx;
+
+        // Calculate line and column from cursor index
+        var line: usize = 1;
+        var col: usize = 1;
+        const text = self.content.items;
+
+        for (text[0..@min(cursor_idx, text.len)]) |c| {
+            if (c == '\n') {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+
+        self.cursor_line = line;
+        self.cursor_col = col;
     }
 
     pub fn deinit(self: *TabSession) void {

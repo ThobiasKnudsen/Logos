@@ -61,9 +61,15 @@ pub fn mainView(app: *App) bool {
                 last_auto_save_time = now;
             }
         }
+
+        // Status bar at bottom
+        components.StatusBar.render(active_session);
     } else {
         // No sessions - show empty state
         renderEmptyState(app);
+
+        // Status bar at bottom (no active session)
+        components.StatusBar.render(null);
     }
 
     // Check for keyboard shortcuts and window events
