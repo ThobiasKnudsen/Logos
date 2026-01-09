@@ -634,6 +634,122 @@ test "regex_trie_many_regexes" {
     std.debug.print("Regex bulk matching completed: {d} tokens matched, {d} failed\n", .{ bulk_num_tokens, bulk_num_failed });
 }
 
+// Test regex literal splitting functionality (equivalent to C++ regex_literal_splitting_test)
+test "regex_literal_splitting" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const regex_splitting = @import("regex_splitting.zig");
+
+    const test_patterns = [_][]const u8{
+        "(/\\*.*\\*/)",
+        "(ads/\\*.*\\*/)",
+        "a.b.c",
+        "(a|b).c",
+        "a(b|c)d",
+        "a.*b",
+        "[abc]d[0-9]",
+        "[abc]\\d[0-9]",
+        "\\w+abc",
+        "^a.*$",
+        "(a|b|c)?d",
+        "ab|cd.e",
+        "a\\[b\\].*",
+        ".+bc|def",
+        "(ab|cd){2}",
+        "a?b+c*",
+        "\\D\\W\\S\\b\\w+",
+        "\\p{L}+",
+        "\\Qspecial$chars(a|b|c) \\E(a|b|c)",
+        "a\\Ab\\Z$",
+        "a*?b",
+        "(a{2,5}+|[A-Z]+)c",
+        "a.*b%",
+        "a\\)",
+        "{invalid}abc",
+        "a|b|c|extra",
+        "\\Qunclosed",
+        "(a|b|(c|d))e(f|g)",
+        "(a|b|(c|d))e(f|g)",
+        "^(ab|cd){2,4}|(ef|gh)\\d+.*$",
+        "((a|b|c)?\\?|(d|e){1,3}??|[f-g]+)[\\w\\s]*|(h|i|j)k",
+        "\\Qabc|def\\E(ghi|jkl)mno|\\p{Lu}{2,}(pqr|stu)",
+        "(\\b(foo|bar)\\b|\\B(baz|qux)\\B){0,2}|(img|vid):(\\w+)(alt|src)",
+        "(a{2,5}+(b|c|d)+|(e|f){3,}?g+)+|(h|i)j{1,3}+k",
+        "(?=(a|b|c))d|e(?<!f|g)h|(i|j|k)l{2}m",
+    };
+
+    std.debug.print("\n=== Regex Literal Splitting Test ===\n", .{});
+
+    for (test_patterns) |pattern| {
+        var paths = regex_splitting.regexSplitting(allocator, pattern) catch |err| {
+            std.debug.print("{s} - ERROR: {}\n", .{ pattern, err });
+            continue;
+        };
+        defer {
+            for (paths.items) |*path| {
+                for (path.items) |*seg| seg.deinit();
+                path.deinit(allocator);
+            }
+            paths.deinit(allocator);
+        }
+
+        std.debug.print("{s}\n", .{pattern});
+        for (paths.items) |path| {
+            if (path.items.len == 0) continue;
+            std.debug.print("    ", .{});
+            for (path.items) |seg| {
+                const seg_type = if (seg.is_lit) " (lit)" else " (regex)";
+                std.debug.print("{s}{s} ", .{ seg.str, seg_type });
+            }
+            std.debug.print("\n", .{});
+        }
+        std.debug.print("    VALID\n", .{});
+    }
+
+    std.debug.print("\n--- Validation Mode (patterns that may have issues) ---\n", .{});
+    const validation_patterns = [_][]const u8{
+        "a\\)",
+        "{invalid}abc",
+        "\\Qunclosed",
+        "(?=(a|b|c))d|e(?<!f|g)h|(i|j|k)l{2}m",
+    };
+
+    for (validation_patterns) |pattern| {
+        var paths = regex_splitting.regexSplitting(allocator, pattern) catch |err| {
+            std.debug.print("{s} (validated) - ERROR: {}\n", .{ pattern, err });
+            continue;
+        };
+        defer {
+            for (paths.items) |*path| {
+                for (path.items) |*seg| seg.deinit();
+                path.deinit(allocator);
+            }
+            paths.deinit(allocator);
+        }
+
+        std.debug.print("{s} (validated)\n", .{pattern});
+        var all_valid = paths.items.len > 0;
+        for (paths.items) |path| {
+            if (path.items.len == 0) continue;
+            std.debug.print("    ", .{});
+            var path_valid = true;
+            for (path.items) |seg| {
+                const seg_type = if (seg.is_lit) " (lit)" else " (regex)";
+                std.debug.print("{s}{s} ", .{ seg.str, seg_type });
+                if (!seg.is_lit and seg.str.len == 0) {
+                    path_valid = false;
+                }
+            }
+            std.debug.print("\n", .{});
+            if (!path_valid) all_valid = false;
+        }
+        const status = if (all_valid) "VALID" else "INVALID (some segs skipped)";
+        std.debug.print("    {s}\n", .{status});
+    }
+}
+
 // ============================================================================
 // Benchmark Tests - Performance profiling
 // ============================================================================
