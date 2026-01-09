@@ -22,12 +22,24 @@ pub const RegexTrieError = error{
 const RegexTrieValue = struct {
     regex_key: []const u8,
     /// Generic value pointer - cast to your type when retrieving
+    /// Caller is responsible for freeing this when removing patterns
     data: ?*anyopaque,
     allocator: std.mem.Allocator,
+    /// Flag to prevent double-free when multiple nodes share same value
+    freed: bool,
 
     fn deinit(self: *RegexTrieValue) void {
-        self.allocator.free(self.regex_key);
-        // Note: Does NOT free data - caller is responsible for managing data lifetime
+        if (!self.freed) {
+            self.allocator.free(self.regex_key);
+            self.freed = true;
+        }
+    }
+
+    fn destroy(self: *RegexTrieValue) void {
+        if (!self.freed) {
+            self.deinit();
+            self.allocator.destroy(self);
+        }
     }
 
     fn create(allocator: std.mem.Allocator, regex_key: []const u8, data: ?*anyopaque) !*RegexTrieValue {
@@ -35,6 +47,7 @@ const RegexTrieValue = struct {
         value.regex_key = try allocator.dupe(u8, regex_key);
         value.data = data;
         value.allocator = allocator;
+        value.freed = false;
         return value;
     }
 };
@@ -87,24 +100,22 @@ pub const RegexTrie = struct {
 
     pub fn deinit(self: *RegexTrie) void {
         const allocator = self.allocator;
-        var freed_values = std.AutoHashMap(*RegexTrieValue, void).init(allocator);
-        defer freed_values.deinit();
-        deinitInternal(self, &freed_values);
+        deinitInternal(self);
         allocator.destroy(self);
     }
 
-    fn deinitInternal(self: *RegexTrie, freed_values: *std.AutoHashMap(*RegexTrieValue, void)) void {
+    fn deinitInternal(self: *RegexTrie) void {
         // Clean up children
         for (self.children.items) |maybe_child| {
             if (maybe_child) |child| {
-                child.deinitInternal(freed_values);
+                child.deinitInternal();
                 self.allocator.destroy(child);
             }
         }
 
         // Clean up regex children
         for (self.regexes.items) |*entry| {
-            entry.node.deinitInternal(freed_values);
+            entry.node.deinitInternal();
             self.allocator.destroy(entry.node);
             entry.deinit();
         }
@@ -115,18 +126,9 @@ pub const RegexTrie = struct {
             regex.deinit();
         }
 
-        // Clean up leaf value (only if not already freed)
+        // Clean up leaf value (freed flag prevents double-free for shared values)
         if (self.leaf_value) |val| {
-            const gop = freed_values.getOrPut(val) catch {
-                // If we can't track it, free it anyway to avoid leaks
-                val.deinit();
-                self.allocator.destroy(val);
-                return;
-            };
-            if (!gop.found_existing) {
-                val.deinit();
-                self.allocator.destroy(val);
-            }
+            val.destroy();
         }
 
         self.children.deinit(self.allocator);

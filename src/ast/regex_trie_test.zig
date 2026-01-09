@@ -369,9 +369,8 @@ fn trimLine(line: []u8) []u8 {
 test "regex_trie_many_words" {
     std.debug.print("=== Starting regex_trie_many_words test ===\n", .{});
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // Use c_allocator to test if GPA is the bottleneck
+    const allocator = std.heap.c_allocator;
 
     var root = try RegexTrie.init(allocator);
     errdefer root.deinit(); // Clean up on error
@@ -640,9 +639,8 @@ test "regex_trie_many_regexes" {
 // ============================================================================
 
 test "benchmark: insert literal strings" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // Test with c_allocator instead of GPA to check if GPA is the bottleneck
+    const allocator = std.heap.c_allocator;
 
     var root = try RegexTrie.init(allocator);
     defer root.deinit();
