@@ -2,7 +2,6 @@ const std = @import("std");
 const testing = std.testing;
 const regex_trie = @import("regex_trie.zig");
 const RegexTrie = regex_trie.RegexTrie;
-const RegexTrieValue = regex_trie.RegexTrieValue;
 const RegexTrieError = regex_trie.RegexTrieError;
 
 // Flag to disable slow tests that may hang
@@ -11,20 +10,6 @@ const enable_slow_tests = false;
 // ============================================================================
 // Unit Tests - Testing individual functionality
 // ============================================================================
-
-test "RegexTrieValue.create and deinit" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const value = try RegexTrieValue.create(allocator, "test");
-    defer {
-        value.deinit();
-        allocator.destroy(value);
-    }
-
-    try testing.expectEqualStrings("test", value.regex_key);
-}
 
 test "RegexTrie.init" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -48,12 +33,11 @@ test "insert simple literal string" {
     var root = try RegexTrie.init(allocator);
     defer root.deinit();
 
-    const value = try RegexTrieValue.create(allocator, "hello");
-    try root.insert(value);
+    try root.insert(allocator, "hello", null);
 
     const result = try root.get("hello");
     try testing.expectEqual(@as(usize, 5), result.matched);
-    try testing.expectEqualStrings("hello", result.value.regex_key);
+    try testing.expectEqualStrings("hello", result.regex_key);
 }
 
 test "insert multiple literal strings" {
@@ -64,26 +48,21 @@ test "insert multiple literal strings" {
     var root = try RegexTrie.init(allocator);
     defer root.deinit();
 
-    const val1 = try RegexTrieValue.create(allocator, "hello");
-    try root.insert(val1);
-
-    const val2 = try RegexTrieValue.create(allocator, "world");
-    try root.insert(val2);
-
-    const val3 = try RegexTrieValue.create(allocator, "hi");
-    try root.insert(val3);
+    try root.insert(allocator, "hello", null);
+    try root.insert(allocator, "world", null);
+    try root.insert(allocator, "hi", null);
 
     var result = try root.get("hello");
     try testing.expectEqual(@as(usize, 5), result.matched);
-    try testing.expectEqualStrings("hello", result.value.regex_key);
+    try testing.expectEqualStrings("hello", result.regex_key);
 
     result = try root.get("world");
     try testing.expectEqual(@as(usize, 5), result.matched);
-    try testing.expectEqualStrings("world", result.value.regex_key);
+    try testing.expectEqualStrings("world", result.regex_key);
 
     result = try root.get("hi");
     try testing.expectEqual(@as(usize, 2), result.matched);
-    try testing.expectEqualStrings("hi", result.value.regex_key);
+    try testing.expectEqualStrings("hi", result.regex_key);
 }
 
 test "insert overlapping literal strings" {
@@ -94,19 +73,16 @@ test "insert overlapping literal strings" {
     var root = try RegexTrie.init(allocator);
     defer root.deinit();
 
-    const val1 = try RegexTrieValue.create(allocator, "he");
-    try root.insert(val1);
-
-    const val2 = try RegexTrieValue.create(allocator, "hello");
-    try root.insert(val2);
+    try root.insert(allocator, "he", null);
+    try root.insert(allocator, "hello", null);
 
     var result = try root.get("he");
     try testing.expectEqual(@as(usize, 2), result.matched);
-    try testing.expectEqualStrings("he", result.value.regex_key);
+    try testing.expectEqualStrings("he", result.regex_key);
 
     result = try root.get("hello");
     try testing.expectEqual(@as(usize, 5), result.matched);
-    try testing.expectEqualStrings("hello", result.value.regex_key);
+    try testing.expectEqualStrings("hello", result.regex_key);
 }
 
 test "get returns longest match" {
@@ -117,16 +93,13 @@ test "get returns longest match" {
     var root = try RegexTrie.init(allocator);
     defer root.deinit();
 
-    const val1 = try RegexTrieValue.create(allocator, "he");
-    try root.insert(val1);
-
-    const val2 = try RegexTrieValue.create(allocator, "hello");
-    try root.insert(val2);
+    try root.insert(allocator, "he", null);
+    try root.insert(allocator, "hello", null);
 
     // Should match the longest prefix
     const result = try root.get("hello world");
     try testing.expectEqual(@as(usize, 5), result.matched);
-    try testing.expectEqualStrings("hello", result.value.regex_key);
+    try testing.expectEqualStrings("hello", result.regex_key);
 }
 
 test "get with non-existent key returns error" {
@@ -137,8 +110,7 @@ test "get with non-existent key returns error" {
     var root = try RegexTrie.init(allocator);
     defer root.deinit();
 
-    const value = try RegexTrieValue.create(allocator, "hello");
-    try root.insert(value);
+    try root.insert(allocator, "hello", null);
 
     const result = root.get("world");
     try testing.expectError(RegexTrieError.NodeNotFound, result);
@@ -152,12 +124,11 @@ test "insert single character" {
     var root = try RegexTrie.init(allocator);
     defer root.deinit();
 
-    const value = try RegexTrieValue.create(allocator, "a");
-    try root.insert(value);
+    try root.insert(allocator, "a", null);
 
     const result = try root.get("a");
     try testing.expectEqual(@as(usize, 1), result.matched);
-    try testing.expectEqualStrings("a", result.value.regex_key);
+    try testing.expectEqualStrings("a", result.regex_key);
 }
 
 test "insert special characters" {
@@ -168,14 +139,9 @@ test "insert special characters" {
     var root = try RegexTrie.init(allocator);
     defer root.deinit();
 
-    const val1 = try RegexTrieValue.create(allocator, "\n");
-    try root.insert(val1);
-
-    const val2 = try RegexTrieValue.create(allocator, "\r");
-    try root.insert(val2);
-
-    const val3 = try RegexTrieValue.create(allocator, " ");
-    try root.insert(val3);
+    try root.insert(allocator, "\n", null);
+    try root.insert(allocator, "\r", null);
+    try root.insert(allocator, " ", null);
 
     var result = try root.get("\n");
     try testing.expectEqual(@as(usize, 1), result.matched);
@@ -195,12 +161,11 @@ test "insert simple regex pattern" {
     var root = try RegexTrie.init(allocator);
     defer root.deinit();
 
-    const value = try RegexTrieValue.create(allocator, "[0-9]+");
-    try root.insert(value);
+    try root.insert(allocator, "[0-9]+", null);
 
     const result = try root.get("123");
     try testing.expect(result.matched > 0);
-    try testing.expectEqualStrings("[0-9]+", result.value.regex_key);
+    try testing.expectEqualStrings("[0-9]+", result.regex_key);
 }
 
 test "insert literal and regex pattern" {
@@ -211,19 +176,16 @@ test "insert literal and regex pattern" {
     var root = try RegexTrie.init(allocator);
     defer root.deinit();
 
-    const val1 = try RegexTrieValue.create(allocator, "hello");
-    try root.insert(val1);
-
-    const val2 = try RegexTrieValue.create(allocator, "[0-9]+");
-    try root.insert(val2);
+    try root.insert(allocator, "hello", null);
+    try root.insert(allocator, "[0-9]+", null);
 
     var result = try root.get("hello");
     try testing.expectEqual(@as(usize, 5), result.matched);
-    try testing.expectEqualStrings("hello", result.value.regex_key);
+    try testing.expectEqualStrings("hello", result.regex_key);
 
     result = try root.get("123");
     try testing.expect(result.matched > 0);
-    try testing.expectEqualStrings("[0-9]+", result.value.regex_key);
+    try testing.expectEqualStrings("[0-9]+", result.regex_key);
 }
 
 test "remove existing key" {
@@ -234,15 +196,11 @@ test "remove existing key" {
     var root = try RegexTrie.init(allocator);
     defer root.deinit();
 
-    const value = try RegexTrieValue.create(allocator, "hello");
-    try root.insert(value);
+    try root.insert(allocator, "hello", null);
 
-    const removed = try root.remove("hello");
-    try testing.expect(removed != null);
-    try testing.expectEqualStrings("hello", removed.?.regex_key);
-    // Free the removed value (caller takes ownership)
-    removed.?.deinit();
-    allocator.destroy(removed.?);
+    const removed_data = try root.remove("hello");
+    // With null data, we get null back
+    try testing.expect(removed_data == null);
 
     // Should not be found after removal
     const result = root.get("hello");
@@ -257,8 +215,7 @@ test "remove non-existent key returns error" {
     var root = try RegexTrie.init(allocator);
     defer root.deinit();
 
-    const value = try RegexTrieValue.create(allocator, "hello");
-    try root.insert(value);
+    try root.insert(allocator, "hello", null);
 
     const result = root.remove("world");
     try testing.expectError(RegexTrieError.NodeNotFound, result);
@@ -272,16 +229,10 @@ test "remove one of multiple keys" {
     var root = try RegexTrie.init(allocator);
     defer root.deinit();
 
-    const val1 = try RegexTrieValue.create(allocator, "hello");
-    try root.insert(val1);
+    try root.insert(allocator, "hello", null);
+    try root.insert(allocator, "world", null);
 
-    const val2 = try RegexTrieValue.create(allocator, "world");
-    try root.insert(val2);
-
-    const removed = try root.remove("hello");
-    // Free the removed value (caller takes ownership)
-    removed.?.deinit();
-    allocator.destroy(removed.?);
+    _ = try root.remove("hello");
 
     // hello should be gone
     var result = root.get("hello");
@@ -291,7 +242,7 @@ test "remove one of multiple keys" {
     result = root.get("world");
     const get_result = try result;
     try testing.expectEqual(@as(usize, 5), get_result.matched);
-    try testing.expectEqualStrings("world", get_result.value.regex_key);
+    try testing.expectEqualStrings("world", get_result.regex_key);
 }
 
 test "insert same key twice returns error" {
@@ -302,22 +253,16 @@ test "insert same key twice returns error" {
     var root = try RegexTrie.init(allocator);
     defer root.deinit();
 
-    const val1 = try RegexTrieValue.create(allocator, "hello");
-    try root.insert(val1);
+    try root.insert(allocator, "hello", null);
 
-    const val2 = try RegexTrieValue.create(allocator, "hello");
     // Should return error when trying to insert duplicate leaf value
-    const insert_result = root.insert(val2);
+    const insert_result = root.insert(allocator, "hello", null);
     try testing.expectError(RegexTrieError.DuplicateLeafValue, insert_result);
-
-    // Clean up val2 since insert failed
-    val2.deinit();
-    allocator.destroy(val2);
 
     // Should still get the first value
     const result = try root.get("hello");
     try testing.expectEqual(@as(usize, 5), result.matched);
-    try testing.expectEqualStrings("hello", result.value.regex_key);
+    try testing.expectEqualStrings("hello", result.regex_key);
 }
 
 // Note: get() with empty string has a debug assertion, so we skip testing it
@@ -331,8 +276,7 @@ test "insert with regex that splits into multiple paths" {
     defer root.deinit();
 
     // This pattern might split into multiple paths
-    const value = try RegexTrieValue.create(allocator, "a(b|c)");
-    try root.insert(value);
+    try root.insert(allocator, "a(b|c)", null);
 
     // Should be able to match both "ab" and "ac"
     var result = try root.get("ab");
@@ -348,11 +292,8 @@ test "deinit cleans up properly" {
     const allocator = gpa.allocator();
 
     var root = try RegexTrie.init(allocator);
-    const val1 = try RegexTrieValue.create(allocator, "hello");
-    try root.insert(val1);
-
-    const val2 = try RegexTrieValue.create(allocator, "world");
-    try root.insert(val2);
+    try root.insert(allocator, "hello", null);
+    try root.insert(allocator, "world", null);
 
     // Destroy should not crash
     root.deinit();
@@ -366,19 +307,16 @@ test "multiple regex patterns" {
     var root = try RegexTrie.init(allocator);
     defer root.deinit();
 
-    const val1 = try RegexTrieValue.create(allocator, "[0-9]+");
-    try root.insert(val1);
-
-    const val2 = try RegexTrieValue.create(allocator, "[a-z]+");
-    try root.insert(val2);
+    try root.insert(allocator, "[0-9]+", null);
+    try root.insert(allocator, "[a-z]+", null);
 
     var result = try root.get("123");
     try testing.expect(result.matched > 0);
-    try testing.expectEqualStrings("[0-9]+", result.value.regex_key);
+    try testing.expectEqualStrings("[0-9]+", result.regex_key);
 
     result = try root.get("abc");
     try testing.expect(result.matched > 0);
-    try testing.expectEqualStrings("[a-z]+", result.value.regex_key);
+    try testing.expectEqualStrings("[a-z]+", result.regex_key);
 }
 
 test "get partial match" {
@@ -389,13 +327,12 @@ test "get partial match" {
     var root = try RegexTrie.init(allocator);
     defer root.deinit();
 
-    const value = try RegexTrieValue.create(allocator, "hello");
-    try root.insert(value);
+    try root.insert(allocator, "hello", null);
 
     // Should match "hello" from "hello world"
     const result = try root.get("hello world");
     try testing.expectEqual(@as(usize, 5), result.matched);
-    try testing.expectEqualStrings("hello", result.value.regex_key);
+    try testing.expectEqualStrings("hello", result.regex_key);
 }
 
 test "insert and get unicode characters" {
@@ -408,8 +345,7 @@ test "insert and get unicode characters" {
 
     // Note: This might not work correctly if regex_splitting doesn't handle UTF-8
     // But we test it to see what happens
-    const value = try RegexTrieValue.create(allocator, "café");
-    try root.insert(value);
+    try root.insert(allocator, "café", null);
 
     const result = try root.get("café");
     try testing.expect(result.matched > 0);
@@ -442,18 +378,10 @@ test "regex_trie_many_words" {
     // Note: destroy is also called explicitly for benchmarking at the end
 
     // Insert some basic test words
-    // Note: The trie takes ownership of these values, so we don't free them here
-    const hello_val = try RegexTrieValue.create(allocator, "hello");
-    try root.insert(hello_val);
-
-    const newline_val = try RegexTrieValue.create(allocator, "\n");
-    try root.insert(newline_val);
-
-    const cr_val = try RegexTrieValue.create(allocator, "\r");
-    try root.insert(cr_val);
-
-    const space_val = try RegexTrieValue.create(allocator, " ");
-    try root.insert(space_val);
+    try root.insert(allocator, "hello", null);
+    try root.insert(allocator, "\n", null);
+    try root.insert(allocator, "\r", null);
+    try root.insert(allocator, " ", null);
 
     // printing for debugging
     // std.debug.print("=== Printing trie to stdout ===\n", .{});
@@ -464,7 +392,7 @@ test "regex_trie_many_words" {
     // std.debug.print("Root pointer: {*}\n", .{root});
     const hello_result = try root.get("hello");
     try testing.expectEqual(@as(usize, 5), hello_result.matched);
-    try testing.expectEqualStrings("hello", hello_result.value.regex_key);
+    try testing.expectEqualStrings("hello", hello_result.regex_key);
 
     // Read and insert words from testdata/words.txt
     std.debug.print("Reading testdata/words.txt...\n", .{});
@@ -490,19 +418,12 @@ test "regex_trie_many_words" {
             const line = file_content[line_start..line_end];
             const trimmed = trimLine(line);
             if (trimmed.len > 0) {
-                const word_val = try RegexTrieValue.create(allocator, trimmed);
-                errdefer {
-                    word_val.deinit();
-                    allocator.destroy(word_val);
-                }
-                const insert_result = root.insert(word_val);
+                const insert_result = root.insert(allocator, trimmed, null);
                 if (insert_result) |_| {
                     num_words += 1;
                 } else |err| switch (err) {
                     error.DuplicateLeafValue => {
                         // Skip duplicate words (rare, but handle gracefully)
-                        word_val.deinit();
-                        allocator.destroy(word_val);
                     },
                     else => return err,
                 }
@@ -634,12 +555,7 @@ test "regex_trie_many_regexes" {
             const regex_line = regex_file_content[regex_line_start..regex_line_end];
             const trimmed = trimLine(regex_line);
             if (trimmed.len > 0) {
-                const regex_val = try RegexTrieValue.create(allocator, trimmed);
-                errdefer {
-                    regex_val.deinit();
-                    allocator.destroy(regex_val);
-                }
-                const insert_result = root.insert(regex_val);
+                const insert_result = root.insert(allocator, trimmed, null);
                 if (insert_result) |_| {
                     num_regexes += 1;
 
@@ -650,8 +566,6 @@ test "regex_trie_many_regexes" {
                 } else |err| switch (err) {
                     error.DuplicateLeafValue => {
                         // Skip duplicate regexes
-                        regex_val.deinit();
-                        allocator.destroy(regex_val);
                     },
                     else => return err,
                 }
@@ -749,8 +663,7 @@ test "benchmark: insert literal strings" {
     _ = timer.lap();
 
     for (words) |word| {
-        const value = try RegexTrieValue.create(allocator, word);
-        try root.insert(value);
+        try root.insert(allocator, word, null);
     }
 
     const elapsed = timer.read();
@@ -779,8 +692,7 @@ test "benchmark: get literal strings" {
         var buf: [32]u8 = undefined;
         const word = try std.fmt.bufPrint(&buf, "word{d}", .{i});
         words[i] = try allocator.dupe(u8, word);
-        const value = try RegexTrieValue.create(allocator, words[i]);
-        try root.insert(value);
+        try root.insert(allocator, words[i], null);
     }
     defer for (words) |word| allocator.free(word);
 
@@ -829,12 +741,9 @@ test "benchmark: insert regex patterns" {
 
     for (0..num_inserts) |i| {
         const pattern = patterns[i % patterns.len];
-        const value = try RegexTrieValue.create(allocator, pattern);
-        root.insert(value) catch |err| switch (err) {
+        root.insert(allocator, pattern, null) catch |err| switch (err) {
             error.DuplicateLeafValue => {
                 // Skip duplicates in benchmark
-                value.deinit();
-                allocator.destroy(value);
                 continue;
             },
             else => return err,
@@ -876,8 +785,7 @@ test "benchmark: get regex patterns" {
 
     // Insert patterns
     for (patterns) |pattern| {
-        const value = try RegexTrieValue.create(allocator, pattern);
-        try root.insert(value);
+        try root.insert(allocator, pattern, null);
     }
 
     const num_gets = 50000;
@@ -919,8 +827,7 @@ test "benchmark: regex compilation" {
 
     // Insert patterns (this marks matcher as not updated)
     for (patterns) |pattern| {
-        const value = try RegexTrieValue.create(allocator, pattern);
-        try root.insert(value);
+        try root.insert(allocator, pattern, null);
     }
 
     // Force compilation by doing a get() which triggers updateMatcher
@@ -999,8 +906,7 @@ test "benchmark: mixed workload" {
     for (0..num_literals) |i| {
         var buf: [32]u8 = undefined;
         const word = try std.fmt.bufPrint(&buf, "word{d}", .{i});
-        const value = try RegexTrieValue.create(allocator, word);
-        try root.insert(value);
+        try root.insert(allocator, word, null);
     }
 
     // Insert regexes
@@ -1013,12 +919,9 @@ test "benchmark: mixed workload" {
     };
     for (0..num_regexes) |i| {
         const pattern = regex_patterns[i % regex_patterns.len];
-        const value = try RegexTrieValue.create(allocator, pattern);
-        root.insert(value) catch |err| switch (err) {
+        root.insert(allocator, pattern, null) catch |err| switch (err) {
             error.DuplicateLeafValue => {
                 // Skip duplicates in benchmark
-                value.deinit();
-                allocator.destroy(value);
                 continue;
             },
             else => return err,
@@ -1071,8 +974,7 @@ test "benchmark: deep trie traversal" {
         for (0..depth) |j| {
             try std.fmt.format(long_str.writer(fba_allocator), "_segment{d}", .{j});
         }
-        const value = try RegexTrieValue.create(allocator, long_str.items);
-        try root.insert(value);
+        try root.insert(allocator, long_str.items, null);
     }
 
     const insert_elapsed = timer.lap();

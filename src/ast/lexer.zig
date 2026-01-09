@@ -95,15 +95,8 @@ pub const Lexer = struct {
             try token_types.append(allocator, pattern_entry.token_type);
             const token_type_ptr = &token_types.items[token_types.items.len - 1];
 
-            // Create value with pointer to the token type
-            const value = try regex_trie.RegexTrieValue.create(
-                allocator,
-                pattern_entry.pattern,
-                @ptrCast(token_type_ptr),
-            );
-            errdefer value.deinit();
-
-            try trie.insert(value);
+            // Insert with pointer to the token type as data
+            try trie.insert(allocator, pattern_entry.pattern, @ptrCast(token_type_ptr));
         }
 
         return .{
@@ -146,7 +139,7 @@ pub const Lexer = struct {
             };
 
             // Extract TokenType from the data field
-            const token_type = if (match_result.value.data) |data_ptr|
+            const token_type = if (match_result.data) |data_ptr|
                 @as(*TokenType, @ptrCast(@alignCast(data_ptr))).*
             else
                 .unknown;

@@ -18,19 +18,19 @@ pub const RegexTrieError = error{
     DuplicateLeafValue,
 };
 
-pub const RegexTrieValue = struct {
+/// Internal value storage - not exposed to users
+const RegexTrieValue = struct {
     regex_key: []const u8,
     /// Generic value pointer - cast to your type when retrieving
-    /// Example: const token_type = @as(*TokenType, @ptrCast(@alignCast(value.data))).*
     data: ?*anyopaque,
     allocator: std.mem.Allocator,
 
-    pub fn deinit(self: *RegexTrieValue) void {
+    fn deinit(self: *RegexTrieValue) void {
         self.allocator.free(self.regex_key);
         // Note: Does NOT free data - caller is responsible for managing data lifetime
     }
 
-    pub fn create(allocator: std.mem.Allocator, regex_key: []const u8, data: ?*anyopaque) !*RegexTrieValue {
+    fn create(allocator: std.mem.Allocator, regex_key: []const u8, data: ?*anyopaque) !*RegexTrieValue {
         const value = try allocator.create(RegexTrieValue);
         value.regex_key = try allocator.dupe(u8, regex_key);
         value.data = data;
@@ -39,9 +39,14 @@ pub const RegexTrieValue = struct {
     }
 };
 
+/// Result from get() and getAllMatches()
 pub const MatchResult = struct {
+    /// Number of bytes matched
     matched: usize,
-    value: *RegexTrieValue,
+    /// The regex pattern key that matched
+    regex_key: []const u8,
+    /// User data pointer associated with the pattern (cast to your type)
+    data: ?*anyopaque,
 };
 
 const RegexEntry = struct {
@@ -271,8 +276,7 @@ pub const RegexTrie = struct {
     }
 
     // Fast path for inserting pure literal strings (completely bypasses regex splitting)
-    fn insertLiteralFast(self: *RegexTrie, key_value: *RegexTrieValue) RegexTrieError!void {
-        const str = key_value.regex_key;
+    fn insertLiteralFast(self: *RegexTrie, str: []const u8, key_value: *RegexTrieValue) RegexTrieError!void {
         var current = self;
 
         // Traverse/create path for each character
@@ -323,15 +327,26 @@ pub const RegexTrie = struct {
         }
     }
 
-    pub fn insert(self: *RegexTrie, key_value: *RegexTrieValue) RegexTrieError!void {
-        std.debug.assert(key_value.regex_key.len > 0);
+    /// Insert a pattern into the trie with associated data
+    /// allocator: Used to allocate internal storage for the key
+    /// key: The regex pattern or literal string to insert
+    /// data: Optional user data pointer associated with the pattern
+    pub fn insert(self: *RegexTrie, allocator: std.mem.Allocator, key: []const u8, data: ?*anyopaque) RegexTrieError!void {
+        std.debug.assert(key.len > 0);
 
-        const str = key_value.regex_key;
+        // Create the internal value
+        const key_value = RegexTrieValue.create(allocator, key, data) catch return RegexTrieError.AllocationFailure;
+        errdefer {
+            key_value.deinit();
+            allocator.destroy(key_value);
+        }
+
+        const str = key;
 
         // Fast path: if it's a pure literal, completely bypass regex splitting
         // This avoids all Segment/path allocations and iterations
         if (regex_splitting.isPureLiteral(str)) {
-            return self.insertLiteralFast(key_value);
+            return self.insertLiteralFast(str, key_value);
         }
 
         var paths = regex_splitting.regexSplitting(self.allocator, str) catch return RegexTrieError.AllocationFailure;
@@ -442,7 +457,10 @@ pub const RegexTrie = struct {
         regex_index: usize,
     };
 
-    pub fn remove(self: *RegexTrie, regex_key: []const u8) RegexTrieError!?*RegexTrieValue {
+    /// Remove a pattern from the trie and return the associated data pointer
+    /// The trie handles cleanup of the internal key storage
+    /// The caller is responsible for cleaning up the returned data pointer if needed
+    pub fn remove(self: *RegexTrie, regex_key: []const u8) RegexTrieError!?*anyopaque {
         std.debug.assert(regex_key.len > 0);
 
         var paths = regex_splitting.regexSplitting(self.allocator, regex_key) catch {
@@ -457,7 +475,7 @@ pub const RegexTrie = struct {
         }
 
         var all_removed = true;
-        var removed_value: ?*RegexTrieValue = null;
+        var removed_internal: ?*RegexTrieValue = null;
 
         for (paths.items) |path| {
             var stack = std.ArrayList(PathStep).initCapacity(self.allocator, 0) catch return RegexTrieError.AllocationFailure;
@@ -521,10 +539,10 @@ pub const RegexTrie = struct {
                 continue;
             }
 
-            if (removed_value == null) {
-                removed_value = current.leaf_value;
+            if (removed_internal == null) {
+                removed_internal = current.leaf_value;
             } else {
-                if (removed_value != current.leaf_value) {
+                if (removed_internal != current.leaf_value) {
                     all_removed = false;
                     continue;
                 }
@@ -566,10 +584,18 @@ pub const RegexTrie = struct {
         if (!all_removed) {
             return RegexTrieError.NodeNotFound;
         }
-        return removed_value;
+
+        // Extract data pointer and clean up internal value
+        if (removed_internal) |internal| {
+            const data = internal.data;
+            internal.deinit();
+            self.allocator.destroy(internal);
+            return data;
+        }
+        return null;
     }
 
-    pub fn get(self: *RegexTrie, string: []const u8) RegexTrieError!struct { matched: usize, value: *RegexTrieValue } {
+    pub fn get(self: *RegexTrie, string: []const u8) RegexTrieError!MatchResult {
         std.debug.assert(string.len > 0);
 
         var current = self;
@@ -656,7 +682,11 @@ pub const RegexTrie = struct {
         if (max_matched > 0) {
             std.debug.assert(max_value != null);
             std.debug.assert(max_value.?.regex_key.len > 0);
-            return .{ .matched = max_matched, .value = max_value.? };
+            return .{
+                .matched = max_matched,
+                .regex_key = max_value.?.regex_key,
+                .data = max_value.?.data,
+            };
         }
         return RegexTrieError.NodeNotFound;
     }
@@ -687,7 +717,11 @@ pub const RegexTrie = struct {
             if (eow_idx != 255) {
                 if (current.children.items[eow_idx] == null) {
                     if (current.leaf_value) |value| {
-                        matches.append(allocator, .{ .matched = pos, .value = value }) catch return RegexTrieError.AllocationFailure;
+                        matches.append(allocator, .{
+                            .matched = pos,
+                            .regex_key = value.regex_key,
+                            .data = value.data,
+                        }) catch return RegexTrieError.AllocationFailure;
                     }
                 }
             }
