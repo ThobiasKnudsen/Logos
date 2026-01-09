@@ -1,0 +1,209 @@
+➜  build git:(main) ✗ ./bin/test_ast
+Exact 'hello': res=68, matched=5
+NOTICE    | 1218ms | tid 140145869707136 | test_ast.cpp:88 | bulk_num_words = 466550 num_words = 466550
+NOTICE    | 1218ms | tid 140145869707136 | test_ast.cpp:90 | Bulk verified 466550 words using regex_trie_get_longest_prefix.
+NOTICE    | 1218ms | tid 140145869707136 | test_ast.cpp:91 | Regex Trie (Verstable) after inserting 466550 words.
+1363ms | 1 calls | 1363.784ms avg | test_ast.cpp:13
+1363ms | 1 calls | 1363.784ms avg |     test_ast.cpp:13 to test_ast.cpp:95
+1096ms | 1 calls | 1096.161ms avg | test_ast.cpp:32
+1096ms | 1 calls | 1096.161ms avg |     test_ast.cpp:32 to test_ast.cpp:45
+ 119ms | 1 calls | 119.963ms avg | test_ast.cpp:62
+ 119ms | 1 calls | 119.963ms avg |     test_ast.cpp:62 to test_ast.cpp:86
+ 146ms | 1 calls | 146.389ms avg | test_ast.cpp:92
+ 146ms | 1 calls | 146.389ms avg |     test_ast.cpp:92 to test_ast.cpp:94
+NOTICE    | 1365ms | tid 140145869707136 | test_ast.cpp:128 | Inserted 35 regex patterns into trie.
+NOTICE    | 2245ms | tid 140145869707136 | test_ast.cpp:171 | Bulk matched 586836 tokens in words.txt using regex_trie_get.
+NOTICE    | 2245ms | tid 140145869707136 | test_ast.cpp:174 | Regex Trie (Regex-only) after inserting 35 patterns.
+  0ms | 1 calls | 0.230ms avg | test_ast.cpp:113
+  0ms | 1 calls | 0.230ms avg |     test_ast.cpp:113 to test_ast.cpp:126
+878ms | 1 calls | 878.531ms avg | test_ast.cpp:147
+878ms | 1 calls | 878.531ms avg |     test_ast.cpp:147 to test_ast.cpp:169
+  0ms | 1 calls | 0.054ms avg | test_ast.cpp:175
+  0ms | 1 calls | 0.054ms avg |     test_ast.cpp:175 to test_ast.cpp:177
+880ms | 1 calls | 880.408ms avg | test_ast.cpp:100
+880ms | 1 calls | 880.408ms avg |     test_ast.cpp:100 to test_ast.cpp:178
+(/\*.*\*/)
+    /* (lit) .* (regex) */ (lit) 
+    VALID
+(ads/\*.*\*/)
+    ads/* (lit) .* (regex) */ (lit) 
+    VALID
+a.b.c
+    a (lit) . (regex) b (lit) . (regex) c (lit) 
+    VALID
+(a|b).c
+    a (lit) . (regex) c (lit) 
+    b (lit) . (regex) c (lit) 
+    VALID
+a(b|c)d
+    abd (lit) 
+    acd (lit) 
+    VALID
+a.*b
+    a (lit) .* (regex) b (lit) 
+    VALID
+[abc]d[0-9]
+    [abc] (regex) d (lit) [0-9] (regex) 
+    VALID
+[abc]\d[0-9]
+    [abc]\d[0-9] (regex) 
+    VALID
+\w+abc
+    \w+ (regex) abc (lit) 
+    VALID
+^a.*$
+    ^ (regex) a (lit) .*$ (regex) 
+    VALID
+(a|b|c)?d
+    a? (regex) d (lit) 
+    b? (regex) d (lit) 
+    c? (regex) d (lit) 
+    VALID
+ab|cd.e
+    ab (lit) 
+    cd (lit) . (regex) e (lit) 
+    VALID
+a\[b\].*
+    a[b] (lit) .* (regex) 
+    VALID
+.+bc|def
+    .+ (regex) bc (lit) 
+    def (lit) 
+    VALID
+(ab|cd){2}
+    abab (lit) 
+    abcd (lit) 
+    cdab (lit) 
+    cdcd (lit) 
+    VALID
+a?b+c*
+    a?b+c* (regex) 
+    VALID
+\D\W\S\b\w+
+    \D\W\S\b\w+ (regex) 
+    VALID
+\p{L}+
+    \p{L}+ (regex) 
+    VALID
+\Qspecial$chars(a|b|c) \E(a|b|c)
+    special$chars(a|b|c) a (lit) 
+    special$chars(a|b|c) b (lit) 
+    special$chars(a|b|c) c (lit) 
+    VALID
+a\Ab\Z$
+    a (lit) \A (regex) b (lit) \Z$ (regex) 
+    VALID
+a*?b
+    a*? (regex) b (lit) 
+    VALID
+(a{2,5}+|[A-Z]+)c
+    a{2,5}+ (regex) c (lit) 
+    [A-Z]+ (regex) c (lit) 
+    VALID
+a.*b%
+    a (lit) .* (regex) b% (lit) 
+    VALID
+a\)
+    a) (lit) 
+    VALID
+{invalid}abc
+    {invalid}abc (lit) 
+    VALID
+a|b|c|extra
+    a (lit) 
+    b (lit) 
+    c (lit) 
+    extra (lit) 
+    VALID
+\Qunclosed
+    unclosed (lit) 
+    VALID
+(a|b|(c|d))e(f|g)
+    aef (lit) 
+    aeg (lit) 
+    bef (lit) 
+    beg (lit) 
+    cef (lit) 
+    ceg (lit) 
+    def (lit) 
+    deg (lit) 
+    VALID
+(a|b|(c|d))e(f|g)
+    aef (lit) 
+    aeg (lit) 
+    bef (lit) 
+    beg (lit) 
+    cef (lit) 
+    ceg (lit) 
+    def (lit) 
+    deg (lit) 
+    VALID
+^(ab|cd){2,4}|(ef|gh)\d+.*$
+    ^ab{2,4} (regex) 
+    ^cd{2,4} (regex) 
+    ef (lit) \d+.*$ (regex) 
+    gh (lit) \d+.*$ (regex) 
+    VALID
+((a|b|c)?\?|(d|e){1,3}??|[f-g]+)[\w\s]*|(h|i|j)k
+    a? (regex) ? (lit) [\w\s]* (regex) 
+    b? (regex) ? (lit) [\w\s]* (regex) 
+    c? (regex) ? (lit) [\w\s]* (regex) 
+    d{1,3}? (regex) ? (lit) [\w\s]* (regex) 
+    e{1,3}? (regex) ? (lit) [\w\s]* (regex) 
+    [f-g]+[\w\s]* (regex) 
+    hk (lit) 
+    ik (lit) 
+    jk (lit) 
+    VALID
+\Qabc|def\E(ghi|jkl)mno|\p{Lu}{2,}(pqr|stu)
+    abc|defghimno (lit) 
+    abc|defjklmno (lit) 
+    \p{Lu}{2,} (regex) pqr (lit) 
+    \p{Lu}{2,} (regex) stu (lit) 
+    VALID
+(\b(foo|bar)\b|\B(baz|qux)\B){0,2}|(img|vid):(\w+)(alt|src)
+    \b (regex) foo (lit) \b{0,2} (regex) 
+    \b (regex) bar (lit) \b{0,2} (regex) 
+    \B (regex) baz (lit) \B{0,2} (regex) 
+    \B (regex) qux (lit) \B{0,2} (regex) 
+    img: (lit) \w+ (regex) alt (lit) 
+    img: (lit) \w+ (regex) src (lit) 
+    vid: (lit) \w+ (regex) alt (lit) 
+    vid: (lit) \w+ (regex) src (lit) 
+    VALID
+(a{2,5}+(b|c|d)+|(e|f){3,}?g+)+|(h|i)j{1,3}+k
+    a{2,5}+b++ (regex) 
+    a{2,5}+c++ (regex) 
+    a{2,5}+d++ (regex) 
+    e{3,}?g++ (regex) 
+    f{3,}?g++ (regex) 
+    h (lit) j{1,3}+ (regex) k (lit) 
+    i (lit) j{1,3}+ (regex) k (lit) 
+    VALID
+(?=(a|b|c))d|e(?<!f|g)h|(i|j|k)l{2}m
+    (?=(a|b|c)) (regex) d (lit) 
+    e?<!fh (lit) 
+    egh (lit) 
+    illm (lit) 
+    jllm (lit) 
+    kllm (lit) 
+    VALID
+
+--- Validation Mode ---
+a\ (validated)
+    a\ (lit) 
+    VALID
+{invalid}abc (validated)
+    {invalid}abc (lit) 
+    VALID
+\Qunclosed (validated)
+    unclosed (lit) 
+    VALID
+(?=(a|b|c))d|e(?<!f|g)h|(i|j|k)l{2}m (validated)
+    (?=(a|b|c)) (regex) d (lit) 
+    e?<!fh (lit) 
+    egh (lit) 
+    illm (lit) 
+    jllm (lit) 
+    kllm (lit) 
+    VALID

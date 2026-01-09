@@ -71,6 +71,12 @@ pub fn build(b: *std.Build) void {
     zig_compiler_step.dependOn(&download.step);
 
     // ── Tests ─────────────────────────────────────────────────────────────
+    // Verztable dependency for optimized hash table
+    const verztable_dep = b.dependency("verztable", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Create regex_splitting module with pcrez import
     const regex_splitting_mod = b.createModule(.{
         .root_source_file = b.path("src/ast/regex_splitting.zig"),
@@ -79,6 +85,27 @@ pub fn build(b: *std.Build) void {
     });
     regex_splitting_mod.addImport("pcrez", pcrez_mod);
 
+    // Create regex_trie module (original implementation)
+    const regex_trie_mod = b.createModule(.{
+        .root_source_file = b.path("src/ast/regex_trie.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    regex_trie_mod.addImport("pcrez", pcrez_mod);
+    regex_trie_mod.addImport("regex_splitting", regex_splitting_mod);
+    regex_trie_mod.linkLibrary(pcre2_dep.artifact("pcre2-8"));
+
+    // Create regex_trie_2 module with verztable (optimized implementation)
+    const regex_trie_2_mod = b.createModule(.{
+        .root_source_file = b.path("src/ast/regex_trie_2.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    regex_trie_2_mod.addImport("pcrez", pcrez_mod);
+    regex_trie_2_mod.addImport("regex_splitting", regex_splitting_mod);
+    regex_trie_2_mod.addImport("verztable", verztable_dep.module("verztable"));
+    regex_trie_2_mod.linkLibrary(pcre2_dep.artifact("pcre2-8"));
+
     const regex_trie_test_mod = b.createModule(.{
         .root_source_file = b.path("src/ast/regex_trie_test.zig"),
         .target = target,
@@ -86,6 +113,9 @@ pub fn build(b: *std.Build) void {
     });
     regex_trie_test_mod.addImport("pcrez", pcrez_mod);
     regex_trie_test_mod.addImport("regex_splitting", regex_splitting_mod);
+    regex_trie_test_mod.addImport("regex_trie", regex_trie_mod);
+    regex_trie_test_mod.addImport("regex_trie_2", regex_trie_2_mod);
+    regex_trie_test_mod.addImport("verztable", verztable_dep.module("verztable"));
 
     const regex_trie_tests = b.addTest(.{
         .root_module = regex_trie_test_mod,

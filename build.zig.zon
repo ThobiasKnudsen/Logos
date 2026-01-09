@@ -20,5 +20,9 @@
             .url = "git+https://github.com/david-vanderson/dvui.git#main",
             .hash = "dvui-0.4.0-dev-AQFJmeVS2gBr_UZImna5jjqJewaW2LBD6fve0Lt9Lc70",
         },
+        .verztable = .{
+            .url = "git+https://github.com/ThobiasKnudsen/verztable.git#a47c86c6e896a964c3e410e9b4a61c153e2ffb29",
+            .hash = "verztable-0.1.0-S-yATOQbAwCmwYv1GsL5F9KomA5gGQUsjaqusjkpRUmC",
+        },
     },
 }
