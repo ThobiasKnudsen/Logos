@@ -1,6 +1,6 @@
 const std = @import("std");
 const pcrez = @import("pcrez");
-const regex_splitting = @import("regex_splitting");
+const regex_splitting = @import("regex_splitting.zig");
 
 // PCRE2 C bindings for JIT compilation
 const pcre2_c = @cImport({
@@ -241,10 +241,12 @@ pub const RegexTrie = struct {
                 );
             }
         } else {
-            // Build combined pattern
+            // Build combined pattern with proper anchoring
+            // The pattern is: ^(?:(pattern1)|(pattern2)|...)
+            // The outer non-capturing group ensures ^ anchors all alternatives
             var pattern_buf = std.ArrayList(u8).initCapacity(self.allocator, 0) catch return RegexTrieError.AllocationFailure;
             defer pattern_buf.deinit(self.allocator);
-            pattern_buf.append(self.allocator, '^') catch return RegexTrieError.AllocationFailure;
+            pattern_buf.appendSlice(self.allocator, "^(?:") catch return RegexTrieError.AllocationFailure;
             for (self.regexes.items, 0..) |entry, i| {
                 if (i > 0) {
                     pattern_buf.append(self.allocator, '|') catch return RegexTrieError.AllocationFailure;
@@ -253,6 +255,7 @@ pub const RegexTrie = struct {
                 pattern_buf.appendSlice(self.allocator, entry.pattern) catch return RegexTrieError.AllocationFailure;
                 pattern_buf.append(self.allocator, ')') catch return RegexTrieError.AllocationFailure;
             }
+            pattern_buf.append(self.allocator, ')') catch return RegexTrieError.AllocationFailure;
             const pattern = pattern_buf.toOwnedSlice(self.allocator) catch return RegexTrieError.AllocationFailure;
             defer self.allocator.free(pattern);
 
@@ -631,58 +634,66 @@ pub const RegexTrie = struct {
 
             if (!advanced) {
                 // No literal: Try regex branches
-                if (current.regexes.items.len == 0) {
-                    break;
-                }
-                if (!current.matcher_updated) {
-                    try current.updateMatcher();
-                }
-                std.debug.assert(current.compiled_regex != null);
-                std.debug.assert(current.match_data != null);
+                if (current.regexes.items.len > 0) {
+                    if (!current.matcher_updated) {
+                        try current.updateMatcher();
+                    }
+                    std.debug.assert(current.compiled_regex != null);
+                    std.debug.assert(current.match_data != null);
 
-                if (current.compiled_regex) |*regex| {
-                    if (regex.code) |code_ptr| {
-                        const remaining = string[pos..];
-                        // Use direct PCRE2 call with reusable match_data (like C++ version)
-                        const rc = pcre2_c.pcre2_match_8(
-                            @as(*pcre2_c.pcre2_code_8, @ptrCast(code_ptr)),
-                            remaining.ptr,
-                            remaining.len,
-                            0, // Start offset
-                            0, // Options
-                            current.match_data.?,
-                            null, // Match context
-                        );
-                        if (rc >= 0) {
-                            const ovector = pcre2_c.pcre2_get_ovector_pointer_8(current.match_data.?);
-                            const start = ovector[0];
-                            const end = ovector[1];
-                            if (start == 0 and end > 0) {
-                                const regex_len = end;
-                                // Identify which alternative matched (check capture groups 1..n)
-                                var which: ?usize = null;
-                                for (current.regexes.items, 1..) |_, g| {
-                                    const group_start = ovector[2 * g];
-                                    if (group_start != std.math.maxInt(usize)) {
-                                        which = g - 1; // Convert to 0-based index
-                                        break;
+                    if (current.compiled_regex) |*regex| {
+                        if (regex.code) |code_ptr| {
+                            const remaining = string[pos..];
+                            // Use direct PCRE2 call with reusable match_data (like C++ version)
+                            const rc = pcre2_c.pcre2_match_8(
+                                @as(*pcre2_c.pcre2_code_8, @ptrCast(code_ptr)),
+                                remaining.ptr,
+                                remaining.len,
+                                0, // Start offset
+                                0, // Options
+                                current.match_data.?,
+                                null, // Match context
+                            );
+                            if (rc >= 0) {
+                                const ovector = pcre2_c.pcre2_get_ovector_pointer_8(current.match_data.?);
+                                const start = ovector[0];
+                                const end = ovector[1];
+                                if (start == 0 and end > 0) {
+                                    const regex_len = end;
+                                    // Identify which alternative matched (check capture groups 1..n)
+                                    var which: ?usize = null;
+                                    for (current.regexes.items, 1..) |_, g| {
+                                        const group_start = ovector[2 * g];
+                                        if (group_start != std.math.maxInt(usize)) {
+                                            which = g - 1; // Convert to 0-based index
+                                            break;
+                                        }
                                     }
-                                }
-                                if (which) |w| {
-                                    if (w < current.regexes.items.len) {
-                                        current = current.regexes.items[w].node;
-                                        advance_len = regex_len;
-                                        advanced = true;
+                                    if (which) |w| {
+                                        if (w < current.regexes.items.len) {
+                                            current = current.regexes.items[w].node;
+                                            advance_len = regex_len;
+                                            advanced = true;
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            if (!advanced) {
-                break;
+                // If still not advanced and we're not at root, try root's regex patterns
+                // This handles cases like "test" where literal 't' (for "true") was matched
+                // but then failed - we need to fall back to trying the identifier regex
+                if (!advanced and current != self and pos == 0) {
+                    // We went down a literal path but got stuck at position 0
+                    // This shouldn't happen, but handle it anyway
+                    break;
+                }
+
+                if (!advanced) {
+                    break;
+                }
             }
 
             pos += advance_len;
@@ -693,6 +704,58 @@ pub const RegexTrie = struct {
                 if (current.children.items[eow_idx] == null) {
                     max_matched = pos;
                     max_value = current.leaf_value;
+                }
+            }
+        }
+
+        // If no match found via literal path, try regex patterns from root
+        if (max_matched == 0 and self.regexes.items.len > 0) {
+            if (!self.matcher_updated) {
+                try self.updateMatcher();
+            }
+            if (self.compiled_regex) |*regex| {
+                if (regex.code) |code_ptr| {
+                    const rc = pcre2_c.pcre2_match_8(
+                        @as(*pcre2_c.pcre2_code_8, @ptrCast(code_ptr)),
+                        string.ptr,
+                        string.len,
+                        0,
+                        0,
+                        self.match_data.?,
+                        null,
+                    );
+                    if (rc >= 0) {
+                        const ovector = pcre2_c.pcre2_get_ovector_pointer_8(self.match_data.?);
+                        const start = ovector[0];
+                        const end = ovector[1];
+                        if (start == 0 and end > 0) {
+                            // Identify which alternative matched
+                            var which: ?usize = null;
+                            for (self.regexes.items, 1..) |_, g| {
+                                const group_start = ovector[2 * g];
+                                if (group_start != std.math.maxInt(usize)) {
+                                    which = g - 1;
+                                    break;
+                                }
+                            }
+                            if (which) |w| {
+                                if (w < self.regexes.items.len) {
+                                    const target_node = self.regexes.items[w].node;
+                                    // Check for EOW in target node
+                                    const eow_idx = target_node.child_indices[0];
+                                    if (eow_idx != 255 and target_node.children.items[eow_idx] == null) {
+                                        if (target_node.leaf_value) |val| {
+                                            return .{
+                                                .matched = end,
+                                                .regex_key = val.regex_key,
+                                                .data = val.data,
+                                            };
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -29,16 +29,19 @@ pub const MenuBar = struct {
     pub fn render() Action {
         var action: Action = .none;
 
+        // Get scaled font for menu items
+        const menu_font = dvui.Font.theme(.body).withSize(theme.fonts.menuSize());
+
         // Menu bar container with subtle background
         var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .color_fill = dvui.Color{ .r = 32, .g = 38, .b = 48, .a = 255 },
+            .color_fill = theme.colors.bg_secondary,
             .background = true,
             .expand = .horizontal,
             .padding = .{ .x = 4, .y = 2, .w = 4, .h = 2 },
         });
         defer hbox.deinit();
 
-        var m = dvui.menu(@src(), .horizontal, .{});
+        var m = dvui.menu(@src(), .horizontal, .{ .font = menu_font });
         defer m.deinit();
 
         // File menu
@@ -107,7 +110,7 @@ pub const MenuBar = struct {
             var fw = dvui.floatingMenu(@src(), .{ .from = r }, .{});
             defer fw.deinit();
 
-            if (dvui.menuItemLabel(@src(), "Zoom In   Ctrl++", .{}, .{ .expand = .horizontal }) != null) {
+            if (dvui.menuItemLabel(@src(), "Zoom In   Ctrl+=", .{}, .{ .expand = .horizontal }) != null) {
                 action = .zoom_in;
                 m.close();
             }
@@ -115,7 +118,7 @@ pub const MenuBar = struct {
                 action = .zoom_out;
                 m.close();
             }
-            if (dvui.menuItemLabel(@src(), "Reset Zoom", .{}, .{ .expand = .horizontal }) != null) {
+            if (dvui.menuItemLabel(@src(), "Reset Zoom  Ctrl+0", .{}, .{ .expand = .horizontal }) != null) {
                 action = .reset_zoom;
                 m.close();
             }

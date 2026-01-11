@@ -16,7 +16,7 @@ pub fn main() !void {
 
 // Keep JIT functionality available as a separate entry point
 pub fn runJitDemo() !void {
-    const jit_mod = @import("jit/jit.zig");
+    const jit_mod = @import("zig_jit/jit.zig");
     const allocator = std.heap.page_allocator;
 
     const zig_exe = "zig-out/tools/zig_compiler/zig";

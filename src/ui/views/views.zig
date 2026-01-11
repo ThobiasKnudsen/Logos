@@ -1,3 +1,5 @@
 //! UI Views - full-screen compositions of components
 
-pub const mainView = @import("main_view.zig").mainView;
+const main_view = @import("main_view.zig");
+pub const mainView = main_view.mainView;
+pub const deinit = main_view.deinit;

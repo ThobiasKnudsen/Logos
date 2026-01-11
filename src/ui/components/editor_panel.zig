@@ -9,10 +9,8 @@ const theme = @import("../theme.zig");
 const session = @import("../../session/session.zig");
 
 pub const EditorPanel = struct {
-    // Shared styling constants
+    // Shared styling constants - use theme where possible
     const gutter_width: f32 = 48;
-    const separator_color = dvui.Color{ .r = 60, .g = 70, .b = 85, .a = 255 };
-    const line_number_color = dvui.Color{ .r = 100, .g = 110, .b = 130, .a = 255 };
     const content_padding_x: f32 = 8;
     const content_padding_y: f32 = 4;
 
@@ -48,10 +46,9 @@ pub const EditorPanel = struct {
     }
 
     fn renderLineNumbers(active_session: *session.TabSession) void {
-        // Get the mono font to calculate line height
-        const font_opts: dvui.Options = .{ .font = .theme(.mono) };
-        const mono_font = font_opts.fontGet();
-        const line_height = mono_font.lineHeight();
+        // Get the mono font with current size from centralized theme
+        const scaled_font = theme.fonts.editorFont();
+        const line_height = scaled_font.lineHeight();
 
         var gutter = dvui.box(@src(), .{ .dir = .vertical }, .{
             .min_size_content = .{ .w = gutter_width },
@@ -63,11 +60,11 @@ pub const EditorPanel = struct {
         for (1..line_count + 1) |line_num| {
             var buf: [16]u8 = undefined;
             const line_str = std.fmt.bufPrint(&buf, "{d: >3}", .{line_num}) catch "???";
-            // Use mono font with explicit min height matching TextLayoutWidget's line height
+            // Use mono font with scaled size and explicit min height matching TextLayoutWidget's line height
             dvui.labelNoFmt(@src(), line_str, .{}, .{
                 .id_extra = line_num,
-                .font = .theme(.mono),
-                .color_text = line_number_color,
+                .font = scaled_font,
+                .color_text = theme.colors.text_muted, // Use theme color
                 .padding = .{},
                 .margin = .{},
                 .min_size_content = .{ .h = line_height }, // Match TextLayoutWidget line height
@@ -79,13 +76,16 @@ pub const EditorPanel = struct {
         var sep = dvui.box(@src(), .{}, .{
             .min_size_content = .{ .w = 1 },
             .expand = .vertical,
-            .color_fill = separator_color,
+            .color_fill = theme.colors.border, // Use theme color
             .background = true,
         });
         sep.deinit();
     }
 
     fn renderTextArea(active_session: *session.TabSession) void {
+        // Get scaled font from centralized theme
+        const scaled_font = theme.fonts.editorFont();
+
         // Text entry with internal scroll disabled - parent scrollArea handles scrolling
         // Using custom theme with transparent focus to hide the focus border
         var text_entry = dvui.textEntry(@src(), .{
@@ -106,7 +106,7 @@ pub const EditorPanel = struct {
             .corner_radius = .{}, // No corner radius
             .background = false, // No background drawing
             .color_border = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 }, // Transparent border
-            .font = .theme(.mono), // Use mono font to match line numbers
+            .font = scaled_font, // Use scaled mono font
             .theme = &no_focus_theme, // Use theme with transparent focus
         });
         defer text_entry.deinit();

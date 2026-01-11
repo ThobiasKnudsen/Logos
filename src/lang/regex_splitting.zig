@@ -425,8 +425,10 @@ fn parseTerm(allocator: std.mem.Allocator, s: []const u8, pos: *usize) !std.Arra
             try new_paths.append(allocator, new_p);
         }
         if (quant_n.min == 0) {
+            // Append empty path at the END to ensure longer patterns match first
+            // in PCRE2 alternation (first alternative wins)
             const empty_path = try std.ArrayList(Segment).initCapacity(allocator, 0);
-            try new_paths.insert(allocator, 0, empty_path);
+            try new_paths.append(allocator, empty_path);
         }
         for (paths.items) |*path| {
             for (path.items) |*seg| seg.deinit();

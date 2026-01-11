@@ -310,7 +310,7 @@ Reference dvui's `PlotWidget.Axis` for tick calculation and formatting logic. Re
 
 ## Feature 13: Editor Toolbar
 
-**Status**: New component needed
+**Status**: Done
 
 **Implementation**:
 
@@ -320,10 +320,6 @@ Create [`editor_toolbar.zig`](src/ui/components/editor_toolbar.zig) - a horizont
 - **Play button**: Triggers evaluation/rendering of the current expression
 - **Pause button**: Stops ongoing animation or continuous evaluation
 - **Additional suggested buttons**: Stop (reset to initial state), Step (evaluate one step)
-- **Collapse button** (right-aligned): Toggles toolbar visibility
-
-**Collapse behavior**:
-When collapsed, the entire toolbar shrinks to a single small square button positioned at the top-right corner of the editor area. The text area and line number gutter expand upward to fill the freed space. Clicking the collapsed button restores the full toolbar.
 
 ---
 
@@ -658,6 +654,7 @@ pub fn startNewParse(self: *ParseState) void {
 | Render toolbar | Not started | New render_toolbar.zig, split_view.zig | Medium |
 | Math symbol positioning | Not supported | Deferred | High |
 | **Per-tab parsing system** | **Design complete** | **parse_state.zig, lexer.zig, parser.zig** | **Medium** |
+| **Logos Language Spec** | **Design complete** | **ast_node.zig, types.zig, type_checker.zig, curve_expand.zig** | **High** |
 
 ---
 
@@ -670,12 +667,15 @@ pub fn startNewParse(self: *ParseState) void {
 5. **TokenType enum** (Feature 16 prerequisite) - Extend RegexTrieValue
 6. **Lexer + Syntax highlighting** (Features 7, 16) - Debounced lexing with token cache
 7. **ParseState** (Feature 16) - Simple state struct for caching parse results
-8. **AST nodes + Parser** (Features 9, 16) - Build AST from tokens on Play
-9. **GLSL codegen** (Feature 10) - Generate shaders from AST
-10. **GPU fence-based rendering** (Feature 16) - Non-blocking GPU work
-11. **Parsing error display** (Feature 11) - Show errors inline
-12. **Coordinate axes** (Feature 12) - Essential for math visualization
-13. **Custom GPU rendering** (Feature 8) - Display generated shaders
+8. **AST nodes** (Feature 17) - Full AST node definitions with closures, casts, types
+9. **Parser** (Features 9, 16, 17) - Recursive descent parser for Logos syntax
+10. **Type system + checker** (Feature 17) - Type inference and return-path validation
+11. **Curve expansion pass** (Feature 17) - Anti-aliasing 4-sample expansion for boolean expressions
+12. **GLSL codegen** (Features 10, 17) - Generate shaders from typed AST with curve expansion
+13. **GPU fence-based rendering** (Feature 16) - Non-blocking GPU work
+14. **Parsing error display** (Feature 11) - Show errors inline
+15. **Coordinate axes** (Feature 12) - Essential for math visualization
+16. **Custom GPU rendering** (Feature 8) - Display generated shaders
 
 ### Implementation Dependencies
 
@@ -685,8 +685,11 @@ flowchart LR
     TokenType["TokenType enum"]
     Lexer["Lexer (7)"]
     ParseState["ParseState (16)"]
-    Parser["Parser (9)"]
-    GLSL["GLSL Gen (10)"]
+    ASTNodes["AST Nodes (17)"]
+    Parser["Parser (9, 17)"]
+    TypeCheck["Type Checker (17)"]
+    CurveExpand["Curve Expansion (17)"]
+    GLSL["GLSL Gen (10, 17)"]
     GPUFence["GPU Fence Render"]
     Errors["Error Display (11)"]
     Axes["Axes (12)"]
@@ -695,12 +698,321 @@ flowchart LR
     Toolbar --> ParseState
     TokenType --> Lexer
     Lexer --> ParseState
-    ParseState --> Parser
-    Parser --> GLSL
-    Parser --> Errors
+    ParseState --> ASTNodes
+    ASTNodes --> Parser
+    Parser --> TypeCheck
+    TypeCheck --> CurveExpand
+    TypeCheck --> Errors
+    CurveExpand --> GLSL
     GLSL --> GPUFence
     GPUFence --> GPU
     Axes --> GPU
 ```
 
 **Conclusion**: The codebase structure is **excellent** for all planned features. The separation between UI, session, AST, and renderer layers is clean. The regex_trie foundation is solid for tokenization. dvui's manual `addText()` API makes syntax highlighting straightforward. Native file dialogs are available. The **single-threaded architecture** keeps implementation simple while GPU fence-based async rendering ensures the UI is never blocked during heavy shader work. Math symbol positioning requires future custom work.
+
+---
+
+## Feature 17: Logos Language Specification
+
+**Status**: Design in progress
+
+This section documents the syntax and semantics of the Logos mathematical expression language, which compiles to GLSL fragment shaders for GPU rendering.
+
+### Syntax Overview
+
+#### Reserved Identifiers
+
+```
+// Axis variables (bound to fragment coordinates)
+axis1, axis1.min, axis1.max, axis1.res
+axis2, axis2.min, axis2.max, axis2.res
+axis3, axis3.min, axis3.max, axis3.res
+
+// Time uniforms
+time.s, time.ms, time.us
+
+// Output color channels
+red, green, blue, alpha
+
+// Generic variable constructor
+var(min, max, res)
+```
+
+#### Bindings and Statements
+
+Comma (`,`) serves dual purpose like C:
+- **Statement separator**: `a: 1, b: 2, c: a + b`
+- **Argument separator**: `foo(a, b, c)`
+
+```logos
+// Constant binding
+BASE_ITER: 16,
+BAILOUT: 4.0,
+
+// Expression binding
+width_x: x.max - x.min,
+
+// Tuple destructuring
+(width_x, width_y): (x.max - x.min, y.max - y.min),
+
+// Axis binding (maps to fragment shader inputs)
+x: axis1,
+y: axis2,
+(red, green, blue, alpha): mandelbrot(x, y),
+```
+
+#### Functions and Closures
+
+Functions are defined with `name(params): (body)` syntax. Inner functions capture variables from outer scope (closures):
+
+```logos
+mandelbrot_color(iter, sq): (
+    mu: f32(iter) + 1.0 - log(0.5 * log(sq) / log(2.0)) / log(2.0),
+    base_mod: 0.05 * mu + 0.3 * time_s,
+    
+    // Inner function captures: mu, base_mod, time_s from outer scope
+    triwave_channel(offset): (
+        color_base * ((1.0 - fade) + fade * clamp(
+            abs(fract(fract(base_mod) + offset) * 6.0 - 3.0) - 1.0,
+            0.0, 1.0
+        ))
+    ),
+    
+    // Return tuple
+    (triwave_channel(0.5), triwave_channel(1.0/3.0), triwave_channel(0.25), 1.0)
+),
+```
+
+#### Control Flow
+
+```logos
+// If expression (both branches must return same type)
+if (iter < max_iter) (
+    mandelbrot_color(iter, sq)
+) else (
+    (0.0, 0.0, 0.0, 1.0)
+),
+
+// While loop with embedded assignment
+while (iter < max_iter and (sq: z_x * z_x + z_y * z_y, sq) < BAILOUT) (
+    zy2: z_y * z_y,
+    z_y: 2.0 * z_x * z_y + c_y,
+    z_x: z_x * z_x - zy2 + c_x,
+    iter: iter + 1
+),
+
+// For loop
+for (i: 0, i < len(A), i: i + 1) (
+    sum_A: sum_A + A[i]
+),
+```
+
+#### Operators
+
+| Category | Operators |
+|----------|-----------|
+| Arithmetic | `+`, `-`, `*`, `/`, `²` (square) |
+| Comparison | `=`, `!=`, `<`, `>`, `<=`, `>=` |
+| Logical | `and`, `or`, `!` |
+| Property | `.` (e.g., `x.max`, `axis1.res`) |
+
+#### Type Casting
+
+Explicit type casts use function-call syntax:
+
+```logos
+f32(iter)      // Cast to 32-bit float
+i32(x)         // Cast to 32-bit integer
+```
+
+### Semantic Rules
+
+#### 1. Type Consistency at Return Points
+
+All return paths within an expression or function **must have the same type**. The type checker verifies this:
+
+```logos
+// VALID: both branches return (f32, f32, f32, f32)
+if (cond) (
+    (1.0, 0.0, 0.0, 1.0)
+) else (
+    (0.0, 1.0, 0.0, 1.0)
+)
+
+// INVALID: branches return different types
+if (cond) (
+    (1.0, 0.0, 0.0, 1.0)  // 4-tuple
+) else (
+    1.0                     // scalar
+)
+```
+
+#### 2. Root Scope Implies GPU Execution
+
+Any expression that returns to the **outermost scope** is compiled to GLSL and executed on the GPU. This includes:
+
+- Direct axis bindings: `(red, green, blue, alpha): mandelbrot(x, y)`
+- Boolean curve expressions: `x² + y² = 9`
+
+The codegen identifies all return points within the called function/expression and expands them into the GLSL shader.
+
+#### 3. Anti-Aliasing Expansion for Curve Rendering
+
+Boolean expressions involving axis variables are automatically expanded for anti-aliased curve rendering. The pattern samples at 4 sub-pixel offsets to detect edges:
+
+**Source:**
+```logos
+x² + y² = 9 and ((x > y² or x < y) and x + y != 3)
+```
+
+**Expansion:**
+```logos
+// Calculate sub-pixel offsets
+dx: (x.max - x.min) / (2.0 * x.res),
+dy: (y.max - y.min) / (2.0 * y.res),
+
+// For each condition, sample at 4 corners: (±dx, ±dy)
+// v1: x²+y²=9 → edge detection via sample disagreement
+v1_1: (x-dx)² + (y-dy)² > 9,
+v1_2: (x-dx)² + (y+dy)² > 9,
+v1_3: (x+dx)² + (y-dy)² > 9,
+v1_4: (x+dx)² + (y+dy)² > 9,
+v1: !(v1_1 = v1_2 and v1_2 = v1_3 and v1_3 = v1_4),
+
+// v2: x > y² (same 4-sample pattern)
+v2_1: (x-dx) > (y-dy)²,
+v2_2: (x-dx) > (y+dy)²,
+v2_3: (x+dx) > (y-dy)²,
+v2_4: (x+dx) > (y+dy)²,
+v2: v2_1 = true and v2_1 = v2_2 and v2_2 = v2_3 and v2_3 = v2_4,
+
+// ... same for v3 (x < y) and v4 (x + y != 3)
+
+// Final combined result
+v1 and ((v2 or v3) and v4)
+```
+
+**Edge Detection Logic:**
+- For equality (`=`): Pixel is ON the curve if samples **disagree** (using `!`)
+- For inequalities (`>`, `<`, `!=`): Pixel satisfies condition if **all samples agree**
+
+This produces smooth, anti-aliased curve rendering without explicit line-drawing algorithms.
+
+### GLSL Codegen Architecture
+
+```mermaid
+flowchart TB
+    AST["Typed AST"]
+    Analyze["Analyze Root Returns"]
+    
+    subgraph expansion [Curve Expansion Pass]
+        DetectBool["Detect boolean expressions<br/>on axis variables"]
+        Gen4Sample["Generate 4-sample pattern"]
+        GenAgreement["Generate agreement checks"]
+    end
+    
+    subgraph emit [GLSL Emission]
+        Header["#version 450<br/>layout declarations"]
+        Uniforms["Uniform buffer:<br/>time, axis bounds"]
+        Functions["Inline expanded functions"]
+        Main["void main() { ... }"]
+    end
+    
+    AST --> Analyze --> DetectBool
+    DetectBool --> Gen4Sample --> GenAgreement
+    GenAgreement --> Header --> Uniforms --> Functions --> Main
+```
+
+### AST Node Types (Updated)
+
+```zig
+pub const AstNode = union(enum) {
+    // Literals
+    number: f64,
+    identifier: []const u8,
+    bool_lit: bool,
+    
+    // Expressions
+    binary_op: struct { op: BinaryOp, left: *AstNode, right: *AstNode },
+    unary_op: struct { op: UnaryOp, operand: *AstNode },
+    function_call: struct { name: []const u8, args: []*AstNode },
+    property_access: struct { base: *AstNode, property: []const u8 },
+    tuple: []*AstNode,
+    cast: struct { target_type: PrimitiveType, operand: *AstNode },
+    index: struct { base: *AstNode, index: *AstNode },
+    
+    // Statements
+    binding: struct { 
+        pattern: BindingPattern,  // single name or tuple destructure
+        value: *AstNode,
+    },
+    if_expr: struct { cond: *AstNode, then_branch: *AstNode, else_branch: ?*AstNode },
+    while_loop: struct { cond: *AstNode, body: *AstNode },
+    for_loop: struct { init: *AstNode, cond: *AstNode, update: *AstNode, body: *AstNode },
+    
+    // Function definition (with closure support)
+    function_def: struct {
+        name: []const u8,
+        params: []const []const u8,
+        body: *AstNode,
+        captures: []const []const u8,  // Populated during semantic analysis
+    },
+    
+    // Block (sequence of statements, last is return value)
+    block: []*AstNode,
+};
+
+pub const BindingPattern = union(enum) {
+    single: []const u8,
+    tuple: []const []const u8,
+};
+
+pub const BinaryOp = enum {
+    add, sub, mul, div, pow,           // Arithmetic
+    eq, neq, lt, gt, lte, gte,         // Comparison
+    @"and", @"or",                      // Logical
+};
+
+pub const UnaryOp = enum {
+    neg,     // -x
+    not,     // !x
+    square,  // x² (parsed from ² suffix)
+};
+
+pub const PrimitiveType = enum {
+    f32, f64, i32, i64, bool,
+    vec2, vec3, vec4,
+};
+```
+
+### Type System
+
+```zig
+pub const Type = union(enum) {
+    primitive: PrimitiveType,
+    tuple: []const Type,
+    function: struct {
+        params: []const Type,
+        return_type: *const Type,
+    },
+    axis: struct {
+        has_min: bool,
+        has_max: bool,
+        has_res: bool,
+    },
+    unknown,  // Before type inference
+};
+```
+
+### Files to Create/Modify (Updated)
+
+| File | Action | Purpose |
+|------|--------|---------|
+| `src/lang/ast_node.zig` | **Rewrite** | Full AST node definitions with closures, casts, types |
+| `src/lang/types.zig` | **Create** | Type system definitions |
+| `src/lang/type_checker.zig` | **Create** | Type inference and validation |
+| `src/lang/parser.zig` | **Create** | Recursive descent parser |
+| `src/lang/codegen/glsl.zig` | **Create** | GLSL code generator |
+| `src/lang/codegen/curve_expand.zig` | **Create** | Anti-aliasing expansion pass |
+| `src/lang/lexer.zig` | **Modify** | Add Logos-specific token patterns |

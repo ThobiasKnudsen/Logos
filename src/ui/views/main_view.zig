@@ -19,6 +19,9 @@ const components = @import("../components/components.zig");
 
 const App = @import("../../app.zig").App;
 
+// Re-export theme for convenience
+pub const ui_theme = theme;
+
 /// Auto-save state
 var last_auto_save_time: i64 = 0;
 const auto_save_interval_ms: i64 = 2000; // Save every 2 seconds if modified
@@ -26,15 +29,18 @@ const auto_save_interval_ms: i64 = 2000; // Save every 2 seconds if modified
 /// Persistent state for the split view
 var split_view: components.SplitView = .{};
 
-/// Separator line color
-const separator_color = dvui.Color{ .r = 50, .g = 58, .b = 70, .a = 255 };
+
+/// Clean up module-level state (must be called on app shutdown)
+pub fn deinit() void {
+    split_view.deinit();
+}
 
 /// Returns false if user wants to quit
 pub fn mainView(app: *App) bool {
     // Root container - fills entire window
     var root = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .both,
-        .color_fill = dvui.Color{ .r = 28, .g = 33, .b = 42, .a = 255 },
+        .color_fill = theme.colors.bg_primary,
         .background = true,
     });
     defer root.deinit();
@@ -77,6 +83,7 @@ pub fn mainView(app: *App) bool {
     for (dvui.events()) |*e| {
         if (e.evt == .key and e.evt.key.action == .down) {
             const ctrl_pressed = e.evt.key.mod.has(.lcontrol) or e.evt.key.mod.has(.rcontrol);
+            const shift_pressed = e.evt.key.mod.has(.lshift) or e.evt.key.mod.has(.rshift);
             if (ctrl_pressed) {
                 switch (e.evt.key.code) {
                     .n => {
@@ -99,6 +106,32 @@ pub fn mainView(app: *App) bool {
                         keyboard_action = .quit;
                         e.handled = true;
                     },
+                    // Zoom controls: Ctrl+= or Ctrl+Shift+= (which is Ctrl++) and Ctrl+-
+                    // On US keyboards, '+' is Shift+'=' so we check for equal key with or without shift
+                    .equal => {
+                        // Ctrl+= or Ctrl+Shift+= both zoom in
+                        keyboard_action = .zoom_in;
+                        e.handled = true;
+                    },
+                    .kp_add => {
+                        keyboard_action = .zoom_in;
+                        e.handled = true;
+                    },
+                    .minus => {
+                        // Only zoom out if Shift is NOT pressed (Shift+- would be '_')
+                        if (!shift_pressed) {
+                            keyboard_action = .zoom_out;
+                            e.handled = true;
+                        }
+                    },
+                    .kp_subtract => {
+                        keyboard_action = .zoom_out;
+                        e.handled = true;
+                    },
+                    .zero, .kp_0 => {
+                        keyboard_action = .reset_zoom;
+                        e.handled = true;
+                    },
                     else => {},
                 }
             }
@@ -119,7 +152,7 @@ fn horizontalSeparator(id_extra: usize) void {
         .id_extra = id_extra,
         .min_size_content = .{ .h = 1 },
         .expand = .horizontal,
-        .color_fill = separator_color,
+        .color_fill = theme.colors.border,
         .background = true,
     });
     sep.deinit();
@@ -207,6 +240,15 @@ fn handleMenuAction(app: *App, action: components.MenuBar.Action) bool {
         .quit => {
             return false;
         },
+        .zoom_in => {
+            theme.fonts.zoomIn();
+        },
+        .zoom_out => {
+            theme.fonts.zoomOut();
+        },
+        .reset_zoom => {
+            theme.fonts.resetZoom();
+        },
         else => {},
     }
     return true;
@@ -286,8 +328,11 @@ fn renderEmptyState(app: *App) void {
     });
     defer center.deinit();
 
+    const ui_font = dvui.Font.theme(.body).withSize(theme.fonts.uiSize());
+
     dvui.labelNoFmt(@src(), "No sessions open", .{}, .{
-        .color_text = dvui.Color{ .r = 130, .g = 140, .b = 160, .a = 255 },
+        .color_text = theme.colors.text_muted,
+        .font = ui_font,
     });
 
     // Spacing
@@ -299,6 +344,7 @@ fn renderEmptyState(app: *App) void {
     if (dvui.button(@src(), "Create New Session", .{}, .{
         .padding = .{ .x = 16, .y = 8, .w = 16, .h = 8 },
         .corner_radius = dvui.Rect{ .x = 4, .y = 4, .w = 4, .h = 4 },
+        .font = ui_font,
     })) {
         // Create new untitled session and start editing its name
         if (app.session_manager.createUntitledSession()) |new_idx| {

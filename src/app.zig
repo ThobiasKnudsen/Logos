@@ -26,6 +26,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        ui.views.deinit();
         self.graph_renderer.deinit();
         self.session_manager.deinit();
     }

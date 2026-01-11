@@ -7,25 +7,23 @@
 
 const std = @import("std");
 const dvui = @import("dvui");
+const theme = @import("../theme.zig");
 const session = @import("../../session/session.zig");
 
 pub const StatusBar = struct {
-    // Colors matching the app theme
-    const bg_color = dvui.Color{ .r = 24, .g = 28, .b = 36, .a = 255 }; // Slightly darker than main bg
-    const border_color = dvui.Color{ .r = 50, .g = 58, .b = 70, .a = 255 };
-    const text_color = dvui.Color{ .r = 140, .g = 150, .b = 170, .a = 255 }; // Muted text
-    const text_accent = dvui.Color{ .r = 180, .g = 190, .b = 210, .a = 255 }; // Slightly brighter for emphasis
-
     const status_padding_x: f32 = 12.0;
     const status_padding_y: f32 = 4.0;
 
     pub fn render(active_session: ?*session.TabSession) void {
+        // Get scaled font for status bar
+        const status_font = dvui.Font.theme(.body).withSize(theme.fonts.statusSize());
+
         // Top border line
         {
             var top_line = dvui.box(@src(), .{}, .{
                 .min_size_content = .{ .h = 1 },
                 .expand = .horizontal,
-                .color_fill = border_color,
+                .color_fill = theme.colors.border,
                 .background = true,
             });
             top_line.deinit();
@@ -34,7 +32,7 @@ pub const StatusBar = struct {
         // Main status bar container
         var status_container = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
-            .color_fill = bg_color,
+            .color_fill = theme.colors.bg_primary,
             .background = true,
             .padding = .{ .x = status_padding_x, .y = status_padding_y, .w = status_padding_x, .h = status_padding_y },
         });
@@ -52,39 +50,39 @@ pub const StatusBar = struct {
                 if (sess.file_path) |path| {
                     // Show file path
                     dvui.label(@src(), "{s}", .{path}, .{
-                        .font = dvui.Font.theme(.body).withSize(15),
-                        .color_text = text_color,
+                        .font = status_font,
+                        .color_text = theme.colors.text_secondary,
                     });
 
                     // Show modified indicator
                     if (sess.is_modified) {
                         dvui.labelNoFmt(@src(), " •", .{}, .{
-                            .font = dvui.Font.theme(.body).withSize(15),
-                            .color_text = text_accent,
+                            .font = status_font,
+                            .color_text = theme.colors.text_primary,
                         });
                     }
                 } else {
                     // Unsaved file
                     dvui.labelNoFmt(@src(), "Untitled", .{}, .{
-                        .font = dvui.Font.theme(.body).withSize(15),
-                        .color_text = text_color,
+                        .font = status_font,
+                        .color_text = theme.colors.text_secondary,
                     });
                     if (sess.is_modified) {
                         dvui.labelNoFmt(@src(), " (unsaved)", .{}, .{
-                            .font = dvui.Font.theme(.body).withSize(15),
-                            .color_text = text_accent,
+                            .font = status_font,
+                            .color_text = theme.colors.text_primary,
                         });
                     }
                 }
             } else {
                 dvui.labelNoFmt(@src(), "No file open", .{}, .{
-                    .font = dvui.Font.theme(.body).withSize(15),
-                    .color_text = text_color,
+                    .font = status_font,
+                    .color_text = theme.colors.text_secondary,
                 });
             }
         }
 
-        // Right side: line count and cursor position
+        // Right side: parse status, line count, cursor position
         {
             var right = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .gravity_y = 0.5,
@@ -92,39 +90,61 @@ pub const StatusBar = struct {
             defer right.deinit();
 
             if (active_session) |sess| {
-                const line_count = countLines(sess.content.items);
+                // Parse status
+                const parse_status = sess.parse_state.status;
+                const parse_status_text = switch (parse_status) {
+                    .idle => "Ready",
+                    .lexing => "Lexing...",
+                    .parsing => "Parsing...",
+                    .ready => "OK",
+                    .err => "Error",
+                };
+
+                // Status colors (green for OK, red for Error, muted otherwise)
+                const parse_status_color = switch (parse_status) {
+                    .ready => theme.colors.accent_secondary, // green
+                    .err => dvui.Color{ .r = 220, .g = 80, .b = 80, .a = 255 }, // red
+                    else => theme.colors.text_secondary,
+                };
+
+                dvui.labelNoFmt(@src(), parse_status_text, .{}, .{
+                    .font = status_font,
+                    .color_text = parse_status_color,
+                });
 
                 // Separator
                 dvui.labelNoFmt(@src(), "│", .{}, .{
-                    .font = dvui.Font.theme(.body).withSize(15),
-                    .color_text = border_color,
+                    .font = status_font,
+                    .color_text = theme.colors.border,
                     .padding = .{ .x = 8, .y = 0, .w = 8, .h = 0 },
                 });
+
+                const line_count = countLines(sess.content.items);
 
                 // Line count
                 if (line_count == 1) {
                     dvui.label(@src(), "{d} line", .{line_count}, .{
-                        .font = dvui.Font.theme(.body).withSize(15),
-                        .color_text = text_color,
+                        .font = status_font,
+                        .color_text = theme.colors.text_secondary,
                     });
                 } else {
                     dvui.label(@src(), "{d} lines", .{line_count}, .{
-                        .font = dvui.Font.theme(.body).withSize(15),
-                        .color_text = text_color,
+                        .font = status_font,
+                        .color_text = theme.colors.text_secondary,
                     });
                 }
 
                 // Separator
                 dvui.labelNoFmt(@src(), "│", .{}, .{
-                    .font = dvui.Font.theme(.body).withSize(15),
-                    .color_text = border_color,
+                    .font = status_font,
+                    .color_text = theme.colors.border,
                     .padding = .{ .x = 8, .y = 0, .w = 8, .h = 0 },
                 });
 
                 // Cursor position: Ln X, Col Y
                 dvui.label(@src(), "Ln {d}, Col {d}", .{ sess.cursor_line, sess.cursor_col }, .{
-                    .font = dvui.Font.theme(.body).withSize(15),
-                    .color_text = text_color,
+                    .font = status_font,
+                    .color_text = theme.colors.text_secondary,
                 });
             }
         }

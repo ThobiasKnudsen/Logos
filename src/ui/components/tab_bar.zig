@@ -20,13 +20,6 @@ pub const TabBar = struct {
     // Padding relative to font size (em units) - smaller values for thinner tabs
     const tab_padding_x: f32 = 10.0; // horizontal padding in em
     const tab_padding_y: f32 = 1.0; // vertical padding in em
-    const border_color = dvui.Color{ .r = 60, .g = 70, .b = 85, .a = 255 };
-    const bg_color = dvui.Color{ .r = 30, .g = 36, .b = 45, .a = 255 };
-    const active_bg = dvui.Color{ .r = 40, .g = 48, .b = 60, .a = 255 };
-    const hover_bg = dvui.Color{ .r = 35, .g = 42, .b = 52, .a = 255 };
-    const text_color = dvui.Color{ .r = 255, .g = 255, .b = 255, .a = 255 }; // Pure white for active tab
-    const text_muted = dvui.Color{ .r = 140, .g = 150, .b = 170, .a = 255 };
-    const close_hover = dvui.Color{ .r = 180, .g = 80, .b = 80, .a = 255 };
 
     // Double-click detection
     const double_click_time_ms: i64 = 400;
@@ -74,7 +67,7 @@ pub const TabBar = struct {
         // Tab bar container with top and bottom border lines
         var tabs_container = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
-            .color_fill = bg_color,
+            .color_fill = theme.colors.bg_secondary,
             .background = true,
         });
         defer tabs_container.deinit();
@@ -84,7 +77,7 @@ pub const TabBar = struct {
             var top_line = dvui.box(@src(), .{}, .{
                 .min_size_content = .{ .h = 1 },
                 .expand = .horizontal,
-                .color_fill = border_color,
+                .color_fill = theme.colors.border,
                 .background = true,
             });
             top_line.deinit();
@@ -107,7 +100,7 @@ pub const TabBar = struct {
                         .id_extra = idx,
                         .min_size_content = .{ .w = 1 },
                         .expand = .vertical,
-                        .color_fill = border_color,
+                        .color_fill = theme.colors.border,
                         .background = true,
                     });
                     sep.deinit();
@@ -124,22 +117,24 @@ pub const TabBar = struct {
                 var sep = dvui.box(@src(), .{}, .{
                     .min_size_content = .{ .w = 1 },
                     .expand = .vertical,
-                    .color_fill = border_color,
+                    .color_fill = theme.colors.border,
                     .background = true,
                 });
                 sep.deinit();
             }
 
             // Add tab button - using transparent button style
+            const tab_font = dvui.Font.theme(.body).withSize(theme.fonts.uiSize());
             if (dvui.button(@src(), "+", .{ .draw_focus = false }, .{
                 .border = .{},
                 .corner_radius = .{},
                 .margin = .{},
                 .padding = .{ .x = tab_padding_x, .y = tab_padding_y, .w = tab_padding_x, .h = tab_padding_y },
                 .background = false, // Transparent background
-                .color_text = text_color,
+                .color_text = theme.colors.text_primary,
                 .color_fill = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 },
                 .gravity_y = 0.5,
+                .font = tab_font,
             })) {
                 action = .add_tab;
             }
@@ -149,7 +144,7 @@ pub const TabBar = struct {
                 var sep = dvui.box(@src(), .{}, .{
                     .min_size_content = .{ .w = 1 },
                     .expand = .vertical,
-                    .color_fill = border_color,
+                    .color_fill = theme.colors.border,
                     .background = true,
                 });
                 sep.deinit();
@@ -169,7 +164,7 @@ pub const TabBar = struct {
             var bottom_line = dvui.box(@src(), .{}, .{
                 .min_size_content = .{ .h = 1 },
                 .expand = .horizontal,
-                .color_fill = border_color,
+                .color_fill = theme.colors.border,
                 .background = true,
             });
             bottom_line.deinit();
@@ -187,11 +182,12 @@ pub const TabBar = struct {
     fn renderTab(sess: *session.TabSession, idx: usize, is_active: bool) ?Action {
         var action: ?Action = null;
         const is_editing_this = isEditing(idx);
+        const tab_font = dvui.Font.theme(.body).withSize(theme.fonts.uiSize());
 
         // Outer tab container with background - this creates the unified appearance
         var tab_box = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .id_extra = idx,
-            .color_fill = if (is_active) active_bg else bg_color,
+            .color_fill = if (is_active) theme.colors.bg_elevated else theme.colors.bg_secondary,
             .background = true,
         });
         defer tab_box.deinit();
@@ -203,17 +199,20 @@ pub const TabBar = struct {
             }
 
             // Show text entry for editing - pass full buffer so it can grow
+            // Background enabled to show text selection for copy/paste support
             var text_entry = dvui.textEntry(@src(), .{
                 .text = .{ .buffer = &edit_buffer },
             }, .{
                 .id_extra = idx,
                 .margin = .{ .x = tab_padding_x, .y = tab_padding_y, .w = 0.2, .h = tab_padding_y },
-                .padding = .{},
+                .padding = .{ .x = 4, .y = 2, .w = 4, .h = 2 },
                 .border = .{},
-                .corner_radius = .{},
-                .background = false,
+                .corner_radius = dvui.Rect{ .x = 2, .y = 2, .w = 2, .h = 2 },
+                .background = true,
+                .color_fill = theme.colors.bg_hover, // Use theme color
                 .min_size_content = .{ .w = 60, .h = 16 },
-                .color_text = text_color,
+                .color_text = theme.colors.text_primary,
+                .font = tab_font,
                 .gravity_y = 0.5,
             });
             defer text_entry.deinit();
@@ -267,7 +266,8 @@ pub const TabBar = struct {
                 .margin = .{},
                 .padding = .{ .x = tab_padding_x, .y = tab_padding_y, .w = 0.2, .h = tab_padding_y },
                 .background = false,
-                .color_text = if (is_active) text_color else text_muted,
+                .color_text = if (is_active) theme.colors.text_primary else theme.colors.text_secondary,
+                .font = tab_font,
                 .gravity_y = 0.5,
             });
         }
@@ -281,8 +281,9 @@ pub const TabBar = struct {
             .margin = .{},
             .padding = .{ .x = 0.2, .y = tab_padding_y, .w = 0.4, .h = tab_padding_y },
             .background = false,
-            .color_text = text_muted,
+            .color_text = theme.colors.text_secondary,
             .color_fill = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 },
+            .font = tab_font,
             .gravity_y = 0.5,
         });
         defer close_btn.deinit();
@@ -335,9 +336,7 @@ pub const TabBar = struct {
         }
 
         // Show tooltip with file path when hovering over the tab (below the tab)
-        const tooltip_text_color = dvui.Color{ .r = 200, .g = 210, .b = 220, .a = 255 }; // Light text
-        const tooltip_border_color = dvui.Color{ .r = 50, .g = 58, .b = 70, .a = 255 }; // Subtle grey border
-        const tooltip_bg_color = dvui.Color{ .r = 30, .g = 36, .b = 45, .a = 255 }; // Dark background
+        const tooltip_font = dvui.Font.theme(.body).withSize(theme.fonts.tooltipSize());
         if (sess.file_path) |path| {
             var tt: dvui.FloatingTooltipWidget = undefined;
             tt.init(@src(), .{
@@ -345,15 +344,15 @@ pub const TabBar = struct {
                 .position = .vertical,
             }, .{
                 .id_extra = idx,
-                .color_border = tooltip_border_color,
-                .color_fill = tooltip_bg_color,
+                .color_border = theme.colors.border,
+                .color_fill = theme.colors.bg_secondary,
                 .border = .all(1),
             });
             if (tt.shown()) {
                 var tl = dvui.textLayout(@src(), .{}, .{
                     .background = false,
-                    .color_text = tooltip_text_color,
-                    .font = dvui.Font.theme(.body).withSize(14), // Smaller font
+                    .color_text = theme.colors.text_primary,
+                    .font = tooltip_font,
                 });
                 tl.format("{s}", .{path}, .{});
                 tl.deinit();
@@ -366,15 +365,15 @@ pub const TabBar = struct {
                 .position = .vertical,
             }, .{
                 .id_extra = idx,
-                .color_border = tooltip_border_color,
-                .color_fill = tooltip_bg_color,
+                .color_border = theme.colors.border,
+                .color_fill = theme.colors.bg_secondary,
                 .border = .all(1),
             });
             if (tt.shown()) {
                 var tl = dvui.textLayout(@src(), .{}, .{
                     .background = false,
-                    .color_text = tooltip_text_color,
-                    .font = dvui.Font.theme(.body).withSize(14), // Smaller font
+                    .color_text = theme.colors.text_primary,
+                    .font = tooltip_font,
                 });
                 tl.format("NOT SAVED", .{}, .{});
                 tl.deinit();

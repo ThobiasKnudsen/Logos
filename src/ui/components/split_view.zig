@@ -1,6 +1,6 @@
 //! Resizable split view - divides space between editor and graph renderer
 //!
-//! Left panel: Text editor
+//! Left panel: Text editor with toolbar
 //! Right panel: Graph/plot rendering with custom shaders
 
 const std = @import("std");
@@ -10,14 +10,22 @@ const session = @import("../../session/session.zig");
 const renderer = @import("../../renderer/renderer.zig");
 
 const EditorPanel = @import("editor_panel.zig").EditorPanel;
+const EditorToolbar = @import("editor_toolbar.zig").EditorToolbar;
 
 pub const SplitView = struct {
     /// Split ratio (0.0 to 1.0) - portion of width for left panel
     split_ratio: f32 = 0.45,
 
+    /// Editor toolbar state
+    editor_toolbar: EditorToolbar = EditorToolbar.init(),
+
     const handle_width: f32 = 6;
     const separator_color = dvui.Color{ .r = 60, .g = 70, .b = 85, .a = 255 };
     const separator_hover_color = dvui.Color{ .r = 99, .g = 130, .b = 170, .a = 255 };
+
+    pub fn deinit(self: *SplitView) void {
+        self.editor_toolbar.deinit();
+    }
 
     pub fn render(
         self: *SplitView,
@@ -36,7 +44,7 @@ pub const SplitView = struct {
         });
         defer paned.deinit();
 
-        // Left panel - Editor (first pane)
+        // Left panel - Editor with toolbar (first pane)
         if (paned.showFirst()) {
             var left = dvui.box(@src(), .{ .dir = .vertical }, .{
                 .expand = .both,
@@ -45,6 +53,10 @@ pub const SplitView = struct {
             });
             defer left.deinit();
 
+            // Toolbar at top
+            _ = self.editor_toolbar.render(active_session);
+
+            // Editor panel below toolbar
             EditorPanel.render(active_session);
         }
 

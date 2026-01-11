@@ -7,3 +7,4 @@
 
 pub const TabSession = @import("tab_session.zig").TabSession;
 pub const SessionManager = @import("session_manager.zig").SessionManager;
+pub const parse_state = @import("parse_state.zig");
