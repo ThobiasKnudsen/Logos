@@ -1,6 +1,6 @@
 const std = @import("std");
 const pcrez = @import("pcrez");
-const regex_splitting = @import("regex_splitting.zig");
+const regex_splitting = @import("regex_splitting");
 
 // PCRE2 C bindings for JIT compilation
 const pcre2_c = @cImport({
@@ -680,15 +680,6 @@ pub const RegexTrie = struct {
                             }
                         }
                     }
-                }
-
-                // If still not advanced and we're not at root, try root's regex patterns
-                // This handles cases like "test" where literal 't' (for "true") was matched
-                // but then failed - we need to fall back to trying the identifier regex
-                if (!advanced and current != self and pos == 0) {
-                    // We went down a literal path but got stuck at position 0
-                    // This shouldn't happen, but handle it anyway
-                    break;
                 }
 
                 if (!advanced) {

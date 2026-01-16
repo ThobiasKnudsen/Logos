@@ -2,11 +2,13 @@
 //!
 //! Multi-line text area where users write their expressions/code
 //! that gets parsed and visualized in the graph panel.
+//! Includes syntax highlighting via manual tokenization.
 
 const std = @import("std");
 const dvui = @import("dvui");
 const theme = @import("../theme.zig");
 const session = @import("../../session/session.zig");
+const lexer_mod = @import("../../lang/lexer.zig");
 
 pub const EditorPanel = struct {
     // Shared styling constants - use theme where possible
@@ -20,6 +22,22 @@ pub const EditorPanel = struct {
         t.focus = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 }; // Transparent focus
         break :blk t;
     };
+
+    // Global lexer instance (initialized lazily)
+    // Uses page_allocator since it's a long-lived global resource
+    var lexer: ?lexer_mod.Lexer = null;
+
+    /// Initialize the global lexer if not already done
+    fn ensureLexer(_: std.mem.Allocator) ?*lexer_mod.Lexer {
+        if (lexer == null) {
+            // Use page_allocator for the global lexer since it lives for the app lifetime
+            lexer = lexer_mod.Lexer.init(std.heap.page_allocator, lexer_mod.LexerConfig.logosPatterns()) catch |err| {
+                std.log.err("Failed to initialize lexer: {}", .{err});
+                return null;
+            };
+        }
+        return &lexer.?;
+    }
 
     pub fn render(active_session: *session.TabSession) void {
         // Outer scroll area - handles scrolling for both line numbers and text
@@ -41,8 +59,8 @@ pub const EditorPanel = struct {
         // Vertical separator line between gutter and text
         renderSeparator();
 
-        // Main text area
-        renderTextArea(active_session);
+        // Main text area with syntax highlighting
+        renderTextAreaWithHighlighting(active_session);
     }
 
     fn renderLineNumbers(active_session: *session.TabSession) void {
@@ -82,13 +100,14 @@ pub const EditorPanel = struct {
         sep.deinit();
     }
 
-    fn renderTextArea(active_session: *session.TabSession) void {
+    fn renderTextAreaWithHighlighting(active_session: *session.TabSession) void {
         // Get scaled font from centralized theme
         const scaled_font = theme.fonts.editorFont();
 
-        // Text entry with internal scroll disabled - parent scrollArea handles scrolling
-        // Using custom theme with transparent focus to hide the focus border
-        var text_entry = dvui.textEntry(@src(), .{
+        // Create TextEntryWidget manually to avoid automatic draw() call
+        // (dvui.textEntry() calls processEvents() and draw() automatically)
+        var text_entry = dvui.widgetAlloc(dvui.TextEntryWidget);
+        text_entry.init(@src(), .{
             .text = .{
                 .array_list = .{
                     .backing = &active_session.content,
@@ -109,7 +128,11 @@ pub const EditorPanel = struct {
             .font = scaled_font, // Use scaled mono font
             .theme = &no_focus_theme, // Use theme with transparent focus
         });
+        text_entry.data().was_allocated_on_widget_stack = true;
         defer text_entry.deinit();
+
+        // Process input events (keyboard, mouse, selection)
+        text_entry.processEvents();
 
         // Mark as modified if text changed
         if (text_entry.text_changed) {
@@ -117,8 +140,63 @@ pub const EditorPanel = struct {
             active_session.render_state.needs_update = true;
         }
 
+        // Get the content from the text entry widget's internal buffer
+        // This is the authoritative source that matches what the widget expects
+        const content = text_entry.text[0..text_entry.len];
+
+        // Try to get the lexer for syntax highlighting
+        if (ensureLexer(active_session.allocator)) |lex| {
+            // Tokenize and render with colors using custom draw sequence
+            renderWithSyntaxHighlighting(text_entry, lex, content);
+        } else {
+            // Fallback: use normal widget draw (no highlighting)
+            text_entry.draw();
+        }
+
         // Update cursor position in session for status bar display
         active_session.updateCursorPosition(text_entry.textLayout.selection.cursor);
+    }
+
+    /// Render text with syntax highlighting, replacing the widget's default text rendering
+    fn renderWithSyntaxHighlighting(
+        text_entry: *dvui.TextEntryWidget,
+        lex: *lexer_mod.Lexer,
+        content: []const u8,
+    ) void {
+        // Draw background, focus ring, etc.
+        text_entry.drawBeforeText();
+
+        // Handle empty content - still need to call addTextDone for proper layout
+        if (content.len == 0) {
+            text_entry.textLayout.addTextDone(text_entry.data().options.strip());
+            text_entry.drawAfterText();
+            return;
+        }
+
+        // Tokenize the content
+        const tokens = lex.tokenize(content) catch {
+            // On error, fall back to plain text with default color
+            text_entry.textLayout.addText(content, text_entry.data().options.strip());
+            text_entry.textLayout.addTextDone(text_entry.data().options.strip());
+            text_entry.drawAfterText();
+            return;
+        };
+        defer lex.allocator.free(tokens);
+
+        // Get base options from the widget for consistent styling
+        const base_opts = text_entry.data().options.strip();
+
+        // Render each token with its syntax color
+        for (tokens) |token| {
+            const color = theme.syntax.colorForTokenType(token.token_type);
+            text_entry.textLayout.addText(token.text, base_opts.override(.{ .color_text = color }));
+        }
+
+        // Finalize text layout - marks text as done so deinit doesn't add it again
+        text_entry.textLayout.addTextDone(base_opts);
+
+        // Draw cursor and selection overlay
+        text_entry.drawAfterText();
     }
 
     fn countLines(text: []const u8) usize {

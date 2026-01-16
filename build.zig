@@ -48,6 +48,15 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("pcrez", pcrez_mod);
     exe.linkLibrary(pcre2_dep.artifact("pcre2-8"));
 
+    // ── Regex modules for lexer ──────────────────────────────────────────
+    const regex_splitting_mod = b.createModule(.{
+        .root_source_file = b.path("src/lang/regex_splitting.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    regex_splitting_mod.addImport("pcrez", pcrez_mod);
+    exe.root_module.addImport("regex_splitting", regex_splitting_mod);
+
     // ── Run step ───────────────────────────────────────────────────────
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -71,17 +80,9 @@ pub fn build(b: *std.Build) void {
     zig_compiler_step.dependOn(&download.step);
 
     // ── Tests ─────────────────────────────────────────────────────────────
-    // Create regex_splitting module with pcrez import
-    const regex_splitting_mod = b.createModule(.{
-        .root_source_file = b.path("src/ast/regex_splitting.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    regex_splitting_mod.addImport("pcrez", pcrez_mod);
-
     // Create regex_trie module (original implementation)
     const regex_trie_mod = b.createModule(.{
-        .root_source_file = b.path("src/ast/regex_trie.zig"),
+        .root_source_file = b.path("src/lang/regex_trie.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -90,7 +91,7 @@ pub fn build(b: *std.Build) void {
     regex_trie_mod.linkLibrary(pcre2_dep.artifact("pcre2-8"));
 
     const regex_trie_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/ast/regex_trie_test.zig"),
+        .root_source_file = b.path("src/lang/regex_trie_test.zig"),
         .target = target,
         .optimize = optimize,
     });
