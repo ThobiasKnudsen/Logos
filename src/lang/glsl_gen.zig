@@ -47,6 +47,16 @@ pub const GenerationResult = struct {
     errors: []const []const u8,
 };
 
+/// Information about a nested function and its captured variables
+const NestedFunctionInfo = struct {
+    /// The function node
+    node: *const AstNode,
+    /// Name of parent function (null if top-level)
+    parent_func: ?[]const u8,
+    /// Variables captured from parent scope
+    captured_vars: []const []const u8,
+};
+
 /// GLSL Code Generator
 pub const GlslGenerator = struct {
     allocator: std.mem.Allocator,
@@ -58,6 +68,10 @@ pub const GlslGenerator = struct {
     functions: std.StringHashMap(*const AstNode),
     /// Set of functions already emitted
     emitted_functions: std.StringHashMap(void),
+    /// Tracks which functions call which other functions (for ordering)
+    function_deps: std.StringHashMap(std.ArrayList([]const u8)),
+    /// Tracks nested function info (parent scope, captured variables)
+    nested_func_info: std.StringHashMap(NestedFunctionInfo),
     /// Errors encountered during generation
     errors: std.ArrayList([]const u8),
     /// Current random seed for colors
@@ -75,6 +89,8 @@ pub const GlslGenerator = struct {
             .defined_vars = std.StringHashMap(void).init(allocator),
             .functions = std.StringHashMap(*const AstNode).init(allocator),
             .emitted_functions = std.StringHashMap(void).init(allocator),
+            .function_deps = std.StringHashMap(std.ArrayList([]const u8)).init(allocator),
+            .nested_func_info = std.StringHashMap(NestedFunctionInfo).init(allocator),
             .errors = .{ .items = &.{}, .capacity = 0 },
             .color_seed = 0x12345678,
             .temp_counter = 0,
@@ -86,6 +102,13 @@ pub const GlslGenerator = struct {
         self.defined_vars.deinit();
         self.functions.deinit();
         self.emitted_functions.deinit();
+        // Clean up function_deps ArrayLists
+        var deps_iter = self.function_deps.iterator();
+        while (deps_iter.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.function_deps.deinit();
+        self.nested_func_info.deinit();
         self.errors.deinit(self.allocator);
     }
 
@@ -106,7 +129,10 @@ pub const GlslGenerator = struct {
         // First pass: collect all function definitions and constants
         try self.collectDefinitions(root);
 
-        // Second pass: find all root-level outputs (non-void expressions)
+        // Second pass: analyze dependencies and captured variables (after all functions are known)
+        try self.analyzeFunctionDependencies(root);
+
+        // Third pass: find all root-level outputs (non-void expressions)
         const outputs = try self.findRootOutputs(root);
         defer self.allocator.free(outputs);
 
@@ -135,40 +161,328 @@ pub const GlslGenerator = struct {
     }
 
     /// Collect function definitions and constants from the AST (including nested ones)
+    /// This ONLY registers functions - dependency analysis happens in a separate pass
     fn collectDefinitions(self: *Self, node: *const AstNode) !void {
+        try self.collectFunctionsOnly(node);
+    }
+
+    /// First pass: just collect all function definitions without analyzing dependencies
+    fn collectFunctionsOnly(self: *Self, node: *const AstNode) !void {
         switch (node.data) {
             .block => |stmts| {
                 for (stmts) |stmt| {
-                    try self.collectDefinitions(stmt);
+                    try self.collectFunctionsOnly(stmt);
                 }
             },
             .function_def => |fd| {
                 try self.functions.put(fd.name, node);
-                // Also collect any nested functions from the body
-                try self.collectDefinitions(fd.body);
+                // Recurse to find nested functions
+                try self.collectFunctionsOnly(fd.body);
             },
             .binding => |b| {
-                // Check if the value is a function definition (nested function via binding)
                 if (b.value.data == .function_def) {
                     const nested_fd = b.value.data.function_def;
                     try self.functions.put(nested_fd.name, b.value);
-                    try self.collectDefinitions(nested_fd.body);
+                    try self.collectFunctionsOnly(nested_fd.body);
                 } else {
-                    // Recurse into the value for any nested function definitions
-                    try self.collectDefinitions(b.value);
+                    try self.collectFunctionsOnly(b.value);
                 }
             },
             .if_expr => |ie| {
-                try self.collectDefinitions(ie.then_branch);
+                try self.collectFunctionsOnly(ie.then_branch);
                 if (ie.else_branch) |eb| {
-                    try self.collectDefinitions(eb);
+                    try self.collectFunctionsOnly(eb);
                 }
             },
             .while_loop => |wl| {
-                try self.collectDefinitions(wl.body);
+                try self.collectFunctionsOnly(wl.body);
             },
             .for_loop => |fl| {
-                try self.collectDefinitions(fl.body);
+                try self.collectFunctionsOnly(fl.body);
+            },
+            else => {},
+        }
+    }
+
+    /// Second pass: analyze dependencies and captured variables (after all functions are registered)
+    fn analyzeFunctionDependencies(self: *Self, root: *const AstNode) !void {
+        try self.analyzeWithParent(root, null, &.{});
+    }
+
+    fn analyzeWithParent(
+        self: *Self,
+        node: *const AstNode,
+        parent_func: ?[]const u8,
+        parent_scope_vars: []const []const u8,
+    ) !void {
+        switch (node.data) {
+            .block => |stmts| {
+                // Build up scope variables as we go through bindings
+                var scope_vars: std.ArrayList([]const u8) = .{ .items = &.{}, .capacity = 0 };
+                defer scope_vars.deinit(self.allocator);
+                try scope_vars.appendSlice(self.allocator, parent_scope_vars);
+
+                for (stmts) |stmt| {
+                    // Add binding names to scope before processing nested functions
+                    if (stmt.data == .binding) {
+                        const b = stmt.data.binding;
+                        switch (b.pattern) {
+                            .single => |name| try scope_vars.append(self.allocator, name),
+                            .tuple => |names| {
+                                for (names) |name| try scope_vars.append(self.allocator, name);
+                            },
+                        }
+                    }
+                    try self.analyzeWithParent(stmt, parent_func, scope_vars.items);
+                }
+            },
+            .function_def => |fd| {
+                // Track function dependencies (which functions this one calls)
+                // Now all functions are registered, so findFunctionCalls will work correctly
+                var deps: std.ArrayList([]const u8) = .{ .items = &.{}, .capacity = 0 };
+                try self.findFunctionCalls(fd.body, &deps);
+                try self.function_deps.put(fd.name, deps);
+
+                // If this is a nested function, track captured variables
+                if (parent_func != null) {
+                    const captured = try self.findCapturedVars(fd.body, fd.params, parent_scope_vars);
+                    try self.nested_func_info.put(fd.name, .{
+                        .node = node,
+                        .parent_func = parent_func,
+                        .captured_vars = captured,
+                    });
+                }
+
+                // Build param set for nested scope
+                var nested_scope: std.ArrayList([]const u8) = .{ .items = &.{}, .capacity = 0 };
+                defer nested_scope.deinit(self.allocator);
+                for (fd.params) |p| try nested_scope.append(self.allocator, p);
+
+                // Analyze nested functions
+                try self.analyzeWithParent(fd.body, fd.name, nested_scope.items);
+            },
+            .binding => |b| {
+                if (b.value.data == .function_def) {
+                    const nested_fd = b.value.data.function_def;
+
+                    // Track dependencies
+                    var deps: std.ArrayList([]const u8) = .{ .items = &.{}, .capacity = 0 };
+                    try self.findFunctionCalls(nested_fd.body, &deps);
+                    try self.function_deps.put(nested_fd.name, deps);
+
+                    // Track captured variables for nested function
+                    if (parent_func != null) {
+                        const captured = try self.findCapturedVars(nested_fd.body, nested_fd.params, parent_scope_vars);
+                        try self.nested_func_info.put(nested_fd.name, .{
+                            .node = b.value,
+                            .parent_func = parent_func,
+                            .captured_vars = captured,
+                        });
+                    }
+
+                    // Build param set for nested scope
+                    var nested_scope: std.ArrayList([]const u8) = .{ .items = &.{}, .capacity = 0 };
+                    defer nested_scope.deinit(self.allocator);
+                    for (nested_fd.params) |p| try nested_scope.append(self.allocator, p);
+
+                    try self.analyzeWithParent(nested_fd.body, nested_fd.name, nested_scope.items);
+                } else {
+                    try self.analyzeWithParent(b.value, parent_func, parent_scope_vars);
+                }
+            },
+            .if_expr => |ie| {
+                try self.analyzeWithParent(ie.then_branch, parent_func, parent_scope_vars);
+                if (ie.else_branch) |eb| {
+                    try self.analyzeWithParent(eb, parent_func, parent_scope_vars);
+                }
+            },
+            .while_loop => |wl| {
+                try self.analyzeWithParent(wl.body, parent_func, parent_scope_vars);
+            },
+            .for_loop => |fl| {
+                try self.analyzeWithParent(fl.body, parent_func, parent_scope_vars);
+            },
+            else => {},
+        }
+    }
+
+    /// Find all function calls within an expression
+    fn findFunctionCalls(self: *Self, node: *const AstNode, deps: *std.ArrayList([]const u8)) !void {
+        switch (node.data) {
+            .apply => |op| {
+                // If it's not a builtin, it might be a user function
+                if (getBuiltin(op.name) == null) {
+                    // Check if it's in our functions map
+                    if (self.functions.contains(op.name)) {
+                        // Avoid duplicates
+                        var found = false;
+                        for (deps.items) |d| {
+                            if (std.mem.eql(u8, d, op.name)) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            try deps.append(self.allocator, op.name);
+                        }
+                    }
+                }
+                // Recurse into arguments
+                for (op.args) |arg| {
+                    try self.findFunctionCalls(arg, deps);
+                }
+            },
+            .block => |stmts| {
+                for (stmts) |stmt| try self.findFunctionCalls(stmt, deps);
+            },
+            .binding => |b| {
+                try self.findFunctionCalls(b.value, deps);
+            },
+            .if_expr => |ie| {
+                try self.findFunctionCalls(ie.condition, deps);
+                try self.findFunctionCalls(ie.then_branch, deps);
+                if (ie.else_branch) |eb| try self.findFunctionCalls(eb, deps);
+            },
+            .while_loop => |wl| {
+                try self.findFunctionCalls(wl.condition, deps);
+                try self.findFunctionCalls(wl.body, deps);
+            },
+            .for_loop => |fl| {
+                try self.findFunctionCalls(fl.init, deps);
+                try self.findFunctionCalls(fl.condition, deps);
+                try self.findFunctionCalls(fl.update, deps);
+                try self.findFunctionCalls(fl.body, deps);
+            },
+            .tuple => |elements| {
+                for (elements) |elem| try self.findFunctionCalls(elem, deps);
+            },
+            .cast => |c| {
+                try self.findFunctionCalls(c.operand, deps);
+            },
+            .property_access => |pa| {
+                try self.findFunctionCalls(pa.base, deps);
+            },
+            .index => |idx| {
+                try self.findFunctionCalls(idx.base, deps);
+                try self.findFunctionCalls(idx.index_expr, deps);
+            },
+            else => {},
+        }
+    }
+
+    /// Find variables captured from parent scope
+    fn findCapturedVars(
+        self: *Self,
+        body: *const AstNode,
+        params: []const []const u8,
+        parent_scope_vars: []const []const u8,
+    ) ![]const []const u8 {
+        var referenced = std.StringHashMap(void).init(self.allocator);
+        defer referenced.deinit();
+
+        var local_vars = std.StringHashMap(void).init(self.allocator);
+        defer local_vars.deinit();
+
+        // Params are local
+        for (params) |p| {
+            try local_vars.put(p, {});
+        }
+
+        // Find all referenced identifiers
+        try self.findReferencedVars(body, &referenced, &local_vars);
+
+        // Captured = referenced AND in parent_scope AND not in params
+        var captured: std.ArrayList([]const u8) = .{ .items = &.{}, .capacity = 0 };
+        var ref_iter = referenced.iterator();
+        while (ref_iter.next()) |entry| {
+            const name = entry.key_ptr.*;
+            // Check if it's in parent scope
+            for (parent_scope_vars) |parent_var| {
+                if (std.mem.eql(u8, name, parent_var)) {
+                    // Check not a param
+                    var is_param = false;
+                    for (params) |p| {
+                        if (std.mem.eql(u8, name, p)) {
+                            is_param = true;
+                            break;
+                        }
+                    }
+                    if (!is_param) {
+                        try captured.append(self.allocator, name);
+                    }
+                    break;
+                }
+            }
+        }
+
+        return captured.toOwnedSlice(self.allocator);
+    }
+
+    /// Find all referenced variable names in an expression
+    fn findReferencedVars(
+        self: *Self,
+        node: *const AstNode,
+        referenced: *std.StringHashMap(void),
+        local_vars: *std.StringHashMap(void),
+    ) !void {
+        switch (node.data) {
+            .identifier => |name| {
+                if (!local_vars.contains(name)) {
+                    try referenced.put(name, {});
+                }
+            },
+            .apply => |op| {
+                for (op.args) |arg| {
+                    try self.findReferencedVars(arg, referenced, local_vars);
+                }
+            },
+            .block => |stmts| {
+                for (stmts) |stmt| {
+                    // Add bindings to local vars before processing subsequent statements
+                    if (stmt.data == .binding) {
+                        const b = stmt.data.binding;
+                        try self.findReferencedVars(b.value, referenced, local_vars);
+                        switch (b.pattern) {
+                            .single => |name| try local_vars.put(name, {}),
+                            .tuple => |names| {
+                                for (names) |name| try local_vars.put(name, {});
+                            },
+                        }
+                    } else {
+                        try self.findReferencedVars(stmt, referenced, local_vars);
+                    }
+                }
+            },
+            .binding => |b| {
+                try self.findReferencedVars(b.value, referenced, local_vars);
+            },
+            .if_expr => |ie| {
+                try self.findReferencedVars(ie.condition, referenced, local_vars);
+                try self.findReferencedVars(ie.then_branch, referenced, local_vars);
+                if (ie.else_branch) |eb| try self.findReferencedVars(eb, referenced, local_vars);
+            },
+            .while_loop => |wl| {
+                try self.findReferencedVars(wl.condition, referenced, local_vars);
+                try self.findReferencedVars(wl.body, referenced, local_vars);
+            },
+            .for_loop => |fl| {
+                try self.findReferencedVars(fl.init, referenced, local_vars);
+                try self.findReferencedVars(fl.condition, referenced, local_vars);
+                try self.findReferencedVars(fl.update, referenced, local_vars);
+                try self.findReferencedVars(fl.body, referenced, local_vars);
+            },
+            .tuple => |elements| {
+                for (elements) |elem| try self.findReferencedVars(elem, referenced, local_vars);
+            },
+            .cast => |c| {
+                try self.findReferencedVars(c.operand, referenced, local_vars);
+            },
+            .property_access => |pa| {
+                try self.findReferencedVars(pa.base, referenced, local_vars);
+            },
+            .index => |idx| {
+                try self.findReferencedVars(idx.base, referenced, local_vars);
+                try self.findReferencedVars(idx.index_expr, referenced, local_vars);
             },
             else => {},
         }
@@ -314,20 +628,113 @@ pub const GlslGenerator = struct {
             else => {},
         }
 
-        // Now emit all collected functions (including nested ones)
-        var iter = self.functions.iterator();
-        while (iter.next()) |entry| {
-            const func_name = entry.key_ptr.*;
-            const func_node = entry.value_ptr.*;
+        // Topologically sort functions (dependencies first)
+        const sorted_funcs = try self.topologicalSortFunctions();
+        defer self.allocator.free(sorted_funcs);
 
+        // Emit functions in sorted order
+        for (sorted_funcs) |func_name| {
             if (!self.emitted_functions.contains(func_name)) {
-                if (func_node.data == .function_def) {
-                    const fd = func_node.data.function_def;
-                    try self.emitFunction(fd.name, fd.params, fd.body);
-                    try self.emitted_functions.put(fd.name, {});
+                if (self.functions.get(func_name)) |func_node| {
+                    if (func_node.data == .function_def) {
+                        const fd = func_node.data.function_def;
+                        try self.emitFunctionWithCaptures(fd.name, fd.params, fd.body);
+                        try self.emitted_functions.put(fd.name, {});
+                    }
                 }
             }
         }
+        try self.writeLine("");
+    }
+
+    /// Topologically sort functions so dependencies are emitted first
+    fn topologicalSortFunctions(self: *Self) ![]const []const u8 {
+        var result: std.ArrayList([]const u8) = .{ .items = &.{}, .capacity = 0 };
+        errdefer result.deinit(self.allocator);
+
+        var visited = std.StringHashMap(void).init(self.allocator);
+        defer visited.deinit();
+
+        var in_stack = std.StringHashMap(void).init(self.allocator);
+        defer in_stack.deinit();
+
+        // Visit all functions
+        var func_iter = self.functions.iterator();
+        while (func_iter.next()) |entry| {
+            const func_name = entry.key_ptr.*;
+            if (!visited.contains(func_name)) {
+                try self.topoVisit(func_name, &visited, &in_stack, &result);
+            }
+        }
+
+        return result.toOwnedSlice(self.allocator);
+    }
+
+    fn topoVisit(
+        self: *Self,
+        func_name: []const u8,
+        visited: *std.StringHashMap(void),
+        in_stack: *std.StringHashMap(void),
+        result: *std.ArrayList([]const u8),
+    ) !void {
+        if (in_stack.contains(func_name)) {
+            // Cycle detected - just skip (will cause GLSL error but better than infinite loop)
+            return;
+        }
+        if (visited.contains(func_name)) {
+            return;
+        }
+
+        try in_stack.put(func_name, {});
+
+        // Visit dependencies first
+        if (self.function_deps.get(func_name)) |deps| {
+            for (deps.items) |dep| {
+                try self.topoVisit(dep, visited, in_stack, result);
+            }
+        }
+
+        _ = in_stack.remove(func_name);
+        try visited.put(func_name, {});
+        try result.append(self.allocator, func_name);
+    }
+
+    /// Emit a function, adding captured variables as extra parameters for nested functions
+    fn emitFunctionWithCaptures(self: *Self, name: []const u8, params: []const []const u8, body: *const AstNode) !void {
+        // Infer return type from body
+        const return_type = self.inferGlslType(body);
+
+        try self.write(return_type);
+        try self.write(" ");
+        try self.write(name);
+        try self.write("(");
+
+        // Emit original parameters
+        for (params, 0..) |param, i| {
+            if (i > 0) try self.write(", ");
+            try self.write("float ");
+            try self.write(param);
+        }
+
+        // If this is a nested function, add captured variables as extra parameters
+        if (self.nested_func_info.get(name)) |info| {
+            for (info.captured_vars) |cap_var| {
+                if (params.len > 0 or info.captured_vars.len > 0) {
+                    try self.write(", ");
+                }
+                try self.write("float ");
+                try self.write(cap_var);
+            }
+        }
+
+        try self.write(") {\n");
+        self.indent_level += 1;
+
+        // Emit function body
+        try self.emitFunctionBody(body);
+
+        self.indent_level -= 1;
+        try self.writeLine("}");
         try self.writeLine("");
     }
 
@@ -351,32 +758,6 @@ pub const GlslGenerator = struct {
             },
             .tuple => {}, // Can't emit tuple as define
         }
-    }
-
-    fn emitFunction(self: *Self, name: []const u8, params: []const []const u8, body: *const AstNode) !void {
-        // Infer return type from body
-        const return_type = self.inferGlslType(body);
-
-        try self.write(return_type);
-        try self.write(" ");
-        try self.write(name);
-        try self.write("(");
-
-        for (params, 0..) |param, i| {
-            if (i > 0) try self.write(", ");
-            try self.write("float "); // Assume float params for now
-            try self.write(param);
-        }
-
-        try self.write(") {\n");
-        self.indent_level += 1;
-
-        // Emit function body
-        try self.emitFunctionBody(body);
-
-        self.indent_level -= 1;
-        try self.writeLine("}");
-        try self.writeLine("");
     }
 
     fn emitFunctionBody(self: *Self, body: *const AstNode) std.mem.Allocator.Error!void {
@@ -926,6 +1307,17 @@ pub const GlslGenerator = struct {
                 if (i > 0) try self.write(", ");
                 try self.emitExprWithCorner(arg, x_var, y_var);
             }
+
+            // If this is a nested function with captures, pass the captured variables
+            if (self.nested_func_info.get(name)) |info| {
+                for (info.captured_vars) |cap_var| {
+                    if (args.len > 0 or info.captured_vars.len > 0) {
+                        try self.write(", ");
+                    }
+                    try self.write(cap_var);
+                }
+            }
+
             try self.write(")");
         }
     }
@@ -1098,6 +1490,17 @@ pub const GlslGenerator = struct {
                 if (i > 0) try self.write(", ");
                 try self.emitExpr(arg);
             }
+
+            // If this is a nested function with captures, pass the captured variables
+            if (self.nested_func_info.get(name)) |info| {
+                for (info.captured_vars) |cap_var| {
+                    if (args.len > 0 or info.captured_vars.len > 0) {
+                        try self.write(", ");
+                    }
+                    try self.write(cap_var);
+                }
+            }
+
             try self.write(")");
         }
     }
