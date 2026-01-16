@@ -571,8 +571,22 @@ pub const GlslGenerator = struct {
                 try self.writeLine("out_color = result;");
             },
             .boolean => {
+                // For boolean expressions, use corner checking for proper curve rendering
+                // Calculate half-pixel size for corner sampling
+                try self.writeLine("// Half-pixel offsets for corner sampling");
+                try self.writeLine("float dx = (fubo.max_x - fubo.min_x) / (2.0 * fubo.res.x);");
+                try self.writeLine("float dy = (fubo.max_y - fubo.min_y) / (2.0 * fubo.res.y);");
+                try self.writeLine("");
+                try self.writeLine("// Corner coordinates");
+                try self.writeLine("float x_m = x - dx;  // x minus");
+                try self.writeLine("float x_p = x + dx;  // x plus");
+                try self.writeLine("float y_m = y - dy;  // y minus");
+                try self.writeLine("float y_p = y + dy;  // y plus");
+                try self.writeLine("");
+
+                // Emit the corner-checked boolean expression
                 try self.write("bool cond = ");
-                try self.emitExpr(output);
+                try self.emitBooleanWithCornerCheck(output);
                 try self.write(";\n");
 
                 // Generate random color from seed
@@ -600,6 +614,320 @@ pub const GlslGenerator = struct {
 
         self.indent_level -= 1;
         try self.writeLine("}");
+    }
+
+    /// Emit a boolean expression with corner checking for proper curve/region rendering
+    /// For equations (=): Check if corners straddle the curve (not all on same side)
+    /// For inequalities (>, <, >=, <=): Check if all corners agree
+    /// For and/or: Recursively apply corner checking
+    fn emitBooleanWithCornerCheck(self: *Self, node: *const AstNode) std.mem.Allocator.Error!void {
+        switch (node.data) {
+            .apply => |op| {
+                if (getBuiltin(op.name)) |builtin| {
+                    if (builtin.category == .logical) {
+                        // and/or - recursively apply to both sides
+                        if (std.mem.eql(u8, op.name, "and") and op.args.len >= 2) {
+                            try self.write("(");
+                            try self.emitBooleanWithCornerCheck(op.args[0]);
+                            try self.write(" && ");
+                            try self.emitBooleanWithCornerCheck(op.args[1]);
+                            try self.write(")");
+                            return;
+                        } else if (std.mem.eql(u8, op.name, "or") and op.args.len >= 2) {
+                            try self.write("(");
+                            try self.emitBooleanWithCornerCheck(op.args[0]);
+                            try self.write(" || ");
+                            try self.emitBooleanWithCornerCheck(op.args[1]);
+                            try self.write(")");
+                            return;
+                        } else if (std.mem.eql(u8, op.name, "not") and op.args.len >= 1) {
+                            try self.write("!(");
+                            try self.emitBooleanWithCornerCheck(op.args[0]);
+                            try self.write(")");
+                            return;
+                        }
+                    } else if (builtin.category == .comparison) {
+                        // Comparison operators - apply corner checking
+                        try self.emitComparisonWithCornerCheck(op.name, op.args);
+                        return;
+                    }
+                }
+                // Fall through to regular expression
+                try self.emitExpr(node);
+            },
+            .bool_lit => {
+                try self.emitExpr(node);
+            },
+            else => {
+                // For other expressions, just emit normally
+                try self.emitExpr(node);
+            },
+        }
+    }
+
+    /// Emit a comparison with corner checking
+    /// For equality (=): curve passes through pixel if corners don't all agree on which side
+    /// For inequality (>, <, >=, <=, !=): all corners must agree
+    fn emitComparisonWithCornerCheck(self: *Self, op_name: []const u8, args: []*AstNode) std.mem.Allocator.Error!void {
+        if (args.len < 2) {
+            try self.write("false");
+            return;
+        }
+
+        const lhs = args[0];
+        const rhs = args[1];
+
+        // For equality, we check if corners straddle the curve
+        // Convert LHS = RHS to checking if (LHS - RHS) changes sign across corners
+        if (std.mem.eql(u8, op_name, "eq")) {
+            // Equation: curve passes through if not all corners are on same side
+            // v1_1 = (LHS - RHS) at corner 1 > 0
+            // v1_2 = (LHS - RHS) at corner 2 > 0
+            // etc.
+            // Result: !(v1_1 == v1_2 && v1_2 == v1_3 && v1_3 == v1_4)
+            try self.write("(!(");
+            // Corner 1: (x_m, y_m)
+            try self.write("((");
+            try self.emitExprWithCorner(lhs, "x_m", "y_m");
+            try self.write(") > (");
+            try self.emitExprWithCorner(rhs, "x_m", "y_m");
+            try self.write(")) == ((");
+            // Corner 2: (x_m, y_p)
+            try self.emitExprWithCorner(lhs, "x_m", "y_p");
+            try self.write(") > (");
+            try self.emitExprWithCorner(rhs, "x_m", "y_p");
+            try self.write(")) && ((");
+            // Corner 2 == Corner 3
+            try self.emitExprWithCorner(lhs, "x_m", "y_p");
+            try self.write(") > (");
+            try self.emitExprWithCorner(rhs, "x_m", "y_p");
+            try self.write(")) == ((");
+            // Corner 3: (x_p, y_m)
+            try self.emitExprWithCorner(lhs, "x_p", "y_m");
+            try self.write(") > (");
+            try self.emitExprWithCorner(rhs, "x_p", "y_m");
+            try self.write(")) && ((");
+            // Corner 3 == Corner 4
+            try self.emitExprWithCorner(lhs, "x_p", "y_m");
+            try self.write(") > (");
+            try self.emitExprWithCorner(rhs, "x_p", "y_m");
+            try self.write(")) == ((");
+            // Corner 4: (x_p, y_p)
+            try self.emitExprWithCorner(lhs, "x_p", "y_p");
+            try self.write(") > (");
+            try self.emitExprWithCorner(rhs, "x_p", "y_p");
+            try self.write("))))");
+        } else {
+            // For inequalities: all corners must satisfy the condition
+            const glsl_op = if (std.mem.eql(u8, op_name, "gt"))
+                " > "
+            else if (std.mem.eql(u8, op_name, "lt"))
+                " < "
+            else if (std.mem.eql(u8, op_name, "ge"))
+                " >= "
+            else if (std.mem.eql(u8, op_name, "le"))
+                " <= "
+            else if (std.mem.eql(u8, op_name, "neq"))
+                " != "
+            else
+                " == ";
+
+            try self.write("(");
+            // Corner 1: (x_m, y_m)
+            try self.write("((");
+            try self.emitExprWithCorner(lhs, "x_m", "y_m");
+            try self.write(")");
+            try self.write(glsl_op);
+            try self.write("(");
+            try self.emitExprWithCorner(rhs, "x_m", "y_m");
+            try self.write(")) && ");
+            // Corner 2: (x_m, y_p)
+            try self.write("((");
+            try self.emitExprWithCorner(lhs, "x_m", "y_p");
+            try self.write(")");
+            try self.write(glsl_op);
+            try self.write("(");
+            try self.emitExprWithCorner(rhs, "x_m", "y_p");
+            try self.write(")) && ");
+            // Corner 3: (x_p, y_m)
+            try self.write("((");
+            try self.emitExprWithCorner(lhs, "x_p", "y_m");
+            try self.write(")");
+            try self.write(glsl_op);
+            try self.write("(");
+            try self.emitExprWithCorner(rhs, "x_p", "y_m");
+            try self.write(")) && ");
+            // Corner 4: (x_p, y_p)
+            try self.write("((");
+            try self.emitExprWithCorner(lhs, "x_p", "y_p");
+            try self.write(")");
+            try self.write(glsl_op);
+            try self.write("(");
+            try self.emitExprWithCorner(rhs, "x_p", "y_p");
+            try self.write(")))");
+        }
+    }
+
+    /// Emit an expression with x and y replaced by corner coordinates
+    fn emitExprWithCorner(self: *Self, node: *const AstNode, x_var: []const u8, y_var: []const u8) std.mem.Allocator.Error!void {
+        switch (node.data) {
+            .number => |n| {
+                var num_buf: [64]u8 = undefined;
+                const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{n}) catch "0.0";
+                try self.write(num_str);
+            },
+            .bool_lit => |b| {
+                try self.write(if (b) "true" else "false");
+            },
+            .identifier => |name| {
+                // Replace x and y with corner coordinates
+                if (std.mem.eql(u8, name, "x")) {
+                    try self.write(x_var);
+                } else if (std.mem.eql(u8, name, "y")) {
+                    try self.write(y_var);
+                } else if (std.mem.eql(u8, name, "time_s") or std.mem.eql(u8, name, "time.s")) {
+                    try self.write("fubo.time");
+                } else {
+                    try self.write(name);
+                }
+            },
+            .apply => |op| {
+                try self.emitApplyWithCorner(op.name, op.args, x_var, y_var);
+            },
+            .property_access => |pa| {
+                // Handle axis property access
+                if (pa.base.data == .identifier) {
+                    const base_name = pa.base.data.identifier;
+                    if (std.mem.eql(u8, base_name, "x") or std.mem.eql(u8, base_name, "axis1")) {
+                        if (std.mem.eql(u8, pa.property, "min")) {
+                            try self.write("fubo.min_x");
+                            return;
+                        } else if (std.mem.eql(u8, pa.property, "max")) {
+                            try self.write("fubo.max_x");
+                            return;
+                        } else if (std.mem.eql(u8, pa.property, "res")) {
+                            try self.write("fubo.res.x");
+                            return;
+                        }
+                    } else if (std.mem.eql(u8, base_name, "y") or std.mem.eql(u8, base_name, "axis2")) {
+                        if (std.mem.eql(u8, pa.property, "min")) {
+                            try self.write("fubo.min_y");
+                            return;
+                        } else if (std.mem.eql(u8, pa.property, "max")) {
+                            try self.write("fubo.max_y");
+                            return;
+                        } else if (std.mem.eql(u8, pa.property, "res")) {
+                            try self.write("fubo.res.y");
+                            return;
+                        }
+                    }
+                }
+                try self.emitExprWithCorner(pa.base, x_var, y_var);
+                try self.write(".");
+                try self.write(pa.property);
+            },
+            .tuple => |elements| {
+                const n = elements.len;
+                try self.write(switch (n) {
+                    2 => "vec2(",
+                    3 => "vec3(",
+                    4 => "vec4(",
+                    else => "vec4(",
+                });
+                for (elements, 0..) |elem, i| {
+                    if (i > 0) try self.write(", ");
+                    try self.emitExprWithCorner(elem, x_var, y_var);
+                }
+                try self.write(")");
+            },
+            .cast => |c| {
+                try self.write(c.target_type.toGlsl());
+                try self.write("(");
+                try self.emitExprWithCorner(c.operand, x_var, y_var);
+                try self.write(")");
+            },
+            .if_expr => |ie| {
+                try self.write("(");
+                try self.emitExprWithCorner(ie.condition, x_var, y_var);
+                try self.write(" ? ");
+                try self.emitExprWithCorner(ie.then_branch, x_var, y_var);
+                try self.write(" : ");
+                if (ie.else_branch) |eb| {
+                    try self.emitExprWithCorner(eb, x_var, y_var);
+                } else {
+                    try self.write("0.0");
+                }
+                try self.write(")");
+            },
+            else => {
+                try self.write("/* unsupported */");
+            },
+        }
+    }
+
+    /// Emit an apply expression with corner coordinate substitution
+    fn emitApplyWithCorner(self: *Self, name: []const u8, args: []*AstNode, x_var: []const u8, y_var: []const u8) std.mem.Allocator.Error!void {
+        // Handle type casts
+        if (args.len == 1) {
+            if (self.getGlslTypeName(name)) |glsl_type| {
+                try self.write(glsl_type);
+                try self.write("(");
+                try self.emitExprWithCorner(args[0], x_var, y_var);
+                try self.write(")");
+                return;
+            }
+        }
+
+        if (getBuiltin(name)) |builtin| {
+            switch (builtin.emit_style) {
+                .infix => {
+                    if (args.len >= 2) {
+                        try self.write("(");
+                        try self.emitExprWithCorner(args[0], x_var, y_var);
+                        try self.write(" ");
+                        try self.write(builtin.glsl orelse name);
+                        try self.write(" ");
+                        try self.emitExprWithCorner(args[1], x_var, y_var);
+                        try self.write(")");
+                    }
+                },
+                .prefix => {
+                    if (args.len >= 1) {
+                        try self.write("(");
+                        try self.write(builtin.glsl orelse name);
+                        try self.emitExprWithCorner(args[0], x_var, y_var);
+                        try self.write(")");
+                    }
+                },
+                .postfix => {
+                    if (std.mem.eql(u8, name, "square") and args.len >= 1) {
+                        try self.write("(");
+                        try self.emitExprWithCorner(args[0], x_var, y_var);
+                        try self.write(" * ");
+                        try self.emitExprWithCorner(args[0], x_var, y_var);
+                        try self.write(")");
+                    }
+                },
+                .call => {
+                    try self.write(builtin.glsl orelse name);
+                    try self.write("(");
+                    for (args, 0..) |arg, i| {
+                        if (i > 0) try self.write(", ");
+                        try self.emitExprWithCorner(arg, x_var, y_var);
+                    }
+                    try self.write(")");
+                },
+            }
+        } else {
+            // User-defined function
+            try self.write(name);
+            try self.write("(");
+            for (args, 0..) |arg, i| {
+                if (i > 0) try self.write(", ");
+                try self.emitExprWithCorner(arg, x_var, y_var);
+            }
+            try self.write(")");
+        }
     }
 
     fn emitExpr(self: *Self, node: *const AstNode) std.mem.Allocator.Error!void {
