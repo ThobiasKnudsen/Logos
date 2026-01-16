@@ -436,7 +436,7 @@ pub const EditorToolbar = struct {
         debugPrintShaders(result.shaders);
     }
 
-    /// Debug print all generated shaders
+    /// Debug print all generated shaders and write to files
     fn debugPrintShaders(shaders: []const glsl_gen.GeneratedShader) void {
         std.debug.print("\n========== GENERATED GLSL SHADERS ==========\n", .{});
         std.debug.print("Total shaders: {d}\n\n", .{shaders.len});
@@ -448,6 +448,15 @@ pub const EditorToolbar = struct {
             });
             std.debug.print("{s}\n", .{shader.source});
             std.debug.print("--- End Shader {d} ---\n\n", .{i});
+
+            // Write to file for debugging
+            var path_buf: [128]u8 = undefined;
+            const path = std.fmt.bufPrint(&path_buf, "/tmp/logos_shader_{d}.frag.glsl", .{i}) catch continue;
+            if (std.fs.createFileAbsolute(path, .{})) |file| {
+                defer file.close();
+                file.writeAll(shader.source) catch {};
+                std.debug.print("Written to: {s}\n", .{path});
+            } else |_| {}
         }
         std.debug.print("=============================================\n\n", .{});
     }

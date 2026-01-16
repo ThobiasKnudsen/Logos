@@ -134,7 +134,7 @@ pub const GlslGenerator = struct {
         };
     }
 
-    /// Collect function definitions and constants from the AST
+    /// Collect function definitions and constants from the AST (including nested ones)
     fn collectDefinitions(self: *Self, node: *const AstNode) !void {
         switch (node.data) {
             .block => |stmts| {
@@ -144,10 +144,31 @@ pub const GlslGenerator = struct {
             },
             .function_def => |fd| {
                 try self.functions.put(fd.name, node);
+                // Also collect any nested functions from the body
+                try self.collectDefinitions(fd.body);
             },
             .binding => |b| {
-                // Constants/variables will be handled during emission
-                _ = b;
+                // Check if the value is a function definition (nested function via binding)
+                if (b.value.data == .function_def) {
+                    const nested_fd = b.value.data.function_def;
+                    try self.functions.put(nested_fd.name, b.value);
+                    try self.collectDefinitions(nested_fd.body);
+                } else {
+                    // Recurse into the value for any nested function definitions
+                    try self.collectDefinitions(b.value);
+                }
+            },
+            .if_expr => |ie| {
+                try self.collectDefinitions(ie.then_branch);
+                if (ie.else_branch) |eb| {
+                    try self.collectDefinitions(eb);
+                }
+            },
+            .while_loop => |wl| {
+                try self.collectDefinitions(wl.body);
+            },
+            .for_loop => |fl| {
+                try self.collectDefinitions(fl.body);
             },
             else => {},
         }
@@ -281,15 +302,9 @@ pub const GlslGenerator = struct {
                 for (stmts) |stmt| {
                     switch (stmt.data) {
                         .binding => |b| {
-                            // Check if it's a simple constant
-                            if (self.isConstantBinding(b.value)) {
+                            // Check if it's a simple constant (not a nested function)
+                            if (b.value.data != .function_def and self.isConstantBinding(b.value)) {
                                 try self.emitConstantDefine(b.pattern, b.value);
-                            }
-                        },
-                        .function_def => |fd| {
-                            if (!self.emitted_functions.contains(fd.name)) {
-                                try self.emitFunction(fd.name, fd.params, fd.body);
-                                try self.emitted_functions.put(fd.name, {});
                             }
                         },
                         else => {},
@@ -297,6 +312,21 @@ pub const GlslGenerator = struct {
                 }
             },
             else => {},
+        }
+
+        // Now emit all collected functions (including nested ones)
+        var iter = self.functions.iterator();
+        while (iter.next()) |entry| {
+            const func_name = entry.key_ptr.*;
+            const func_node = entry.value_ptr.*;
+
+            if (!self.emitted_functions.contains(func_name)) {
+                if (func_node.data == .function_def) {
+                    const fd = func_node.data.function_def;
+                    try self.emitFunction(fd.name, fd.params, fd.body);
+                    try self.emitted_functions.put(fd.name, {});
+                }
+            }
         }
         try self.writeLine("");
     }
@@ -352,10 +382,24 @@ pub const GlslGenerator = struct {
     fn emitFunctionBody(self: *Self, body: *const AstNode) std.mem.Allocator.Error!void {
         switch (body.data) {
             .block => |stmts| {
-                // Emit all statements, return the last one
+                // Find the last non-function-def statement as return value
+                var last_value_idx: ?usize = null;
                 for (stmts, 0..) |stmt, i| {
-                    const is_last = i == stmts.len - 1;
-                    if (is_last) {
+                    // Skip function definitions (hoisted) and bindings
+                    if (stmt.data != .function_def) {
+                        if (stmt.data != .binding) {
+                            last_value_idx = i;
+                        } else {
+                            // Binding - could still be the "last thing" if no expression follows
+                            // but we don't return bindings
+                        }
+                    }
+                }
+
+                // Emit all statements except the last value expression
+                for (stmts, 0..) |stmt, i| {
+                    if (last_value_idx != null and i == last_value_idx.?) {
+                        // This is the return expression
                         try self.writeIndent();
                         try self.write("return ");
                         try self.emitExpr(stmt);
@@ -363,6 +407,11 @@ pub const GlslGenerator = struct {
                     } else {
                         try self.emitStatement(stmt);
                     }
+                }
+
+                // If no return expression found, emit void return
+                if (last_value_idx == null) {
+                    try self.writeLine("return;");
                 }
             },
             else => {
@@ -378,17 +427,32 @@ pub const GlslGenerator = struct {
     fn emitStatement(self: *Self, stmt: *const AstNode) std.mem.Allocator.Error!void {
         switch (stmt.data) {
             .binding => |b| {
+                // Check for nested function definition - skip it (hoisted separately)
+                if (b.value.data == .function_def) {
+                    return;
+                }
+
                 try self.writeIndent();
                 switch (b.pattern) {
                     .single => |name| {
-                        const var_type = self.inferGlslType(b.value);
-                        try self.write(var_type);
-                        try self.write(" ");
-                        try self.write(name);
-                        try self.write(" = ");
-                        try self.emitExpr(b.value);
-                        try self.write(";\n");
-                        try self.defined_vars.put(name, {});
+                        // Check if variable already defined (reassignment vs declaration)
+                        if (self.defined_vars.contains(name)) {
+                            // Reassignment - no type declaration
+                            try self.write(name);
+                            try self.write(" = ");
+                            try self.emitExpr(b.value);
+                            try self.write(";\n");
+                        } else {
+                            // New variable declaration
+                            const var_type = self.inferGlslType(b.value);
+                            try self.write(var_type);
+                            try self.write(" ");
+                            try self.write(name);
+                            try self.write(" = ");
+                            try self.emitExpr(b.value);
+                            try self.write(";\n");
+                            try self.defined_vars.put(name, {});
+                        }
                     },
                     .tuple => |names| {
                         // Tuple destructuring - emit temp and extract
@@ -403,7 +467,10 @@ pub const GlslGenerator = struct {
 
                         for (names, 0..) |name, i| {
                             try self.writeIndent();
-                            try self.write("float ");
+                            // Check if already defined
+                            if (!self.defined_vars.contains(name)) {
+                                try self.write("float ");
+                            }
                             try self.write(name);
                             try self.write(" = ");
                             try self.write(temp_name);
@@ -468,6 +535,9 @@ pub const GlslGenerator = struct {
                 for (stmts) |s| {
                     try self.emitStatement(s);
                 }
+            },
+            .function_def => {
+                // Skip - already hoisted to top level
             },
             else => {
                 // Expression statement
@@ -554,18 +624,38 @@ pub const GlslGenerator = struct {
                 try self.emitApply(op.name, op.args);
             },
             .property_access => |pa| {
+                // Check if this is an axis property access (x.min, y.max, etc.)
+                if (pa.base.data == .identifier) {
+                    const base_name = pa.base.data.identifier;
+                    // Map axis properties to uniforms
+                    if (std.mem.eql(u8, base_name, "x") or std.mem.eql(u8, base_name, "axis1")) {
+                        if (std.mem.eql(u8, pa.property, "min")) {
+                            try self.write("fubo.min_x");
+                            return;
+                        } else if (std.mem.eql(u8, pa.property, "max")) {
+                            try self.write("fubo.max_x");
+                            return;
+                        } else if (std.mem.eql(u8, pa.property, "res")) {
+                            try self.write("fubo.res.x");
+                            return;
+                        }
+                    } else if (std.mem.eql(u8, base_name, "y") or std.mem.eql(u8, base_name, "axis2")) {
+                        if (std.mem.eql(u8, pa.property, "min")) {
+                            try self.write("fubo.min_y");
+                            return;
+                        } else if (std.mem.eql(u8, pa.property, "max")) {
+                            try self.write("fubo.max_y");
+                            return;
+                        } else if (std.mem.eql(u8, pa.property, "res")) {
+                            try self.write("fubo.res.y");
+                            return;
+                        }
+                    }
+                }
+                // Regular property access
                 try self.emitExpr(pa.base);
                 try self.write(".");
-                // Map property names
-                if (std.mem.eql(u8, pa.property, "min")) {
-                    try self.write("x"); // Would need context for axis
-                } else if (std.mem.eql(u8, pa.property, "max")) {
-                    try self.write("y");
-                } else if (std.mem.eql(u8, pa.property, "res")) {
-                    try self.write("z");
-                } else {
-                    try self.write(pa.property);
-                }
+                try self.write(pa.property);
             },
             .tuple => |elements| {
                 const n = elements.len;
@@ -620,6 +710,17 @@ pub const GlslGenerator = struct {
     }
 
     fn emitApply(self: *Self, name: []const u8, args: []*AstNode) std.mem.Allocator.Error!void {
+        // Handle type casts that were parsed as function calls
+        if (args.len == 1) {
+            if (self.getGlslTypeName(name)) |glsl_type| {
+                try self.write(glsl_type);
+                try self.write("(");
+                try self.emitExpr(args[0]);
+                try self.write(")");
+                return;
+            }
+        }
+
         if (getBuiltin(name)) |builtin| {
             switch (builtin.emit_style) {
                 .infix => {
@@ -674,7 +775,6 @@ pub const GlslGenerator = struct {
     }
 
     fn inferGlslType(self: *Self, node: *const AstNode) []const u8 {
-        _ = self;
         return switch (node.data) {
             .number => "float",
             .bool_lit => "bool",
@@ -690,18 +790,32 @@ pub const GlslGenerator = struct {
                         return "bool";
                     }
                 }
+                // Check if it's a user-defined function and infer from its body
+                if (self.functions.get(op.name)) |func_node| {
+                    if (func_node.data == .function_def) {
+                        return self.inferGlslType(func_node.data.function_def.body);
+                    }
+                }
                 return "float";
             },
             .if_expr => |ie| {
-                // Infer from branches
-                _ = ie;
-                return "float"; // Simplified
+                // Infer from then branch
+                return self.inferGlslType(ie.then_branch);
             },
             .block => |stmts| {
                 if (stmts.len > 0) {
-                    return "float"; // Would need recursion
+                    // Return type is the type of the last statement
+                    const last = stmts[stmts.len - 1];
+                    // Skip bindings, look for the actual value
+                    if (last.data == .binding) {
+                        return "void";
+                    }
+                    return self.inferGlslType(last);
                 }
                 return "void";
+            },
+            .cast => |c| {
+                return c.target_type.toGlsl();
             },
             else => "float",
         };
@@ -729,6 +843,19 @@ pub const GlslGenerator = struct {
         const name = try std.fmt.allocPrint(self.allocator, "_tmp{d}", .{self.temp_counter});
         self.temp_counter += 1;
         return name;
+    }
+
+    /// Map Logos type names to GLSL type names
+    fn getGlslTypeName(_: *Self, name: []const u8) ?[]const u8 {
+        if (std.mem.eql(u8, name, "f32")) return "float";
+        if (std.mem.eql(u8, name, "f64")) return "double";
+        if (std.mem.eql(u8, name, "i32")) return "int";
+        if (std.mem.eql(u8, name, "i64")) return "int"; // GLSL doesn't have i64
+        if (std.mem.eql(u8, name, "bool")) return "bool";
+        if (std.mem.eql(u8, name, "vec2")) return "vec2";
+        if (std.mem.eql(u8, name, "vec3")) return "vec3";
+        if (std.mem.eql(u8, name, "vec4")) return "vec4";
+        return null;
     }
 };
 
