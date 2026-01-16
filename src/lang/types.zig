@@ -329,62 +329,6 @@ pub const TypeEnv = struct {
     }
 };
 
-/// Built-in function signatures
-pub const BuiltinFunctions = struct {
-    /// Get the type signature of a built-in function
-    pub fn getSignature(name: []const u8) ?BuiltinSignature {
-        // Math functions (f32 -> f32)
-        const unary_math = [_][]const u8{
-            "sin",  "cos",   "tan",   "asin", "acos",  "atan",
-            "sinh", "cosh",  "tanh",  "log",  "log2",  "log10",
-            "exp",  "exp2",  "sqrt",  "abs",  "sign",  "floor",
-            "ceil", "round", "fract",
-        };
-        for (unary_math) |fn_name| {
-            if (std.mem.eql(u8, name, fn_name)) {
-                return .{ .kind = .unary_math };
-            }
-        }
-
-        // Binary math functions (f32, f32 -> f32)
-        const binary_math = [_][]const u8{ "pow", "mod", "min", "max", "step" };
-        for (binary_math) |fn_name| {
-            if (std.mem.eql(u8, name, fn_name)) {
-                return .{ .kind = .binary_math };
-            }
-        }
-
-        // Special functions
-        if (std.mem.eql(u8, name, "clamp")) return .{ .kind = .clamp };
-        if (std.mem.eql(u8, name, "mix")) return .{ .kind = .mix };
-        if (std.mem.eql(u8, name, "smoothstep")) return .{ .kind = .smoothstep };
-
-        // Vector functions
-        if (std.mem.eql(u8, name, "len") or std.mem.eql(u8, name, "length")) return .{ .kind = .length };
-        if (std.mem.eql(u8, name, "normalize")) return .{ .kind = .normalize };
-        if (std.mem.eql(u8, name, "dot")) return .{ .kind = .dot };
-        if (std.mem.eql(u8, name, "cross")) return .{ .kind = .cross };
-
-        return null;
-    }
-
-    pub const BuiltinSignature = struct {
-        kind: Kind,
-
-        pub const Kind = enum {
-            unary_math, // f32 -> f32 (or matching vector type)
-            binary_math, // (f32, f32) -> f32
-            clamp, // (f32, f32, f32) -> f32
-            mix, // (f32, f32, f32) -> f32
-            smoothstep, // (f32, f32, f32) -> f32
-            length, // vec -> f32
-            normalize, // vec -> vec
-            dot, // (vec, vec) -> f32
-            cross, // (vec3, vec3) -> vec3
-        };
-    };
-};
-
 /// Reserved identifiers in the Logos language
 pub const ReservedNames = struct {
     /// Check if a name is a reserved axis variable

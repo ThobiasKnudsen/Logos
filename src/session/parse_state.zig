@@ -5,8 +5,11 @@
 
 const std = @import("std");
 const ast_node = @import("../lang/ast_node.zig");
+const glsl_gen = @import("../lang/glsl_gen.zig");
 
 pub const AstNode = ast_node.AstNode;
+pub const GeneratedShader = glsl_gen.GeneratedShader;
+pub const OutputType = glsl_gen.OutputType;
 
 /// Token from lexer - represents one lexical element
 pub const Token = struct {
@@ -117,8 +120,8 @@ pub const ParseState = struct {
     /// Parsed AST (allocated in parse_arena)
     ast: ?*AstNode,
 
-    /// Generated GLSL shader code (allocated in parse_arena)
-    // generated_glsl: ?[]const u8,  // TODO: Add when GLSL gen is implemented
+    /// Generated GLSL fragment shaders (one per root output)
+    generated_shaders: ?[]GeneratedShader,
 
     /// Parse errors for display (allocated in general allocator)
     errors: std.ArrayList(ParseError),
@@ -141,6 +144,7 @@ pub const ParseState = struct {
             .content_hash = 0,
             .tokens = null,
             .ast = null,
+            .generated_shaders = null,
             .errors = std.ArrayList(ParseError){
                 .items = &.{},
                 .capacity = 0,
@@ -167,7 +171,7 @@ pub const ParseState = struct {
 
         // Clear parse products
         self.ast = null;
-        // self.generated_glsl = null;
+        self.freeGeneratedShaders();
 
         // Clear errors but retain capacity
         self.errors.clearRetainingCapacity();
@@ -175,6 +179,17 @@ pub const ParseState = struct {
 
         // Status back to idle
         self.status = .idle;
+    }
+
+    /// Free generated shaders
+    pub fn freeGeneratedShaders(self: *ParseState) void {
+        if (self.generated_shaders) |shaders| {
+            for (shaders) |shader| {
+                self.allocator.free(shader.source);
+            }
+            self.allocator.free(shaders);
+            self.generated_shaders = null;
+        }
     }
 
     /// Free tokens from previous lex
@@ -188,6 +203,7 @@ pub const ParseState = struct {
     /// Deinitialize parse state
     pub fn deinit(self: *ParseState) void {
         self.freeTokens();
+        self.freeGeneratedShaders();
         self.errors.deinit(self.allocator);
         self.parse_arena.deinit();
     }

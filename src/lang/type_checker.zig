@@ -14,8 +14,8 @@ const ast_node = @import("ast_node.zig");
 const types = @import("types.zig");
 
 const AstNode = ast_node.AstNode;
-const BinaryOp = ast_node.BinaryOp;
-const UnaryOp = ast_node.UnaryOp;
+const Builtin = ast_node.Builtin;
+const getBuiltin = ast_node.getBuiltin;
 const SourceSpan = ast_node.SourceSpan;
 const Type = types.Type;
 const TypeEnv = types.TypeEnv;
@@ -118,9 +118,7 @@ pub const TypeChecker = struct {
             .number => &Builtins.f64_type, // All numeric literals are f64 by default
             .bool_lit => &Builtins.bool_type,
             .identifier => |name| self.inferIdentifier(name, node.span),
-            .binary_op => |op| self.inferBinaryOp(op.op, op.left, op.right, node.span),
-            .unary_op => |op| self.inferUnaryOp(op.op, op.operand, node.span),
-            .function_call => |call| self.inferFunctionCall(call.callee, call.args, node.span),
+            .apply => |op| self.inferApply(op.name, op.args, node.span),
             .property_access => |acc| self.inferPropertyAccess(acc.base, acc.property, node.span),
             .tuple => |elements| self.inferTuple(elements, node.span),
             .cast => |c| self.inferCast(c.target_type, c.operand, node.span),
@@ -150,224 +148,189 @@ pub const TypeChecker = struct {
         return &Builtins.error_type;
     }
 
-    fn inferBinaryOp(self: *TypeChecker, op: BinaryOp, left: *AstNode, right: *AstNode, span: SourceSpan) *const Type {
-        const left_type = self.inferType(left);
-        const right_type = self.inferType(right);
-
-        // Propagate errors
-        if (left_type.* == .err or right_type.* == .err) {
-            return &Builtins.error_type;
+    /// Unified type inference for all operations (binary ops, unary ops, function calls)
+    fn inferApply(self: *TypeChecker, name: []const u8, args: []*AstNode, span: SourceSpan) *const Type {
+        // First, check if this is a built-in operation
+        if (getBuiltin(name)) |builtin| {
+            return self.inferBuiltinApply(name, builtin, args, span);
         }
 
-        // Comparison operators return bool
-        if (op.isComparison()) {
-            if (!left_type.isNumeric() or !right_type.isNumeric()) {
-                self.addError(.type_mismatch, span, "comparison requires numeric types", .{});
+        // Check for type cast (f32, i32, etc.)
+        if (self.isPrimitiveTypeName(name)) |prim_type| {
+            if (args.len != 1) {
+                self.addError(.arity_mismatch, span, "type cast expects 1 argument, got {}", .{args.len});
                 return &Builtins.error_type;
             }
-            return &Builtins.bool_type;
+            _ = self.inferType(args[0]); // Check the argument
+            return switch (prim_type) {
+                .f32 => &Builtins.f32_type,
+                .f64 => &Builtins.f64_type,
+                .i32 => &Builtins.i32_type,
+                .i64 => &Builtins.i64_type,
+                .bool => &Builtins.bool_type,
+                .vec2 => &Builtins.vec2_type,
+                .vec3 => &Builtins.vec3_type,
+                .vec4 => &Builtins.vec4_type,
+            };
         }
 
-        // Logical operators require bool
-        if (op.isLogical()) {
-            if (left_type.* != .primitive or left_type.primitive != .bool) {
-                self.addError(.type_mismatch, span, "logical operator requires bool, got {}", .{left_type});
+        // User-defined function call - look up in symbol table
+        if (self.env.lookup(name)) |sym| {
+            if (sym.sym_type.* != .function) {
+                self.addError(.not_callable, span, "'{s}' is not callable (type: {})", .{ name, sym.sym_type });
                 return &Builtins.error_type;
             }
-            if (right_type.* != .primitive or right_type.primitive != .bool) {
-                self.addError(.type_mismatch, span, "logical operator requires bool, got {}", .{right_type});
+
+            const fn_type = sym.sym_type.function;
+
+            // Check arity
+            if (args.len != fn_type.params.len) {
+                self.addError(.arity_mismatch, span, "'{s}' expects {} arguments, got {}", .{ name, fn_type.params.len, args.len });
                 return &Builtins.error_type;
             }
-            return &Builtins.bool_type;
+
+            // Check argument types
+            for (args, fn_type.params) |arg, expected| {
+                const arg_type = self.inferType(arg);
+                if (!arg_type.isCompatible(expected)) {
+                    self.addError(.type_mismatch, arg.span, "expected {}, got {}", .{ expected, arg_type });
+                }
+            }
+
+            return fn_type.return_type;
         }
 
-        // Arithmetic operators - check numeric types
-        if (!left_type.isNumeric()) {
-            self.addError(.type_mismatch, span, "arithmetic requires numeric type, got {}", .{left_type});
-            return &Builtins.error_type;
-        }
-        if (!right_type.isNumeric()) {
-            self.addError(.type_mismatch, span, "arithmetic requires numeric type, got {}", .{right_type});
-            return &Builtins.error_type;
-        }
-
-        // Type promotion: return the "larger" type
-        return self.promoteNumericTypes(left_type, right_type);
+        // Unknown function
+        self.addError(.undefined_variable, span, "undefined function '{s}'", .{name});
+        return &Builtins.error_type;
     }
 
-    fn inferUnaryOp(self: *TypeChecker, op: UnaryOp, operand: *AstNode, span: SourceSpan) *const Type {
-        const operand_type = self.inferType(operand);
+    /// Type check a builtin operation using metadata from the builtin table
+    fn inferBuiltinApply(self: *TypeChecker, name: []const u8, builtin: Builtin, args: []*AstNode, span: SourceSpan) *const Type {
+        // Check arity
+        if (args.len != builtin.arity) {
+            self.addError(.arity_mismatch, span, "'{s}' expects {} argument(s), got {}", .{ name, builtin.arity, args.len });
+            return &Builtins.error_type;
+        }
 
-        if (operand_type.* == .err) return &Builtins.error_type;
+        // Infer types of all arguments
+        var arg_types: [8]*const Type = undefined; // Max 8 args should be plenty
+        for (args, 0..) |arg, i| {
+            arg_types[i] = self.inferType(arg);
+            if (arg_types[i].* == .err) return &Builtins.error_type;
+        }
 
-        return switch (op) {
-            .neg, .square => {
-                if (!operand_type.isNumeric()) {
-                    self.addError(.type_mismatch, span, "unary operator requires numeric type, got {}", .{operand_type});
-                    return &Builtins.error_type;
-                }
-                return operand_type;
-            },
-            .not => {
-                if (operand_type.* != .primitive or operand_type.primitive != .bool) {
-                    self.addError(.type_mismatch, span, "logical not requires bool, got {}", .{operand_type});
-                    return &Builtins.error_type;
-                }
-                return &Builtins.bool_type;
-            },
+        // Type check based on category
+        return switch (builtin.category) {
+            .arithmetic => self.checkArithmeticOp(name, args, arg_types[0..args.len], span),
+            .comparison => self.checkComparisonOp(name, args, arg_types[0..args.len], span),
+            .logical => self.checkLogicalOp(name, args, arg_types[0..args.len], span),
+            .math => self.checkMathOp(name, builtin.arity, args, arg_types[0..args.len], span),
+            .special => self.checkSpecialOp(name, args, arg_types[0..args.len], span),
         };
     }
 
-    fn inferFunctionCall(self: *TypeChecker, callee: *AstNode, args: []*AstNode, span: SourceSpan) *const Type {
-        // Check for built-in functions
-        if (callee.data == .identifier) {
-            const name = callee.data.identifier;
-
-            // Check for built-in function
-            if (types.BuiltinFunctions.getSignature(name)) |sig| {
-                return self.checkBuiltinCall(sig, args, span);
-            }
-
-            // Check for type cast (f32, i32, etc.)
-            if (self.isPrimitiveTypeName(name)) |prim_type| {
-                if (args.len != 1) {
-                    self.addError(.arity_mismatch, span, "type cast expects 1 argument, got {}", .{args.len});
-                    return &Builtins.error_type;
-                }
-                _ = self.inferType(args[0]); // Check the argument
-                return switch (prim_type) {
-                    .f32 => &Builtins.f32_type,
-                    .f64 => &Builtins.f64_type,
-                    .i32 => &Builtins.i32_type,
-                    .i64 => &Builtins.i64_type,
-                    .bool => &Builtins.bool_type,
-                    .vec2 => &Builtins.vec2_type,
-                    .vec3 => &Builtins.vec3_type,
-                    .vec4 => &Builtins.vec4_type,
-                };
+    fn checkArithmeticOp(self: *TypeChecker, name: []const u8, args: []*AstNode, arg_types: []const *const Type, span: SourceSpan) *const Type {
+        _ = name;
+        // All args must be numeric
+        for (arg_types, args) |t, arg| {
+            if (!t.isNumeric()) {
+                self.addError(.type_mismatch, arg.span, "arithmetic requires numeric type, got {}", .{t});
+                return &Builtins.error_type;
             }
         }
 
-        // User-defined function call
-        const callee_type = self.inferType(callee);
-        if (callee_type.* == .err) return &Builtins.error_type;
-
-        if (callee_type.* != .function) {
-            self.addError(.not_callable, span, "cannot call non-function type {}", .{callee_type});
-            return &Builtins.error_type;
+        // Return promoted type for binary, same type for unary
+        if (args.len == 2) {
+            return self.promoteNumericTypes(arg_types[0], arg_types[1]);
         }
-
-        const fn_type = callee_type.function;
-
-        // Check arity
-        if (args.len != fn_type.params.len) {
-            self.addError(.arity_mismatch, span, "expected {} arguments, got {}", .{ fn_type.params.len, args.len });
-            return &Builtins.error_type;
-        }
-
-        // Check argument types
-        for (args, fn_type.params) |arg, expected| {
-            const arg_type = self.inferType(arg);
-            if (!arg_type.isCompatible(expected)) {
-                self.addError(.type_mismatch, arg.span, "expected {}, got {}", .{ expected, arg_type });
-            }
-        }
-
-        return fn_type.return_type;
+        return arg_types[0];
     }
 
-    fn checkBuiltinCall(self: *TypeChecker, sig: types.BuiltinFunctions.BuiltinSignature, args: []*AstNode, span: SourceSpan) *const Type {
-        switch (sig.kind) {
-            .unary_math => {
-                if (args.len != 1) {
-                    self.addError(.arity_mismatch, span, "expected 1 argument", .{});
-                    return &Builtins.error_type;
-                }
-                const arg_type = self.inferType(args[0]);
-                if (!arg_type.isNumeric()) {
-                    self.addError(.type_mismatch, span, "expected numeric type", .{});
-                    return &Builtins.error_type;
-                }
-                return arg_type; // Same type as input
-            },
-            .binary_math => {
-                if (args.len != 2) {
-                    self.addError(.arity_mismatch, span, "expected 2 arguments", .{});
-                    return &Builtins.error_type;
-                }
-                const t1 = self.inferType(args[0]);
-                const t2 = self.inferType(args[1]);
-                if (!t1.isNumeric() or !t2.isNumeric()) {
-                    self.addError(.type_mismatch, span, "expected numeric types", .{});
-                    return &Builtins.error_type;
-                }
-                return self.promoteNumericTypes(t1, t2);
-            },
-            .clamp, .mix, .smoothstep => {
-                if (args.len != 3) {
-                    self.addError(.arity_mismatch, span, "expected 3 arguments", .{});
-                    return &Builtins.error_type;
-                }
-                for (args) |arg| {
-                    const t = self.inferType(arg);
-                    if (!t.isNumeric()) {
-                        self.addError(.type_mismatch, span, "expected numeric type", .{});
-                        return &Builtins.error_type;
-                    }
-                }
-                return self.inferType(args[0]); // Return first arg type
-            },
-            .length => {
-                if (args.len != 1) {
-                    self.addError(.arity_mismatch, span, "expected 1 argument", .{});
-                    return &Builtins.error_type;
-                }
-                const arg_type = self.inferType(args[0]);
-                if (!arg_type.isVector() and !arg_type.isScalar()) {
-                    self.addError(.type_mismatch, span, "expected vector or scalar", .{});
-                    return &Builtins.error_type;
-                }
-                return &Builtins.f32_type;
-            },
-            .normalize => {
-                if (args.len != 1) {
-                    self.addError(.arity_mismatch, span, "expected 1 argument", .{});
-                    return &Builtins.error_type;
-                }
-                const arg_type = self.inferType(args[0]);
-                if (!arg_type.isVector()) {
-                    self.addError(.type_mismatch, span, "expected vector type", .{});
-                    return &Builtins.error_type;
-                }
-                return arg_type;
-            },
-            .dot => {
-                if (args.len != 2) {
-                    self.addError(.arity_mismatch, span, "expected 2 arguments", .{});
-                    return &Builtins.error_type;
-                }
-                const t1 = self.inferType(args[0]);
-                const t2 = self.inferType(args[1]);
-                if (!t1.isVector() or !t2.isVector()) {
-                    self.addError(.type_mismatch, span, "expected vector types", .{});
-                    return &Builtins.error_type;
-                }
-                return &Builtins.f32_type;
-            },
-            .cross => {
-                if (args.len != 2) {
-                    self.addError(.arity_mismatch, span, "expected 2 arguments", .{});
-                    return &Builtins.error_type;
-                }
-                const t1 = self.inferType(args[0]);
-                const t2 = self.inferType(args[1]);
-                if (t1.vectorDimension() != 3 or t2.vectorDimension() != 3) {
-                    self.addError(.type_mismatch, span, "cross product requires vec3", .{});
-                    return &Builtins.error_type;
-                }
-                return &Builtins.vec3_type;
-            },
+    fn checkComparisonOp(self: *TypeChecker, name: []const u8, args: []*AstNode, arg_types: []const *const Type, span: SourceSpan) *const Type {
+        _ = name;
+        _ = span;
+        // Both args must be numeric
+        for (arg_types, args) |t, arg| {
+            if (!t.isNumeric()) {
+                self.addError(.type_mismatch, arg.span, "comparison requires numeric types, got {}", .{t});
+                return &Builtins.error_type;
+            }
         }
+        return &Builtins.bool_type;
+    }
+
+    fn checkLogicalOp(self: *TypeChecker, name: []const u8, args: []*AstNode, arg_types: []const *const Type, span: SourceSpan) *const Type {
+        _ = name;
+        _ = span;
+        // All args must be bool
+        for (arg_types, args) |t, arg| {
+            if (t.* != .primitive or t.primitive != .bool) {
+                self.addError(.type_mismatch, arg.span, "logical operator requires bool, got {}", .{t});
+                return &Builtins.error_type;
+            }
+        }
+        return &Builtins.bool_type;
+    }
+
+    fn checkMathOp(self: *TypeChecker, name: []const u8, arity: u8, args: []*AstNode, arg_types: []const *const Type, span: SourceSpan) *const Type {
+        _ = span;
+        _ = name;
+        // All args must be numeric
+        for (arg_types, args) |t, arg| {
+            if (!t.isNumeric()) {
+                self.addError(.type_mismatch, arg.span, "math function requires numeric type, got {}", .{t});
+                return &Builtins.error_type;
+            }
+        }
+
+        // Return type based on arity
+        if (arity == 1) {
+            return arg_types[0]; // Unary: same type as input
+        } else if (arity == 2) {
+            return self.promoteNumericTypes(arg_types[0], arg_types[1]);
+        } else {
+            return arg_types[0]; // 3+ args: return first arg type
+        }
+    }
+
+    fn checkSpecialOp(self: *TypeChecker, name: []const u8, args: []*AstNode, arg_types: []const *const Type, span: SourceSpan) *const Type {
+        // Handle special operations with custom type rules
+        if (std.mem.eql(u8, name, "len") or std.mem.eql(u8, name, "length")) {
+            if (!arg_types[0].isVector() and !arg_types[0].isScalar()) {
+                self.addError(.type_mismatch, span, "length expects vector or scalar, got {}", .{arg_types[0]});
+                return &Builtins.error_type;
+            }
+            return &Builtins.f32_type;
+        }
+
+        if (std.mem.eql(u8, name, "normalize")) {
+            if (!arg_types[0].isVector()) {
+                self.addError(.type_mismatch, span, "normalize expects vector, got {}", .{arg_types[0]});
+                return &Builtins.error_type;
+            }
+            return arg_types[0];
+        }
+
+        if (std.mem.eql(u8, name, "dot")) {
+            if (!arg_types[0].isVector() or !arg_types[1].isVector()) {
+                self.addError(.type_mismatch, span, "dot expects vectors, got {} and {}", .{ arg_types[0], arg_types[1] });
+                return &Builtins.error_type;
+            }
+            return &Builtins.f32_type;
+        }
+
+        if (std.mem.eql(u8, name, "cross")) {
+            if (arg_types[0].vectorDimension() != 3 or arg_types[1].vectorDimension() != 3) {
+                self.addError(.type_mismatch, span, "cross requires vec3, got {} and {}", .{ arg_types[0], arg_types[1] });
+                return &Builtins.error_type;
+            }
+            return &Builtins.vec3_type;
+        }
+
+        // Fallback for unknown special ops
+        _ = args;
+        return &Builtins.error_type;
     }
 
     fn inferPropertyAccess(self: *TypeChecker, base: *AstNode, property: []const u8, span: SourceSpan) *const Type {

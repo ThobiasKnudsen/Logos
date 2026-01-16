@@ -4,7 +4,7 @@
 //! - Bindings: `name: expr` or `(a, b, c): expr`
 //! - Function definitions: `name(params): (body)`
 //! - Control flow: if/else, while, for
-//! - Expressions: binary ops, unary ops, function calls, property access
+//! - Expressions: operators (as apply nodes), function calls, property access
 //! - Literals: numbers, identifiers, booleans, tuples
 
 const std = @import("std");
@@ -15,8 +15,6 @@ pub const Token = parse_state.Token;
 pub const TokenType = parse_state.TokenType;
 pub const ParseError = parse_state.ParseError;
 pub const AstNode = ast.AstNode;
-pub const BinaryOp = ast.BinaryOp;
-pub const UnaryOp = ast.UnaryOp;
 pub const PrimitiveType = ast.PrimitiveType;
 pub const BindingPattern = ast.BindingPattern;
 pub const SourceSpan = ast.SourceSpan;
@@ -177,7 +175,11 @@ pub const Parser = struct {
                 _ = self.advance();
                 self.skipWhitespaceAndComments();
                 const right = try self.parseAnd();
-                left = try AstNode.binaryOp(self.allocator, .@"or", left, right);
+                // Create apply("or", [left, right])
+                var args = try self.allocator.alloc(*AstNode, 2);
+                args[0] = left;
+                args[1] = right;
+                left = try AstNode.apply(self.allocator, "or", args, left.span.merge(right.span));
             } else {
                 break;
             }
@@ -195,7 +197,11 @@ pub const Parser = struct {
                 _ = self.advance();
                 self.skipWhitespaceAndComments();
                 const right = try self.parseComparison();
-                left = try AstNode.binaryOp(self.allocator, .@"and", left, right);
+                // Create apply("and", [left, right])
+                var args = try self.allocator.alloc(*AstNode, 2);
+                args[0] = left;
+                args[1] = right;
+                left = try AstNode.apply(self.allocator, "and", args, left.span.merge(right.span));
             } else {
                 break;
             }
@@ -209,10 +215,14 @@ pub const Parser = struct {
 
         while (true) {
             self.skipWhitespaceAndComments();
-            const op = self.matchComparisonOp() orelse break;
+            const op_name = self.matchComparisonOp() orelse break;
             self.skipWhitespaceAndComments();
             const right = try self.parseAddSub();
-            left = try AstNode.binaryOp(self.allocator, op, left, right);
+            // Create apply(op_name, [left, right])
+            var args = try self.allocator.alloc(*AstNode, 2);
+            args[0] = left;
+            args[1] = right;
+            left = try AstNode.apply(self.allocator, op_name, args, left.span.merge(right.span));
         }
         return left;
     }
@@ -227,12 +237,18 @@ pub const Parser = struct {
                 _ = self.advance();
                 self.skipWhitespaceAndComments();
                 const right = try self.parseMulDiv();
-                left = try AstNode.binaryOp(self.allocator, .add, left, right);
+                var args = try self.allocator.alloc(*AstNode, 2);
+                args[0] = left;
+                args[1] = right;
+                left = try AstNode.apply(self.allocator, "add", args, left.span.merge(right.span));
             } else if (self.checkText("-")) {
                 _ = self.advance();
                 self.skipWhitespaceAndComments();
                 const right = try self.parseMulDiv();
-                left = try AstNode.binaryOp(self.allocator, .sub, left, right);
+                var args = try self.allocator.alloc(*AstNode, 2);
+                args[0] = left;
+                args[1] = right;
+                left = try AstNode.apply(self.allocator, "sub", args, left.span.merge(right.span));
             } else {
                 break;
             }
@@ -250,7 +266,10 @@ pub const Parser = struct {
                 _ = self.advance();
                 self.skipWhitespaceAndComments();
                 const right = try self.parsePower();
-                left = try AstNode.binaryOp(self.allocator, .mul, left, right);
+                var args = try self.allocator.alloc(*AstNode, 2);
+                args[0] = left;
+                args[1] = right;
+                left = try AstNode.apply(self.allocator, "mul", args, left.span.merge(right.span));
             } else if (self.checkText("/")) {
                 // Check it's not a comment
                 if (self.pos + 1 < self.tokens.len) {
@@ -262,7 +281,10 @@ pub const Parser = struct {
                 _ = self.advance();
                 self.skipWhitespaceAndComments();
                 const right = try self.parsePower();
-                left = try AstNode.binaryOp(self.allocator, .div, left, right);
+                var args = try self.allocator.alloc(*AstNode, 2);
+                args[0] = left;
+                args[1] = right;
+                left = try AstNode.apply(self.allocator, "div", args, left.span.merge(right.span));
             } else {
                 break;
             }
@@ -279,7 +301,10 @@ pub const Parser = struct {
             _ = self.advance();
             self.skipWhitespaceAndComments();
             const exp = try self.parsePower(); // Right associative
-            return AstNode.binaryOp(self.allocator, .pow, base, exp);
+            var args = try self.allocator.alloc(*AstNode, 2);
+            args[0] = base;
+            args[1] = exp;
+            return AstNode.apply(self.allocator, "pow", args, base.span.merge(exp.span));
         }
         return base;
     }
@@ -292,7 +317,9 @@ pub const Parser = struct {
             const op_token = self.advance().?;
             self.skipWhitespaceAndComments();
             const operand = try self.parseUnary();
-            return AstNode.unaryOp(self.allocator, .neg, operand, SourceSpan{
+            var args = try self.allocator.alloc(*AstNode, 1);
+            args[0] = operand;
+            return AstNode.apply(self.allocator, "neg", args, SourceSpan{
                 .start = op_token.byte_start,
                 .end = operand.span.end,
             });
@@ -301,7 +328,9 @@ pub const Parser = struct {
             const op_token = self.advance().?;
             self.skipWhitespaceAndComments();
             const operand = try self.parseUnary();
-            return AstNode.unaryOp(self.allocator, .not, operand, SourceSpan{
+            var args = try self.allocator.alloc(*AstNode, 1);
+            args[0] = operand;
+            return AstNode.apply(self.allocator, "not", args, SourceSpan{
                 .start = op_token.byte_start,
                 .end = operand.span.end,
             });
@@ -320,7 +349,9 @@ pub const Parser = struct {
             // Square operator: x²
             if (self.checkText("²") or self.checkText("\xc2\xb2")) {
                 const op_token = self.advance().?;
-                node = try AstNode.unaryOp(self.allocator, .square, node, SourceSpan{
+                var args = try self.allocator.alloc(*AstNode, 1);
+                args[0] = node;
+                node = try AstNode.apply(self.allocator, "square", args, SourceSpan{
                     .start = node.span.start,
                     .end = op_token.byte_end,
                 });
@@ -362,6 +393,10 @@ pub const Parser = struct {
                 };
                 if (!is_callable) break;
 
+                // Get the function name from the identifier
+                const func_name = node.data.identifier;
+                const func_start = node.span.start;
+
                 _ = self.advance(); // consume '('
                 self.skipWhitespaceAndComments();
 
@@ -388,8 +423,9 @@ pub const Parser = struct {
 
                 self.skipWhitespaceAndComments();
                 const close = try self.expectText(")");
-                node = try AstNode.functionCall(self.allocator, node, try args.toOwnedSlice(self.allocator), SourceSpan{
-                    .start = node.span.start,
+                // Create apply node with the function name
+                node = try AstNode.apply(self.allocator, func_name, try args.toOwnedSlice(self.allocator), SourceSpan{
+                    .start = func_start,
                     .end = close.byte_end,
                 });
             } else {
@@ -476,12 +512,13 @@ pub const Parser = struct {
         return self.unexpectedTokenError();
     }
 
-    /// Parse parenthesized expression or tuple
+    /// Parse parenthesized expression, tuple, or block
+    /// Blocks contain statements (bindings, control flow), tuples/parens contain expressions
     fn parseParenOrTuple(self: *Parser) Error!*AstNode {
         const open = self.advance().?; // consume '('
         self.skipWhitespaceAndComments();
 
-        // Empty tuple
+        // Empty tuple/unit
         if (self.checkText(")")) {
             const close = self.advance().?;
             const empty_tuple: []*AstNode = &.{};
@@ -491,15 +528,18 @@ pub const Parser = struct {
             });
         }
 
-        // Parse first expression
-        const first = try self.parseExpression();
+        // Parse first element as a statement (allows bindings, control flow, and expressions)
+        const first = try self.parseStatement();
         self.skipWhitespaceAndComments();
 
-        // If there's a comma, this is a tuple
+        // If there's a comma, this is a tuple or block
         if (self.checkText(",")) {
             var elements: std.ArrayList(*AstNode) = .{ .items = &.{}, .capacity = 0 };
             errdefer elements.deinit(self.allocator);
             try elements.append(self.allocator, first);
+
+            // Track if any element is a binding (indicates this is a block)
+            var has_binding = (first.data == .binding);
 
             while (self.checkText(",")) {
                 _ = self.advance();
@@ -508,19 +548,27 @@ pub const Parser = struct {
                 // Allow trailing comma before )
                 if (self.checkText(")")) break;
 
-                const elem = try self.parseExpression();
+                const elem = try self.parseStatement();
+                if (elem.data == .binding) has_binding = true;
                 try elements.append(self.allocator, elem);
                 self.skipWhitespaceAndComments();
             }
 
             const close = try self.expectText(")");
-            return AstNode.tupleLit(self.allocator, try elements.toOwnedSlice(self.allocator), SourceSpan{
+            const span = SourceSpan{
                 .start = open.byte_start,
                 .end = close.byte_end,
-            });
+            };
+
+            // If any element is a binding, treat as block; otherwise tuple
+            if (has_binding) {
+                return AstNode.blockNode(self.allocator, try elements.toOwnedSlice(self.allocator), span);
+            } else {
+                return AstNode.tupleLit(self.allocator, try elements.toOwnedSlice(self.allocator), span);
+            }
         }
 
-        // Just a parenthesized expression
+        // Just a parenthesized expression (or single statement)
         _ = try self.expectText(")");
         return first;
     }
@@ -677,29 +725,30 @@ pub const Parser = struct {
         return self.advance().?;
     }
 
-    fn matchComparisonOp(self: *Parser) ?BinaryOp {
+    /// Returns the operation name for comparison operators
+    fn matchComparisonOp(self: *Parser) ?[]const u8 {
         if (self.pos >= self.tokens.len) return null;
         const text = self.tokens[self.pos].text;
 
-        const op: ?BinaryOp = if (std.mem.eql(u8, text, "!="))
-            .neq
+        const op_name: ?[]const u8 = if (std.mem.eql(u8, text, "!="))
+            "neq"
         else if (std.mem.eql(u8, text, "<="))
-            .lte
+            "lte"
         else if (std.mem.eql(u8, text, ">="))
-            .gte
+            "gte"
         else if (std.mem.eql(u8, text, "="))
-            .eq
+            "eq"
         else if (std.mem.eql(u8, text, "<"))
-            .lt
+            "lt"
         else if (std.mem.eql(u8, text, ">"))
-            .gt
+            "gt"
         else
             null;
 
-        if (op != null) {
+        if (op_name != null) {
             self.pos += 1;
         }
-        return op;
+        return op_name;
     }
 
     fn tryParseBindingPattern(self: *Parser) ?BindingPattern {
@@ -919,4 +968,3 @@ pub fn parseTokens(allocator: std.mem.Allocator, tokens: []const Token) !struct 
         .errors = try parser.errors.toOwnedSlice(allocator),
     };
 }
-

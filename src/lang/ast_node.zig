@@ -3,81 +3,128 @@
 //! Logos is a mathematical expression language that compiles to GLSL
 //! fragment shaders for GPU rendering. This module defines all AST
 //! node types used by the parser and code generators.
+//!
+//! Design: All operations (binary ops, unary ops, function calls) are unified
+//! into a single "apply" node. The operation name determines semantics:
+//! - Builtins like "add", "sin" are looked up in a table for arity/emit style
+//! - User-defined functions are resolved during semantic analysis
 
 const std = @import("std");
 
-/// Binary operators
-pub const BinaryOp = enum {
-    // Arithmetic
-    add, // +
-    sub, // -
-    mul, // *
-    div, // /
-    pow, // ^
+/// How an operation should be emitted in generated code
+pub const EmitStyle = enum {
+    /// Infix: `left op right` (e.g., `a + b`)
+    infix,
+    /// Prefix: `op operand` (e.g., `-x`, `!x`)
+    prefix,
+    /// Postfix: special handling (e.g., `x²` → `x * x`)
+    postfix,
+    /// Function call: `name(args...)` (e.g., `sin(x)`)
+    call,
+};
 
-    // Comparison
-    eq, // =
-    neq, // !=
-    lt, // <
-    gt, // >
-    lte, // <=
-    gte, // >=
+/// Built-in operation definition
+pub const Builtin = struct {
+    arity: u8,
+    emit_style: EmitStyle,
+    /// GLSL representation (null means special handling required)
+    glsl: ?[]const u8,
+    /// Category for type checking
+    category: Category,
 
-    // Logical
-    @"and", // and
-    @"or", // or
+    pub const Category = enum {
+        /// Arithmetic: numeric -> numeric (e.g., add, mul)
+        arithmetic,
+        /// Comparison: numeric -> bool (e.g., eq, lt)
+        comparison,
+        /// Logical: bool -> bool (e.g., and, or, not)
+        logical,
+        /// Math function: numeric -> numeric (e.g., sin, cos)
+        math,
+        /// Special: custom type rules
+        special,
+    };
 
-    /// Convert to GLSL operator string
-    pub fn toGlsl(self: BinaryOp) []const u8 {
-        return switch (self) {
-            .add => "+",
-            .sub => "-",
-            .mul => "*",
-            .div => "/",
-            .pow => "pow", // GLSL uses pow(a, b) function
-            .eq => "==",
-            .neq => "!=",
-            .lt => "<",
-            .gt => ">",
-            .lte => "<=",
-            .gte => ">=",
-            .@"and" => "&&",
-            .@"or" => "||",
-        };
+    /// Check if this is a comparison operation (returns bool)
+    pub fn isComparison(self: Builtin) bool {
+        return self.category == .comparison;
     }
 
-    /// Check if this is a comparison operator (returns bool)
-    pub fn isComparison(self: BinaryOp) bool {
-        return switch (self) {
-            .eq, .neq, .lt, .gt, .lte, .gte => true,
-            else => false,
-        };
-    }
-
-    /// Check if this is a logical operator
-    pub fn isLogical(self: BinaryOp) bool {
-        return switch (self) {
-            .@"and", .@"or" => true,
-            else => false,
-        };
+    /// Check if this is a logical operation
+    pub fn isLogical(self: Builtin) bool {
+        return self.category == .logical;
     }
 };
 
-/// Unary operators
-pub const UnaryOp = enum {
-    neg, // -x (negation)
-    not, // !x (logical not)
-    square, // x² (parsed from ² suffix)
+/// Table of all built-in operations
+/// Operations are identified by string name and looked up here for metadata
+pub const builtins = std.StaticStringMap(Builtin).initComptime(&[_]struct { []const u8, Builtin }{
+    // ============ Arithmetic (infix, 2 args) ============
+    .{ "add", Builtin{ .arity = 2, .emit_style = .infix, .glsl = "+", .category = .arithmetic } },
+    .{ "sub", Builtin{ .arity = 2, .emit_style = .infix, .glsl = "-", .category = .arithmetic } },
+    .{ "mul", Builtin{ .arity = 2, .emit_style = .infix, .glsl = "*", .category = .arithmetic } },
+    .{ "div", Builtin{ .arity = 2, .emit_style = .infix, .glsl = "/", .category = .arithmetic } },
+    .{ "pow", Builtin{ .arity = 2, .emit_style = .call, .glsl = "pow", .category = .arithmetic } },
 
-    /// Convert to GLSL
-    pub fn toGlsl(self: UnaryOp) []const u8 {
-        return switch (self) {
-            .neg => "-",
-            .not => "!",
-            .square => "", // Handled specially: emits (x * x)
-        };
-    }
-};
+    // ============ Comparison (infix, 2 args, returns bool) ============
+    .{ "eq", Builtin{ .arity = 2, .emit_style = .infix, .glsl = "==", .category = .comparison } },
+    .{ "neq", Builtin{ .arity = 2, .emit_style = .infix, .glsl = "!=", .category = .comparison } },
+    .{ "lt", Builtin{ .arity = 2, .emit_style = .infix, .glsl = "<", .category = .comparison } },
+    .{ "gt", Builtin{ .arity = 2, .emit_style = .infix, .glsl = ">", .category = .comparison } },
+    .{ "lte", Builtin{ .arity = 2, .emit_style = .infix, .glsl = "<=", .category = .comparison } },
+    .{ "gte", Builtin{ .arity = 2, .emit_style = .infix, .glsl = ">=", .category = .comparison } },
+
+    // ============ Logical (2 args for binary, 1 for not) ============
+    .{ "and", Builtin{ .arity = 2, .emit_style = .infix, .glsl = "&&", .category = .logical } },
+    .{ "or", Builtin{ .arity = 2, .emit_style = .infix, .glsl = "||", .category = .logical } },
+    .{ "not", Builtin{ .arity = 1, .emit_style = .prefix, .glsl = "!", .category = .logical } },
+
+    // ============ Unary arithmetic (prefix, 1 arg) ============
+    .{ "neg", Builtin{ .arity = 1, .emit_style = .prefix, .glsl = "-", .category = .arithmetic } },
+    .{ "square", Builtin{ .arity = 1, .emit_style = .postfix, .glsl = null, .category = .arithmetic } }, // x² → (x * x)
+
+    // ============ Math functions (call style) ============
+    .{ "sin", Builtin{ .arity = 1, .emit_style = .call, .glsl = "sin", .category = .math } },
+    .{ "cos", Builtin{ .arity = 1, .emit_style = .call, .glsl = "cos", .category = .math } },
+    .{ "tan", Builtin{ .arity = 1, .emit_style = .call, .glsl = "tan", .category = .math } },
+    .{ "asin", Builtin{ .arity = 1, .emit_style = .call, .glsl = "asin", .category = .math } },
+    .{ "acos", Builtin{ .arity = 1, .emit_style = .call, .glsl = "acos", .category = .math } },
+    .{ "atan", Builtin{ .arity = 1, .emit_style = .call, .glsl = "atan", .category = .math } },
+    .{ "sinh", Builtin{ .arity = 1, .emit_style = .call, .glsl = "sinh", .category = .math } },
+    .{ "cosh", Builtin{ .arity = 1, .emit_style = .call, .glsl = "cosh", .category = .math } },
+    .{ "tanh", Builtin{ .arity = 1, .emit_style = .call, .glsl = "tanh", .category = .math } },
+    .{ "log", Builtin{ .arity = 1, .emit_style = .call, .glsl = "log", .category = .math } },
+    .{ "log2", Builtin{ .arity = 1, .emit_style = .call, .glsl = "log2", .category = .math } },
+    .{ "log10", Builtin{ .arity = 1, .emit_style = .call, .glsl = "log10", .category = .math } },
+    .{ "exp", Builtin{ .arity = 1, .emit_style = .call, .glsl = "exp", .category = .math } },
+    .{ "exp2", Builtin{ .arity = 1, .emit_style = .call, .glsl = "exp2", .category = .math } },
+    .{ "sqrt", Builtin{ .arity = 1, .emit_style = .call, .glsl = "sqrt", .category = .math } },
+    .{ "abs", Builtin{ .arity = 1, .emit_style = .call, .glsl = "abs", .category = .math } },
+    .{ "sign", Builtin{ .arity = 1, .emit_style = .call, .glsl = "sign", .category = .math } },
+    .{ "floor", Builtin{ .arity = 1, .emit_style = .call, .glsl = "floor", .category = .math } },
+    .{ "ceil", Builtin{ .arity = 1, .emit_style = .call, .glsl = "ceil", .category = .math } },
+    .{ "round", Builtin{ .arity = 1, .emit_style = .call, .glsl = "round", .category = .math } },
+    .{ "fract", Builtin{ .arity = 1, .emit_style = .call, .glsl = "fract", .category = .math } },
+    .{ "mod", Builtin{ .arity = 2, .emit_style = .call, .glsl = "mod", .category = .math } },
+    .{ "min", Builtin{ .arity = 2, .emit_style = .call, .glsl = "min", .category = .math } },
+    .{ "max", Builtin{ .arity = 2, .emit_style = .call, .glsl = "max", .category = .math } },
+    .{ "step", Builtin{ .arity = 2, .emit_style = .call, .glsl = "step", .category = .math } },
+    .{ "clamp", Builtin{ .arity = 3, .emit_style = .call, .glsl = "clamp", .category = .math } },
+    .{ "mix", Builtin{ .arity = 3, .emit_style = .call, .glsl = "mix", .category = .math } },
+    .{ "smoothstep", Builtin{ .arity = 3, .emit_style = .call, .glsl = "smoothstep", .category = .math } },
+
+    // ============ Vector functions ============
+    .{ "len", Builtin{ .arity = 1, .emit_style = .call, .glsl = "length", .category = .special } },
+    .{ "length", Builtin{ .arity = 1, .emit_style = .call, .glsl = "length", .category = .special } },
+    .{ "normalize", Builtin{ .arity = 1, .emit_style = .call, .glsl = "normalize", .category = .special } },
+    .{ "dot", Builtin{ .arity = 2, .emit_style = .call, .glsl = "dot", .category = .special } },
+    .{ "cross", Builtin{ .arity = 2, .emit_style = .call, .glsl = "cross", .category = .special } },
+});
+
+/// Look up a builtin by name
+pub fn getBuiltin(name: []const u8) ?Builtin {
+    return builtins.get(name);
+}
 
 /// Primitive types in the Logos type system
 pub const PrimitiveType = enum {
@@ -172,24 +219,15 @@ pub const AstNode = struct {
 
         // ============ Expressions ============
 
-        /// Binary operation: `a + b`, `x and y`
-        binary_op: struct {
-            op: BinaryOp,
-            left: *AstNode,
-            right: *AstNode,
-        },
-
-        /// Unary operation: `-x`, `!cond`, `x²`
-        unary_op: struct {
-            op: UnaryOp,
-            operand: *AstNode,
-        },
-
-        /// Function call: `sin(x)`, `mandelbrot(x, y)`
-        function_call: struct {
-            /// Function name or expression
-            callee: *AstNode,
-            /// Arguments
+        /// Unified operation application: covers all operations
+        /// - Binary ops: `a + b` → apply("add", [a, b])
+        /// - Unary ops: `-x` → apply("neg", [x])
+        /// - Function calls: `sin(x)` → apply("sin", [x])
+        /// - User functions: `foo(a, b)` → apply("foo", [a, b])
+        apply: struct {
+            /// Operation/function name (e.g., "add", "sin", "my_func")
+            name: []const u8,
+            /// Arguments to the operation
             args: []*AstNode,
         },
 
@@ -291,31 +329,11 @@ pub const AstNode = struct {
         return node;
     }
 
-    /// Create a binary operation node
-    pub fn binaryOp(allocator: std.mem.Allocator, op: BinaryOp, left: *AstNode, right: *AstNode) !*AstNode {
+    /// Create an apply node (unified operation)
+    pub fn apply(allocator: std.mem.Allocator, name: []const u8, args: []*AstNode, span: SourceSpan) !*AstNode {
         const node = try allocator.create(AstNode);
         node.* = .{
-            .data = .{ .binary_op = .{ .op = op, .left = left, .right = right } },
-            .span = left.span.merge(right.span),
-        };
-        return node;
-    }
-
-    /// Create a unary operation node
-    pub fn unaryOp(allocator: std.mem.Allocator, op: UnaryOp, operand: *AstNode, span: SourceSpan) !*AstNode {
-        const node = try allocator.create(AstNode);
-        node.* = .{
-            .data = .{ .unary_op = .{ .op = op, .operand = operand } },
-            .span = span.merge(operand.span),
-        };
-        return node;
-    }
-
-    /// Create a function call node
-    pub fn functionCall(allocator: std.mem.Allocator, callee: *AstNode, args: []*AstNode, span: SourceSpan) !*AstNode {
-        const node = try allocator.create(AstNode);
-        node.* = .{
-            .data = .{ .function_call = .{ .callee = callee, .args = args } },
+            .data = .{ .apply = .{ .name = name, .args = args } },
             .span = span,
         };
         return node;
@@ -438,10 +456,8 @@ pub const AstNode = struct {
                     std.mem.eql(u8, name, "y") or
                     std.mem.eql(u8, name, "z");
             },
-            .binary_op => |op| op.left.isAxisDependent() or op.right.isAxisDependent(),
-            .unary_op => |op| op.operand.isAxisDependent(),
-            .function_call => |call| {
-                for (call.args) |arg| {
+            .apply => |op| {
+                for (op.args) |arg| {
                     if (arg.isAxisDependent()) return true;
                 }
                 return false;
@@ -472,10 +488,140 @@ pub const AstNode = struct {
     pub fn isBooleanExpr(self: *const AstNode) bool {
         return switch (self.data) {
             .bool_lit => true,
-            .binary_op => |op| op.op.isComparison() or op.op.isLogical(),
-            .unary_op => |op| op.op == .not,
+            .apply => |op| {
+                if (getBuiltin(op.name)) |builtin| {
+                    return builtin.isComparison() or builtin.isLogical();
+                }
+                return false;
+            },
             else => false,
         };
+    }
+
+    // ============ Debug Printing ============
+
+    /// Print AST node with indentation for debugging
+    pub fn debugPrint(self: *const AstNode, depth: usize) void {
+        const max_depth = 64;
+        const indent = "  " ** max_depth;
+        const clamped_depth = @min(depth, max_depth);
+        const prefix = indent[0 .. clamped_depth * 2];
+
+        switch (self.data) {
+            .number => |n| {
+                std.debug.print("{s}Number: {d}\n", .{ prefix, n });
+            },
+            .identifier => |name| {
+                std.debug.print("{s}Identifier: {s}\n", .{ prefix, name });
+            },
+            .bool_lit => |b| {
+                std.debug.print("{s}Bool: {}\n", .{ prefix, b });
+            },
+            .apply => |op| {
+                const builtin_info = if (getBuiltin(op.name)) |b|
+                    @tagName(b.emit_style)
+                else
+                    "user";
+                std.debug.print("{s}Apply: {s} ({s}, {d} args)\n", .{ prefix, op.name, builtin_info, op.args.len });
+                for (op.args, 0..) |arg, i| {
+                    std.debug.print("{s}  arg[{d}]:\n", .{ prefix, i });
+                    arg.debugPrint(depth + 2);
+                }
+            },
+            .property_access => |acc| {
+                std.debug.print("{s}PropertyAccess: .{s}\n", .{ prefix, acc.property });
+                std.debug.print("{s}  base:\n", .{prefix});
+                acc.base.debugPrint(depth + 2);
+            },
+            .tuple => |elements| {
+                std.debug.print("{s}Tuple ({d} elements):\n", .{ prefix, elements.len });
+                for (elements, 0..) |elem, i| {
+                    std.debug.print("{s}  [{d}]:\n", .{ prefix, i });
+                    elem.debugPrint(depth + 2);
+                }
+            },
+            .cast => |c| {
+                std.debug.print("{s}Cast: {s}\n", .{ prefix, @tagName(c.target_type) });
+                std.debug.print("{s}  operand:\n", .{prefix});
+                c.operand.debugPrint(depth + 2);
+            },
+            .index => |idx| {
+                std.debug.print("{s}Index:\n", .{prefix});
+                std.debug.print("{s}  base:\n", .{prefix});
+                idx.base.debugPrint(depth + 2);
+                std.debug.print("{s}  index:\n", .{prefix});
+                idx.index_expr.debugPrint(depth + 2);
+            },
+            .binding => |b| {
+                switch (b.pattern) {
+                    .single => |name| std.debug.print("{s}Binding: {s}\n", .{ prefix, name }),
+                    .tuple => |names| {
+                        std.debug.print("{s}Binding: (", .{prefix});
+                        for (names, 0..) |name, i| {
+                            if (i > 0) std.debug.print(", ", .{});
+                            std.debug.print("{s}", .{name});
+                        }
+                        std.debug.print(")\n", .{});
+                    },
+                }
+                std.debug.print("{s}  value:\n", .{prefix});
+                b.value.debugPrint(depth + 2);
+            },
+            .if_expr => |ie| {
+                std.debug.print("{s}If:\n", .{prefix});
+                std.debug.print("{s}  condition:\n", .{prefix});
+                ie.condition.debugPrint(depth + 2);
+                std.debug.print("{s}  then:\n", .{prefix});
+                ie.then_branch.debugPrint(depth + 2);
+                if (ie.else_branch) |eb| {
+                    std.debug.print("{s}  else:\n", .{prefix});
+                    eb.debugPrint(depth + 2);
+                }
+            },
+            .while_loop => |wl| {
+                std.debug.print("{s}While:\n", .{prefix});
+                std.debug.print("{s}  condition:\n", .{prefix});
+                wl.condition.debugPrint(depth + 2);
+                std.debug.print("{s}  body:\n", .{prefix});
+                wl.body.debugPrint(depth + 2);
+            },
+            .for_loop => |fl| {
+                std.debug.print("{s}For:\n", .{prefix});
+                std.debug.print("{s}  init:\n", .{prefix});
+                fl.init.debugPrint(depth + 2);
+                std.debug.print("{s}  condition:\n", .{prefix});
+                fl.condition.debugPrint(depth + 2);
+                std.debug.print("{s}  update:\n", .{prefix});
+                fl.update.debugPrint(depth + 2);
+                std.debug.print("{s}  body:\n", .{prefix});
+                fl.body.debugPrint(depth + 2);
+            },
+            .function_def => |fd| {
+                std.debug.print("{s}FunctionDef: {s}\n", .{ prefix, fd.name });
+                std.debug.print("{s}  params: ", .{prefix});
+                for (fd.params, 0..) |p, i| {
+                    if (i > 0) std.debug.print(", ", .{});
+                    std.debug.print("{s}", .{p});
+                }
+                std.debug.print("\n", .{});
+                std.debug.print("{s}  body:\n", .{prefix});
+                fd.body.debugPrint(depth + 2);
+            },
+            .block => |stmts| {
+                std.debug.print("{s}Block ({d} statements):\n", .{ prefix, stmts.len });
+                for (stmts, 0..) |stmt, i| {
+                    std.debug.print("{s}  [{d}]:\n", .{ prefix, i });
+                    stmt.debugPrint(depth + 2);
+                }
+            },
+        }
+    }
+
+    /// Print the entire AST tree with a header
+    pub fn debugPrintTree(self: *const AstNode) void {
+        std.debug.print("\n========== AST DEBUG OUTPUT ==========\n", .{});
+        self.debugPrint(0);
+        std.debug.print("=======================================\n\n", .{});
     }
 };
 

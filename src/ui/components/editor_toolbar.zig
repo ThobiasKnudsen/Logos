@@ -9,6 +9,7 @@ const theme = @import("../theme.zig");
 const session = @import("../../session/session.zig");
 const lexer_mod = @import("../../lang/lexer.zig");
 const parser_mod = @import("../../lang/parser.zig");
+const glsl_gen = @import("../../lang/glsl_gen.zig");
 
 // Entypo icons from dvui
 const entypo = dvui.entypo;
@@ -316,8 +317,6 @@ pub const EditorToolbar = struct {
 
     /// Parse tokens into an AST
     fn parseTokens(self: *EditorToolbar, active_session: *session.TabSession) void {
-        _ = self;
-
         const tokens = active_session.parse_state.tokens orelse {
             active_session.parse_state.status = .err;
             active_session.parse_state.error_message = "No tokens to parse";
@@ -328,6 +327,9 @@ pub const EditorToolbar = struct {
             active_session.parse_state.status = .ready;
             return;
         }
+
+        // DEBUG: Print all tokens
+        debugPrintTokens(tokens, active_session.content.items);
 
         active_session.parse_state.status = .parsing;
 
@@ -359,6 +361,20 @@ pub const EditorToolbar = struct {
 
                 active_session.parse_state.error_message = formatted;
 
+                // DEBUG: Print error context
+                std.debug.print("\n========== PARSE ERROR ==========\n", .{});
+                std.debug.print("Error: {s}\n", .{first_err.message});
+                std.debug.print("At byte offset: {d}-{d}\n", .{ first_err.byte_start, first_err.byte_end });
+                std.debug.print("Location: Ln {d}, Col {d}\n", .{ loc.line, loc.column });
+
+                // Show the problematic token/area
+                if (first_err.byte_start < content.len) {
+                    const context_start = if (first_err.byte_start > 20) first_err.byte_start - 20 else 0;
+                    const context_end = @min(first_err.byte_end + 20, content.len);
+                    std.debug.print("Context: ...{s}...\n", .{content[context_start..context_end]});
+                }
+                std.debug.print("=================================\n\n", .{});
+
                 // Copy errors to parse state
                 for (parser.errors.items) |parse_err| {
                     active_session.parse_state.errors.append(active_session.allocator, parse_err) catch {};
@@ -371,8 +387,119 @@ pub const EditorToolbar = struct {
 
         // Store the AST
         active_session.parse_state.ast = ast;
-        active_session.parse_state.status = .ready;
 
         std.log.info("Parsed {} tokens into AST", .{tokens.len});
+
+        // DEBUG: Print AST when play is clicked
+        ast.debugPrintTree();
+
+        // Generate GLSL shaders
+        self.generateGlsl(active_session);
+    }
+
+    /// Generate GLSL shaders from the AST
+    fn generateGlsl(_: *EditorToolbar, active_session: *session.TabSession) void {
+        const ast = active_session.parse_state.ast orelse {
+            active_session.parse_state.status = .err;
+            active_session.parse_state.error_message = "No AST to generate GLSL from";
+            return;
+        };
+
+        // Free any previously generated shaders
+        active_session.parse_state.freeGeneratedShaders();
+
+        // Generate GLSL
+        var generator = glsl_gen.GlslGenerator.init(active_session.allocator);
+        defer generator.deinit();
+
+        const result = generator.generate(ast) catch |err| {
+            std.log.err("GLSL generation error: {}", .{err});
+            active_session.parse_state.status = .err;
+            active_session.parse_state.error_message = "GLSL generation failed";
+            return;
+        };
+
+        if (result.shaders.len == 0) {
+            std.log.info("No root outputs found - nothing to render", .{});
+            active_session.parse_state.status = .ready;
+            active_session.parse_state.error_message = "No outputs to render";
+            return;
+        }
+
+        // Store the generated shaders
+        active_session.parse_state.generated_shaders = result.shaders;
+        active_session.parse_state.status = .ready;
+
+        std.log.info("Generated {} GLSL fragment shader(s)", .{result.shaders.len});
+
+        // DEBUG: Print generated shaders
+        debugPrintShaders(result.shaders);
+    }
+
+    /// Debug print all generated shaders
+    fn debugPrintShaders(shaders: []const glsl_gen.GeneratedShader) void {
+        std.debug.print("\n========== GENERATED GLSL SHADERS ==========\n", .{});
+        std.debug.print("Total shaders: {d}\n\n", .{shaders.len});
+
+        for (shaders, 0..) |shader, i| {
+            std.debug.print("--- Shader {d} ({s}) ---\n", .{
+                i,
+                @tagName(shader.output_type),
+            });
+            std.debug.print("{s}\n", .{shader.source});
+            std.debug.print("--- End Shader {d} ---\n\n", .{i});
+        }
+        std.debug.print("=============================================\n\n", .{});
+    }
+
+    /// Debug print all tokens with their types and positions
+    fn debugPrintTokens(tokens: []const session.parse_state.Token, content: []const u8) void {
+        std.debug.print("\n========== TOKENS DEBUG ==========\n", .{});
+        std.debug.print("Total tokens: {d}\n\n", .{tokens.len});
+
+        for (tokens, 0..) |token, i| {
+            const loc = session.parse_state.byteOffsetToLocation(content, token.byte_start);
+
+            // Skip whitespace for cleaner output
+            if (token.token_type == .whitespace) continue;
+
+            // Escape newlines in token text for display
+            var display_text: [64]u8 = undefined;
+            var display_len: usize = 0;
+            for (token.text) |c| {
+                if (display_len >= 60) {
+                    display_text[display_len] = '.';
+                    display_len += 1;
+                    display_text[display_len] = '.';
+                    display_len += 1;
+                    display_text[display_len] = '.';
+                    display_len += 1;
+                    break;
+                }
+                if (c == '\n') {
+                    display_text[display_len] = '\\';
+                    display_len += 1;
+                    display_text[display_len] = 'n';
+                    display_len += 1;
+                } else if (c == '\t') {
+                    display_text[display_len] = '\\';
+                    display_len += 1;
+                    display_text[display_len] = 't';
+                    display_len += 1;
+                } else {
+                    display_text[display_len] = c;
+                    display_len += 1;
+                }
+            }
+
+            std.debug.print("[{d:4}] {s:12} Ln{d:3}:Col{d:3}  \"{s}\"\n", .{
+                i,
+                @tagName(token.token_type),
+                loc.line,
+                loc.column,
+                display_text[0..display_len],
+            });
+        }
+        std.debug.print("==================================\n\n", .{});
     }
 };
