@@ -266,11 +266,12 @@ pub const GpuPipeline = struct {
             .props = 0,
         };
 
+        std.log.info("Calling SDL_CreateGPUGraphicsPipeline...", .{});
         self.pipeline = c.SDL_CreateGPUGraphicsPipeline(device, &pipeline_info) orelse {
             return self.setError("Failed to create graphics pipeline");
         };
 
-        std.log.info("Graphics pipeline created successfully", .{});
+        std.log.info("SDL_CreateGPUGraphicsPipeline succeeded", .{});
     }
 
     /// Ensure render texture exists and has correct size
@@ -317,8 +318,20 @@ pub const GpuPipeline = struct {
         const device_opaque = self.device orelse return error.NoDevice;
         const device: *c.SDL_GPUDevice = @ptrCast(device_opaque);
 
-        // Compile new fragment shader first (before touching any GPU state)
-        const new_shader = shader_compiler.compileAndCreateShader(
+        // Recompile vertex shader too (helps with AMD RADV driver compatibility)
+        // Some drivers have issues when pipeline shaders are compiled at different times
+        const new_vertex = shader_compiler.compileAndCreateShader(
+            self.allocator,
+            device_opaque,
+            shaders.default_vertex_glsl,
+            .vertex,
+        ) catch |err| {
+            std.log.err("Failed to compile vertex shader: {}", .{err});
+            return self.setError("Vertex shader compilation failed");
+        };
+
+        // Compile new fragment shader
+        const new_fragment = shader_compiler.compileAndCreateShader(
             self.allocator,
             device_opaque,
             glsl_source,
@@ -342,13 +355,14 @@ pub const GpuPipeline = struct {
         // Resources will be cleaned up when the device is destroyed at app shutdown.
         self.pipeline = null;
 
-        // Set new shader
-        self.fragment_shader = new_shader;
+        // Set new shaders
+        self.vertex_shader = new_vertex;
+        self.fragment_shader = new_fragment;
 
-        // Create new pipeline with new shader
+        // Create new pipeline with new shaders
         try self.createPipeline();
 
-        std.log.info("Fragment shader updated successfully", .{});
+        std.log.info("Shaders updated successfully", .{});
     }
 
     /// Render a frame to the render texture (non-blocking)

@@ -135,4 +135,83 @@ pub fn build(b: *std.Build) void {
     const run_test_live = b.addRunArtifact(regex_trie_tests);
     const test_live_step = b.step("test-live", "Run the test with live output");
     test_live_step.dependOn(&run_test_live.step);
+
+    // ── Shader Generation Tests ──────────────────────────────────────────
+    // Tests the shader pipeline: Logos expression → Tokens → AST → GLSL → SPIRV
+    const shader_gen_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/shader_gen_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    shader_gen_test_mod.addImport("pcrez", pcrez_mod);
+    shader_gen_test_mod.addImport("regex_splitting", regex_splitting_mod);
+
+    const shader_gen_test = b.addTest(.{
+        .root_module = shader_gen_test_mod,
+    });
+    shader_gen_test.linkLibC();
+    shader_gen_test.linkLibrary(pcre2_dep.artifact("pcre2-8"));
+
+    // Link shaderc for GLSL to SPIRV compilation (no SDL needed)
+    shader_gen_test.addLibraryPath(.{ .cwd_relative = "build/lib" });
+    shader_gen_test.addIncludePath(.{ .cwd_relative = "build/_deps/shaderc-src/libshaderc/include" });
+    shader_gen_test.addRPath(.{ .cwd_relative = "build/lib" });
+    shader_gen_test.linkSystemLibrary("shaderc_shared");
+
+    const run_shader_gen_test = b.addRunArtifact(shader_gen_test);
+    const shader_gen_test_step = b.step("test-shader-gen", "Run shader generation pipeline tests");
+    shader_gen_test_step.dependOn(&run_shader_gen_test.step);
+
+    // Also create an executable version for more detailed debugging
+    const shader_gen_exe = b.addExecutable(.{
+        .name = "shader_gen_test",
+        .root_module = shader_gen_test_mod,
+    });
+    shader_gen_exe.linkLibC();
+    shader_gen_exe.linkLibrary(pcre2_dep.artifact("pcre2-8"));
+    shader_gen_exe.addLibraryPath(.{ .cwd_relative = "build/lib" });
+    shader_gen_exe.addIncludePath(.{ .cwd_relative = "build/_deps/shaderc-src/libshaderc/include" });
+    shader_gen_exe.addRPath(.{ .cwd_relative = "build/lib" });
+    shader_gen_exe.linkSystemLibrary("shaderc_shared");
+
+    b.installArtifact(shader_gen_exe);
+
+    const run_shader_gen_exe = b.addRunArtifact(shader_gen_exe);
+    const run_shader_gen_step = b.step("run-shader-gen-test", "Run shader generation test executable");
+    run_shader_gen_step.dependOn(&run_shader_gen_exe.step);
+
+    // ── GPU Pipeline Test ────────────────────────────────────────────────
+    // Tests actual GPU pipeline creation (crashes on AMD RADV)
+    // Pipeline: Logos expression → Tokens → AST → GLSL → SPIRV → SDL Shader → GPU Pipeline
+    const gpu_pipeline_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/gpu_pipeline_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    gpu_pipeline_test_mod.addImport("pcrez", pcrez_mod);
+    gpu_pipeline_test_mod.addImport("regex_splitting", regex_splitting_mod);
+
+    const gpu_pipeline_exe = b.addExecutable(.{
+        .name = "gpu_pipeline_test",
+        .root_module = gpu_pipeline_test_mod,
+    });
+    gpu_pipeline_exe.linkLibC();
+    gpu_pipeline_exe.linkLibrary(pcre2_dep.artifact("pcre2-8"));
+
+    // Link SDL, shaderc, and SDL_ShaderCross for full pipeline
+    gpu_pipeline_exe.addLibraryPath(.{ .cwd_relative = "build/lib" });
+    gpu_pipeline_exe.addIncludePath(.{ .cwd_relative = "build/_deps/shaderc-src/libshaderc/include" });
+    gpu_pipeline_exe.addIncludePath(.{ .cwd_relative = "build/_deps/sdl3_shadercross-src/include" });
+    gpu_pipeline_exe.addIncludePath(.{ .cwd_relative = "build/_deps/sdl3-src/include" });
+    gpu_pipeline_exe.addRPath(.{ .cwd_relative = "build/lib" });
+    gpu_pipeline_exe.linkSystemLibrary("shaderc_shared");
+    gpu_pipeline_exe.addObjectFile(.{ .cwd_relative = "build/lib/libSDL3_shadercross.a" });
+    gpu_pipeline_exe.addObjectFile(.{ .cwd_relative = "build/lib/libSDL3.a" });
+    gpu_pipeline_exe.linkSystemLibrary("spirv-cross-c-shared");
+
+    b.installArtifact(gpu_pipeline_exe);
+
+    const run_gpu_pipeline_test = b.addRunArtifact(gpu_pipeline_exe);
+    const gpu_pipeline_test_step = b.step("test-gpu-pipeline", "Run GPU pipeline test (requires display)");
+    gpu_pipeline_test_step.dependOn(&run_gpu_pipeline_test.step);
 }

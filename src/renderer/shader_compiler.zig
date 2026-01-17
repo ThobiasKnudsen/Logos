@@ -7,17 +7,16 @@
 
 const std = @import("std");
 
-// C bindings for shaderc and SDL_ShaderCross
+// C bindings for shaderc, SDL, and SDL_ShaderCross (all in one cimport for type compatibility)
 const c = @cImport({
     @cInclude("shaderc/shaderc.h");
+    @cInclude("SDL3/SDL.h");
+    @cInclude("SDL3/SDL_gpu.h");
     @cInclude("SDL3_shadercross/SDL_shadercross.h");
 });
 
-// Re-export SDL for GPU operations
-pub const sdl = @cImport({
-    @cInclude("SDL3/SDL.h");
-    @cInclude("SDL3/SDL_gpu.h");
-});
+// Re-export SDL for external use (GPU operations)
+pub const sdl = c;
 
 /// Shader stage enum
 pub const ShaderStage = enum {
@@ -124,7 +123,7 @@ pub fn compileGlslToSpirv(
     }
     defer c.shaderc_compile_options_release(options);
 
-    // Match C code: no optimization for shader debugging
+    // No optimization for easier debugging
     c.shaderc_compile_options_set_optimization_level(options, c.shaderc_optimization_level_zero);
     // Target Vulkan 1.0 / SPIRV 1.0 for maximum compatibility
     c.shaderc_compile_options_set_target_env(options, c.shaderc_target_env_vulkan, c.shaderc_env_version_vulkan_1_0);
@@ -194,13 +193,15 @@ pub fn reflectSpirv(spirv: []const u8) ShaderError!ShaderResourceInfo {
 }
 
 /// Create an SDL GPU shader from SPIRV bytecode
-/// Uses SDL_ShaderCross to cross-compile to native format
+/// Uses SDL_CreateGPUShader directly with SPIRV format (same method as dvui backend)
 /// Note: device and return are *anyopaque to avoid cimport type conflicts with dvui backend
 pub fn createGpuShader(
     device: *anyopaque,
     spirv: []const u8,
     stage: ShaderStage,
 ) ShaderError!*anyopaque {
+    const typed_device: *c.SDL_GPUDevice = @ptrCast(@alignCast(device));
+
     // Reflect to get resource info
     const metadata = c.SDL_ShaderCross_ReflectGraphicsSPIRV(
         spirv.ptr,
@@ -209,21 +210,34 @@ pub fn createGpuShader(
     ) orelse return ShaderError.ReflectionFailed;
     defer c.SDL_free(metadata);
 
-    var info = c.SDL_ShaderCross_SPIRV_Info{
-        .bytecode = spirv.ptr,
-        .bytecode_size = spirv.len,
-        .entrypoint = "main",
-        .shader_stage = stage.toShaderCrossStage(),
-        .props = 0,
+    // Use SDL_CreateGPUShader directly with SPIRV format (same as dvui backend)
+    // This is more compatible than SDL_ShaderCross_CompileGraphicsShaderFromSPIRV
+    var shader_info = std.mem.zeroes(c.SDL_GPUShaderCreateInfo);
+    shader_info.code = spirv.ptr;
+    shader_info.code_size = spirv.len;
+    shader_info.entrypoint = "main";
+    shader_info.format = c.SDL_GPU_SHADERFORMAT_SPIRV;
+    shader_info.stage = switch (stage) {
+        .vertex => c.SDL_GPU_SHADERSTAGE_VERTEX,
+        .fragment => c.SDL_GPU_SHADERSTAGE_FRAGMENT,
+        .compute => @as(c.SDL_GPUShaderStage, 0),
+    };
+    shader_info.num_samplers = metadata.*.resource_info.num_samplers;
+    shader_info.num_storage_textures = metadata.*.resource_info.num_storage_textures;
+    shader_info.num_storage_buffers = metadata.*.resource_info.num_storage_buffers;
+    shader_info.num_uniform_buffers = metadata.*.resource_info.num_uniform_buffers;
+
+    std.log.info("Calling SDL_CreateGPUShader (SPIRV format, {d} uniforms)...", .{metadata.*.resource_info.num_uniform_buffers});
+
+    const gpu_shader = c.SDL_CreateGPUShader(typed_device, &shader_info) orelse {
+        const err_msg = c.SDL_GetError();
+        if (err_msg != null and err_msg[0] != 0) {
+            std.log.err("SDL_CreateGPUShader failed: {s}", .{err_msg});
+        }
+        return ShaderError.ShaderCreationFailed;
     };
 
-    const gpu_shader = c.SDL_ShaderCross_CompileGraphicsShaderFromSPIRV(
-        @ptrCast(device),
-        &info,
-        &metadata.*.resource_info,
-        0,
-    ) orelse return ShaderError.ShaderCreationFailed;
-
+    std.log.info("SDL_CreateGPUShader succeeded", .{});
     return @ptrCast(gpu_shader);
 }
 

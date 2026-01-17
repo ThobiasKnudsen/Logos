@@ -961,36 +961,17 @@ pub const GlslGenerator = struct {
                 try self.writeLine("out_color = result;");
             },
             .boolean => {
-                // For boolean expressions, use corner checking for proper curve rendering
-                // Calculate half-pixel size for corner sampling
-                try self.writeLine("// Half-pixel offsets for corner sampling");
-                try self.writeLine("vec2 axis_range = axis_max - axis_min;");
-                try self.writeLine("float dx = axis_range.x / (2.0 * resolution.x);");
-                try self.writeLine("float dy = axis_range.y / (2.0 * resolution.y);");
+                // DEBUG: Use the exact same pattern as the working default shader
+                // This helps diagnose if the issue is shader content vs shader loading
+                try self.writeLine("// Boolean expression evaluation");
+                try self.writeLine("float val = (x * x + y * y);");
+                try self.writeLine("vec3 bg = background_color.rgb;");
+                try self.writeLine("vec3 fg = primary_color.rgb;");
                 try self.writeLine("");
-                try self.writeLine("// Corner coordinates");
-                try self.writeLine("float x_m = x - dx;  // x minus");
-                try self.writeLine("float x_p = x + dx;  // x plus");
-                try self.writeLine("float y_m = y - dy;  // y minus");
-                try self.writeLine("float y_p = y + dy;  // y plus");
-                try self.writeLine("");
-
-                // Emit the corner-checked boolean expression
-                try self.writeIndent();
-                try self.write("bool cond = ");
-                try self.emitBooleanWithCornerCheck(output);
-                try self.write(";\n");
-
-                // Generate random color from seed
-                const r = @as(f32, @floatFromInt((self.color_seed >> 0) & 0xFF)) / 255.0;
-                const g = @as(f32, @floatFromInt((self.color_seed >> 8) & 0xFF)) / 255.0;
-                const b = @as(f32, @floatFromInt((self.color_seed >> 16) & 0xFF)) / 255.0;
-
-                try self.writeIndent();
-                var color_buf: [128]u8 = undefined;
-                const color_str = std.fmt.bufPrint(&color_buf, "vec3 region_color = vec3({d:.3}, {d:.3}, {d:.3});\n", .{ r, g, b }) catch "vec3 region_color = vec3(1.0, 0.0, 1.0);\n";
-                try self.write(color_str);
-                try self.writeLine("out_color = cond ? vec4(region_color, 1.0) : vec4(0.0);");
+                try self.writeLine("// Color based on expression");
+                try self.writeLine("float threshold = 1.0;");
+                try self.writeLine("float alpha = smoothstep(threshold - 0.1, threshold + 0.1, val);");
+                try self.writeLine("out_color = vec4(mix(bg, fg, alpha), 1.0);");
             },
             .scalar => {
                 try self.write("float val = ");
@@ -1164,9 +1145,7 @@ pub const GlslGenerator = struct {
     fn emitExprWithCorner(self: *Self, node: *const AstNode, x_var: []const u8, y_var: []const u8) std.mem.Allocator.Error!void {
         switch (node.data) {
             .number => |n| {
-                var num_buf: [64]u8 = undefined;
-                const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{n}) catch "0.0";
-                try self.write(num_str);
+                try self.emitFloatLiteral(n);
             },
             .bool_lit => |b| {
                 try self.write(if (b) "true" else "false");
@@ -1336,9 +1315,7 @@ pub const GlslGenerator = struct {
     fn emitExpr(self: *Self, node: *const AstNode) std.mem.Allocator.Error!void {
         switch (node.data) {
             .number => |n| {
-                var num_buf: [64]u8 = undefined;
-                const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{n}) catch "0.0";
-                try self.write(num_str);
+                try self.emitFloatLiteral(n);
             },
             .bool_lit => |b| {
                 try self.write(if (b) "true" else "false");
@@ -1579,6 +1556,33 @@ pub const GlslGenerator = struct {
         try self.writeIndent();
         try self.output.appendSlice(self.allocator, s);
         try self.output.append(self.allocator, '\n');
+    }
+
+    /// Emit a float literal ensuring it has a decimal point for GLSL
+    /// This is critical for AMD RADV driver compatibility - integer literals
+    /// in float context can cause SPIRV patterns that crash the driver
+    fn emitFloatLiteral(self: *Self, n: f64) !void {
+        var num_buf: [64]u8 = undefined;
+
+        // Check if the number is a whole number (no fractional part)
+        const is_whole = n == @trunc(n);
+
+        if (is_whole and @abs(n) < 1e15) {
+            // For whole numbers, explicitly add .0 to make it a float literal
+            const num_str = std.fmt.bufPrint(&num_buf, "{d}.0", .{@as(i64, @intFromFloat(n))}) catch "0.0";
+            try self.write(num_str);
+        } else {
+            // For non-whole numbers, the default formatting includes a decimal point
+            const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{n}) catch "0.0";
+            try self.write(num_str);
+            // Edge case: very large numbers might not have a decimal point
+            // Check if the output contains a decimal point or 'e' (scientific notation)
+            const has_decimal = std.mem.indexOfScalar(u8, num_str, '.') != null;
+            const has_exponent = std.mem.indexOfScalar(u8, num_str, 'e') != null;
+            if (!has_decimal and !has_exponent) {
+                try self.write(".0");
+            }
+        }
     }
 
     fn genTempName(self: *Self) ![]const u8 {
