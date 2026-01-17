@@ -89,10 +89,11 @@ fn testPipelineCreation(allocator: std.mem.Allocator, device: *c.SDL_GPUDevice, 
     );
     std.debug.print("  Fragment shader created: {*}\n", .{new_fragment});
 
-    // *** CRITICAL: Replicate app behavior - DON'T release old resources ***
-    // This is exactly what updateFragmentShader does in gpu_pipeline.zig
-    std.debug.print("  NOT releasing old shaders/pipeline (like app does)...\n", .{});
-    stored_pipeline = null; // Just null the pointer, don't release
+    // Store old resources to release after creating new pipeline (like the app does)
+    const old_pipeline = stored_pipeline;
+    const old_vertex_shader = stored_vertex_shader;
+    const old_fragment_shader = stored_fragment_shader;
+    
     stored_vertex_shader = new_vertex;
     stored_fragment_shader = new_fragment;
 
@@ -177,7 +178,29 @@ fn testPipelineCreation(allocator: std.mem.Allocator, device: *c.SDL_GPUDevice, 
     std.debug.print("  Pipeline created successfully: {*}\n", .{pipeline});
     stored_pipeline = pipeline;
 
-    // *** DON'T cleanup - leak resources like the app does ***
+    // Release old resources with double-sync (like the app does)
+    // This prevents AMD RADV driver crashes from accumulated unreleased pipelines
+    for (0..2) |_| {
+        const sync_cmd = c.SDL_AcquireGPUCommandBuffer(device);
+        if (sync_cmd) |cmd| {
+            const sync_fence = c.SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+            if (sync_fence) |fence| {
+                _ = c.SDL_WaitForGPUFences(device, true, @ptrCast(&fence), 1);
+                c.SDL_ReleaseGPUFence(device, @ptrCast(fence));
+            }
+        }
+    }
+    
+    if (old_pipeline) |p| {
+        c.SDL_ReleaseGPUGraphicsPipeline(device, @ptrCast(p));
+    }
+    if (old_vertex_shader) |old_vs| {
+        c.SDL_ReleaseGPUShader(device, @ptrCast(old_vs));
+    }
+    if (old_fragment_shader) |old_fs| {
+        c.SDL_ReleaseGPUShader(device, @ptrCast(old_fs));
+    }
+    
     std.debug.print("\n✓ Pipeline test PASSED for: {s}\n", .{expression});
 }
 
@@ -463,15 +486,29 @@ pub fn main() !void {
     const test_expressions = [_][]const u8{
         "x+y", // Simple - should work
         "x²+y²", // Without comparison
-        "x²+y²>1", // THE PROBLEMATIC ONE
+        "x²+y²>1", // Greater than
+        "x²+y²<1", // Less than
         "x²+y²=1", // Equality
         "sin(x)+cos(y)>0", // Complex
+        "x>y", // Simple comparison
+        "x²+y²=9 and ((x>y² or x<y) and x+y!=3)", // Complex boolean expression
+        "x²+y²=9 and ((x>y² or x<y) and x+y!=5)", // Variant
+        "x²+y²=9 and ((x>y² or x<y) and x+y!=9)", // Variant
+        "x²+y²=9 and ((x>y² or x<y) and x+y!=10)", // Variant
+        // More expressions to test driver stability
+        "x²+y²<4", // Circle radius 2
+        "x²+y²>4", // Outside circle
+        "x>0 and y>0", // First quadrant
+        "x<0 or y<0", // Not first quadrant
+        "x²<y", // Parabola
+        "sin(x)>y", // Sine wave
     };
 
     var passed: usize = 0;
     var failed: usize = 0;
 
     for (test_expressions) |expr| {
+        // Create new pipeline
         testPipelineCreation(allocator, device, expr) catch |err| {
             std.debug.print("\n✗ Pipeline test FAILED for: {s}\n", .{expr});
             std.debug.print("  Error: {s}\n", .{@errorName(err)});
@@ -479,6 +516,14 @@ pub fn main() !void {
             continue;
         };
         passed += 1;
+
+        // CRITICAL: Simulate app behavior - render a frame with a pipeline
+        // This is what the app does between shader updates
+        if (stored_pipeline) |pipeline| {
+            simulateFrameRendering(device, pipeline) catch |err| {
+                std.debug.print("  Warning: Frame rendering failed: {s}\n", .{@errorName(err)});
+            };
+        }
     }
 
     // NOTE: Not cleaning up resources - testing the leak scenario like the app

@@ -609,6 +609,7 @@ pub const GlslGenerator = struct {
         try self.writeLine("vec2 pan;");
         try self.writeLine("vec2 axis_min;"); // (min_x, min_y)
         try self.writeLine("vec2 axis_max;"); // (max_x, max_y)
+        try self.writeLine("vec2 _pad2;"); // std140 alignment for vec4
         try self.writeLine("vec4 primary_color;");
         try self.writeLine("vec4 secondary_color;");
         try self.writeLine("vec4 background_color;");
@@ -961,17 +962,38 @@ pub const GlslGenerator = struct {
                 try self.writeLine("out_color = result;");
             },
             .boolean => {
-                // DEBUG: Use the exact same pattern as the working default shader
-                // This helps diagnose if the issue is shader content vs shader loading
-                try self.writeLine("// Boolean expression evaluation");
-                try self.writeLine("float val = (x * x + y * y);");
+                // Boolean expression evaluation with corner checking for anti-aliasing
+                try self.writeLine("// Boolean expression evaluation with corner checking");
+                try self.writeLine("// Calculate pixel size in world coordinates for anti-aliasing");
+                try self.writeLine("vec2 pixel_size = (axis_max - axis_min) / resolution;");
+                try self.writeLine("float half_px = pixel_size.x * 0.5;");
+                try self.writeLine("float half_py = pixel_size.y * 0.5;");
+                try self.writeLine("");
+                try self.writeLine("// Pixel corner coordinates");
+                try self.writeLine("float x_m = x - half_px;");
+                try self.writeLine("float x_p = x + half_px;");
+                try self.writeLine("float y_m = y - half_py;");
+                try self.writeLine("float y_p = y + half_py;");
+                try self.writeLine("");
+                try self.writeLine("// Evaluate boolean expression with corner checking");
+                try self.write("    bool result = ");
+                try self.emitBooleanWithCornerCheck(output);
+                try self.write(";\n");
+                try self.writeLine("");
                 try self.writeLine("vec3 bg = background_color.rgb;");
                 try self.writeLine("vec3 fg = primary_color.rgb;");
                 try self.writeLine("");
-                try self.writeLine("// Color based on expression");
-                try self.writeLine("float threshold = 1.0;");
-                try self.writeLine("float alpha = smoothstep(threshold - 0.1, threshold + 0.1, val);");
-                try self.writeLine("out_color = vec4(mix(bg, fg, alpha), 1.0);");
+                try self.writeLine("// DEBUG: Visualize coordinates (remove this later)");
+                try self.writeLine("// Red channel = x normalized, Green = y normalized, Blue = result");
+                try self.writeLine("// float debug_x = (x - axis_min.x) / (axis_max.x - axis_min.x);");
+                try self.writeLine("// float debug_y = (y - axis_min.y) / (axis_max.y - axis_min.y);");
+                try self.writeLine("// out_color = vec4(debug_x, debug_y, float(result), 1.0);");
+                try self.writeLine("");
+                try self.writeLine("if (result) {");
+                try self.writeLine("    out_color = vec4(fg, 1.0);");
+                try self.writeLine("} else {");
+                try self.writeLine("    out_color = vec4(bg, 1.0);");
+                try self.writeLine("}");
             },
             .scalar => {
                 try self.write("float val = ");

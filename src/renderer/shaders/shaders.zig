@@ -110,7 +110,7 @@ pub const ShaderType = enum {
 pub const Uniforms = extern struct {
     time: f32 = 0,
     _pad0: f32 = 0,
-    resolution: [2]f32 = .{ 0, 0 },
+    resolution: [2]f32 = .{ 1, 1 },  // Default to 1 to avoid division by zero
     mouse: [2]f32 = .{ 0, 0 },
     zoom: f32 = 1.0,
     _pad1: f32 = 0,
@@ -120,7 +120,11 @@ pub const Uniforms = extern struct {
     axis_min: [2]f32 = .{ -5, -5 },
     axis_max: [2]f32 = .{ 5, 5 },
 
-    // Colors (vec4 aligned)
+    // Padding for std140 alignment (vec4 must be 16-byte aligned)
+    // axis_max ends at offset 56, primary_color needs to start at 64
+    _pad2: [2]f32 = .{ 0, 0 },
+
+    // Colors (vec4 aligned at offset 64)
     primary_color: [4]f32 = .{ 1, 1, 1, 1 },
     secondary_color: [4]f32 = .{ 0.5, 0.5, 0.5, 1 },
     background_color: [4]f32 = .{ 0, 0, 0, 1 },
@@ -184,6 +188,7 @@ pub const default_fragment_glsl =
     \\    vec2 pan;
     \\    vec2 axis_min;
     \\    vec2 axis_max;
+    \\    vec2 _pad2;
     \\    vec4 primary_color;
     \\    vec4 secondary_color;
     \\    vec4 background_color;
@@ -235,6 +240,7 @@ pub const custom_fragment_template =
     \\    vec2 pan;
     \\    vec2 axis_min;
     \\    vec2 axis_max;
+    \\    vec2 _pad2;
     \\    vec4 primary_color;
     \\    vec4 secondary_color;
     \\    vec4 background_color;

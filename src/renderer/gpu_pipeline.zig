@@ -341,7 +341,7 @@ pub const GpuPipeline = struct {
             return self.setError("Fragment shader compilation failed");
         };
 
-        // Wait for any pending GPU work to complete before releasing resources
+        // Wait for any pending GPU work to complete before modifying resources
         if (self.pending_fence) |fence_opaque| {
             const fence: *c.SDL_GPUFence = @ptrCast(fence_opaque);
             _ = c.SDL_WaitForGPUFences(device, true, @ptrCast(&fence), 1);
@@ -350,10 +350,15 @@ pub const GpuPipeline = struct {
             self.is_rendering = false;
         }
 
-        // WORKAROUND: Don't release old pipeline or shader - causes Vulkan driver crash
-        // on AMD RADV driver. This leaks memory but is acceptable for shader hot-reload.
-        // Resources will be cleaned up when the device is destroyed at app shutdown.
+        // Store old resources to release AFTER creating new pipeline
+        const old_pipeline = self.pipeline;
+        const old_vertex_shader = self.vertex_shader;
+        const old_fragment_shader = self.fragment_shader;
+
+        // Clear references before creating new resources
         self.pipeline = null;
+        self.vertex_shader = null;
+        self.fragment_shader = null;
 
         // Set new shaders
         self.vertex_shader = new_vertex;
@@ -361,6 +366,31 @@ pub const GpuPipeline = struct {
 
         // Create new pipeline with new shaders
         try self.createPipeline();
+
+        // After creating new pipeline, properly release old resources to avoid driver crash
+        // from accumulated unreleased pipelines (AMD RADV crashes after ~20 pipelines).
+        // Submit TWO sync command buffers to ensure GPU is truly idle.
+        for (0..2) |_| {
+            const sync_cmd = c.SDL_AcquireGPUCommandBuffer(device);
+            if (sync_cmd) |cmd| {
+                const sync_fence = c.SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+                if (sync_fence) |fence| {
+                    _ = c.SDL_WaitForGPUFences(device, true, @ptrCast(&fence), 1);
+                    c.SDL_ReleaseGPUFence(device, @ptrCast(fence));
+                }
+            }
+        }
+
+        // Now release old resources
+        if (old_pipeline) |p| {
+            c.SDL_ReleaseGPUGraphicsPipeline(device, @ptrCast(p));
+        }
+        if (old_vertex_shader) |vs| {
+            c.SDL_ReleaseGPUShader(device, @ptrCast(vs));
+        }
+        if (old_fragment_shader) |fs| {
+            c.SDL_ReleaseGPUShader(device, @ptrCast(fs));
+        }
 
         std.log.info("Shaders updated successfully", .{});
     }
