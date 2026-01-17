@@ -15,6 +15,28 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.linkLibC();
+
+    // ── Shader Compiler Libraries (shaderc + SDL_ShaderCross) ─────────────
+    // Library paths from CMake build
+    exe.addLibraryPath(.{ .cwd_relative = "build/lib" });
+
+    // Include paths for shader compiler headers
+    exe.addIncludePath(.{ .cwd_relative = "build/_deps/shaderc-src/libshaderc/include" });
+    exe.addIncludePath(.{ .cwd_relative = "build/_deps/sdl3_shadercross-src/include" });
+    exe.addIncludePath(.{ .cwd_relative = "build/_deps/sdl3-src/include" });
+
+    // Add rpath for runtime library loading
+    exe.addRPath(.{ .cwd_relative = "build/lib" });
+
+    // Link shaderc shared library (includes glslang, SPIRV-Tools)
+    exe.linkSystemLibrary("shaderc_shared");
+
+    // Link SDL_ShaderCross static library
+    exe.addObjectFile(.{ .cwd_relative = "build/lib/libSDL3_shadercross.a" });
+
+    // Link spirv-cross shared library (used by SDL_ShaderCross for translation)
+    exe.linkSystemLibrary("spirv-cross-c-shared");
+
     b.installArtifact(exe);
 
     // ── DVUI with SDL3GPU backend ──────────────────────────────────────────

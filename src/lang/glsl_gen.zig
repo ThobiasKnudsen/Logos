@@ -592,20 +592,28 @@ pub const GlslGenerator = struct {
     }
 
     fn emitUniforms(self: *Self) !void {
-        try self.writeLine("layout(set = 3, binding = 0, std140) uniform FragmentUBO {");
+        // Input/output declarations first (matching default shader order)
+        try self.writeLine("layout(location = 0) in vec2 in_texcoord;");
+        try self.writeLine("layout(location = 0) out vec4 out_color;");
+        try self.writeLine("");
+        // Uniform layout must match shaders.Uniforms struct exactly
+        // Use same style as default shader (no instance name)
+        try self.writeLine("layout(set = 0, binding = 0) uniform Uniforms {");
         self.indent_level += 1;
         try self.writeLine("float time;");
-        try self.writeLine("float padding;");
-        try self.writeLine("vec2 res;");
-        try self.writeLine("float min_x;");
-        try self.writeLine("float max_x;");
-        try self.writeLine("float min_y;");
-        try self.writeLine("float max_y;");
+        try self.writeLine("float _pad0;");
+        try self.writeLine("vec2 resolution;");
+        try self.writeLine("vec2 mouse;");
+        try self.writeLine("float zoom;");
+        try self.writeLine("float _pad1;");
+        try self.writeLine("vec2 pan;");
+        try self.writeLine("vec2 axis_min;"); // (min_x, min_y)
+        try self.writeLine("vec2 axis_max;"); // (max_x, max_y)
+        try self.writeLine("vec4 primary_color;");
+        try self.writeLine("vec4 secondary_color;");
+        try self.writeLine("vec4 background_color;");
         self.indent_level -= 1;
-        try self.writeLine("} fubo;");
-        try self.writeLine("");
-        try self.writeLine("layout(location = 0) in vec2 frag_uv;");
-        try self.writeLine("layout(location = 0) out vec4 out_color;");
+        try self.writeLine("};");
         try self.writeLine("");
     }
 
@@ -933,12 +941,13 @@ pub const GlslGenerator = struct {
         try self.writeLine("void main() {");
         self.indent_level += 1;
 
-        // Set up axis variables
-        try self.writeLine("float axis1 = frag_uv.x;");
-        try self.writeLine("float axis2 = frag_uv.y;");
-        try self.writeLine("float x = frag_uv.x;");
-        try self.writeLine("float y = frag_uv.y;");
-        try self.writeLine("float time_s = fubo.time;");
+        // Set up axis variables mapped to world coordinates
+        // axis1 and axis2 are the raw axis values (x and y need explicit assignment)
+        try self.writeLine("// Map UV to world coordinates using axis bounds");
+        try self.writeLine("vec2 uv = in_texcoord;");
+        try self.writeLine("vec2 world = mix(axis_min, axis_max, uv);");
+        try self.writeLine("float x = world.x;");
+        try self.writeLine("float y = world.y;");
         try self.writeLine("");
 
         // Emit the output expression
@@ -955,8 +964,9 @@ pub const GlslGenerator = struct {
                 // For boolean expressions, use corner checking for proper curve rendering
                 // Calculate half-pixel size for corner sampling
                 try self.writeLine("// Half-pixel offsets for corner sampling");
-                try self.writeLine("float dx = (fubo.max_x - fubo.min_x) / (2.0 * fubo.res.x);");
-                try self.writeLine("float dy = (fubo.max_y - fubo.min_y) / (2.0 * fubo.res.y);");
+                try self.writeLine("vec2 axis_range = axis_max - axis_min;");
+                try self.writeLine("float dx = axis_range.x / (2.0 * resolution.x);");
+                try self.writeLine("float dy = axis_range.y / (2.0 * resolution.y);");
                 try self.writeLine("");
                 try self.writeLine("// Corner coordinates");
                 try self.writeLine("float x_m = x - dx;  // x minus");
@@ -966,6 +976,7 @@ pub const GlslGenerator = struct {
                 try self.writeLine("");
 
                 // Emit the corner-checked boolean expression
+                try self.writeIndent();
                 try self.write("bool cond = ");
                 try self.emitBooleanWithCornerCheck(output);
                 try self.write(";\n");
@@ -1167,7 +1178,7 @@ pub const GlslGenerator = struct {
                 } else if (std.mem.eql(u8, name, "y")) {
                     try self.write(y_var);
                 } else if (std.mem.eql(u8, name, "time_s") or std.mem.eql(u8, name, "time.s")) {
-                    try self.write("fubo.time");
+                    try self.write("time");
                 } else {
                     try self.write(name);
                 }
@@ -1181,24 +1192,24 @@ pub const GlslGenerator = struct {
                     const base_name = pa.base.data.identifier;
                     if (std.mem.eql(u8, base_name, "x") or std.mem.eql(u8, base_name, "axis1")) {
                         if (std.mem.eql(u8, pa.property, "min")) {
-                            try self.write("fubo.min_x");
+                            try self.write("axis_min.x");
                             return;
                         } else if (std.mem.eql(u8, pa.property, "max")) {
-                            try self.write("fubo.max_x");
+                            try self.write("axis_max.x");
                             return;
                         } else if (std.mem.eql(u8, pa.property, "res")) {
-                            try self.write("fubo.res.x");
+                            try self.write("resolution.x");
                             return;
                         }
                     } else if (std.mem.eql(u8, base_name, "y") or std.mem.eql(u8, base_name, "axis2")) {
                         if (std.mem.eql(u8, pa.property, "min")) {
-                            try self.write("fubo.min_y");
+                            try self.write("axis_min.y");
                             return;
                         } else if (std.mem.eql(u8, pa.property, "max")) {
-                            try self.write("fubo.max_y");
+                            try self.write("axis_max.y");
                             return;
                         } else if (std.mem.eql(u8, pa.property, "res")) {
-                            try self.write("fubo.res.y");
+                            try self.write("resolution.y");
                             return;
                         }
                     }
@@ -1335,7 +1346,7 @@ pub const GlslGenerator = struct {
             .identifier => |name| {
                 // Map special identifiers
                 if (std.mem.eql(u8, name, "time_s") or std.mem.eql(u8, name, "time.s")) {
-                    try self.write("fubo.time");
+                    try self.write("time");
                 } else {
                     try self.write(name);
                 }
@@ -1350,24 +1361,24 @@ pub const GlslGenerator = struct {
                     // Map axis properties to uniforms
                     if (std.mem.eql(u8, base_name, "x") or std.mem.eql(u8, base_name, "axis1")) {
                         if (std.mem.eql(u8, pa.property, "min")) {
-                            try self.write("fubo.min_x");
+                            try self.write("axis_min.x");
                             return;
                         } else if (std.mem.eql(u8, pa.property, "max")) {
-                            try self.write("fubo.max_x");
+                            try self.write("axis_max.x");
                             return;
                         } else if (std.mem.eql(u8, pa.property, "res")) {
-                            try self.write("fubo.res.x");
+                            try self.write("resolution.x");
                             return;
                         }
                     } else if (std.mem.eql(u8, base_name, "y") or std.mem.eql(u8, base_name, "axis2")) {
                         if (std.mem.eql(u8, pa.property, "min")) {
-                            try self.write("fubo.min_y");
+                            try self.write("axis_min.y");
                             return;
                         } else if (std.mem.eql(u8, pa.property, "max")) {
-                            try self.write("fubo.max_y");
+                            try self.write("axis_max.y");
                             return;
                         } else if (std.mem.eql(u8, pa.property, "res")) {
-                            try self.write("fubo.res.y");
+                            try self.write("resolution.y");
                             return;
                         }
                     }

@@ -10,6 +10,8 @@ const session = @import("../../session/session.zig");
 const lexer_mod = @import("../../lang/lexer.zig");
 const parser_mod = @import("../../lang/parser.zig");
 const glsl_gen = @import("../../lang/glsl_gen.zig");
+const shader_compiler = @import("../../renderer/shader_compiler.zig");
+const renderer = @import("../../renderer/renderer.zig");
 
 // Entypo icons from dvui
 const entypo = dvui.entypo;
@@ -66,7 +68,7 @@ pub const EditorToolbar = struct {
     }
 
     /// Render the toolbar and return whether play was clicked
-    pub fn render(self: *EditorToolbar, active_session: *session.TabSession) bool {
+    pub fn render(self: *EditorToolbar, active_session: *session.TabSession, graph_renderer: *renderer.GraphRenderer) bool {
         var play_clicked = false;
 
         // Get scaled sizes
@@ -136,15 +138,17 @@ pub const EditorToolbar = struct {
                     // Start running
                     self.state = .running;
                     play_clicked = true;
-                    self.tokenizeContent(active_session);
+                    self.tokenizeAndRender(active_session, graph_renderer);
                 },
                 .running => {
                     // Pause
                     self.state = .paused;
+                    graph_renderer.setAnimating(false);
                 },
                 .paused => {
                     // Continue running
                     self.state = .running;
+                    graph_renderer.setAnimating(true);
                 },
             }
         }
@@ -269,6 +273,31 @@ pub const EditorToolbar = struct {
                 .padding = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
                 .gravity_y = 0.5,
             });
+        }
+    }
+
+    /// Tokenize, parse, generate GLSL, and send to GPU for rendering
+    fn tokenizeAndRender(self: *EditorToolbar, active_session: *session.TabSession, graph_renderer: *renderer.GraphRenderer) void {
+        // First do the tokenize/parse/generate flow
+        self.tokenizeContent(active_session);
+
+        // If successful, send the first shader to the GPU
+        if (active_session.parse_state.status == .ready) {
+            if (active_session.parse_state.generated_shaders) |shaders| {
+                if (shaders.len > 0) {
+                    // Send the first shader to the GPU pipeline
+                    graph_renderer.updateShader(shaders[0].source) catch |err| {
+                        std.log.err("Failed to update GPU shader: {}", .{err});
+                        active_session.parse_state.status = .err;
+                        active_session.parse_state.error_message = "GPU shader update failed";
+                        return;
+                    };
+
+                    // Enable animation for time-based shaders
+                    graph_renderer.setAnimating(true);
+                    std.log.info("Shader sent to GPU pipeline - rendering active", .{});
+                }
+            }
         }
     }
 
@@ -436,10 +465,16 @@ pub const EditorToolbar = struct {
         debugPrintShaders(result.shaders);
     }
 
-    /// Debug print all generated shaders and write to files
+    /// Debug print all generated shaders and compile to SPIRV
     fn debugPrintShaders(shaders: []const glsl_gen.GeneratedShader) void {
         std.debug.print("\n========== GENERATED GLSL SHADERS ==========\n", .{});
         std.debug.print("Total shaders: {d}\n\n", .{shaders.len});
+
+        // Initialize shader compiler (lazy init - safe after SDL is running)
+        shader_compiler.init() catch |err| {
+            std.debug.print("Shader compiler init failed: {}\n", .{err});
+            return;
+        };
 
         for (shaders, 0..) |shader, i| {
             std.debug.print("--- Shader {d} ({s}) ---\n", .{
@@ -449,14 +484,27 @@ pub const EditorToolbar = struct {
             std.debug.print("{s}\n", .{shader.source});
             std.debug.print("--- End Shader {d} ---\n\n", .{i});
 
-            // Write to file for debugging
-            var path_buf: [128]u8 = undefined;
-            const path = std.fmt.bufPrint(&path_buf, "/tmp/logos_shader_{d}.frag.glsl", .{i}) catch continue;
-            if (std.fs.createFileAbsolute(path, .{})) |file| {
-                defer file.close();
-                file.writeAll(shader.source) catch {};
-                std.debug.print("Written to: {s}\n", .{path});
-            } else |_| {}
+            // Compile GLSL to SPIRV
+            var spirv = shader_compiler.compileGlslToSpirv(
+                std.heap.page_allocator,
+                shader.source,
+                .fragment,
+            ) catch |err| {
+                std.debug.print("SPIRV compilation FAILED for shader {d}: {}\n", .{ i, err });
+                continue;
+            };
+            defer spirv.deinit();
+
+            std.debug.print("SPIRV compilation SUCCESS for shader {d}: {d} bytes\n", .{ i, spirv.data.len });
+
+            // Verify SPIRV magic number (0x07230203)
+            if (spirv.data.len >= 4) {
+                const is_valid = spirv.data[0] == 0x03 and
+                    spirv.data[1] == 0x02 and
+                    spirv.data[2] == 0x23 and
+                    spirv.data[3] == 0x07;
+                std.debug.print("SPIRV magic number valid: {}\n\n", .{is_valid});
+            }
         }
         std.debug.print("=============================================\n\n", .{});
     }

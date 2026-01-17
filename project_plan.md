@@ -240,124 +240,87 @@ flowchart LR
 
 | Component | Purpose | Status |
 |-----------|---------|--------|
-| **glslang** | GLSL → SPIRV compilation | ✅ Already in build (has C API) |
-| **SDL_ShaderCross** | SPIRV → Native format translation | ✅ Already in build |
-| **SPIRV-Cross** | Translation engine | ✅ Bundled with ShaderCross |
+| **shaderc** | GLSL → SPIRV compilation | ✅ `libshaderc_shared.so` in build/lib |
+| **SDL_ShaderCross** | SPIRV → Native format translation | ✅ `libSDL3_shadercross.a` in build/lib |
+| **SPIRV-Cross** | Translation engine | ✅ `libspirv-cross-c-shared.so` in build/lib |
 
-**Can be simplified/removed**:
-- shaderc → use glslang C API directly (cleaner, already a dependency)
+**Can be removed**:
 - urcu/TSM → not needed (single-threaded design)
+
+**Using**:
+- shaderc → shared library (`libshaderc_shared.so`) for GLSL→SPIRV compilation. Provides clean C API and bundles glslang + SPIRV-Tools.
 
 **Optional** (depends on reflection needs):
 - spirv-reflect → SDL_ShaderCross provides basic reflection via `SDL_ShaderCross_ReflectGraphicsSPIRV()`, but spirv-reflect offers more detailed metadata (exact descriptor set/binding numbers, full struct hierarchy, member offsets). Keep if you need fine-grained uniform buffer introspection.
 
 ### Zig Implementation
 
-Create `src/renderer/shader_compiler.zig`:
+The implementation is in `src/renderer/shader_compiler.zig`. It uses shaderc for GLSL→SPIRV compilation:
 
 ```zig
 const c = @cImport({
-    @cInclude("glslang/Include/glslang_c_interface.h");
-    @cInclude("glslang/Include/glslang_c_shader_types.h");
+    @cInclude("shaderc/shaderc.h");
     @cInclude("SDL3_shadercross/SDL_shadercross.h");
 });
 
 pub const ShaderStage = enum { vertex, fragment, compute };
 
-/// Compile GLSL source to SPIRV bytecode using glslang
+/// Compile GLSL source to SPIRV bytecode using shaderc
 pub fn compileGlslToSpirv(
     allocator: std.mem.Allocator,
     glsl_source: []const u8,
     stage: ShaderStage,
-) ![]const u8 {
-    // 1. Initialize glslang (once per process)
-    _ = c.glslang_initialize_process();
-    defer c.glslang_finalize_process();
-
-    // 2. Create shader with Vulkan 1.0 / SPIRV 1.0 target
-    var input = c.glslang_input_t{
-        .language = c.GLSLANG_SOURCE_GLSL,
-        .stage = switch (stage) {
-            .vertex => c.GLSLANG_STAGE_VERTEX,
-            .fragment => c.GLSLANG_STAGE_FRAGMENT,
-            .compute => c.GLSLANG_STAGE_COMPUTE,
-        },
-        .client = c.GLSLANG_CLIENT_VULKAN,
-        .client_version = c.GLSLANG_TARGET_VULKAN_1_0,
-        .target_language = c.GLSLANG_TARGET_SPV,
-        .target_language_version = c.GLSLANG_TARGET_SPV_1_0,
-        .code = glsl_source.ptr,
-        .default_version = 450,
-        .default_profile = c.GLSLANG_CORE_PROFILE,
-        // ... resource limits
-    };
-
-    // 3. Parse and link
-    const shader = c.glslang_shader_create(&input);
-    defer c.glslang_shader_delete(shader);
+) !SpirvBytecode {
+    const compiler = global_compiler orelse return error.CompilerInitFailed;
     
-    if (c.glslang_shader_parse(shader, &input) == 0) {
-        const log = c.glslang_shader_get_info_log(shader);
-        std.log.err("Shader parse error: {s}", .{log});
-        return error.ShaderParseError;
-    }
+    // Create compile options with Vulkan target
+    const options = c.shaderc_compile_options_initialize();
+    defer c.shaderc_compile_options_release(options);
+    
+    c.shaderc_compile_options_set_target_env(options, c.shaderc_target_env_vulkan, c.shaderc_env_version_vulkan_1_0);
 
-    const program = c.glslang_program_create();
-    defer c.glslang_program_delete(program);
-    
-    c.glslang_program_add_shader(program, shader);
-    if (c.glslang_program_link(program, c.GLSLANG_MSG_DEFAULT_BIT) == 0) {
-        return error.ShaderLinkError;
-    }
+    // Compile GLSL to SPIRV
+    const result = c.shaderc_compile_into_spv(
+        compiler,
+        glsl_source.ptr,
+        glsl_source.len,
+        stage.toShadercKind(),
+        "shader",
+        "main",
+        options,
+    );
+    defer c.shaderc_result_release(result);
 
-    // 4. Generate SPIRV
-    c.glslang_program_SPIRV_generate(program, input.stage);
-    
-    const spirv_size = c.glslang_program_SPIRV_get_size(program);
-    const spirv_ptr = c.glslang_program_SPIRV_get_ptr(program);
-    
-    // Copy to Zig-managed memory
-    const result = try allocator.alloc(u8, spirv_size * @sizeOf(u32));
-    @memcpy(result, @as([*]const u8, @ptrCast(spirv_ptr))[0..result.len]);
-    return result;
+    // Check compilation status and copy output
+    const spirv_len = c.shaderc_result_get_length(result);
+    const spirv_ptr = c.shaderc_result_get_bytes(result);
+    const output = try allocator.alloc(u8, spirv_len);
+    @memcpy(output, spirv_ptr[0..spirv_len]);
+    return SpirvBytecode{ .data = output, .allocator = allocator };
 }
 
 /// Create SDL GPU shader with automatic platform translation
 pub fn createGpuShader(
-    device: *sdl.GPU_Device,
+    device: *sdl.SDL_GPUDevice,
     spirv: []const u8,
     stage: ShaderStage,
-) !*sdl.GPU_Shader {
-    // 1. Reflect SPIRV for resource info (samplers, buffers, etc.)
-    const metadata = c.SDL_ShaderCross_ReflectGraphicsSPIRV(
-        spirv.ptr,
-        spirv.len,
-        0,
-    ) orelse return error.ReflectionFailed;
+) !*sdl.SDL_GPUShader {
+    // Reflect SPIRV for resource info
+    const metadata = c.SDL_ShaderCross_ReflectGraphicsSPIRV(spirv.ptr, spirv.len, 0);
     defer c.SDL_free(metadata);
 
-    // 2. Create shader - SDL_ShaderCross automatically translates to:
-    //    - SPIRV (Vulkan/Linux)
-    //    - DXIL/DXBC (DirectX/Windows)  
-    //    - MSL (Metal/macOS)
+    // Create shader - SDL_ShaderCross auto-translates to native format
     var info = c.SDL_ShaderCross_SPIRV_Info{
         .bytecode = spirv.ptr,
         .bytecode_size = spirv.len,
         .entrypoint = "main",
-        .shader_stage = switch (stage) {
-            .vertex => c.SDL_SHADERCROSS_SHADERSTAGE_VERTEX,
-            .fragment => c.SDL_SHADERCROSS_SHADERSTAGE_FRAGMENT,
-            .compute => c.SDL_SHADERCROSS_SHADERSTAGE_COMPUTE,
-        },
+        .shader_stage = stage.toShaderCrossStage(),
         .props = 0,
     };
 
     return c.SDL_ShaderCross_CompileGraphicsShaderFromSPIRV(
-        device,
-        &info,
-        &metadata.resource_info,
-        0,
-    ) orelse return error.ShaderCreationFailed;
+        device, &info, &metadata.resource_info, 0,
+    );
 }
 ```
 
@@ -366,18 +329,42 @@ pub fn createGpuShader(
 Add to `build.zig`:
 
 ```zig
-// Link glslang and SDL_ShaderCross from CMake build
+// Library paths from CMake build
 exe.addLibraryPath(.{ .cwd_relative = "build/lib" });
-exe.addIncludePath(.{ .cwd_relative = "build/include" });
-exe.addIncludePath(.{ .cwd_relative = "build/_deps/glslang-src/glslang/Include" });
-exe.addIncludePath(.{ .cwd_relative = "build/_deps/sdl3_shadercross-src/include" });
 
-exe.linkSystemLibrary("glslang");
-exe.linkSystemLibrary("SPIRV");  // glslang's SPIRV generator
-exe.linkSystemLibrary("SDL3_shadercross");
+// Include paths for shader compiler headers
+exe.addIncludePath(.{ .cwd_relative = "build/_deps/shaderc-src/libshaderc/include" });
+exe.addIncludePath(.{ .cwd_relative = "build/_deps/sdl3_shadercross-src/include" });
+exe.addIncludePath(.{ .cwd_relative = "build/_deps/sdl3-src/include" });
+
+// Add rpath for runtime library loading
+exe.addRPath(.{ .cwd_relative = "build/lib" });
+
+// Link shaderc shared library (includes glslang, SPIRV-Tools)
+exe.linkSystemLibrary("shaderc_shared");
+
+// Link SDL_ShaderCross static library
+exe.addObjectFile(.{ .cwd_relative = "build/lib/libSDL3_shadercross.a" });
+
+// Link spirv-cross shared library (used by SDL_ShaderCross for translation)
+exe.linkSystemLibrary("spirv-cross-c-shared");
 ```
 
-### Key SDL_ShaderCross Functions
+### Key Functions
+
+**Shaderc (GLSL → SPIRV):**
+
+| Function | Purpose |
+|----------|---------|
+| `shaderc_compiler_initialize()` | Create compiler instance (reusable, thread-safe) |
+| `shaderc_compile_options_initialize()` | Create compile options |
+| `shaderc_compile_options_set_target_env()` | Set target (Vulkan 1.0) |
+| `shaderc_compile_into_spv()` | Compile GLSL to SPIRV binary |
+| `shaderc_result_get_bytes()` | Get SPIRV bytecode |
+| `shaderc_result_get_error_message()` | Get compilation errors |
+| `shaderc_compiler_release()` | Cleanup (call at shutdown) |
+
+**SDL_ShaderCross (SPIRV → Native):**
 
 | Function | Purpose |
 |----------|---------|

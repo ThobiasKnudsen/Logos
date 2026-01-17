@@ -329,6 +329,138 @@ pub const TypeEnv = struct {
     }
 };
 
+/// Range Variable - represents a variable with a defined range and resolution
+/// Used for axis definitions and user-defined range variables
+/// Syntax: var(start, end, resolution) or axis1, axis2 (pre-defined)
+pub const RangeVar = struct {
+    /// Minimum value (start of range)
+    start: f64,
+    /// Maximum value (end of range)
+    end: f64,
+    /// Number of samples/pixels along this range
+    resolution: u32,
+
+    /// Default range for axes (-5 to 5, 1000 resolution)
+    pub const default_axis: RangeVar = .{
+        .start = -5.0,
+        .end = 5.0,
+        .resolution = 1000,
+    };
+
+    /// Create a range variable with validation
+    pub fn init(start: f64, end: f64, resolution: u32) !RangeVar {
+        if (start >= end) {
+            return error.InvalidRange; // start must be < end
+        }
+        if (resolution == 0) {
+            return error.InvalidResolution; // resolution must be > 0
+        }
+        return .{
+            .start = start,
+            .end = end,
+            .resolution = resolution,
+        };
+    }
+
+    /// Get the span of the range (end - start)
+    pub fn span(self: RangeVar) f64 {
+        return self.end - self.start;
+    }
+
+    /// Map a normalized value [0, 1] to the range
+    pub fn map(self: RangeVar, normalized: f64) f64 {
+        return self.start + normalized * self.span();
+    }
+
+    /// Map a value from the range to normalized [0, 1]
+    pub fn normalize(self: RangeVar, value: f64) f64 {
+        return (value - self.start) / self.span();
+    }
+
+    /// Get step size between samples
+    pub fn stepSize(self: RangeVar) f64 {
+        return self.span() / @as(f64, @floatFromInt(self.resolution));
+    }
+
+    /// Update start value (with validation)
+    pub fn setStart(self: *RangeVar, new_start: f64) !void {
+        if (new_start >= self.end) {
+            return error.InvalidRange;
+        }
+        self.start = new_start;
+    }
+
+    /// Update end value (with validation)
+    pub fn setEnd(self: *RangeVar, new_end: f64) !void {
+        if (new_end <= self.start) {
+            return error.InvalidRange;
+        }
+        self.end = new_end;
+    }
+
+    /// Update resolution (with validation)
+    pub fn setResolution(self: *RangeVar, new_res: u32) !void {
+        if (new_res == 0) {
+            return error.InvalidResolution;
+        }
+        self.resolution = new_res;
+    }
+
+    /// Pan the range by a delta (both start and end shift)
+    pub fn pan(self: *RangeVar, delta: f64) void {
+        self.start += delta;
+        self.end += delta;
+    }
+
+    /// Zoom around a center point
+    pub fn zoom(self: *RangeVar, factor: f64, center: f64) void {
+        const dist_to_start = center - self.start;
+        const dist_to_end = self.end - center;
+        self.start = center - dist_to_start * factor;
+        self.end = center + dist_to_end * factor;
+    }
+
+    /// Format for display (e.g., "[-5.00, 5.00]")
+    pub fn format(
+        self: RangeVar,
+        comptime _: []const u8,
+        _: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        try writer.print("[{d:.2}, {d:.2}] ({d})", .{ self.start, self.end, self.resolution });
+    }
+};
+
+/// Axis state for the render area
+pub const AxisState = struct {
+    /// X axis (axis1) - horizontal, shown at bottom
+    axis1: RangeVar = RangeVar.default_axis,
+    /// Y axis (axis2) - vertical, shown at left
+    axis2: RangeVar = RangeVar.default_axis,
+
+    /// Get current mouse position in world coordinates
+    pub fn screenToWorld(self: AxisState, screen_x: f32, screen_y: f32, width: f32, height: f32) struct { x: f64, y: f64 } {
+        const norm_x = @as(f64, screen_x / width);
+        const norm_y = @as(f64, 1.0 - screen_y / height); // Flip Y
+        return .{
+            .x = self.axis1.map(norm_x),
+            .y = self.axis2.map(norm_y),
+        };
+    }
+
+    /// Pan both axes
+    pub fn panBy(self: *AxisState, dx: f64, dy: f64) void {
+        self.axis1.pan(-dx);
+        self.axis2.pan(-dy);
+    }
+
+    /// Zoom both axes around a point
+    pub fn zoomAt(self: *AxisState, factor: f64, world_x: f64, world_y: f64) void {
+        self.axis1.zoom(factor, world_x);
+        self.axis2.zoom(factor, world_y);
+    }
+};
+
 /// Reserved identifiers in the Logos language
 pub const ReservedNames = struct {
     /// Check if a name is a reserved axis variable

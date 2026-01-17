@@ -53,8 +53,8 @@ pub const SplitView = struct {
             });
             defer left.deinit();
 
-            // Toolbar at top
-            _ = self.editor_toolbar.render(active_session);
+            // Toolbar at top - pass graph_renderer so Play button can trigger rendering
+            _ = self.editor_toolbar.render(active_session, graph_renderer);
 
             // Editor panel below toolbar
             EditorPanel.render(active_session);
@@ -71,11 +71,54 @@ pub const SplitView = struct {
 
             // Get panel dimensions for rendering
             const rs = right.data().contentRectScale();
-            graph_renderer.renderToPanel(rs.r.w, rs.r.h);
+            const panel_width = rs.r.w;
+            const panel_height = rs.r.h;
+
+            // Handle mouse events for pan/zoom/hover
+            self.handleRenderPanelMouse(graph_renderer, right, panel_width, panel_height);
+
+            // Render the graph
+            graph_renderer.renderToPanel(panel_width, panel_height);
         }
 
         // Draw custom separator line over the handle area (full height)
         drawSeparatorLine(paned);
+    }
+
+    /// Handle mouse events in the render panel for pan/zoom/hover
+    fn handleRenderPanelMouse(
+        _: *SplitView,
+        graph_renderer: *renderer.GraphRenderer,
+        box_widget: *dvui.BoxWidget,
+        panel_width: f32,
+        panel_height: f32,
+    ) void {
+        // Get current window for mouse state
+        const win = dvui.currentWindow();
+        const mouse_pos = win.mouse_pt;
+        const panel_rs = box_widget.data().contentRectScale();
+
+        // Convert to panel-local coordinates
+        const local_x = mouse_pos.x - panel_rs.r.x;
+        const local_y = mouse_pos.y - panel_rs.r.y;
+
+        // Check if mouse is inside the panel
+        const in_panel = local_x >= 0 and local_x < panel_width and
+            local_y >= 0 and local_y < panel_height;
+
+        if (in_panel) {
+            // Always update hover position
+            graph_renderer.handleMouseMove(local_x, local_y, panel_width, panel_height);
+        } else {
+            // Clear hover when outside
+            graph_renderer.hover_x = null;
+            graph_renderer.hover_y = null;
+        }
+
+        // Note: For full pan/zoom support, we would need to properly capture
+        // mouse events on this widget. For now, hover coordinate display works.
+        // The mouse down/up/scroll handling requires event matching which is
+        // more complex in dvui's architecture.
     }
 
     fn drawSeparatorLine(paned: *dvui.PanedWidget) void {

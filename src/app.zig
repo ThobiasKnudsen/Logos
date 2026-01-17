@@ -53,6 +53,9 @@ pub const App = struct {
         });
         defer win.deinit();
 
+        // Initialize graph renderer with the backend now that SDL is ready
+        self.graph_renderer.initWithDevice(&backend);
+
         var interrupted = false;
 
         main_loop: while (true) {
@@ -88,5 +91,9 @@ pub const App = struct {
             const wait_event_micros = win.waitTime(end_micros);
             interrupted = try backend.waitEventTimeout(wait_event_micros);
         }
+
+        // Release GPU resources before backend is destroyed
+        // This must happen while SDL device is still valid
+        self.graph_renderer.releaseGpuResources();
     }
 };
