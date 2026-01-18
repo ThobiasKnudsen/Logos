@@ -1239,6 +1239,12 @@ pub const GlslGenerator = struct {
                 try self.emitExprWithCorner(c.operand, x_var, y_var);
                 try self.write(")");
             },
+            .index => |idx| {
+                try self.emitExprWithCorner(idx.base, x_var, y_var);
+                try self.write("[");
+                try self.emitExprWithCorner(idx.index_expr, x_var, y_var);
+                try self.write("]");
+            },
             .if_expr => |ie| {
                 try self.write("(");
                 try self.emitExprWithCorner(ie.condition, x_var, y_var);

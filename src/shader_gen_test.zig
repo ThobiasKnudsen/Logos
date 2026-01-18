@@ -367,6 +367,141 @@ test "complex boolean: x²+y²>1 and x>0" {
     try std.testing.expect(result.spirv_valid);
 }
 
+test "negative numbers in comparison: x>-1 and y<-0.5" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try initShaderCompiler();
+    defer deinitShaderCompiler();
+
+    const result = try testExpression(allocator, "x>-1 and y<-0.5");
+
+    try std.testing.expect(result.ast_valid);
+    try std.testing.expect(result.glsl_valid);
+    try std.testing.expect(result.spirv_valid);
+}
+
+test "chained comparisons: x>0 and y>0 and x+y<2" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try initShaderCompiler();
+    defer deinitShaderCompiler();
+
+    const result = try testExpression(allocator, "x>0 and y>0 and x+y<2");
+
+    try std.testing.expect(result.ast_valid);
+    try std.testing.expect(result.glsl_valid);
+    try std.testing.expect(result.spirv_valid);
+}
+
+test "deeply nested math: sin(cos(x²)+y²)>0" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try initShaderCompiler();
+    defer deinitShaderCompiler();
+
+    const result = try testExpression(allocator, "sin(cos(x²)+y²)>0");
+
+    try std.testing.expect(result.ast_valid);
+    try std.testing.expect(result.glsl_valid);
+    try std.testing.expect(result.spirv_valid);
+}
+
+test "complex or expression: x²>1 or y²>1 or x*y>0.5" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try initShaderCompiler();
+    defer deinitShaderCompiler();
+
+    const result = try testExpression(allocator, "x²>1 or y²>1 or x*y>0.5");
+
+    try std.testing.expect(result.ast_valid);
+    try std.testing.expect(result.glsl_valid);
+    try std.testing.expect(result.spirv_valid);
+}
+
+test "mixed and/or: (x>0 and y>0) or (x<0 and y<0)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try initShaderCompiler();
+    defer deinitShaderCompiler();
+
+    const result = try testExpression(allocator, "(x>0 and y>0) or (x<0 and y<0)");
+
+    try std.testing.expect(result.ast_valid);
+    try std.testing.expect(result.glsl_valid);
+    try std.testing.expect(result.spirv_valid);
+}
+
+test "absolute value comparison: abs(x)+abs(y)<1" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try initShaderCompiler();
+    defer deinitShaderCompiler();
+
+    const result = try testExpression(allocator, "abs(x)+abs(y)<1");
+
+    try std.testing.expect(result.ast_valid);
+    try std.testing.expect(result.glsl_valid);
+    try std.testing.expect(result.spirv_valid);
+}
+
+test "floor/ceil in comparison: floor(x)=ceil(y)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try initShaderCompiler();
+    defer deinitShaderCompiler();
+
+    const result = try testExpression(allocator, "floor(x)=ceil(y)");
+
+    try std.testing.expect(result.ast_valid);
+    try std.testing.expect(result.glsl_valid);
+    try std.testing.expect(result.spirv_valid);
+}
+
+test "exp and log: exp(x)>log(y+2)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try initShaderCompiler();
+    defer deinitShaderCompiler();
+
+    const result = try testExpression(allocator, "exp(x)>log(y+2)");
+
+    try std.testing.expect(result.ast_valid);
+    try std.testing.expect(result.glsl_valid);
+    try std.testing.expect(result.spirv_valid);
+}
+
+test "power expression: x^3+y^3>1" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try initShaderCompiler();
+    defer deinitShaderCompiler();
+
+    const result = try testExpression(allocator, "x^3+y^3>1");
+
+    try std.testing.expect(result.ast_valid);
+    try std.testing.expect(result.glsl_valid);
+    try std.testing.expect(result.spirv_valid);
+}
+
 // ============================================================================
 // Main entry point for standalone execution
 // ============================================================================
@@ -400,6 +535,28 @@ pub fn main() !void {
         "sin(x)>0.5",
         "x²+y²>1 and x>0",
         "x²+y²>1 or y<0",
+
+        // Negative numbers
+        "x>-1 and y<-0.5",
+
+        // Chained boolean operations
+        "x>0 and y>0 and x+y<2",
+        "(x>0 and y>0) or (x<0 and y<0)",
+
+        // Deeply nested math
+        "sin(cos(x²)+y²)>0",
+        "x²>1 or y²>1 or x*y>0.5",
+
+        // Various math functions
+        "abs(x)+abs(y)<1",
+        "floor(x)=ceil(y)",
+        "exp(x)>log(y+2)",
+        "x^3+y^3>1",
+
+        // More complex nesting
+        "sin(x*y)²+cos(x-y)²>0.5",
+        "abs(sin(x))+abs(cos(y))<1.5",
+        "max(x²,y²)<1 and min(x,y)>-0.5",
     };
 
     var results: std.ArrayList(TestResult) = .{ .items = &.{}, .capacity = 0 };
