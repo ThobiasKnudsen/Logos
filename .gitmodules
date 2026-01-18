@@ -1,0 +1,6 @@
+[submodule "vendor/SDL_shadercross_zig"]
+	path = vendor/SDL_shadercross_zig
+	url = https://github.com/Beyley/SDL_shadercross_zig
+[submodule "vendor/SPIRV-Cross_zig"]
+	path = vendor/SPIRV-Cross_zig
+	url = https://github.com/Beyley/SPIRV-Cross_zig
