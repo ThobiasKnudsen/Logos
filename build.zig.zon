@@ -6,7 +6,7 @@
         "build.zig",
         "build.zig.zon",
         "src",
-        "vendor",
+        "vendor", // Git submodules
     },
     .dependencies = .{
         .pcrez = .{
@@ -27,7 +27,8 @@
             .hash = "sdl-0.2.6+3.2.20-7uIn9FAjfwGon7V_xiNW1BXyq5ZzTOgPJSbRbybb-Fwz",
             .lazy = true,
         },
-        // Local vendored copy with Zig 0.15 compatibility fixes
+        // SDL_shadercross - Git submodule (cleaner than vendor copy)
+        // To update: git submodule update --remote vendor/SDL_shadercross_zig
         .SDL_shadercross_zig = .{
             .path = "vendor/SDL_shadercross_zig",
         },
