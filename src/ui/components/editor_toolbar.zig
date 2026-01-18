@@ -176,6 +176,9 @@ pub const EditorToolbar = struct {
             },
         )) {
             self.state = .stopped;
+            // Actually stop the graph renderer
+            graph_renderer.setAnimating(false);
+            std.log.info("Rendering stopped by user", .{});
         }
 
         // Close toolbar before drawing separator
@@ -293,9 +296,10 @@ pub const EditorToolbar = struct {
                         return;
                     };
 
-                    // Enable animation for time-based shaders
-                    graph_renderer.setAnimating(true);
-                    std.log.info("Shader sent to GPU pipeline - rendering active", .{});
+                    // Don't enable animation automatically - expressions are usually static
+                    // User can enable animation later if needed (for time-based shaders)
+                    graph_renderer.setAnimating(false);
+                    std.log.info("Shader sent to GPU pipeline - rendering active (static, no animation)", .{});
                 }
             }
         }

@@ -159,28 +159,35 @@ pub const GpuPipeline = struct {
     fn createDefaultPipeline(self: *GpuPipeline) !void {
         const device = self.device orelse return error.NoDevice;
 
-        // Compile vertex shader
+        std.log.info("[GpuPipeline] Creating default pipeline with push constants...", .{});
+
+        // Compile vertex shader (no resources)
         self.vertex_shader = shader_compiler.compileAndCreateShader(
             self.allocator,
             device,
             shaders.default_vertex_glsl,
             .vertex,
         ) catch |err| {
-            std.log.err("Failed to compile vertex shader: {}", .{err});
+            std.log.err("[GpuPipeline] Failed to compile vertex shader: {}", .{err});
             return self.setError("Vertex shader compilation failed");
         };
 
-        // Compile fragment shader
-        self.fragment_shader = shader_compiler.compileAndCreateShader(
+        // Compile fragment shader - uses 1 uniform buffer (binding 0) for SDL_PushGPUFragmentUniformData
+        const frag_resources = shader_compiler.ShaderResources{
+            .num_uniform_buffers = 1, // One uniform buffer at binding 0
+        };
+        self.fragment_shader = shader_compiler.compileAndCreateShaderWithResources(
             self.allocator,
             device,
             shaders.default_fragment_glsl,
             .fragment,
+            frag_resources,
         ) catch |err| {
-            std.log.err("Failed to compile fragment shader: {}", .{err});
+            std.log.err("[GpuPipeline] Failed to compile fragment shader: {}", .{err});
             return self.setError("Fragment shader compilation failed");
         };
 
+        std.log.info("[GpuPipeline] Shaders compiled, creating pipeline...", .{});
         try self.createPipeline();
     }
 
@@ -202,12 +209,12 @@ pub const GpuPipeline = struct {
         // WORKAROUND: Don't release old pipeline here - causes AMD RADV Vulkan crash
         // The caller should set self.pipeline = null before calling createPipeline
 
-        // Color target description
+        // Color target description - must be explicit for RADV driver
         var color_targets: [1]c.SDL_GPUColorTargetDescription = .{
             .{
                 .format = c.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
                 .blend_state = .{
-                    .src_color_blendfactor = c.SDL_GPU_BLENDFACTOR_SRC_ALPHA,
+                    .src_color_blendfactor = c.SDL_GPU_BLENDFACTOR_ONE,
                     .dst_color_blendfactor = c.SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
                     .color_blend_op = c.SDL_GPU_BLENDOP_ADD,
                     .src_alpha_blendfactor = c.SDL_GPU_BLENDFACTOR_ONE,
@@ -220,7 +227,7 @@ pub const GpuPipeline = struct {
             },
         };
 
-        // Pipeline create info
+        // Pipeline create info - must explicitly initialize all fields for RADV driver
         const pipeline_info = c.SDL_GPUGraphicsPipelineCreateInfo{
             .vertex_shader = vs,
             .fragment_shader = fs,
@@ -266,12 +273,12 @@ pub const GpuPipeline = struct {
             .props = 0,
         };
 
-        std.log.info("Calling SDL_CreateGPUGraphicsPipeline...", .{});
+        std.log.info("[GpuPipeline] Calling SDL_CreateGPUGraphicsPipeline...", .{});
         self.pipeline = c.SDL_CreateGPUGraphicsPipeline(device, &pipeline_info) orelse {
             return self.setError("Failed to create graphics pipeline");
         };
 
-        std.log.info("SDL_CreateGPUGraphicsPipeline succeeded", .{});
+        std.log.info("[GpuPipeline] SDL_CreateGPUGraphicsPipeline succeeded ✓", .{});
     }
 
     /// Ensure render texture exists and has correct size
@@ -315,8 +322,15 @@ pub const GpuPipeline = struct {
 
     /// Update the fragment shader with new GLSL code
     pub fn updateFragmentShader(self: *GpuPipeline, glsl_source: []const u8) !void {
-        const device_opaque = self.device orelse return error.NoDevice;
+        std.log.info("[GpuPipeline] ===== UPDATE FRAGMENT SHADER =====", .{});
+
+        const device_opaque = self.device orelse {
+            std.log.err("[GpuPipeline] No device available", .{});
+            return error.NoDevice;
+        };
         const device: *c.SDL_GPUDevice = @ptrCast(device_opaque);
+
+        std.log.info("[GpuPipeline] Compiling vertex shader...", .{});
 
         // Recompile vertex shader too (helps with AMD RADV driver compatibility)
         // Some drivers have issues when pipeline shaders are compiled at different times
@@ -326,20 +340,31 @@ pub const GpuPipeline = struct {
             shaders.default_vertex_glsl,
             .vertex,
         ) catch |err| {
-            std.log.err("Failed to compile vertex shader: {}", .{err});
+            std.log.err("[GpuPipeline] Vertex shader compilation FAILED: {}", .{err});
             return self.setError("Vertex shader compilation failed");
         };
 
-        // Compile new fragment shader
-        const new_fragment = shader_compiler.compileAndCreateShader(
+        std.log.info("[GpuPipeline] Vertex shader compiled ✓", .{});
+        std.log.info("[GpuPipeline] Compiling fragment shader ({} bytes)...", .{glsl_source.len});
+
+        // Compile new fragment shader - uses 1 uniform buffer (binding 0) for SDL_PushGPUFragmentUniformData
+        const frag_resources = shader_compiler.ShaderResources{
+            .num_uniform_buffers = 1, // One uniform buffer at binding 0
+        };
+        const new_fragment = shader_compiler.compileAndCreateShaderWithResources(
             self.allocator,
             device_opaque,
             glsl_source,
             .fragment,
+            frag_resources,
         ) catch |err| {
-            std.log.err("Failed to compile new fragment shader: {}", .{err});
+            std.log.err("[GpuPipeline] Fragment shader compilation FAILED: {}", .{err});
             return self.setError("Fragment shader compilation failed");
         };
+
+        std.log.info("[GpuPipeline] Fragment shader compiled ✓", .{});
+
+        std.log.info("[GpuPipeline] Waiting for pending GPU work...", .{});
 
         // Wait for any pending GPU work to complete before modifying resources
         if (self.pending_fence) |fence_opaque| {
@@ -349,6 +374,8 @@ pub const GpuPipeline = struct {
             self.pending_fence = null;
             self.is_rendering = false;
         }
+
+        std.log.info("[GpuPipeline] Storing old resources and setting new shaders...", .{});
 
         // Store old resources to release AFTER creating new pipeline
         const old_pipeline = self.pipeline;
@@ -364,8 +391,12 @@ pub const GpuPipeline = struct {
         self.vertex_shader = new_vertex;
         self.fragment_shader = new_fragment;
 
+        std.log.info("[GpuPipeline] Creating new pipeline...", .{});
+
         // Create new pipeline with new shaders
         try self.createPipeline();
+
+        std.log.info("[GpuPipeline] Pipeline created ✓", .{});
 
         // After creating new pipeline, properly release old resources to avoid driver crash
         // from accumulated unreleased pipelines (AMD RADV crashes after ~20 pipelines).
@@ -440,6 +471,7 @@ pub const GpuPipeline = struct {
             return self.setError("Failed to submit command buffer");
         }
 
+        std.log.info("[GpuPipeline] Render submitted with fence, is_rendering=true", .{});
         self.is_rendering = true;
         return true;
     }
@@ -447,12 +479,19 @@ pub const GpuPipeline = struct {
     /// Poll for render completion (non-blocking)
     /// Returns true if rendering is complete
     pub fn pollCompletion(self: *GpuPipeline) bool {
-        if (!self.is_rendering) return true;
+        if (!self.is_rendering) {
+            std.log.debug("[GpuPipeline] pollCompletion: not rendering, returning true", .{});
+            return true;
+        }
 
         const device: *c.SDL_GPUDevice = @ptrCast(self.device orelse return true);
         const fence: *c.SDL_GPUFence = @ptrCast(self.pending_fence orelse return true);
 
-        if (c.SDL_QueryGPUFence(device, fence)) {
+        const fence_ready = c.SDL_QueryGPUFence(device, fence);
+        std.log.debug("[GpuPipeline] pollCompletion: fence_ready={}", .{fence_ready});
+
+        if (fence_ready) {
+            std.log.info("[GpuPipeline] Render COMPLETE - fence signaled", .{});
             c.SDL_ReleaseGPUFence(device, fence);
             self.pending_fence = null;
             self.is_rendering = false;
@@ -460,6 +499,21 @@ pub const GpuPipeline = struct {
         }
 
         return false;
+    }
+
+    /// Wait synchronously for the current render to complete
+    pub fn waitForCompletion(self: *GpuPipeline) void {
+        if (!self.is_rendering) return;
+
+        const device: *c.SDL_GPUDevice = @ptrCast(self.device orelse return);
+        const fence: *c.SDL_GPUFence = @ptrCast(self.pending_fence orelse return);
+
+        std.log.info("[GpuPipeline] Waiting for render to complete...", .{});
+        _ = c.SDL_WaitForGPUFences(device, true, @ptrCast(&fence), 1);
+        c.SDL_ReleaseGPUFence(device, fence);
+        self.pending_fence = null;
+        self.is_rendering = false;
+        std.log.info("[GpuPipeline] Render completed ✓", .{});
     }
 
     /// Update uniform values
@@ -487,38 +541,86 @@ pub const GpuPipeline = struct {
     /// Render to an external texture (for dvui integration)
     /// The texture must have SDL_GPU_TEXTUREUSAGE_COLOR_TARGET flag
     pub fn renderToExternalTexture(self: *GpuPipeline, external_texture: *anyopaque, width: u32, height: u32) !bool {
-        if (self.is_rendering) return false;
+        if (self.is_rendering) {
+            // std.log.debug("[GpuPipeline] Already rendering, skipping frame", .{});
+            return false;
+        }
 
-        const device: *c.SDL_GPUDevice = @ptrCast(self.device orelse return error.NoDevice);
-        const pipeline: *c.SDL_GPUGraphicsPipeline = @ptrCast(self.pipeline orelse return error.NoPipeline);
+        // Reduced verbosity - only log occasionally
+        // std.log.debug("[GpuPipeline] renderToExternalTexture: size={}x{}", .{ width, height });
+
+        const device: *c.SDL_GPUDevice = @ptrCast(self.device orelse {
+            std.log.err("[GpuPipeline] No device available for rendering", .{});
+            return error.NoDevice;
+        });
+        const pipeline: *c.SDL_GPUGraphicsPipeline = @ptrCast(self.pipeline orelse {
+            std.log.err("[GpuPipeline] No pipeline available for rendering", .{});
+            return error.NoPipeline;
+        });
         const target_texture: *c.SDL_GPUTexture = @ptrCast(external_texture);
 
         // Update resolution in uniforms
         self.uniforms.resolution = .{ @floatFromInt(width), @floatFromInt(height) };
 
+        // DIAGNOSTIC: Log ALL uniforms on EVERY render to catch if they change
+        std.log.info("[GpuPipeline] === RENDER UNIFORMS ===", .{});
+        std.log.info("[GpuPipeline]   axis_min = ({d:.3}, {d:.3})", .{ self.uniforms.axis_min[0], self.uniforms.axis_min[1] });
+        std.log.info("[GpuPipeline]   axis_max = ({d:.3}, {d:.3})", .{ self.uniforms.axis_max[0], self.uniforms.axis_max[1] });
+        std.log.info("[GpuPipeline]   primary_color = ({d:.3}, {d:.3}, {d:.3}, {d:.3})", .{
+            self.uniforms.primary_color[0],
+            self.uniforms.primary_color[1],
+            self.uniforms.primary_color[2],
+            self.uniforms.primary_color[3],
+        });
+        std.log.info("[GpuPipeline]   background_color = ({d:.3}, {d:.3}, {d:.3}, {d:.3})", .{
+            self.uniforms.background_color[0],
+            self.uniforms.background_color[1],
+            self.uniforms.background_color[2],
+            self.uniforms.background_color[3],
+        });
+        std.log.info("[GpuPipeline] === END UNIFORMS ===", .{});
+
+        // std.log.debug("[GpuPipeline] Acquiring command buffer...", .{});
+
         // Acquire command buffer
         const cmd = c.SDL_AcquireGPUCommandBuffer(device) orelse {
+            std.log.err("[GpuPipeline] Failed to acquire command buffer", .{});
             return self.setError("Failed to acquire command buffer");
         };
+
+        // std.log.debug("[GpuPipeline] Setting up color target and beginning render pass...", .{});
 
         // Set up color target
         var color_target = std.mem.zeroes(c.SDL_GPUColorTargetInfo);
         color_target.texture = target_texture;
         color_target.clear_color = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 1.0 };
+        // Use CLEAR to ensure fresh content - the fullscreen shader covers everything anyway
+        // This prevents showing old/stale texture content
         color_target.load_op = c.SDL_GPU_LOADOP_CLEAR;
         color_target.store_op = c.SDL_GPU_STOREOP_STORE;
 
         // Begin render pass
         const render_pass = c.SDL_BeginGPURenderPass(cmd, &color_target, 1, null) orelse {
+            std.log.err("[GpuPipeline] Failed to begin render pass", .{});
             _ = c.SDL_SubmitGPUCommandBuffer(cmd);
             return self.setError("Failed to begin render pass");
         };
 
+        // std.log.debug("[GpuPipeline] Render pass begun, binding pipeline and drawing...", .{});
+
         // Bind pipeline
         c.SDL_BindGPUGraphicsPipeline(render_pass, pipeline);
 
-        // Push uniforms
-        c.SDL_PushGPUFragmentUniformData(cmd, 0, &self.uniforms, @sizeOf(shaders.Uniforms));
+        // Push uniforms (push constants)
+        const uniform_size = @sizeOf(shaders.Uniforms);
+        std.log.info("[GpuPipeline] Pushing {} bytes of uniform data to slot 0", .{uniform_size});
+        std.log.info("[GpuPipeline] Data check - primary_color in memory: ({d:.3}, {d:.3}, {d:.3}, {d:.3})", .{
+            self.uniforms.primary_color[0],
+            self.uniforms.primary_color[1],
+            self.uniforms.primary_color[2],
+            self.uniforms.primary_color[3],
+        });
+        c.SDL_PushGPUFragmentUniformData(cmd, 0, &self.uniforms, uniform_size);
 
         // Draw fullscreen triangle (3 vertices, generated in shader)
         c.SDL_DrawGPUPrimitives(render_pass, 3, 1, 0, 0);
@@ -526,11 +628,16 @@ pub const GpuPipeline = struct {
         // End render pass
         c.SDL_EndGPURenderPass(render_pass);
 
+        // std.log.debug("[GpuPipeline] Render pass ended, submitting command buffer...", .{});
+
         // Submit with fence for async completion tracking
         self.pending_fence = c.SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
         if (self.pending_fence == null) {
+            std.log.err("[GpuPipeline] Failed to submit command buffer", .{});
             return self.setError("Failed to submit command buffer");
         }
+
+        // std.log.debug("[GpuPipeline] Command buffer submitted ✓", .{});
 
         self.is_rendering = true;
         return true;

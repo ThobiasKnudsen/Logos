@@ -6,6 +6,7 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "vendor",
     },
     .dependencies = .{
         .pcrez = .{
@@ -19,6 +20,20 @@
         .dvui = .{
             .url = "git+https://github.com/david-vanderson/dvui.git#main",
             .hash = "dvui-0.4.0-dev-AQFJmeVS2gBr_UZImna5jjqJewaW2LBD6fve0Lt9Lc70",
+        },
+        // SDL3 - referenced from dvui but needed at top level for shader compiler headers
+        .sdl3 = .{
+            .url = "git+https://github.com/david-vanderson/SDL#2c5bd165a7bd647639cbf5f7edb899410d27b695",
+            .hash = "sdl-0.2.6+3.2.20-7uIn9FAjfwGon7V_xiNW1BXyq5ZzTOgPJSbRbybb-Fwz",
+            .lazy = true,
+        },
+        // Local vendored copy with Zig 0.15 compatibility fixes
+        .SDL_shadercross_zig = .{
+            .path = "vendor/SDL_shadercross_zig",
+        },
+        .shaderc_zig = .{
+            .url = "git+https://github.com/tiawl/shaderc.zig#0be8711deb5fdffbe32bce97d57b8f664495505e",
+            .hash = "shaderc_zig-1.0.0-mOl844ZlAwB7fsf9B231E6UEXPiLO2iLMYjvezWqF9NM",
         },
     },
 }

@@ -4,49 +4,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // ── Executable ─────────────────────────────────────────────────────
-    const exe = b.addExecutable(.{
-        .name = "Logos",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-
-    exe.linkLibC();
-
-    // ── Shader Compiler Libraries (shaderc + SDL_ShaderCross) ─────────────
-    // Library paths from CMake build
-    exe.addLibraryPath(.{ .cwd_relative = "build/lib" });
-
-    // Include paths for shader compiler headers
-    exe.addIncludePath(.{ .cwd_relative = "build/_deps/shaderc-src/libshaderc/include" });
-    exe.addIncludePath(.{ .cwd_relative = "build/_deps/sdl3_shadercross-src/include" });
-    exe.addIncludePath(.{ .cwd_relative = "build/_deps/sdl3-src/include" });
-
-    // Add rpath for runtime library loading
-    exe.addRPath(.{ .cwd_relative = "build/lib" });
-
-    // Link shaderc shared library (includes glslang, SPIRV-Tools)
-    exe.linkSystemLibrary("shaderc_shared");
-
-    // Link SDL_ShaderCross static library
-    exe.addObjectFile(.{ .cwd_relative = "build/lib/libSDL3_shadercross.a" });
-
-    // Link spirv-cross shared library (used by SDL_ShaderCross for translation)
-    exe.linkSystemLibrary("spirv-cross-c-shared");
-
-    b.installArtifact(exe);
-
     // ── DVUI with SDL3GPU backend ──────────────────────────────────────────
     const dvui_dep = b.dependency("dvui", .{
         .target = target,
         .optimize = optimize,
-        .backend = .sdl3gpu, // Use SDL3 GPU API backend
+        .backend = .sdl3gpu,
     });
-    exe.root_module.addImport("dvui", dvui_dep.module("dvui_sdl3gpu"));
-    exe.root_module.addImport("sdl3gpu", dvui_dep.module("sdl3"));
 
     // ── PCREz (Zig wrapper for PCRE2) ─────────────────────────────────
     const pcrez_dep = b.lazyDependency("pcrez", .{
@@ -54,7 +17,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }) orelse @panic("PCREz dependency failed");
 
-    // Get PCRE2 dependency for headers
     const pcre2_dep = b.dependency("pcre2", .{
         .target = target,
         .optimize = optimize,
@@ -67,9 +29,6 @@ pub fn build(b: *std.Build) void {
     });
     pcrez_mod.linkLibrary(pcre2_dep.artifact("pcre2-8"));
 
-    exe.root_module.addImport("pcrez", pcrez_mod);
-    exe.linkLibrary(pcre2_dep.artifact("pcre2-8"));
-
     // ── Regex modules for lexer ──────────────────────────────────────────
     const regex_splitting_mod = b.createModule(.{
         .root_source_file = b.path("src/lang/regex_splitting.zig"),
@@ -77,7 +36,66 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     regex_splitting_mod.addImport("pcrez", pcrez_mod);
+
+    // ── Shader Compiler Dependencies ─────────────────────────────────────
+    // Get shaderc from Zig package (builds from source)
+    const shaderc_dep = b.dependency("shaderc_zig", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Get SDL3 dependency for headers (lazy, from dvui's dependencies)
+    const sdl3_dep = b.lazyDependency("sdl3", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // ── Main Executable ─────────────────────────────────────────────────────
+    const exe = b.addExecutable(.{
+        .name = "Logos",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    exe.linkLibC();
+    exe.linkLibCpp(); // Required for shaderc C++ runtime
+
+    // Link shaderc
+    exe.linkLibrary(shaderc_dep.artifact("shaderc"));
+
+    // Build and link SDL_shadercross with SDL3 headers
+    if (sdl3_dep) |sdl3| {
+        const sdl3_include_path = sdl3.path("include").getPath(b);
+
+        const shadercross_dep = b.dependency("SDL_shadercross_zig", .{
+            .target = target,
+            .optimize = optimize,
+            .shared = false,
+            .dxc = false, // Disable DXC to simplify build
+            .cli = false,
+            .sdl_include_dir = @as([]const u8, sdl3_include_path),
+        });
+        exe.linkLibrary(shadercross_dep.artifact("SDL_shadercross"));
+
+        // Add SDL3 headers for shader_compiler.zig @cImport
+        exe.root_module.addIncludePath(sdl3.path("include"));
+    }
+
+    // DVUI imports
+    exe.root_module.addImport("dvui", dvui_dep.module("dvui_sdl3gpu"));
+    exe.root_module.addImport("sdl3gpu", dvui_dep.module("sdl3"));
+
+    // PCREz imports
+    exe.root_module.addImport("pcrez", pcrez_mod);
+    exe.linkLibrary(pcre2_dep.artifact("pcre2-8"));
+
+    // Regex module
     exe.root_module.addImport("regex_splitting", regex_splitting_mod);
+
+    b.installArtifact(exe);
 
     // ── Run step ───────────────────────────────────────────────────────
     const run_cmd = b.addRunArtifact(exe);
@@ -87,7 +105,7 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    // ── Bundled Zig compiler (unchanged) ───────────────────────────────
+    // ── Bundled Zig compiler ───────────────────────────────────────────
     const bundled_zig_dir = b.getInstallPath(.prefix, "tools/zig_compiler");
     const script_path = b.path("scripts/download_zig_compiler.sh");
     const download = b.addSystemCommand(&.{
@@ -102,7 +120,7 @@ pub fn build(b: *std.Build) void {
     zig_compiler_step.dependOn(&download.step);
 
     // ── Tests ─────────────────────────────────────────────────────────────
-    // Create regex_trie module (original implementation)
+    // Create regex_trie module
     const regex_trie_mod = b.createModule(.{
         .root_source_file = b.path("src/lang/regex_trie.zig"),
         .target = target,
@@ -150,13 +168,9 @@ pub fn build(b: *std.Build) void {
         .root_module = shader_gen_test_mod,
     });
     shader_gen_test.linkLibC();
+    shader_gen_test.linkLibCpp();
     shader_gen_test.linkLibrary(pcre2_dep.artifact("pcre2-8"));
-
-    // Link shaderc for GLSL to SPIRV compilation (no SDL needed)
-    shader_gen_test.addLibraryPath(.{ .cwd_relative = "build/lib" });
-    shader_gen_test.addIncludePath(.{ .cwd_relative = "build/_deps/shaderc-src/libshaderc/include" });
-    shader_gen_test.addRPath(.{ .cwd_relative = "build/lib" });
-    shader_gen_test.linkSystemLibrary("shaderc_shared");
+    shader_gen_test.linkLibrary(shaderc_dep.artifact("shaderc"));
 
     const run_shader_gen_test = b.addRunArtifact(shader_gen_test);
     const shader_gen_test_step = b.step("test-shader-gen", "Run shader generation pipeline tests");
@@ -168,11 +182,9 @@ pub fn build(b: *std.Build) void {
         .root_module = shader_gen_test_mod,
     });
     shader_gen_exe.linkLibC();
+    shader_gen_exe.linkLibCpp();
     shader_gen_exe.linkLibrary(pcre2_dep.artifact("pcre2-8"));
-    shader_gen_exe.addLibraryPath(.{ .cwd_relative = "build/lib" });
-    shader_gen_exe.addIncludePath(.{ .cwd_relative = "build/_deps/shaderc-src/libshaderc/include" });
-    shader_gen_exe.addRPath(.{ .cwd_relative = "build/lib" });
-    shader_gen_exe.linkSystemLibrary("shaderc_shared");
+    shader_gen_exe.linkLibrary(shaderc_dep.artifact("shaderc"));
 
     b.installArtifact(shader_gen_exe);
 
@@ -181,7 +193,7 @@ pub fn build(b: *std.Build) void {
     run_shader_gen_step.dependOn(&run_shader_gen_exe.step);
 
     // ── GPU Pipeline Test ────────────────────────────────────────────────
-    // Tests actual GPU pipeline creation (crashes on AMD RADV)
+    // Tests actual GPU pipeline creation
     // Pipeline: Logos expression → Tokens → AST → GLSL → SPIRV → SDL Shader → GPU Pipeline
     const gpu_pipeline_test_mod = b.createModule(.{
         .root_source_file = b.path("src/gpu_pipeline_test.zig"),
@@ -196,18 +208,26 @@ pub fn build(b: *std.Build) void {
         .root_module = gpu_pipeline_test_mod,
     });
     gpu_pipeline_exe.linkLibC();
+    gpu_pipeline_exe.linkLibCpp();
     gpu_pipeline_exe.linkLibrary(pcre2_dep.artifact("pcre2-8"));
+    gpu_pipeline_exe.linkLibrary(shaderc_dep.artifact("shaderc"));
 
-    // Link SDL, shaderc, and SDL_ShaderCross for full pipeline
-    gpu_pipeline_exe.addLibraryPath(.{ .cwd_relative = "build/lib" });
-    gpu_pipeline_exe.addIncludePath(.{ .cwd_relative = "build/_deps/shaderc-src/libshaderc/include" });
-    gpu_pipeline_exe.addIncludePath(.{ .cwd_relative = "build/_deps/sdl3_shadercross-src/include" });
-    gpu_pipeline_exe.addIncludePath(.{ .cwd_relative = "build/_deps/sdl3-src/include" });
-    gpu_pipeline_exe.addRPath(.{ .cwd_relative = "build/lib" });
-    gpu_pipeline_exe.linkSystemLibrary("shaderc_shared");
-    gpu_pipeline_exe.addObjectFile(.{ .cwd_relative = "build/lib/libSDL3_shadercross.a" });
-    gpu_pipeline_exe.addObjectFile(.{ .cwd_relative = "build/lib/libSDL3.a" });
-    gpu_pipeline_exe.linkSystemLibrary("spirv-cross-c-shared");
+    // Link SDL_shadercross and SDL3 for GPU pipeline test
+    if (sdl3_dep) |sdl3| {
+        const sdl3_include_path = sdl3.path("include").getPath(b);
+
+        const shadercross_dep = b.dependency("SDL_shadercross_zig", .{
+            .target = target,
+            .optimize = optimize,
+            .shared = false,
+            .dxc = false,
+            .cli = false,
+            .sdl_include_dir = @as([]const u8, sdl3_include_path),
+        });
+        gpu_pipeline_exe.linkLibrary(shadercross_dep.artifact("SDL_shadercross"));
+        gpu_pipeline_exe.linkLibrary(sdl3.artifact("SDL3"));
+        gpu_pipeline_exe.root_module.addIncludePath(sdl3.path("include"));
+    }
 
     b.installArtifact(gpu_pipeline_exe);
 

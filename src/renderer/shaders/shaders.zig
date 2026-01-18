@@ -171,14 +171,16 @@ pub const default_vertex_glsl =
     \\}
 ;
 
-/// Default fragment shader - gradient background
+/// Default fragment shader - uses push constants (not uniform buffer)
 pub const default_fragment_glsl =
     \\#version 450
     \\
     \\layout(location = 0) in vec2 in_texcoord;
     \\layout(location = 0) out vec4 out_color;
     \\
-    \\layout(set = 0, binding = 0) uniform Uniforms {
+    \\// Uniform buffer for fragment shader (set 3, binding 0 = uniform slot 0)
+    \\// SDL3 uses set 3 for fragment shader uniforms, set 1 for vertex
+    \\layout(set = 3, binding = 0, std140) uniform PushConstants {
     \\    float time;
     \\    float _pad0;
     \\    vec2 resolution;
@@ -195,30 +197,9 @@ pub const default_fragment_glsl =
     \\};
     \\
     \\void main() {
+    \\    // Simple gradient using push constants
     \\    vec2 uv = in_texcoord;
-    \\    
-    \\    // Dark gradient background
-    \\    vec3 bg = mix(
-    \\        background_color.rgb,
-    \\        background_color.rgb * 1.2,
-    \\        uv.y
-    \\    );
-    \\    
-    \\    // Subtle grid
-    \\    vec2 world = mix(axis_min, axis_max, uv);
-    \\    vec2 grid = abs(fract(world) - 0.5);
-    \\    float line = min(grid.x, grid.y);
-    \\    float grid_alpha = smoothstep(0.02, 0.0, line) * 0.15;
-    \\    
-    \\    // Axis lines
-    \\    float axis_x = smoothstep(0.02, 0.0, abs(world.y));
-    \\    float axis_y = smoothstep(0.02, 0.0, abs(world.x));
-    \\    float axis_alpha = max(axis_x, axis_y) * 0.4;
-    \\    
-    \\    vec3 final_color = mix(bg, secondary_color.rgb, grid_alpha);
-    \\    final_color = mix(final_color, primary_color.rgb, axis_alpha);
-    \\    
-    \\    out_color = vec4(final_color, 1.0);
+    \\    out_color = vec4(uv.x, uv.y, 0.5 + 0.5 * sin(time), 1.0);
     \\}
 ;
 
@@ -230,7 +211,9 @@ pub const custom_fragment_template =
     \\layout(location = 0) in vec2 in_texcoord;
     \\layout(location = 0) out vec4 out_color;
     \\
-    \\layout(set = 0, binding = 0) uniform Uniforms {
+    \\// Uniform buffer for fragment shader (set 3, binding 0 = uniform slot 0)
+    \\// SDL3 uses set 3 for fragment shader uniforms, set 1 for vertex
+    \\layout(set = 3, binding = 0, std140) uniform PushConstants {
     \\    float time;
     \\    float _pad0;
     \\    vec2 resolution;
@@ -251,11 +234,11 @@ pub const custom_fragment_template =
     \\    vec2 world = mix(axis_min, axis_max, uv);
     \\    float x = world.x;
     \\    float y = world.y;
-    \\    
+    \\
     \\    // LOGOS_EXPRESSION_START
     \\    vec4 result = vec4(0.0, 0.0, 0.0, 1.0);
     \\    // LOGOS_EXPRESSION_END
-    \\    
+    \\
     \\    out_color = result;
     \\}
 ;

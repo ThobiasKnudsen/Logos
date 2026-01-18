@@ -78,6 +78,12 @@ pub const GraphRenderer = struct {
     hover_x: ?f64,
     hover_y: ?f64,
 
+    /// Flag to wait for first render after shader update
+    needs_initial_render: bool,
+
+    /// Track if we've successfully rendered at least once
+    has_rendered_once: bool,
+
     pub fn init(allocator: std.mem.Allocator) GraphRenderer {
         return .{
             .allocator = allocator,
@@ -98,6 +104,8 @@ pub const GraphRenderer = struct {
             .last_mouse_y = 0,
             .hover_x = null,
             .hover_y = null,
+            .needs_initial_render = false,
+            .has_rendered_once = false,
         };
     }
 
@@ -171,6 +179,10 @@ pub const GraphRenderer = struct {
     /// Update the shader from generated GLSL code
     /// Called when the user clicks "Play" and GLSL is generated from the AST
     pub fn updateShader(self: *GraphRenderer, glsl_source: []const u8) !void {
+        std.log.info("[GraphRenderer] ========== UPDATE SHADER START ==========", .{});
+        std.log.info("[GraphRenderer] GLSL source length: {} bytes", .{glsl_source.len});
+        std.log.info("[GraphRenderer] GLSL source:\n{s}", .{glsl_source});
+
         // Clear previous error
         self.clearError();
 
@@ -181,16 +193,30 @@ pub const GraphRenderer = struct {
         self.current_glsl = try self.allocator.dupe(u8, glsl_source);
 
         if (!self.is_initialized) {
+            std.log.err("[GraphRenderer] Cannot update shader: not initialized", .{});
             return error.NotInitialized;
         }
 
+        std.log.info("[GraphRenderer] Calling gpu_pipeline.updateFragmentShader()...", .{});
+
         // Update the GPU pipeline with new shader
         self.gpu_pipeline.updateFragmentShader(glsl_source) catch |err| {
+            std.log.err("[GraphRenderer] Shader update FAILED: {}", .{err});
             self.setError("Shader update failed");
             return err;
         };
 
-        std.log.info("Shader updated successfully", .{});
+        // IMPORTANT: Invalidate render target so it gets recreated with new shader
+        // The old texture still contains output from the previous shader
+        std.log.info("[GraphRenderer] Invalidating render target to force recreation with new shader", .{});
+        self.render_target = null;
+
+        // Mark that we need to wait for first render to complete and reset rendered flag
+        self.needs_initial_render = true;
+        self.has_rendered_once = false;
+
+        std.log.info("[GraphRenderer] Shader updated successfully ✓", .{});
+        std.log.info("[GraphRenderer] ========== UPDATE SHADER END ==========", .{});
     }
 
     /// Run automated shader test - parses "x²+y²=9" and tries to render
@@ -287,16 +313,41 @@ pub const GraphRenderer = struct {
         // Update frame counter
         self.frame_count +%= 1;
 
+        // DEBUG: Log render state every 60 frames
+        if (self.frame_count % 60 == 0) {
+            std.log.debug("[GraphRenderer] Frame {}: initialized={}, has_glsl={}, is_rendering={}, has_target={}", .{
+                self.frame_count,
+                self.is_initialized,
+                self.current_glsl != null,
+                self.isRendering(),
+                self.render_target != null,
+            });
+        }
+
         // Sync axis state to GPU pipeline uniforms
         self.syncAxisStateToUniforms();
 
+        // Always ensure we have a render target (even before shader is loaded)
+        self.ensureRenderTarget(panel_width, panel_height);
+
         // Try to render if initialized and shader is active
         if (self.is_initialized and self.current_glsl != null) {
-            // Ensure we have a render target
-            self.ensureRenderTarget(panel_width, panel_height);
+            // Only submit render if:
+            // 1. Not currently rendering, AND
+            // 2. Either animating OR we haven't rendered once yet (for static expressions)
+            const is_rendering = self.isRendering();
+            const should_render = !is_rendering and (self.is_animating or !self.has_rendered_once);
 
-            // Submit render if not already rendering
-            if (!self.isRendering()) {
+            // DIAGNOSTIC: Log render check state every 60 frames or when state changes
+            if (self.frame_count % 60 == 0 or should_render) {
+                std.log.info("[GraphRenderer] Render check: has_rendered_once={}, is_rendering={}, should_render={}", .{
+                    self.has_rendered_once,
+                    is_rendering,
+                    should_render,
+                });
+            }
+
+            if (should_render) {
                 if (self.render_target) |target| {
                     // Get the underlying SDL texture from dvui's texture target
                     const backend_target: *BackendTextureTarget = @ptrCast(@alignCast(target.ptr));
@@ -309,19 +360,38 @@ pub const GraphRenderer = struct {
                         @floatFromInt(panel_height),
                     );
 
+                    // DEBUG: Log render submission
+                    if (self.frame_count % 60 == 0) {
+                        std.log.debug("[GraphRenderer] Submitting render: elapsed={d:.2}s, size={}x{}", .{
+                            elapsed,
+                            panel_width,
+                            panel_height,
+                        });
+                    }
+
                     // Render to the external texture
                     _ = self.gpu_pipeline.renderToExternalTexture(
                         backend_target.texture,
                         panel_width,
                         panel_height,
                     ) catch |err| {
-                        std.log.err("Render failed: {}", .{err});
+                        std.log.err("[GraphRenderer] Render failed: {}", .{err});
                     };
+
+                    // Log first render after shader update (async - no blocking)
+                    if (self.needs_initial_render) {
+                        std.log.info("[GraphRenderer] First render submitted for new shader (async) to texture ptr={*}", .{target.ptr});
+                        self.needs_initial_render = false;
+                    }
                 }
             }
 
             // Poll for completion
             if (self.pollCompletion()) {
+                // Mark that we've rendered successfully
+                std.log.info("[GraphRenderer] Render COMPLETED, setting has_rendered_once=true", .{});
+                self.has_rendered_once = true;
+
                 // Render complete - trigger continuous re-render if animating
                 if (self.is_animating) {
                     if (self.render_target) |target| {
@@ -336,7 +406,10 @@ pub const GraphRenderer = struct {
             }
         }
 
-        // Render visual content with axis margins
+        // Render visual content with axis margins (this will DISPLAY the texture)
+        if (self.frame_count % 60 == 0 and self.render_target != null) {
+            std.log.info("[GraphRenderer] About to DISPLAY texture ptr={*}", .{self.render_target.?.ptr});
+        }
         self.renderVisualContentWithAxes(width, height);
     }
 
@@ -360,16 +433,24 @@ pub const GraphRenderer = struct {
                 return; // Size matches, keep existing target
             }
             // Size changed, mark for recreation
+            std.log.info("[GraphRenderer] Render target size changed: {}x{} -> {}x{}, recreating", .{
+                rt.width,
+                rt.height,
+                width,
+                height,
+            });
             // Note: We can't easily destroy dvui textures mid-frame, so we'll leak the old one
             // dvui's texture cache handles cleanup normally
             self.render_target = null;
         }
 
         // Create new render target
+        std.log.info("[GraphRenderer] Creating new render target: {}x{}", .{ width, height });
         self.render_target = dvui.TextureTarget.create(width, height, .nearest) catch |err| {
-            std.log.err("Failed to create render target: {}", .{err});
+            std.log.err("[GraphRenderer] Failed to create render target: {}", .{err});
             return;
         };
+        std.log.info("[GraphRenderer] Render target created: ptr={*}, EMPTY/UNINITIALIZED", .{self.render_target.?.ptr});
     }
 
     /// Render visual content with axis margins
@@ -514,12 +595,8 @@ pub const GraphRenderer = struct {
             return;
         }
 
-        if (self.current_glsl != null) {
-            // Shader is active - render the texture
-            self.renderActiveState(width, height);
-        } else {
-            self.renderIdleState();
-        }
+        // Always render the texture (black if no shader loaded)
+        self.renderTextureOrBlack(width, height);
     }
 
     fn renderErrorState(_: *GraphRenderer, err_msg: []const u8) void {
@@ -545,6 +622,82 @@ pub const GraphRenderer = struct {
             .font = .theme(.title),
             .color_text = dvui.Color.fromHex("#ffaa00"),
         });
+    }
+
+    /// Render the texture (or black background if texture not available)
+    fn renderTextureOrBlack(self: *GraphRenderer, width: f32, height: f32) void {
+        _ = width;
+        _ = height;
+
+        // If we have a render target AND it's been rendered at least once, display it
+        // Don't display uninitialized textures (they contain garbage data)
+        if (self.render_target) |target| {
+            // DEBUG: Log texture info
+            if (self.frame_count % 60 == 0) {
+                std.log.info("[GraphRenderer] DISPLAYING TEXTURE: ptr={*}, size={}x{}, has_glsl={}, has_rendered={}", .{
+                    target.ptr,
+                    target.width,
+                    target.height,
+                    self.current_glsl != null,
+                    self.has_rendered_once,
+                });
+            }
+
+            // IMPORTANT: Don't display uninitialized textures - they contain garbage GPU memory!
+            // Wait for the first render to complete before displaying
+            if (!self.has_rendered_once) {
+                std.log.info("[GraphRenderer] Texture not yet rendered, showing black background", .{});
+                self.renderBlackBackground();
+                return;
+            }
+
+            // Convert TextureTarget to Texture for display
+            const texture = dvui.textureFromTarget(target) catch |err| {
+                std.log.err("[GraphRenderer] Failed to convert texture target: {}", .{err});
+                self.renderBlackBackground();
+                return;
+            };
+
+            // Get current rect for texture placement
+            // Using a box to define the area, then render texture manually
+            var content_box = dvui.box(@src(), .{}, .{
+                .expand = .both,
+            });
+            defer content_box.deinit();
+
+            // Get the rect-scale of the content box for rendering
+            const rs = content_box.data().contentRectScale();
+
+            // DEBUG: Log texture render every 60 frames
+            if (self.frame_count % 60 == 0) {
+                std.log.debug("[GraphRenderer] Rendering texture: rect=({d:.1}, {d:.1}, {d:.1}x{d:.1})", .{
+                    rs.r.x,
+                    rs.r.y,
+                    rs.r.w,
+                    rs.r.h,
+                });
+            }
+
+            // Render the texture to fill the box
+            dvui.renderTexture(texture, rs, .{}) catch |err| {
+                std.log.err("[GraphRenderer] Failed to render texture: {}", .{err});
+                self.renderBlackBackground();
+            };
+        } else {
+            // No render target yet - show black background
+            self.renderBlackBackground();
+        }
+    }
+
+    /// Render a black background when texture is not available
+    fn renderBlackBackground(self: *GraphRenderer) void {
+        _ = self;
+        var bg = dvui.box(@src(), .{}, .{
+            .expand = .both,
+            .color_fill = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 255 },
+            .background = true,
+        });
+        bg.deinit();
     }
 
     fn renderActiveState(self: *GraphRenderer, width: f32, height: f32) void {

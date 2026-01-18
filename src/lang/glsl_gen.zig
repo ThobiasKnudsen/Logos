@@ -541,20 +541,21 @@ pub const GlslGenerator = struct {
         return switch (node.data) {
             .bool_lit => .boolean,
             .number => .scalar,
-            .apply => |op| {
+            .apply => |op| blk: {
                 // Check if it's a comparison or logical operation
                 if (getBuiltin(op.name)) |builtin| {
+                    std.log.info("[GlslGen] inferOutputType: op='{s}', category={s}, returning boolean", .{ op.name, @tagName(builtin.category) });
                     if (builtin.category == .comparison or builtin.category == .logical) {
-                        return .boolean;
+                        break :blk .boolean;
                     }
                 }
                 // Check for tuple-returning functions (like mandelbrot returning vec4)
                 // For now, assume user-defined functions might return color
                 if (self.functions.get(op.name)) |_| {
                     // Could analyze return type, for now assume color if 4-tuple
-                    return .color;
+                    break :blk .color;
                 }
-                return .scalar;
+                break :blk .scalar;
             },
             .tuple => |elements| {
                 // 4-tuple is assumed to be color
@@ -596,9 +597,10 @@ pub const GlslGenerator = struct {
         try self.writeLine("layout(location = 0) in vec2 in_texcoord;");
         try self.writeLine("layout(location = 0) out vec4 out_color;");
         try self.writeLine("");
-        // Uniform layout must match shaders.Uniforms struct exactly
-        // Use same style as default shader (no instance name)
-        try self.writeLine("layout(set = 0, binding = 0) uniform Uniforms {");
+        // Uniform buffer for fragment shader (set 3 for fragment, set 1 for vertex)
+        // SDL3 GPU API uses descriptor sets, not Vulkan push constants
+        // Must match shaders.Uniforms struct exactly (std140 layout)
+        try self.writeLine("layout(set = 3, binding = 0, std140) uniform PushConstants {");
         self.indent_level += 1;
         try self.writeLine("float time;");
         try self.writeLine("float _pad0;");
@@ -954,6 +956,8 @@ pub const GlslGenerator = struct {
         // Emit the output expression
         try self.writeIndent();
 
+        std.log.info("[GlslGen] emitMainFunction: output_type={s}", .{@tagName(output_type)});
+
         switch (output_type) {
             .color => {
                 try self.write("vec4 result = ");
@@ -975,24 +979,16 @@ pub const GlslGenerator = struct {
                 try self.writeLine("float y_m = y - half_py;");
                 try self.writeLine("float y_p = y + half_py;");
                 try self.writeLine("");
-                try self.writeLine("// Evaluate boolean expression with corner checking");
-                try self.write("    bool result = ");
+                try self.writeLine("// Evaluate expression at corners");
+                try self.writeLine("bool result = ");
                 try self.emitBooleanWithCornerCheck(output);
-                try self.write(";\n");
+                try self.writeLine(";");
                 try self.writeLine("");
-                try self.writeLine("vec3 bg = background_color.rgb;");
-                try self.writeLine("vec3 fg = primary_color.rgb;");
-                try self.writeLine("");
-                try self.writeLine("// DEBUG: Visualize coordinates (remove this later)");
-                try self.writeLine("// Red channel = x normalized, Green = y normalized, Blue = result");
-                try self.writeLine("// float debug_x = (x - axis_min.x) / (axis_max.x - axis_min.x);");
-                try self.writeLine("// float debug_y = (y - axis_min.y) / (axis_max.y - axis_min.y);");
-                try self.writeLine("// out_color = vec4(debug_x, debug_y, float(result), 1.0);");
-                try self.writeLine("");
+                try self.writeLine("// Output color based on result");
                 try self.writeLine("if (result) {");
-                try self.writeLine("    out_color = vec4(fg, 1.0);");
+                try self.writeLine("    out_color = vec4(primary_color.rgb, 1.0);");
                 try self.writeLine("} else {");
-                try self.writeLine("    out_color = vec4(bg, 1.0);");
+                try self.writeLine("    out_color = vec4(background_color.rgb, 1.0);");
                 try self.writeLine("}");
             },
             .scalar => {

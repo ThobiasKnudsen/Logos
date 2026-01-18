@@ -110,8 +110,11 @@ pub fn compileGlslToSpirv(
     glsl_source: []const u8,
     stage: ShaderStage,
 ) ShaderError!SpirvBytecode {
+    std.log.info("[ShaderCompiler] Compiling GLSL to SPIRV ({s} stage, {} bytes)...", .{ @tagName(stage), glsl_source.len });
+
     const compiler = global_compiler orelse {
         // Auto-initialize if not done
+        std.log.info("[ShaderCompiler] Auto-initializing compiler...", .{});
         try init();
         return compileGlslToSpirv(allocator, glsl_source, stage);
     };
@@ -119,6 +122,7 @@ pub fn compileGlslToSpirv(
     // Create compile options with Vulkan target
     const options = c.shaderc_compile_options_initialize();
     if (options == null) {
+        std.log.err("[ShaderCompiler] Failed to initialize compile options", .{});
         return ShaderError.OutOfMemory;
     }
     defer c.shaderc_compile_options_release(options);
@@ -128,6 +132,8 @@ pub fn compileGlslToSpirv(
     // Target Vulkan 1.0 / SPIRV 1.0 for maximum compatibility
     c.shaderc_compile_options_set_target_env(options, c.shaderc_target_env_vulkan, c.shaderc_env_version_vulkan_1_0);
     c.shaderc_compile_options_set_target_spirv(options, c.shaderc_spirv_version_1_0);
+
+    std.log.debug("[ShaderCompiler] Calling shaderc_compile_into_spv...", .{});
 
     // Compile GLSL to SPIRV
     const result = c.shaderc_compile_into_spv(
@@ -141,6 +147,7 @@ pub fn compileGlslToSpirv(
     );
 
     if (result == null) {
+        std.log.err("[ShaderCompiler] shaderc_compile_into_spv returned null", .{});
         return ShaderError.ShaderCompileFailed;
     }
     defer c.shaderc_result_release(result);
@@ -150,8 +157,9 @@ pub fn compileGlslToSpirv(
     if (status != c.shaderc_compilation_status_success) {
         const error_msg = c.shaderc_result_get_error_message(result);
         if (error_msg != null) {
-            std.log.err("Shader compilation error: {s}", .{error_msg});
+            std.log.err("[ShaderCompiler] Compilation error: {s}", .{error_msg});
         }
+        std.log.err("[ShaderCompiler] Compilation status: {}", .{status});
         return ShaderError.ShaderCompileFailed;
     }
 
@@ -159,15 +167,29 @@ pub fn compileGlslToSpirv(
     const spirv_len = c.shaderc_result_get_length(result);
     const spirv_ptr = c.shaderc_result_get_bytes(result);
 
+    std.log.debug("[ShaderCompiler] SPIRV output size: {} bytes", .{spirv_len});
+
     if (spirv_ptr == null or spirv_len == 0) {
+        std.log.err("[ShaderCompiler] SPIRV output is null or empty", .{});
         return ShaderError.ShaderCompileFailed;
     }
 
     // Copy to Zig-managed memory
-    const output = allocator.alloc(u8, spirv_len) catch return ShaderError.OutOfMemory;
+    const output = allocator.alloc(u8, spirv_len) catch {
+        std.log.err("[ShaderCompiler] Failed to allocate memory for SPIRV", .{});
+        return ShaderError.OutOfMemory;
+    };
     errdefer allocator.free(output);
 
     @memcpy(output, @as([*]const u8, @ptrCast(spirv_ptr))[0..spirv_len]);
+
+    // Verify SPIRV magic number
+    if (spirv_len >= 4) {
+        const is_valid = output[0] == 0x03 and output[1] == 0x02 and output[2] == 0x23 and output[3] == 0x07;
+        std.log.info("[ShaderCompiler] SPIRV compilation success ✓ (magic number valid: {})", .{is_valid});
+    } else {
+        std.log.warn("[ShaderCompiler] SPIRV too small to verify magic number", .{});
+    }
 
     return SpirvBytecode{
         .data = output,
@@ -175,73 +197,92 @@ pub fn compileGlslToSpirv(
     };
 }
 
-/// Reflect SPIRV bytecode to get resource info
+/// Note: Reflection is now handled internally by SDL_ShaderCross_CompileGraphicsShaderFromSPIRV
+/// This function is kept for backward compatibility but returns empty info
 pub fn reflectSpirv(spirv: []const u8) ShaderError!ShaderResourceInfo {
-    const metadata = c.SDL_ShaderCross_ReflectGraphicsSPIRV(
-        spirv.ptr,
-        spirv.len,
-        0,
-    ) orelse return ShaderError.ReflectionFailed;
-    defer c.SDL_free(metadata);
-
+    _ = spirv;
+    // SDL_shadercross no longer exposes reflection API - it's handled internally
     return ShaderResourceInfo{
-        .num_samplers = metadata.resource_info.num_samplers,
-        .num_storage_textures = metadata.resource_info.num_storage_textures,
-        .num_storage_buffers = metadata.resource_info.num_storage_buffers,
-        .num_uniform_buffers = metadata.resource_info.num_uniform_buffers,
+        .num_samplers = 0,
+        .num_storage_textures = 0,
+        .num_storage_buffers = 0,
+        .num_uniform_buffers = 0,
     };
 }
 
+/// Shader resource info for pipeline creation
+pub const ShaderResources = struct {
+    num_samplers: u32 = 0,
+    num_storage_textures: u32 = 0,
+    num_storage_buffers: u32 = 0,
+    num_uniform_buffers: u32 = 0,
+};
+
 /// Create an SDL GPU shader from SPIRV bytecode
-/// Uses SDL_CreateGPUShader directly with SPIRV format (same method as dvui backend)
+/// Uses SDL_CreateGPUShader directly with specified resource counts
 /// Note: device and return are *anyopaque to avoid cimport type conflicts with dvui backend
 pub fn createGpuShader(
     device: *anyopaque,
     spirv: []const u8,
     stage: ShaderStage,
 ) ShaderError!*anyopaque {
+    // Default resources - minimal shader with no resources
+    const resources = ShaderResources{};
+    return createGpuShaderWithResources(device, spirv, stage, resources);
+}
+
+/// Create an SDL GPU shader from SPIRV bytecode with explicit resource counts
+pub fn createGpuShaderWithResources(
+    device: *anyopaque,
+    spirv: []const u8,
+    stage: ShaderStage,
+    resources: ShaderResources,
+) ShaderError!*anyopaque {
     const typed_device: *c.SDL_GPUDevice = @ptrCast(@alignCast(device));
 
-    // Reflect to get resource info
-    const metadata = c.SDL_ShaderCross_ReflectGraphicsSPIRV(
-        spirv.ptr,
-        spirv.len,
-        0,
-    ) orelse return ShaderError.ReflectionFailed;
-    defer c.SDL_free(metadata);
-
-    // Use SDL_CreateGPUShader directly with SPIRV format (same as dvui backend)
-    // This is more compatible than SDL_ShaderCross_CompileGraphicsShaderFromSPIRV
-    var shader_info = std.mem.zeroes(c.SDL_GPUShaderCreateInfo);
-    shader_info.code = spirv.ptr;
-    shader_info.code_size = spirv.len;
-    shader_info.entrypoint = "main";
-    shader_info.format = c.SDL_GPU_SHADERFORMAT_SPIRV;
-    shader_info.stage = switch (stage) {
+    const sdl_stage: c.SDL_GPUShaderStage = switch (stage) {
         .vertex => c.SDL_GPU_SHADERSTAGE_VERTEX,
         .fragment => c.SDL_GPU_SHADERSTAGE_FRAGMENT,
         .compute => @as(c.SDL_GPUShaderStage, 0),
     };
-    shader_info.num_samplers = metadata.*.resource_info.num_samplers;
-    shader_info.num_storage_textures = metadata.*.resource_info.num_storage_textures;
-    shader_info.num_storage_buffers = metadata.*.resource_info.num_storage_buffers;
-    shader_info.num_uniform_buffers = metadata.*.resource_info.num_uniform_buffers;
 
-    std.log.info("Calling SDL_CreateGPUShader (SPIRV format, {d} uniforms)...", .{metadata.*.resource_info.num_uniform_buffers});
+    std.log.info("[ShaderCompiler] Creating GPU shader (stage={}, uniform_buffers={}, spirv_size={})...", .{
+        @intFromEnum(stage),
+        resources.num_uniform_buffers,
+        spirv.len,
+    });
+
+    // Create shader directly using SDL_CreateGPUShader
+    const shader_info = c.SDL_GPUShaderCreateInfo{
+        .code_size = spirv.len,
+        .code = spirv.ptr,
+        .entrypoint = "main",
+        .format = c.SDL_GPU_SHADERFORMAT_SPIRV,
+        .stage = sdl_stage,
+        .num_samplers = resources.num_samplers,
+        .num_storage_textures = resources.num_storage_textures,
+        .num_storage_buffers = resources.num_storage_buffers,
+        .num_uniform_buffers = resources.num_uniform_buffers,
+        .props = 0,
+    };
+
+    std.log.debug("[ShaderCompiler] Calling SDL_CreateGPUShader...", .{});
 
     const gpu_shader = c.SDL_CreateGPUShader(typed_device, &shader_info) orelse {
         const err_msg = c.SDL_GetError();
         if (err_msg != null and err_msg[0] != 0) {
-            std.log.err("SDL_CreateGPUShader failed: {s}", .{err_msg});
+            std.log.err("[ShaderCompiler] SDL_CreateGPUShader FAILED: {s}", .{err_msg});
+        } else {
+            std.log.err("[ShaderCompiler] SDL_CreateGPUShader FAILED (no error message)", .{});
         }
         return ShaderError.ShaderCreationFailed;
     };
 
-    std.log.info("SDL_CreateGPUShader succeeded", .{});
+    std.log.info("[ShaderCompiler] SDL_CreateGPUShader succeeded ✓", .{});
     return @ptrCast(gpu_shader);
 }
 
-/// Compile GLSL and create GPU shader in one step
+/// Compile GLSL and create GPU shader in one step (minimal resources)
 /// Note: device is *anyopaque to avoid cimport type conflicts with dvui backend
 pub fn compileAndCreateShader(
     allocator: std.mem.Allocator,
@@ -253,6 +294,20 @@ pub fn compileAndCreateShader(
     defer spirv.deinit();
 
     return createGpuShader(device, spirv.data, stage);
+}
+
+/// Compile GLSL and create GPU shader with explicit resource counts
+pub fn compileAndCreateShaderWithResources(
+    allocator: std.mem.Allocator,
+    device: *anyopaque,
+    glsl_source: []const u8,
+    stage: ShaderStage,
+    resources: ShaderResources,
+) ShaderError!*anyopaque {
+    var spirv = try compileGlslToSpirv(allocator, glsl_source, stage);
+    defer spirv.deinit();
+
+    return createGpuShaderWithResources(device, spirv.data, stage, resources);
 }
 
 /// Get supported shader formats for the current platform
@@ -286,7 +341,7 @@ pub const test_fragment_shader =
     \\layout(location = 0) in vec2 in_texcoord;
     \\layout(location = 0) out vec4 out_color;
     \\
-    \\layout(set = 0, binding = 0) uniform Uniforms {
+    \\layout(push_constant) uniform PushConstants {
     \\    float time;
     \\    vec2 resolution;
     \\};
