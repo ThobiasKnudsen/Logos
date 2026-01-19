@@ -112,7 +112,7 @@ pub const SplitView = struct {
                         .position => {
                             // Update hover position and handle dragging
                             graph_renderer.handleMouseMove(local_x, local_y, panel_width, panel_height);
-                            dvui.cursorSet(if (graph_renderer.is_dragging) .arrow_all else .arrow);
+                            dvui.cursorSet(graph_renderer.getCursor());
                         },
                         .press => {
                             // Start dragging on left button press
