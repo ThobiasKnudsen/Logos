@@ -585,7 +585,8 @@ pub const GlslGenerator = struct {
         try self.emitUniforms();
 
         // Emit helper functions (from root definitions)
-        try self.emitHelperFunctions(root);
+        // Pass the output expression so we only emit functions actually used
+        try self.emitHelperFunctions(root, output);
 
         // Emit main function
         try self.emitMainFunction(output, output_type);
@@ -625,7 +626,7 @@ pub const GlslGenerator = struct {
         try self.writeLine("");
     }
 
-    fn emitHelperFunctions(self: *Self, root: *const AstNode) !void {
+    fn emitHelperFunctions(self: *Self, root: *const AstNode, output: *const AstNode) !void {
         // First, collect all constants/bindings that need to be emitted as defines or globals
         switch (root.data) {
             .block => |stmts| {
@@ -645,7 +646,8 @@ pub const GlslGenerator = struct {
         }
 
         // Topologically sort functions (dependencies first)
-        const sorted_funcs = try self.topologicalSortFunctions();
+        // Only include functions that are used (transitively) from the output expression
+        const sorted_funcs = try self.topologicalSortFunctions(output);
         defer self.allocator.free(sorted_funcs);
 
         // Emit functions in sorted order
@@ -664,7 +666,8 @@ pub const GlslGenerator = struct {
     }
 
     /// Topologically sort functions so dependencies are emitted first
-    fn topologicalSortFunctions(self: *Self) ![]const []const u8 {
+    /// Only includes functions transitively used from the output expression
+    fn topologicalSortFunctions(self: *Self, output: *const AstNode) ![]const []const u8 {
         var result: std.ArrayList([]const u8) = .{ .items = &.{}, .capacity = 0 };
         errdefer result.deinit(self.allocator);
 
@@ -674,10 +677,13 @@ pub const GlslGenerator = struct {
         var in_stack = std.StringHashMap(void).init(self.allocator);
         defer in_stack.deinit();
 
-        // Visit all functions
-        var func_iter = self.functions.iterator();
-        while (func_iter.next()) |entry| {
-            const func_name = entry.key_ptr.*;
+        // Find all functions called from output expression
+        var used_funcs: std.ArrayList([]const u8) = .{ .items = &.{}, .capacity = 0 };
+        defer used_funcs.deinit(self.allocator);
+        try self.findFunctionCalls(output, &used_funcs);
+
+        // Visit only the used functions (and their dependencies)
+        for (used_funcs.items) |func_name| {
             if (!visited.contains(func_name)) {
                 try self.topoVisit(func_name, &visited, &in_stack, &result);
             }
@@ -949,13 +955,12 @@ pub const GlslGenerator = struct {
         try self.writeLine("void main() {");
         self.indent_level += 1;
 
-        // Set up axis variables mapped to world coordinates
-        // axis1 and axis2 are the raw axis values (x and y need explicit assignment)
-        try self.writeLine("// Map UV to world coordinates using axis bounds");
+        // Set up UV coordinate variables (x and y in [0,1] range)
+        // User code should map these to world coordinates using axis properties
+        try self.writeLine("// UV coordinates (normalized screen space [0,1])");
         try self.writeLine("vec2 uv = in_texcoord;");
-        try self.writeLine("vec2 world = mix(axis_min, axis_max, uv);");
-        try self.writeLine("float x = world.x;");
-        try self.writeLine("float y = world.y;");
+        try self.writeLine("float x = uv.x;");
+        try self.writeLine("float y = uv.y;");
         try self.writeLine("");
 
         // Emit the output expression
@@ -971,7 +976,12 @@ pub const GlslGenerator = struct {
                 try self.writeLine("out_color = result;");
             },
             .boolean => {
-                // Boolean expression evaluation with corner checking for anti-aliasing
+                // For boolean expressions, override x/y to be world coordinates for proper evaluation
+                try self.writeLine("// Map UV to world coordinates for boolean expressions");
+                try self.writeLine("vec2 world = mix(axis_min, axis_max, uv);");
+                try self.writeLine("x = world.x;  // Override x to world coordinate");
+                try self.writeLine("y = world.y;  // Override y to world coordinate");
+                try self.writeLine("");
                 try self.writeLine("// Boolean expression evaluation with corner checking");
                 try self.writeLine("// Calculate pixel size in world coordinates for anti-aliasing");
                 try self.writeLine("vec2 pixel_size = (axis_max - axis_min) / resolution;");
@@ -1234,17 +1244,22 @@ pub const GlslGenerator = struct {
             },
             .tuple => |elements| {
                 const n = elements.len;
-                try self.write(switch (n) {
-                    2 => "vec2(",
-                    3 => "vec3(",
-                    4 => "vec4(",
-                    else => "vec4(",
-                });
-                for (elements, 0..) |elem, i| {
-                    if (i > 0) try self.write(", ");
-                    try self.emitExprInternal(elem, x_var, y_var);
+                if (n == 1) {
+                    // Single-element tuple - unwrap and emit inner expression
+                    try self.emitExprInternal(elements[0], x_var, y_var);
+                } else {
+                    try self.write(switch (n) {
+                        2 => "vec2(",
+                        3 => "vec3(",
+                        4 => "vec4(",
+                        else => "vec4(",
+                    });
+                    for (elements, 0..) |elem, i| {
+                        if (i > 0) try self.write(", ");
+                        try self.emitExprInternal(elem, x_var, y_var);
+                    }
+                    try self.write(")");
                 }
-                try self.write(")");
             },
             .cast => |c| {
                 try self.write(c.target_type.toGlsl());
@@ -1272,9 +1287,59 @@ pub const GlslGenerator = struct {
                 try self.write(")");
             },
             .block => |stmts| {
-                // For expression context, we just emit the last expression
+                // For expression context, emit bindings as assignments and return the last expression
+                // This handles patterns like: (sq: z_x * z_x + z_y * z_y, sq) in while conditions
                 if (stmts.len > 0) {
-                    try self.emitExprInternal(stmts[stmts.len - 1], x_var, y_var);
+                    // If there are multiple statements, wrap in a comma expression
+                    if (stmts.len > 1) {
+                        try self.write("(");
+                        for (stmts, 0..) |stmt, i| {
+                            if (i > 0) try self.write(", ");
+
+                            // Emit bindings as assignments
+                            if (stmt.data == .binding) {
+                                const b = stmt.data.binding;
+                                switch (b.pattern) {
+                                    .single => |name| {
+                                        try self.write(name);
+                                        try self.write(" = ");
+                                        try self.emitExprInternal(b.value, x_var, y_var);
+                                    },
+                                    .tuple => {
+                                        // Can't handle tuple destructuring in expression context
+                                        // Just emit the last expression
+                                        if (i == stmts.len - 1) {
+                                            try self.emitExprInternal(stmt, x_var, y_var);
+                                        }
+                                    },
+                                }
+                            } else {
+                                try self.emitExprInternal(stmt, x_var, y_var);
+                            }
+                        }
+                        try self.write(")");
+                    } else {
+                        // Single statement - emit directly
+                        const stmt = stmts[0];
+                        if (stmt.data == .binding) {
+                            const b = stmt.data.binding;
+                            switch (b.pattern) {
+                                .single => |name| {
+                                    try self.write("(");
+                                    try self.write(name);
+                                    try self.write(" = ");
+                                    try self.emitExprInternal(b.value, x_var, y_var);
+                                    try self.write(")");
+                                },
+                                .tuple => {
+                                    // Can't handle tuple destructuring in expression context
+                                    try self.emitExprInternal(stmt, x_var, y_var);
+                                },
+                            }
+                        } else {
+                            try self.emitExprInternal(stmt, x_var, y_var);
+                        }
+                    }
                 }
             },
             else => {
@@ -1370,6 +1435,10 @@ pub const GlslGenerator = struct {
             .number => "float",
             .bool_lit => "bool",
             .tuple => |elements| switch (elements.len) {
+                1 => {
+                    // Single-element tuple - unwrap and get inner type
+                    return self.inferGlslType(elements[0]);
+                },
                 2 => "vec2",
                 3 => "vec3",
                 4 => "vec4",

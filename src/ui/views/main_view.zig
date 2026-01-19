@@ -69,13 +69,13 @@ pub fn mainView(app: *App) bool {
         }
 
         // Status bar at bottom
-        components.StatusBar.render(active_session);
+        components.StatusBar.render(active_session, &app.graph_renderer);
     } else {
         // No sessions - show empty state
         renderEmptyState(app);
 
         // Status bar at bottom (no active session)
-        components.StatusBar.render(null);
+        components.StatusBar.render(null, null);
     }
 
     // Check for keyboard shortcuts and window events

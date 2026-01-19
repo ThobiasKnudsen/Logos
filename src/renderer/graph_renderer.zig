@@ -38,6 +38,9 @@ const GRID_LABEL_COLOR: dvui.Color = dvui.Color.fromHex("#888888");
 const GRID_LABEL_PADDING: f32 = 4.0;
 const DEFAULT_GRID_LINES_PER_AXIS: usize = 5;
 
+/// Target pixels between grid lines (used to calculate grid density)
+const TARGET_PIXELS_PER_GRID_LINE: f32 = 100.0;
+
 /// Edge zone size for axis-specific zoom (in pixels)
 const AXIS_ZONE_SIZE: f32 = 40.0;
 
@@ -229,7 +232,13 @@ pub const GraphRenderer = struct {
         // Update the GPU pipeline with new shader
         self.gpu_pipeline.updateFragmentShader(glsl_source) catch |err| {
             std.log.err("[GraphRenderer] Shader update FAILED: {}", .{err});
-            self.setError("Shader update failed");
+
+            // Try to get detailed error message from shader compiler
+            if (shader_compiler.getLastError()) |detailed_error| {
+                self.setError(detailed_error);
+            } else {
+                self.setError("Shader compilation failed");
+            }
             return err;
         };
 
@@ -338,6 +347,9 @@ pub const GraphRenderer = struct {
         // Update frame counter
         self.frame_count +%= 1;
 
+        // Update grid line counts based on panel dimensions
+        self.updateGridDensity(width, height);
+
         // Sync axis state to GPU pipeline uniforms
         self.syncAxisStateToUniforms();
 
@@ -352,13 +364,11 @@ pub const GraphRenderer = struct {
                 self.has_rendered_once = true;
             }
 
-            // Only submit render if:
-            // 1. Not currently rendering, AND
-            // 2. Either animating OR we haven't rendered once yet OR view changed (zoom/pan)
+            // Only submit render if not currently rendering
+            // This ensures continuous rendering to the texture target
             const is_rendering = self.isRendering();
-            const needs_render = self.is_animating or !self.has_rendered_once or self.needs_view_update;
 
-            if (!is_rendering and needs_render) {
+            if (!is_rendering) {
                 // Clear the view update flag since we're actually rendering now
                 self.needs_view_update = false;
                 if (self.render_target) |target| {
@@ -393,6 +403,15 @@ pub const GraphRenderer = struct {
 
         // Render visual content with grid overlay
         self.renderVisualContent(width, height);
+    }
+
+    /// Update grid line density based on panel dimensions
+    /// More pixels = more grid lines to maintain roughly constant spacing
+    fn updateGridDensity(self: *GraphRenderer, width: f32, height: f32) void {
+        // Calculate number of grid lines based on panel dimensions
+        // Target ~100 pixels between each grid line
+        self.num_grid_lines_axis1 = @max(2, @as(usize, @intFromFloat(width / TARGET_PIXELS_PER_GRID_LINE)));
+        self.num_grid_lines_axis2 = @max(2, @as(usize, @intFromFloat(height / TARGET_PIXELS_PER_GRID_LINE)));
     }
 
     /// Sync axis state to GPU pipeline uniforms
@@ -817,11 +836,12 @@ pub const GraphRenderer = struct {
             const dy = (y - self.last_mouse_y) / panel_height;
 
             // Pan in world coordinates (based on drag zone)
+            // Note: panBy and pan already handle coordinate system conversions
             switch (self.current_mouse_zone) {
                 .center => {
                     const pan_x = dx * self.axis_state.axis1.span();
                     const pan_y = dy * self.axis_state.axis2.span();
-                    self.axis_state.panBy(pan_x, -pan_y);
+                    self.axis_state.panBy(pan_x, pan_y);
                 },
                 .axis1_edge => {
                     // Drag on X-axis zone: pan only X
@@ -831,7 +851,7 @@ pub const GraphRenderer = struct {
                 .axis2_edge => {
                     // Drag on Y-axis zone: pan only Y
                     const pan_y = dy * self.axis_state.axis2.span();
-                    self.axis_state.axis2.pan(pan_y); // Note: Y inverted
+                    self.axis_state.axis2.pan(-pan_y);
                 },
             }
 

@@ -450,8 +450,8 @@ pub const AxisState = struct {
 
     /// Pan both axes
     pub fn panBy(self: *AxisState, dx: f64, dy: f64) void {
-        self.axis1.pan(-dx);
-        self.axis2.pan(-dy);
+        self.axis1.pan(-dx); // Negate X: drag right = move view left
+        self.axis2.pan(dy);  // Y already inverted in screenToWorld
     }
 
     /// Zoom both axes around a point

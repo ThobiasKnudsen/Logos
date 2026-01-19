@@ -51,6 +51,16 @@ pub const ShaderError = error{
     OutOfMemory,
 };
 
+/// Compilation error details
+pub const CompilationError = struct {
+    message: []const u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *CompilationError) void {
+        self.allocator.free(self.message);
+    }
+};
+
 /// Compiled SPIRV bytecode
 pub const SpirvBytecode = struct {
     data: []const u8,
@@ -73,6 +83,10 @@ pub const ShaderResourceInfo = struct {
 var global_compiler: ?c.shaderc_compiler_t = null;
 var shadercross_initialized: bool = false;
 
+/// Last compilation error message (for diagnostics)
+var last_error_message: ?[]const u8 = null;
+var last_error_allocator: ?std.mem.Allocator = null;
+
 /// Initialize the shader compiler subsystem
 /// Must be called before any shader compilation
 pub fn init() ShaderError!void {
@@ -93,6 +107,15 @@ pub fn init() ShaderError!void {
 
 /// Cleanup shader compiler resources
 pub fn deinit() void {
+    // Free last error message if any
+    if (last_error_message) |msg| {
+        if (last_error_allocator) |alloc| {
+            alloc.free(msg);
+        }
+        last_error_message = null;
+        last_error_allocator = null;
+    }
+
     if (shadercross_initialized) {
         c.SDL_ShaderCross_Quit();
         shadercross_initialized = false;
@@ -104,6 +127,31 @@ pub fn deinit() void {
     }
 }
 
+/// Get the last compilation error message (if any)
+/// Returns null if no error occurred
+/// The returned string is valid until the next compilation or deinit()
+pub fn getLastError() ?[]const u8 {
+    return last_error_message;
+}
+
+/// Clear the last error message
+fn clearLastError() void {
+    if (last_error_message) |msg| {
+        if (last_error_allocator) |alloc| {
+            alloc.free(msg);
+        }
+        last_error_message = null;
+        last_error_allocator = null;
+    }
+}
+
+/// Store an error message for later retrieval
+fn setLastError(allocator: std.mem.Allocator, message: []const u8) void {
+    clearLastError();
+    last_error_message = allocator.dupe(u8, message) catch null;
+    last_error_allocator = allocator;
+}
+
 /// Compile GLSL source code to SPIRV bytecode
 pub fn compileGlslToSpirv(
     allocator: std.mem.Allocator,
@@ -111,6 +159,9 @@ pub fn compileGlslToSpirv(
     stage: ShaderStage,
 ) ShaderError!SpirvBytecode {
     std.log.info("[ShaderCompiler] Compiling GLSL to SPIRV ({s} stage, {} bytes)...", .{ @tagName(stage), glsl_source.len });
+
+    // Clear any previous error
+    clearLastError();
 
     const compiler = global_compiler orelse {
         // Auto-initialize if not done
@@ -158,7 +209,12 @@ pub fn compileGlslToSpirv(
     if (status != c.shaderc_compilation_status_success) {
         const error_msg = c.shaderc_result_get_error_message(result);
         if (error_msg != null) {
-            std.log.err("[ShaderCompiler] Compilation error: {s}", .{error_msg});
+            const error_str = std.mem.span(error_msg);
+            std.log.err("[ShaderCompiler] Compilation error: {s}", .{error_str});
+            // Store error message for retrieval
+            setLastError(allocator, error_str);
+        } else {
+            setLastError(allocator, "Shader compilation failed with unknown error");
         }
         std.log.err("[ShaderCompiler] Compilation status: {}", .{status});
         return ShaderError.ShaderCompileFailed;
