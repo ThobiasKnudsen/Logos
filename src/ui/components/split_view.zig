@@ -93,32 +93,52 @@ pub const SplitView = struct {
         panel_width: f32,
         panel_height: f32,
     ) void {
-        // Get current window for mouse state
-        const win = dvui.currentWindow();
-        const mouse_pos = win.mouse_pt;
         const panel_rs = box_widget.data().contentRectScale();
 
-        // Convert to panel-local coordinates
-        const local_x = mouse_pos.x - panel_rs.r.x;
-        const local_y = mouse_pos.y - panel_rs.r.y;
+        // Process all events and check if they match this widget
+        const evts = dvui.events();
+        for (evts) |*e| {
+            // Only process events that match our widget
+            if (!dvui.eventMatchSimple(e, box_widget.data()))
+                continue;
 
-        // Check if mouse is inside the panel
-        const in_panel = local_x >= 0 and local_x < panel_width and
-            local_y >= 0 and local_y < panel_height;
+            switch (e.evt) {
+                .mouse => |me| {
+                    // Convert to panel-local coordinates
+                    const local_x = me.p.x - panel_rs.r.x;
+                    const local_y = me.p.y - panel_rs.r.y;
 
-        if (in_panel) {
-            // Always update hover position
-            graph_renderer.handleMouseMove(local_x, local_y, panel_width, panel_height);
-        } else {
-            // Clear hover when outside
-            graph_renderer.hover_x = null;
-            graph_renderer.hover_y = null;
+                    switch (me.action) {
+                        .position => {
+                            // Update hover position and handle dragging
+                            graph_renderer.handleMouseMove(local_x, local_y, panel_width, panel_height);
+                            dvui.cursorSet(if (graph_renderer.is_dragging) .arrow_all else .arrow);
+                        },
+                        .press => {
+                            // Start dragging on left button press
+                            if (me.button == .left) {
+                                graph_renderer.handleMouseDown(local_x, local_y, panel_width, panel_height);
+                                e.handled = true;
+                            }
+                        },
+                        .release => {
+                            // End dragging on button release
+                            if (me.button == .left and graph_renderer.is_dragging) {
+                                graph_renderer.handleMouseUp();
+                                e.handled = true;
+                            }
+                        },
+                        .wheel_y => |delta| {
+                            // Handle zoom with mouse wheel
+                            graph_renderer.handleScroll(delta, local_x, local_y, panel_width, panel_height);
+                            e.handled = true;
+                        },
+                        else => {},
+                    }
+                },
+                else => {},
+            }
         }
-
-        // Note: For full pan/zoom support, we would need to properly capture
-        // mouse events on this widget. For now, hover coordinate display works.
-        // The mouse down/up/scroll handling requires event matching which is
-        // more complex in dvui's architecture.
     }
 
     fn drawSeparatorLine(paned: *dvui.PanedWidget) void {
