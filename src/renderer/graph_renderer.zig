@@ -381,11 +381,13 @@ pub const GraphRenderer = struct {
 
     /// Sync axis state to GPU pipeline uniforms
     fn syncAxisStateToUniforms(self: *GraphRenderer) void {
+        // Note: axis2 (Y-axis) is inverted for GPU because screen coordinates
+        // have Y increasing downward, but mathematical plots have Y increasing upward
         self.gpu_pipeline.setAxisBounds(
             @floatCast(self.axis_state.axis1.start),
             @floatCast(self.axis_state.axis1.end),
-            @floatCast(self.axis_state.axis2.start),
-            @floatCast(self.axis_state.axis2.end),
+            @floatCast(self.axis_state.axis2.end),   // swapped: max becomes min
+            @floatCast(self.axis_state.axis2.start), // swapped: min becomes max
         );
     }
 
