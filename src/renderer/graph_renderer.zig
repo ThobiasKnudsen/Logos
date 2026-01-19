@@ -32,9 +32,11 @@ const BackendTextureTarget = extern struct {
     sampler: *c.SDL_GPUSampler,
 };
 
-/// Axis margin size in pixels
-const AXIS_MARGIN_BOTTOM: f32 = 40.0;
-const AXIS_MARGIN_LEFT: f32 = 50.0;
+/// Grid rendering configuration
+const GRID_LINE_COLOR: dvui.Color = dvui.Color.fromHex("#333333");
+const GRID_LABEL_COLOR: dvui.Color = dvui.Color.fromHex("#888888");
+const GRID_LABEL_PADDING: f32 = 4.0;
+const DEFAULT_GRID_LINES_PER_AXIS: usize = 5;
 
 pub const GraphRenderer = struct {
     allocator: std.mem.Allocator,
@@ -84,6 +86,10 @@ pub const GraphRenderer = struct {
     /// Track if we've successfully rendered at least once
     has_rendered_once: bool,
 
+    /// Grid configuration
+    num_grid_lines_axis1: usize,
+    num_grid_lines_axis2: usize,
+
     pub fn init(allocator: std.mem.Allocator) GraphRenderer {
         return .{
             .allocator = allocator,
@@ -106,6 +112,8 @@ pub const GraphRenderer = struct {
             .hover_y = null,
             .needs_initial_render = false,
             .has_rendered_once = false,
+            .num_grid_lines_axis1 = DEFAULT_GRID_LINES_PER_AXIS,
+            .num_grid_lines_axis2 = DEFAULT_GRID_LINES_PER_AXIS,
         };
     }
 
@@ -304,11 +312,9 @@ pub const GraphRenderer = struct {
 
     /// Render the graph to the dvui panel
     pub fn renderToPanel(self: *GraphRenderer, width: f32, height: f32) void {
-        // Calculate render area (excluding margins)
-        const render_width = @max(1, width - AXIS_MARGIN_LEFT);
-        const render_height = @max(1, height - AXIS_MARGIN_BOTTOM);
-        const panel_width = @as(u32, @intFromFloat(render_width));
-        const panel_height = @as(u32, @intFromFloat(render_height));
+        // Use full panel dimensions (no margins)
+        const panel_width = @as(u32, @intFromFloat(@max(1, width)));
+        const panel_height = @as(u32, @intFromFloat(@max(1, height)));
 
         // Update frame counter
         self.frame_count +%= 1;
@@ -375,8 +381,8 @@ pub const GraphRenderer = struct {
             }
         }
 
-        // Render visual content with axis margins (this will DISPLAY the texture)
-        self.renderVisualContentWithAxes(width, height);
+        // Render visual content with grid overlay
+        self.renderVisualContent(width, height);
     }
 
     /// Sync axis state to GPU pipeline uniforms
@@ -421,130 +427,9 @@ pub const GraphRenderer = struct {
         std.log.info("[GraphRenderer] Render target created: ptr={*}, EMPTY/UNINITIALIZED", .{self.render_target.?.ptr});
     }
 
-    /// Render visual content with axis margins
-    fn renderVisualContentWithAxes(self: *GraphRenderer, width: f32, height: f32) void {
-        // Create main container
-        var main_container = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .expand = .both,
-        });
-        defer main_container.deinit();
-
-        // Left axis margin (Y axis labels)
-        self.renderLeftAxisMargin(height);
-
-        // Right side: render area + bottom margin
-        {
-            var right_container = dvui.box(@src(), .{ .dir = .vertical }, .{
-                .expand = .both,
-            });
-            defer right_container.deinit();
-
-            // Render area
-            self.renderMainContent(width - AXIS_MARGIN_LEFT, height - AXIS_MARGIN_BOTTOM);
-
-            // Bottom axis margin (X axis labels)
-            self.renderBottomAxisMargin(width);
-        }
-    }
-
-    /// Render the left axis margin (Y axis / axis2)
-    fn renderLeftAxisMargin(self: *GraphRenderer, height: f32) void {
-        var margin_box = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .min_size_content = .{ .w = AXIS_MARGIN_LEFT, .h = 0 },
-            .max_size_content = .{ .w = AXIS_MARGIN_LEFT, .h = height - AXIS_MARGIN_BOTTOM },
-            .expand = .vertical,
-            .color_fill = dvui.Color.fromHex("#1a1a2e"),
-            .background = true,
-        });
-        defer margin_box.deinit();
-
-        // Show axis2 label with range
-        var max_buf: [32]u8 = undefined;
-        const max_label = std.fmt.bufPrint(&max_buf, "{d:.1}", .{self.axis_state.axis2.end}) catch "?";
-        dvui.labelNoFmt(@src(), max_label, .{}, .{
-            .color_text = dvui.Color.fromHex("#888888"),
-            .font = .theme(.mono),
-            .gravity_x = 1.0,
-        });
-
-        // Spacer
-        _ = dvui.spacer(@src(), .{ .expand = .vertical });
-
-        // Y axis label
-        dvui.labelNoFmt(@src(), "axis2", .{}, .{
-            .color_text = dvui.Color.fromHex("#666666"),
-            .font = .theme(.mono),
-            .gravity_x = 0.5,
-        });
-
-        // Spacer
-        _ = dvui.spacer(@src(), .{ .expand = .vertical });
-
-        var min_buf: [32]u8 = undefined;
-        const min_label = std.fmt.bufPrint(&min_buf, "{d:.1}", .{self.axis_state.axis2.start}) catch "?";
-        dvui.labelNoFmt(@src(), min_label, .{}, .{
-            .color_text = dvui.Color.fromHex("#888888"),
-            .font = .theme(.mono),
-            .gravity_x = 1.0,
-        });
-    }
-
-    /// Render the bottom axis margin (X axis / axis1)
-    fn renderBottomAxisMargin(self: *GraphRenderer, width: f32) void {
-        var margin_box = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .min_size_content = .{ .w = 0, .h = AXIS_MARGIN_BOTTOM },
-            .max_size_content = .{ .w = width - AXIS_MARGIN_LEFT, .h = AXIS_MARGIN_BOTTOM },
-            .expand = .horizontal,
-            .color_fill = dvui.Color.fromHex("#1a1a2e"),
-            .background = true,
-        });
-        defer margin_box.deinit();
-
-        // Show min value
-        var min_buf: [32]u8 = undefined;
-        const min_label = std.fmt.bufPrint(&min_buf, "{d:.1}", .{self.axis_state.axis1.start}) catch "?";
-        dvui.labelNoFmt(@src(), min_label, .{}, .{
-            .color_text = dvui.Color.fromHex("#888888"),
-            .font = .theme(.mono),
-            .gravity_y = 0.0,
-        });
-
-        // Spacer
-        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-
-        // Show hover coordinates or axis label
-        if (self.hover_x != null and self.hover_y != null) {
-            var hover_label: [64]u8 = undefined;
-            const hover_text = std.fmt.bufPrint(&hover_label, "({d:.2}, {d:.2})", .{ self.hover_x.?, self.hover_y.? }) catch "";
-            dvui.labelNoFmt(@src(), hover_text, .{}, .{
-                .color_text = dvui.Color.fromHex("#ffaa00"),
-                .font = .theme(.mono),
-                .gravity_y = 0.5,
-            });
-        } else {
-            dvui.labelNoFmt(@src(), "axis1", .{}, .{
-                .color_text = dvui.Color.fromHex("#666666"),
-                .font = .theme(.mono),
-                .gravity_y = 0.5,
-            });
-        }
-
-        // Spacer
-        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-
-        // Show max value
-        var max_buf: [32]u8 = undefined;
-        const max_label = std.fmt.bufPrint(&max_buf, "{d:.1}", .{self.axis_state.axis1.end}) catch "?";
-        dvui.labelNoFmt(@src(), max_label, .{}, .{
-            .color_text = dvui.Color.fromHex("#888888"),
-            .font = .theme(.mono),
-            .gravity_y = 0.0,
-        });
-    }
-
-    /// Render the main content area (shader output or status)
-    fn renderMainContent(self: *GraphRenderer, width: f32, height: f32) void {
-        // Create a container that fills the render area
+    /// Render visual content (texture + grid overlay)
+    fn renderVisualContent(self: *GraphRenderer, width: f32, height: f32) void {
+        // Create a container that fills the entire panel
         var container = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .both,
             .min_size_content = .{ .w = width, .h = height },
@@ -563,8 +448,11 @@ pub const GraphRenderer = struct {
             return;
         }
 
-        // Always render the texture (black if no shader loaded)
+        // Render the texture (or black background if not available)
         self.renderTextureOrBlack(width, height);
+
+        // Overlay grid lines and labels on top of the texture
+        self.renderGridOverlay(width, height);
     }
 
     fn renderErrorState(_: *GraphRenderer, err_msg: []const u8) void {
@@ -645,6 +533,114 @@ pub const GraphRenderer = struct {
         bg.deinit();
     }
 
+    /// Render grid overlay with lines and labels
+    fn renderGridOverlay(self: *GraphRenderer, width: f32, height: f32) void {
+        const font = dvui.themeGet().font_body.larger(-2);
+
+        // Calculate grid line positions for axis1 (X-axis, vertical lines)
+        const axis1_range = self.axis_state.axis1.end - self.axis_state.axis1.start;
+        const axis1_step = axis1_range / @as(f64, @floatFromInt(self.num_grid_lines_axis1 + 1));
+
+        // Calculate grid line positions for axis2 (Y-axis, horizontal lines)
+        const axis2_range = self.axis_state.axis2.end - self.axis_state.axis2.start;
+        const axis2_step = axis2_range / @as(f64, @floatFromInt(self.num_grid_lines_axis2 + 1));
+
+        // Draw vertical grid lines (constant X values)
+        for (1..self.num_grid_lines_axis1 + 1) |i| {
+            const axis1_value = self.axis_state.axis1.start + axis1_step * @as(f64, @floatFromInt(i));
+
+            // Convert world coordinate to screen coordinate
+            const norm_x = (axis1_value - self.axis_state.axis1.start) / axis1_range;
+            const screen_x = @as(f32, @floatCast(norm_x)) * width;
+
+            // Draw vertical line
+            const line_start = dvui.Point.Physical{ .x = screen_x, .y = 0 };
+            const line_end = dvui.Point.Physical{ .x = screen_x, .y = height };
+            dvui.Path.stroke(.{ .points = &.{ line_start, line_end } }, .{
+                .color = GRID_LINE_COLOR,
+                .thickness = 1,
+            });
+
+            // Draw label at bottom right of line
+            var label_buf: [32]u8 = undefined;
+            const label_text = std.fmt.bufPrint(&label_buf, "{d:.2}", .{axis1_value}) catch "?";
+            const label_size = font.textSize(label_text);
+
+            const label_x = screen_x + GRID_LABEL_PADDING;
+            const label_y = height - label_size.h - GRID_LABEL_PADDING;
+
+            const label_rs = dvui.RectScale{
+                .r = dvui.Rect.Physical.fromPoint(.{ .x = label_x, .y = label_y }).toSize(label_size.scale(1.0, dvui.Size.Physical)),
+                .s = 1.0,
+            };
+
+            dvui.renderText(.{
+                .font = font,
+                .text = label_text,
+                .rs = label_rs,
+                .color = GRID_LABEL_COLOR,
+            }) catch {};
+        }
+
+        // Draw horizontal grid lines (constant Y values)
+        for (1..self.num_grid_lines_axis2 + 1) |i| {
+            const axis2_value = self.axis_state.axis2.start + axis2_step * @as(f64, @floatFromInt(i));
+
+            // Convert world coordinate to screen coordinate (Y is inverted)
+            const norm_y = (axis2_value - self.axis_state.axis2.start) / axis2_range;
+            const screen_y = height - (@as(f32, @floatCast(norm_y)) * height);
+
+            // Draw horizontal line
+            const line_start = dvui.Point.Physical{ .x = 0, .y = screen_y };
+            const line_end = dvui.Point.Physical{ .x = width, .y = screen_y };
+            dvui.Path.stroke(.{ .points = &.{ line_start, line_end } }, .{
+                .color = GRID_LINE_COLOR,
+                .thickness = 1,
+            });
+
+            // Draw label at left side above the line
+            var label_buf: [32]u8 = undefined;
+            const label_text = std.fmt.bufPrint(&label_buf, "{d:.2}", .{axis2_value}) catch "?";
+            const label_size = font.textSize(label_text);
+
+            const label_x = GRID_LABEL_PADDING;
+            const label_y = screen_y - label_size.h - GRID_LABEL_PADDING;
+
+            const label_rs = dvui.RectScale{
+                .r = dvui.Rect.Physical.fromPoint(.{ .x = label_x, .y = label_y }).toSize(label_size.scale(1.0, dvui.Size.Physical)),
+                .s = 1.0,
+            };
+
+            dvui.renderText(.{
+                .font = font,
+                .text = label_text,
+                .rs = label_rs,
+                .color = GRID_LABEL_COLOR,
+            }) catch {};
+        }
+
+        // Display hover coordinates in top-right corner if available
+        if (self.hover_x != null and self.hover_y != null) {
+            var hover_buf: [64]u8 = undefined;
+            const hover_text = std.fmt.bufPrint(&hover_buf, "({d:.3}, {d:.3})", .{ self.hover_x.?, self.hover_y.? }) catch "";
+            const hover_size = font.textSize(hover_text);
+
+            const hover_x = width - hover_size.w - GRID_LABEL_PADDING * 2;
+            const hover_y = GRID_LABEL_PADDING;
+
+            const hover_rs = dvui.RectScale{
+                .r = dvui.Rect.Physical.fromPoint(.{ .x = hover_x, .y = hover_y }).toSize(hover_size.scale(1.0, dvui.Size.Physical)),
+                .s = 1.0,
+            };
+
+            dvui.renderText(.{
+                .font = font,
+                .text = hover_text,
+                .rs = hover_rs,
+                .color = dvui.Color.fromHex("#ffaa00"),
+            }) catch {};
+        }
+    }
 
     fn renderIdleState(_: *GraphRenderer) void {
         var center = dvui.box(@src(), .{}, .{ .expand = .both, .gravity_x = 0.5, .gravity_y = 0.5 });
@@ -697,34 +693,20 @@ pub const GraphRenderer = struct {
     /// Handle mouse move in the render area
     /// Call this with coordinates relative to the render panel
     pub fn handleMouseMove(self: *GraphRenderer, x: f32, y: f32, panel_width: f32, panel_height: f32) void {
-        // Calculate render area dimensions (excluding margins)
-        const render_width = panel_width - AXIS_MARGIN_LEFT;
-        const render_height = panel_height - AXIS_MARGIN_BOTTOM;
+        // Convert to world coordinates (full panel dimensions)
+        const world = self.axis_state.screenToWorld(x, y, panel_width, panel_height);
+        self.hover_x = world.x;
+        self.hover_y = world.y;
 
-        // Check if mouse is in render area (not in margins)
-        if (x >= AXIS_MARGIN_LEFT and y < render_height) {
-            // Convert to render area coordinates
-            const rx = x - AXIS_MARGIN_LEFT;
-            const ry = y;
+        // Handle dragging for pan
+        if (self.is_dragging) {
+            const dx = (x - self.last_mouse_x) / panel_width;
+            const dy = (y - self.last_mouse_y) / panel_height;
 
-            // Convert to world coordinates
-            const world = self.axis_state.screenToWorld(rx, ry, render_width, render_height);
-            self.hover_x = world.x;
-            self.hover_y = world.y;
-
-            // Handle dragging for pan
-            if (self.is_dragging) {
-                const dx = (x - self.last_mouse_x) / render_width;
-                const dy = (y - self.last_mouse_y) / render_height;
-
-                // Pan in world coordinates
-                const pan_x = dx * self.axis_state.axis1.span();
-                const pan_y = dy * self.axis_state.axis2.span();
-                self.axis_state.panBy(pan_x, -pan_y); // Invert Y for screen coords
-            }
-        } else {
-            self.hover_x = null;
-            self.hover_y = null;
+            // Pan in world coordinates
+            const pan_x = dx * self.axis_state.axis1.span();
+            const pan_y = dy * self.axis_state.axis2.span();
+            self.axis_state.panBy(pan_x, -pan_y); // Invert Y for screen coords
         }
 
         self.last_mouse_x = x;
@@ -732,14 +714,10 @@ pub const GraphRenderer = struct {
     }
 
     /// Handle mouse button down
-    pub fn handleMouseDown(self: *GraphRenderer, x: f32, y: f32, _: f32, panel_height: f32) void {
-        // Check if in render area (not in margins)
-        const render_height = panel_height - AXIS_MARGIN_BOTTOM;
-        if (x >= AXIS_MARGIN_LEFT and y < render_height) {
-            self.is_dragging = true;
-            self.last_mouse_x = x;
-            self.last_mouse_y = y;
-        }
+    pub fn handleMouseDown(self: *GraphRenderer, x: f32, y: f32, _: f32, _: f32) void {
+        self.is_dragging = true;
+        self.last_mouse_x = x;
+        self.last_mouse_y = y;
     }
 
     /// Handle mouse button up
@@ -749,24 +727,13 @@ pub const GraphRenderer = struct {
 
     /// Handle mouse scroll for zoom
     pub fn handleScroll(self: *GraphRenderer, delta: f32, x: f32, y: f32, panel_width: f32, panel_height: f32) void {
-        // Calculate render area dimensions
-        const render_width = panel_width - AXIS_MARGIN_LEFT;
-        const render_height = panel_height - AXIS_MARGIN_BOTTOM;
+        // Convert to world coordinates (full panel dimensions)
+        const world = self.axis_state.screenToWorld(x, y, panel_width, panel_height);
 
-        // Check if in render area
-        if (x >= AXIS_MARGIN_LEFT and y < render_height) {
-            // Convert to render area coordinates
-            const rx = x - AXIS_MARGIN_LEFT;
-            const ry = y;
+        // Zoom factor (positive delta = zoom in)
+        const factor: f64 = if (delta > 0) 0.9 else 1.1;
 
-            // Convert to world coordinates
-            const world = self.axis_state.screenToWorld(rx, ry, render_width, render_height);
-
-            // Zoom factor (positive delta = zoom in)
-            const factor: f64 = if (delta > 0) 0.9 else 1.1;
-
-            self.axis_state.zoomAt(factor, world.x, world.y);
-        }
+        self.axis_state.zoomAt(factor, world.x, world.y);
     }
 
     /// Reset axis ranges to defaults
@@ -794,5 +761,25 @@ pub const GraphRenderer = struct {
     /// Get current axis2 range
     pub fn getAxis2(self: *GraphRenderer) types.RangeVar {
         return self.axis_state.axis2;
+    }
+
+    /// Set number of grid lines for axis1 (X-axis, vertical lines)
+    pub fn setNumGridLinesAxis1(self: *GraphRenderer, count: usize) void {
+        self.num_grid_lines_axis1 = count;
+    }
+
+    /// Set number of grid lines for axis2 (Y-axis, horizontal lines)
+    pub fn setNumGridLinesAxis2(self: *GraphRenderer, count: usize) void {
+        self.num_grid_lines_axis2 = count;
+    }
+
+    /// Get number of grid lines for axis1
+    pub fn getNumGridLinesAxis1(self: *GraphRenderer) usize {
+        return self.num_grid_lines_axis1;
+    }
+
+    /// Get number of grid lines for axis2
+    pub fn getNumGridLinesAxis2(self: *GraphRenderer) usize {
+        return self.num_grid_lines_axis2;
     }
 };
