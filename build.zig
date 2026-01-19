@@ -147,9 +147,27 @@ pub fn build(b: *std.Build) void {
 
     const run_regex_trie_tests = b.addRunArtifact(regex_trie_tests);
 
+    // Parser tests
+    const parser_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lang/parser.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    parser_test_mod.addImport("pcrez", pcrez_mod);
+    parser_test_mod.addImport("regex_splitting", regex_splitting_mod);
+
+    const parser_tests = b.addTest(.{
+        .root_module = parser_test_mod,
+    });
+    parser_tests.linkLibC();
+    parser_tests.linkLibrary(pcre2_dep.artifact("pcre2-8"));
+
+    const run_parser_tests = b.addRunArtifact(parser_tests);
+
     // Main test step - runs all tests
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_regex_trie_tests.step);
+    test_step.dependOn(&run_parser_tests.step);
 
     const run_test_live = b.addRunArtifact(regex_trie_tests);
     const test_live_step = b.step("test-live", "Run the test with live output");

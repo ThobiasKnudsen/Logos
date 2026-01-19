@@ -827,7 +827,7 @@ pub const Parser = struct {
         }
 
         // First param
-        if (self.check(.identifier)) {
+        if (self.check(.identifier) or self.check(.axis)) {
             const name_tok = self.advance().?;
             params.append(self.allocator, name_tok.text) catch {
                 self.pos = start;
@@ -844,7 +844,7 @@ pub const Parser = struct {
             if (self.checkText(",")) {
                 _ = self.advance();
                 self.skipWhitespaceAndComments();
-                if (self.check(.identifier)) {
+                if (self.check(.identifier) or self.check(.axis)) {
                     const name_tok = self.advance().?;
                     params.append(self.allocator, name_tok.text) catch {
                         self.pos = start;
@@ -967,4 +967,57 @@ pub fn parseTokens(allocator: std.mem.Allocator, tokens: []const Token) !struct 
         .ast = ast_result,
         .errors = try parser.errors.toOwnedSlice(allocator),
     };
+}
+
+// ============ Tests ============
+
+test "function definition followed by function call with equals" {
+    const allocator = std.testing.allocator;
+
+    // Test: a(x,y): (x+y), a(x,y) = 9
+    // First defines function a, then uses it in an equality expression
+    const tokens = &[_]Token{
+        .{ .text = "a", .token_type = .identifier, .byte_start = 0, .byte_end = 1 },
+        .{ .text = "(", .token_type = .punctuation, .byte_start = 1, .byte_end = 2 },
+        .{ .text = "x", .token_type = .identifier, .byte_start = 2, .byte_end = 3 },
+        .{ .text = ",", .token_type = .punctuation, .byte_start = 3, .byte_end = 4 },
+        .{ .text = "y", .token_type = .identifier, .byte_start = 4, .byte_end = 5 },
+        .{ .text = ")", .token_type = .punctuation, .byte_start = 5, .byte_end = 6 },
+        .{ .text = ":", .token_type = .punctuation, .byte_start = 6, .byte_end = 7 },
+        .{ .text = " ", .token_type = .whitespace, .byte_start = 7, .byte_end = 8 },
+        .{ .text = "(", .token_type = .punctuation, .byte_start = 8, .byte_end = 9 },
+        .{ .text = "x", .token_type = .identifier, .byte_start = 9, .byte_end = 10 },
+        .{ .text = "+", .token_type = .operator, .byte_start = 10, .byte_end = 11 },
+        .{ .text = "y", .token_type = .identifier, .byte_start = 11, .byte_end = 12 },
+        .{ .text = ")", .token_type = .punctuation, .byte_start = 12, .byte_end = 13 },
+        .{ .text = ",", .token_type = .punctuation, .byte_start = 13, .byte_end = 14 },
+        .{ .text = " ", .token_type = .whitespace, .byte_start = 14, .byte_end = 15 },
+        .{ .text = "a", .token_type = .identifier, .byte_start = 15, .byte_end = 16 },
+        .{ .text = "(", .token_type = .punctuation, .byte_start = 16, .byte_end = 17 },
+        .{ .text = "x", .token_type = .identifier, .byte_start = 17, .byte_end = 18 },
+        .{ .text = ",", .token_type = .punctuation, .byte_start = 18, .byte_end = 19 },
+        .{ .text = "y", .token_type = .identifier, .byte_start = 19, .byte_end = 20 },
+        .{ .text = ")", .token_type = .punctuation, .byte_start = 20, .byte_end = 21 },
+        .{ .text = " ", .token_type = .whitespace, .byte_start = 21, .byte_end = 22 },
+        .{ .text = "=", .token_type = .operator, .byte_start = 22, .byte_end = 23 },
+        .{ .text = " ", .token_type = .whitespace, .byte_start = 23, .byte_end = 24 },
+        .{ .text = "9", .token_type = .number, .byte_start = 24, .byte_end = 25 },
+    };
+
+    const result = try parseTokens(allocator, tokens);
+    defer {
+        if (result.errors.len == 0) {
+            allocator.destroy(result.ast);
+        }
+        allocator.free(result.errors);
+    }
+
+    if (result.errors.len > 0) {
+        std.debug.print("\nParse errors:\n", .{});
+        for (result.errors) |err| {
+            std.debug.print("  [{}-{}]: {s}\n", .{ err.byte_start, err.byte_end, err.message });
+        }
+    }
+
+    try std.testing.expect(result.errors.len == 0);
 }
