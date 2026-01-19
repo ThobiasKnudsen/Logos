@@ -147,7 +147,8 @@ pub fn build(b: *std.Build) void {
 
     const run_regex_trie_tests = b.addRunArtifact(regex_trie_tests);
 
-    const test_step = b.step("test", "Run tests");
+    // Main test step - runs all tests
+    const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_regex_trie_tests.step);
 
     const run_test_live = b.addRunArtifact(regex_trie_tests);
@@ -173,6 +174,11 @@ pub fn build(b: *std.Build) void {
     shader_gen_test.linkLibrary(shaderc_dep.artifact("shaderc"));
 
     const run_shader_gen_test = b.addRunArtifact(shader_gen_test);
+
+    // Add to main test step
+    test_step.dependOn(&run_shader_gen_test.step);
+
+    // Keep dedicated step for running just shader gen tests
     const shader_gen_test_step = b.step("test-shader-gen", "Run shader generation pipeline tests");
     shader_gen_test_step.dependOn(&run_shader_gen_test.step);
 
@@ -231,7 +237,38 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(gpu_pipeline_exe);
 
-    const run_gpu_pipeline_test = b.addRunArtifact(gpu_pipeline_exe);
-    const gpu_pipeline_test_step = b.step("test-gpu-pipeline", "Run GPU pipeline test (requires display)");
-    gpu_pipeline_test_step.dependOn(&run_gpu_pipeline_test.step);
+    // Create test artifact (not just executable)
+    const gpu_pipeline_test = b.addTest(.{
+        .root_module = gpu_pipeline_test_mod,
+    });
+    gpu_pipeline_test.linkLibC();
+    gpu_pipeline_test.linkLibCpp();
+    gpu_pipeline_test.linkLibrary(pcre2_dep.artifact("pcre2-8"));
+    gpu_pipeline_test.linkLibrary(shaderc_dep.artifact("shaderc"));
+
+    if (sdl3_dep) |sdl3| {
+        const sdl3_include_path = sdl3.path("include").getPath(b);
+
+        const shadercross_dep = b.dependency("SDL_shadercross_zig", .{
+            .target = target,
+            .optimize = optimize,
+            .shared = false,
+            .dxc = false,
+            .cli = false,
+            .sdl_include_dir = @as([]const u8, sdl3_include_path),
+        });
+        gpu_pipeline_test.linkLibrary(shadercross_dep.artifact("SDL_shadercross"));
+        gpu_pipeline_test.linkLibrary(sdl3.artifact("SDL3"));
+        gpu_pipeline_test.root_module.addIncludePath(sdl3.path("include"));
+    }
+
+    const run_gpu_pipeline_test = b.addRunArtifact(gpu_pipeline_test);
+
+    // Add to main test step
+    test_step.dependOn(&run_gpu_pipeline_test.step);
+
+    // Keep dedicated step and executable for manual testing
+    const run_gpu_pipeline_exe = b.addRunArtifact(gpu_pipeline_exe);
+    const gpu_pipeline_test_step = b.step("test-gpu-pipeline", "Run GPU pipeline test executable (requires display)");
+    gpu_pipeline_test_step.dependOn(&run_gpu_pipeline_exe.step);
 }

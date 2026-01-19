@@ -15,6 +15,10 @@ const Builtin = ast.Builtin;
 const getBuiltin = ast.getBuiltin;
 const PrimitiveType = ast.PrimitiveType;
 
+/// Maximum magnitude for whole number float literals.
+/// Numbers larger than this use scientific notation which includes a decimal point.
+const MAX_WHOLE_NUMBER_MAGNITUDE = 1e15;
+
 /// Type of output for a generated shader
 pub const OutputType = enum {
     /// vec4 RGBA color output
@@ -597,8 +601,9 @@ pub const GlslGenerator = struct {
         try self.writeLine("layout(location = 0) in vec2 in_texcoord;");
         try self.writeLine("layout(location = 0) out vec4 out_color;");
         try self.writeLine("");
-        // Uniform buffer for fragment shader (set 3 for fragment, set 1 for vertex)
-        // SDL3 GPU API uses descriptor sets, not Vulkan push constants
+        // Uniform buffer for fragment shader.
+        // SDL3 GPU API uses descriptor sets: set 3, binding 0 for fragment shader uniforms
+        // This is different from Vulkan push constants - SDL3 requires proper set/binding numbers
         // Must match shaders.Uniforms struct exactly (std140 layout)
         try self.writeLine("layout(set = 3, binding = 0, std140) uniform PushConstants {");
         self.indent_level += 1;
@@ -1159,8 +1164,20 @@ pub const GlslGenerator = struct {
         }
     }
 
-    /// Emit an expression with x and y replaced by corner coordinates
+
+    /// Emit expression (uses "x" and "y" directly)
+    fn emitExpr(self: *Self, node: *const AstNode) std.mem.Allocator.Error!void {
+        try self.emitExprInternal(node, null, null);
+    }
+
+    /// Emit expression with x/y replaced by corner coordinates
     fn emitExprWithCorner(self: *Self, node: *const AstNode, x_var: []const u8, y_var: []const u8) std.mem.Allocator.Error!void {
+        try self.emitExprInternal(node, x_var, y_var);
+    }
+
+    /// Internal expression emitter - handles both regular and corner-substituted emission
+    /// If x_var and y_var are null, emits x and y as-is. Otherwise substitutes them.
+    fn emitExprInternal(self: *Self, node: *const AstNode, x_var: ?[]const u8, y_var: ?[]const u8) std.mem.Allocator.Error!void {
         switch (node.data) {
             .number => |n| {
                 try self.emitFloatLiteral(n);
@@ -1169,11 +1186,11 @@ pub const GlslGenerator = struct {
                 try self.write(if (b) "true" else "false");
             },
             .identifier => |name| {
-                // Replace x and y with corner coordinates
-                if (std.mem.eql(u8, name, "x")) {
-                    try self.write(x_var);
-                } else if (std.mem.eql(u8, name, "y")) {
-                    try self.write(y_var);
+                // Replace x and y with corner coordinates if provided
+                if (std.mem.eql(u8, name, "x") and x_var != null) {
+                    try self.write(x_var.?);
+                } else if (std.mem.eql(u8, name, "y") and y_var != null) {
+                    try self.write(y_var.?);
                 } else if (std.mem.eql(u8, name, "time_s") or std.mem.eql(u8, name, "time.s")) {
                     try self.write("time");
                 } else {
@@ -1181,7 +1198,7 @@ pub const GlslGenerator = struct {
                 }
             },
             .apply => |op| {
-                try self.emitApplyWithCorner(op.name, op.args, x_var, y_var);
+                try self.emitApplyInternal(op.name, op.args, x_var, y_var);
             },
             .property_access => |pa| {
                 // Handle axis property access
@@ -1211,7 +1228,7 @@ pub const GlslGenerator = struct {
                         }
                     }
                 }
-                try self.emitExprWithCorner(pa.base, x_var, y_var);
+                try self.emitExprInternal(pa.base, x_var, y_var);
                 try self.write(".");
                 try self.write(pa.property);
             },
@@ -1225,34 +1242,40 @@ pub const GlslGenerator = struct {
                 });
                 for (elements, 0..) |elem, i| {
                     if (i > 0) try self.write(", ");
-                    try self.emitExprWithCorner(elem, x_var, y_var);
+                    try self.emitExprInternal(elem, x_var, y_var);
                 }
                 try self.write(")");
             },
             .cast => |c| {
                 try self.write(c.target_type.toGlsl());
                 try self.write("(");
-                try self.emitExprWithCorner(c.operand, x_var, y_var);
+                try self.emitExprInternal(c.operand, x_var, y_var);
                 try self.write(")");
             },
             .index => |idx| {
-                try self.emitExprWithCorner(idx.base, x_var, y_var);
+                try self.emitExprInternal(idx.base, x_var, y_var);
                 try self.write("[");
-                try self.emitExprWithCorner(idx.index_expr, x_var, y_var);
+                try self.emitExprInternal(idx.index_expr, x_var, y_var);
                 try self.write("]");
             },
             .if_expr => |ie| {
                 try self.write("(");
-                try self.emitExprWithCorner(ie.condition, x_var, y_var);
+                try self.emitExprInternal(ie.condition, x_var, y_var);
                 try self.write(" ? ");
-                try self.emitExprWithCorner(ie.then_branch, x_var, y_var);
+                try self.emitExprInternal(ie.then_branch, x_var, y_var);
                 try self.write(" : ");
                 if (ie.else_branch) |eb| {
-                    try self.emitExprWithCorner(eb, x_var, y_var);
+                    try self.emitExprInternal(eb, x_var, y_var);
                 } else {
                     try self.write("0.0");
                 }
                 try self.write(")");
+            },
+            .block => |stmts| {
+                // For expression context, we just emit the last expression
+                if (stmts.len > 0) {
+                    try self.emitExprInternal(stmts[stmts.len - 1], x_var, y_var);
+                }
             },
             else => {
                 try self.write("/* unsupported */");
@@ -1260,14 +1283,19 @@ pub const GlslGenerator = struct {
         }
     }
 
-    /// Emit an apply expression with corner coordinate substitution
-    fn emitApplyWithCorner(self: *Self, name: []const u8, args: []*AstNode, x_var: []const u8, y_var: []const u8) std.mem.Allocator.Error!void {
-        // Handle type casts
+    /// Emit function application (uses "x" and "y" directly)
+    fn emitApply(self: *Self, name: []const u8, args: []*AstNode) std.mem.Allocator.Error!void {
+        try self.emitApplyInternal(name, args, null, null);
+    }
+
+    /// Internal apply emitter - handles both regular and corner-substituted emission
+    fn emitApplyInternal(self: *Self, name: []const u8, args: []*AstNode, x_var: ?[]const u8, y_var: ?[]const u8) std.mem.Allocator.Error!void {
+        // Handle type casts that were parsed as function calls
         if (args.len == 1) {
             if (self.getGlslTypeName(name)) |glsl_type| {
                 try self.write(glsl_type);
                 try self.write("(");
-                try self.emitExprWithCorner(args[0], x_var, y_var);
+                try self.emitExprInternal(args[0], x_var, y_var);
                 try self.write(")");
                 return;
             }
@@ -1278,11 +1306,11 @@ pub const GlslGenerator = struct {
                 .infix => {
                     if (args.len >= 2) {
                         try self.write("(");
-                        try self.emitExprWithCorner(args[0], x_var, y_var);
+                        try self.emitExprInternal(args[0], x_var, y_var);
                         try self.write(" ");
                         try self.write(builtin.glsl orelse name);
                         try self.write(" ");
-                        try self.emitExprWithCorner(args[1], x_var, y_var);
+                        try self.emitExprInternal(args[1], x_var, y_var);
                         try self.write(")");
                     }
                 },
@@ -1290,16 +1318,17 @@ pub const GlslGenerator = struct {
                     if (args.len >= 1) {
                         try self.write("(");
                         try self.write(builtin.glsl orelse name);
-                        try self.emitExprWithCorner(args[0], x_var, y_var);
+                        try self.emitExprInternal(args[0], x_var, y_var);
                         try self.write(")");
                     }
                 },
                 .postfix => {
+                    // Handle square specially: x² → (x * x)
                     if (std.mem.eql(u8, name, "square") and args.len >= 1) {
                         try self.write("(");
-                        try self.emitExprWithCorner(args[0], x_var, y_var);
+                        try self.emitExprInternal(args[0], x_var, y_var);
                         try self.write(" * ");
-                        try self.emitExprWithCorner(args[0], x_var, y_var);
+                        try self.emitExprInternal(args[0], x_var, y_var);
                         try self.write(")");
                     }
                 },
@@ -1308,7 +1337,7 @@ pub const GlslGenerator = struct {
                     try self.write("(");
                     for (args, 0..) |arg, i| {
                         if (i > 0) try self.write(", ");
-                        try self.emitExprWithCorner(arg, x_var, y_var);
+                        try self.emitExprInternal(arg, x_var, y_var);
                     }
                     try self.write(")");
                 },
@@ -1319,188 +1348,7 @@ pub const GlslGenerator = struct {
             try self.write("(");
             for (args, 0..) |arg, i| {
                 if (i > 0) try self.write(", ");
-                try self.emitExprWithCorner(arg, x_var, y_var);
-            }
-
-            // If this is a nested function with captures, pass the captured variables
-            if (self.nested_func_info.get(name)) |info| {
-                for (info.captured_vars) |cap_var| {
-                    if (args.len > 0 or info.captured_vars.len > 0) {
-                        try self.write(", ");
-                    }
-                    try self.write(cap_var);
-                }
-            }
-
-            try self.write(")");
-        }
-    }
-
-    fn emitExpr(self: *Self, node: *const AstNode) std.mem.Allocator.Error!void {
-        switch (node.data) {
-            .number => |n| {
-                try self.emitFloatLiteral(n);
-            },
-            .bool_lit => |b| {
-                try self.write(if (b) "true" else "false");
-            },
-            .identifier => |name| {
-                // Map special identifiers
-                if (std.mem.eql(u8, name, "time_s") or std.mem.eql(u8, name, "time.s")) {
-                    try self.write("time");
-                } else {
-                    try self.write(name);
-                }
-            },
-            .apply => |op| {
-                try self.emitApply(op.name, op.args);
-            },
-            .property_access => |pa| {
-                // Check if this is an axis property access (x.min, y.max, etc.)
-                if (pa.base.data == .identifier) {
-                    const base_name = pa.base.data.identifier;
-                    // Map axis properties to uniforms
-                    if (std.mem.eql(u8, base_name, "x") or std.mem.eql(u8, base_name, "axis1")) {
-                        if (std.mem.eql(u8, pa.property, "min")) {
-                            try self.write("axis_min.x");
-                            return;
-                        } else if (std.mem.eql(u8, pa.property, "max")) {
-                            try self.write("axis_max.x");
-                            return;
-                        } else if (std.mem.eql(u8, pa.property, "res")) {
-                            try self.write("resolution.x");
-                            return;
-                        }
-                    } else if (std.mem.eql(u8, base_name, "y") or std.mem.eql(u8, base_name, "axis2")) {
-                        if (std.mem.eql(u8, pa.property, "min")) {
-                            try self.write("axis_min.y");
-                            return;
-                        } else if (std.mem.eql(u8, pa.property, "max")) {
-                            try self.write("axis_max.y");
-                            return;
-                        } else if (std.mem.eql(u8, pa.property, "res")) {
-                            try self.write("resolution.y");
-                            return;
-                        }
-                    }
-                }
-                // Regular property access
-                try self.emitExpr(pa.base);
-                try self.write(".");
-                try self.write(pa.property);
-            },
-            .tuple => |elements| {
-                const n = elements.len;
-                try self.write(switch (n) {
-                    2 => "vec2(",
-                    3 => "vec3(",
-                    4 => "vec4(",
-                    else => "vec4(",
-                });
-                for (elements, 0..) |elem, i| {
-                    if (i > 0) try self.write(", ");
-                    try self.emitExpr(elem);
-                }
-                try self.write(")");
-            },
-            .cast => |c| {
-                try self.write(c.target_type.toGlsl());
-                try self.write("(");
-                try self.emitExpr(c.operand);
-                try self.write(")");
-            },
-            .index => |idx| {
-                try self.emitExpr(idx.base);
-                try self.write("[");
-                try self.emitExpr(idx.index_expr);
-                try self.write("]");
-            },
-            .if_expr => |ie| {
-                // Ternary operator
-                try self.write("(");
-                try self.emitExpr(ie.condition);
-                try self.write(" ? ");
-                try self.emitExpr(ie.then_branch);
-                try self.write(" : ");
-                if (ie.else_branch) |eb| {
-                    try self.emitExpr(eb);
-                } else {
-                    try self.write("0.0");
-                }
-                try self.write(")");
-            },
-            .block => |stmts| {
-                // For expression context, we just emit the last expression
-                if (stmts.len > 0) {
-                    try self.emitExpr(stmts[stmts.len - 1]);
-                }
-            },
-            else => {
-                try self.write("/* unsupported */");
-            },
-        }
-    }
-
-    fn emitApply(self: *Self, name: []const u8, args: []*AstNode) std.mem.Allocator.Error!void {
-        // Handle type casts that were parsed as function calls
-        if (args.len == 1) {
-            if (self.getGlslTypeName(name)) |glsl_type| {
-                try self.write(glsl_type);
-                try self.write("(");
-                try self.emitExpr(args[0]);
-                try self.write(")");
-                return;
-            }
-        }
-
-        if (getBuiltin(name)) |builtin| {
-            switch (builtin.emit_style) {
-                .infix => {
-                    if (args.len >= 2) {
-                        try self.write("(");
-                        try self.emitExpr(args[0]);
-                        try self.write(" ");
-                        try self.write(builtin.glsl orelse name);
-                        try self.write(" ");
-                        try self.emitExpr(args[1]);
-                        try self.write(")");
-                    }
-                },
-                .prefix => {
-                    if (args.len >= 1) {
-                        try self.write("(");
-                        try self.write(builtin.glsl orelse name);
-                        try self.emitExpr(args[0]);
-                        try self.write(")");
-                    }
-                },
-                .postfix => {
-                    // Handle square specially: x² → (x * x)
-                    if (std.mem.eql(u8, name, "square") and args.len >= 1) {
-                        try self.write("(");
-                        try self.emitExpr(args[0]);
-                        try self.write(" * ");
-                        try self.emitExpr(args[0]);
-                        try self.write(")");
-                    }
-                },
-                .call => {
-                    try self.write(builtin.glsl orelse name);
-                    try self.write("(");
-                    for (args, 0..) |arg, i| {
-                        if (i > 0) try self.write(", ");
-                        try self.emitExpr(arg);
-                    }
-                    try self.write(")");
-                },
-            }
-        } else {
-            // User-defined function or unknown
-            try self.write(name);
-            try self.write("(");
-            for (args, 0..) |arg, i| {
-                if (i > 0) try self.write(", ");
-                try self.emitExpr(arg);
+                try self.emitExprInternal(arg, x_var, y_var);
             }
 
             // If this is a nested function with captures, pass the captured variables
@@ -1582,16 +1430,16 @@ pub const GlslGenerator = struct {
         try self.output.append(self.allocator, '\n');
     }
 
-    /// Emit a float literal ensuring it has a decimal point for GLSL
-    /// This is critical for AMD RADV driver compatibility - integer literals
-    /// in float context can cause SPIRV patterns that crash the driver
+    /// Emit a float literal ensuring it has a decimal point for GLSL.
+    /// GLSL requires explicit float type notation - integer literals in float contexts
+    /// can cause issues. Always emit with decimal point (e.g., "1.0" not "1").
     fn emitFloatLiteral(self: *Self, n: f64) !void {
         var num_buf: [64]u8 = undefined;
 
         // Check if the number is a whole number (no fractional part)
         const is_whole = n == @trunc(n);
 
-        if (is_whole and @abs(n) < 1e15) {
+        if (is_whole and @abs(n) < MAX_WHOLE_NUMBER_MAGNITUDE) {
             // For whole numbers, explicitly add .0 to make it a float literal
             const num_str = std.fmt.bufPrint(&num_buf, "{d}.0", .{@as(i64, @intFromFloat(n))}) catch "0.0";
             try self.write(num_str);

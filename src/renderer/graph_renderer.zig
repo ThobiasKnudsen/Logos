@@ -313,17 +313,6 @@ pub const GraphRenderer = struct {
         // Update frame counter
         self.frame_count +%= 1;
 
-        // DEBUG: Log render state every 60 frames
-        if (self.frame_count % 60 == 0) {
-            std.log.debug("[GraphRenderer] Frame {}: initialized={}, has_glsl={}, is_rendering={}, has_target={}", .{
-                self.frame_count,
-                self.is_initialized,
-                self.current_glsl != null,
-                self.isRendering(),
-                self.render_target != null,
-            });
-        }
-
         // Sync axis state to GPU pipeline uniforms
         self.syncAxisStateToUniforms();
 
@@ -338,15 +327,6 @@ pub const GraphRenderer = struct {
             const is_rendering = self.isRendering();
             const should_render = !is_rendering and (self.is_animating or !self.has_rendered_once);
 
-            // DIAGNOSTIC: Log render check state every 60 frames or when state changes
-            if (self.frame_count % 60 == 0 or should_render) {
-                std.log.info("[GraphRenderer] Render check: has_rendered_once={}, is_rendering={}, should_render={}", .{
-                    self.has_rendered_once,
-                    is_rendering,
-                    should_render,
-                });
-            }
-
             if (should_render) {
                 if (self.render_target) |target| {
                     // Get the underlying SDL texture from dvui's texture target
@@ -360,15 +340,6 @@ pub const GraphRenderer = struct {
                         @floatFromInt(panel_height),
                     );
 
-                    // DEBUG: Log render submission
-                    if (self.frame_count % 60 == 0) {
-                        std.log.debug("[GraphRenderer] Submitting render: elapsed={d:.2}s, size={}x{}", .{
-                            elapsed,
-                            panel_width,
-                            panel_height,
-                        });
-                    }
-
                     // Render to the external texture
                     _ = self.gpu_pipeline.renderToExternalTexture(
                         backend_target.texture,
@@ -378,9 +349,8 @@ pub const GraphRenderer = struct {
                         std.log.err("[GraphRenderer] Render failed: {}", .{err});
                     };
 
-                    // Log first render after shader update (async - no blocking)
+                    // Mark first render after shader update as complete
                     if (self.needs_initial_render) {
-                        std.log.info("[GraphRenderer] First render submitted for new shader (async) to texture ptr={*}", .{target.ptr});
                         self.needs_initial_render = false;
                     }
                 }
@@ -389,7 +359,6 @@ pub const GraphRenderer = struct {
             // Poll for completion
             if (self.pollCompletion()) {
                 // Mark that we've rendered successfully
-                std.log.info("[GraphRenderer] Render COMPLETED, setting has_rendered_once=true", .{});
                 self.has_rendered_once = true;
 
                 // Render complete - trigger continuous re-render if animating
@@ -407,9 +376,6 @@ pub const GraphRenderer = struct {
         }
 
         // Render visual content with axis margins (this will DISPLAY the texture)
-        if (self.frame_count % 60 == 0 and self.render_target != null) {
-            std.log.info("[GraphRenderer] About to DISPLAY texture ptr={*}", .{self.render_target.?.ptr});
-        }
         self.renderVisualContentWithAxes(width, height);
     }
 
@@ -630,23 +596,10 @@ pub const GraphRenderer = struct {
         _ = height;
 
         // If we have a render target AND it's been rendered at least once, display it
-        // Don't display uninitialized textures (they contain garbage data)
+        // Don't display uninitialized textures (they contain garbage GPU memory)
         if (self.render_target) |target| {
-            // DEBUG: Log texture info
-            if (self.frame_count % 60 == 0) {
-                std.log.info("[GraphRenderer] DISPLAYING TEXTURE: ptr={*}, size={}x{}, has_glsl={}, has_rendered={}", .{
-                    target.ptr,
-                    target.width,
-                    target.height,
-                    self.current_glsl != null,
-                    self.has_rendered_once,
-                });
-            }
-
-            // IMPORTANT: Don't display uninitialized textures - they contain garbage GPU memory!
             // Wait for the first render to complete before displaying
             if (!self.has_rendered_once) {
-                std.log.info("[GraphRenderer] Texture not yet rendered, showing black background", .{});
                 self.renderBlackBackground();
                 return;
             }
@@ -667,16 +620,6 @@ pub const GraphRenderer = struct {
 
             // Get the rect-scale of the content box for rendering
             const rs = content_box.data().contentRectScale();
-
-            // DEBUG: Log texture render every 60 frames
-            if (self.frame_count % 60 == 0) {
-                std.log.debug("[GraphRenderer] Rendering texture: rect=({d:.1}, {d:.1}, {d:.1}x{d:.1})", .{
-                    rs.r.x,
-                    rs.r.y,
-                    rs.r.w,
-                    rs.r.h,
-                });
-            }
 
             // Render the texture to fill the box
             dvui.renderTexture(texture, rs, .{}) catch |err| {
@@ -700,92 +643,6 @@ pub const GraphRenderer = struct {
         bg.deinit();
     }
 
-    fn renderActiveState(self: *GraphRenderer, width: f32, height: f32) void {
-        // If we have a render target, display it
-        if (self.render_target) |target| {
-            // Convert TextureTarget to Texture for display
-            const texture = dvui.textureFromTarget(target) catch {
-                self.renderFallbackActiveState(width, height);
-                return;
-            };
-
-            // Get current rect for texture placement
-            // Using a box to define the area, then render texture manually
-            var content_box = dvui.box(@src(), .{}, .{
-                .expand = .both,
-            });
-            defer content_box.deinit();
-
-            // Get the rect-scale of the content box for rendering
-            const rs = content_box.data().contentRectScale();
-
-            // Render the texture to fill the box
-            dvui.renderTexture(texture, rs, .{}) catch |err| {
-                std.log.err("Failed to render texture: {}", .{err});
-            };
-        } else {
-            self.renderFallbackActiveState(width, height);
-        }
-    }
-
-    fn renderFallbackActiveState(self: *GraphRenderer, width: f32, height: f32) void {
-        // Fallback: Draw a colored indicator box that shows the render is active
-        // The color pulses based on frame count when animating
-        const base_hue: f32 = if (self.is_animating)
-            @as(f32, @floatFromInt(self.frame_count % 360))
-        else
-            120.0; // green when not animating
-
-        // Convert HSL to RGB for the indicator
-        const saturation: f32 = 0.6;
-        const lightness: f32 = 0.4;
-        const color = hslToRgb(base_hue / 360.0, saturation, lightness);
-
-        // Draw a filled rectangle as the render indicator
-        var indicator = dvui.box(@src(), .{}, .{
-            .expand = .both,
-            .margin = .{ .x = 10, .y = 10, .w = 10, .h = 10 },
-            .color_fill = color,
-            .background = true,
-            .corner_radius = .{ .x = 8, .y = 8, .w = 8, .h = 8 },
-        });
-
-        // Show status overlay
-        {
-            var overlay = dvui.box(@src(), .{ .dir = .vertical }, .{
-                .expand = .both,
-                .gravity_x = 0.5,
-                .gravity_y = 0.5,
-            });
-            defer overlay.deinit();
-
-            dvui.labelNoFmt(@src(), "✓ GPU Shader Active", .{}, .{
-                .font = .theme(.title),
-                .color_text = dvui.Color.fromHex("#ffffff"),
-                .margin = .{ .x = 0, .y = 0, .w = 0, .h = 8 },
-            });
-
-            if (self.is_animating) {
-                dvui.labelNoFmt(@src(), "▶ Animation Running", .{}, .{
-                    .color_text = dvui.Color.fromHex("#ffffff"),
-                });
-            } else {
-                dvui.labelNoFmt(@src(), "⏸ Static", .{}, .{
-                    .color_text = dvui.Color.fromHex("#cccccc"),
-                });
-            }
-
-            // Show dimensions
-            var dim_buf: [64]u8 = undefined;
-            const dim_str = std.fmt.bufPrint(&dim_buf, "{d:.0} x {d:.0}", .{ width, height }) catch "?";
-            dvui.labelNoFmt(@src(), dim_str, .{}, .{
-                .color_text = dvui.Color.fromHex("#aaaaaa"),
-                .margin = .{ .x = 0, .y = 8, .w = 0, .h = 0 },
-            });
-        }
-
-        indicator.deinit();
-    }
 
     fn renderIdleState(_: *GraphRenderer) void {
         var center = dvui.box(@src(), .{}, .{ .expand = .both, .gravity_x = 0.5, .gravity_y = 0.5 });
@@ -808,37 +665,6 @@ pub const GraphRenderer = struct {
         });
     }
 
-    /// Convert HSL to RGB
-    fn hslToRgb(h: f32, s: f32, l: f32) dvui.Color {
-        if (s == 0) {
-            const v: u8 = @intFromFloat(l * 255);
-            return .{ .r = v, .g = v, .b = v, .a = 255 };
-        }
-
-        const q = if (l < 0.5) l * (1 + s) else l + s - l * s;
-        const p = 2 * l - q;
-
-        const r = hueToRgb(p, q, h + 1.0 / 3.0);
-        const g = hueToRgb(p, q, h);
-        const b = hueToRgb(p, q, h - 1.0 / 3.0);
-
-        return .{
-            .r = @intFromFloat(r * 255),
-            .g = @intFromFloat(g * 255),
-            .b = @intFromFloat(b * 255),
-            .a = 255,
-        };
-    }
-
-    fn hueToRgb(p: f32, q: f32, t_in: f32) f32 {
-        var t = t_in;
-        if (t < 0) t += 1;
-        if (t > 1) t -= 1;
-        if (t < 1.0 / 6.0) return p + (q - p) * 6 * t;
-        if (t < 1.0 / 2.0) return q;
-        if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6;
-        return p;
-    }
 
     /// Test shader compilation with a sample GLSL
     pub fn testCompilation(self: *GraphRenderer) !void {

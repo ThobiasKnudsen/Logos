@@ -135,7 +135,8 @@ pub fn compileGlslToSpirv(
 
     std.log.debug("[ShaderCompiler] Calling shaderc_compile_into_spv...", .{});
 
-    // Compile GLSL to SPIRV
+    // Compile GLSL to SPIRV bytecode
+    // Note: SDL3 GPU API accepts SPIRV input and handles platform-specific translation internally
     const result = c.shaderc_compile_into_spv(
         compiler,
         glsl_source.ptr,
