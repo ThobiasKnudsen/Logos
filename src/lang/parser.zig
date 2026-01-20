@@ -256,7 +256,7 @@ pub const Parser = struct {
         return left;
     }
 
-    /// Parse multiplication and division: a * b, a / b
+    /// Parse multiplication, division, and modulo: a * b, a / b, a % b
     fn parseMulDiv(self: *Parser) Error!*AstNode {
         var left = try self.parsePower();
 
@@ -285,6 +285,14 @@ pub const Parser = struct {
                 args[0] = left;
                 args[1] = right;
                 left = try AstNode.apply(self.allocator, "div", args, left.span.merge(right.span));
+            } else if (self.checkText("%")) {
+                _ = self.advance();
+                self.skipWhitespaceAndComments();
+                const right = try self.parsePower();
+                var args = try self.allocator.alloc(*AstNode, 2);
+                args[0] = left;
+                args[1] = right;
+                left = try AstNode.apply(self.allocator, "mod", args, left.span.merge(right.span));
             } else {
                 break;
             }

@@ -985,8 +985,8 @@ pub const GlslGenerator = struct {
                 try self.writeLine("// Boolean expression evaluation with corner checking");
                 try self.writeLine("// Calculate pixel size in world coordinates for anti-aliasing");
                 try self.writeLine("vec2 pixel_size = (axis_max - axis_min) / resolution;");
-                try self.writeLine("float half_px = pixel_size.x * 0.5;");
-                try self.writeLine("float half_py = pixel_size.y * 0.5;");
+                try self.writeLine("float half_px = pixel_size.x * 1.0;");
+                try self.writeLine("float half_py = pixel_size.y * 1.0;");
                 try self.writeLine("");
                 try self.writeLine("// Pixel corner coordinates");
                 try self.writeLine("float x_m = x - half_px;");
@@ -1173,7 +1173,6 @@ pub const GlslGenerator = struct {
             try self.write(")))");
         }
     }
-
 
     /// Emit expression (uses "x" and "y" directly)
     fn emitExpr(self: *Self, node: *const AstNode) std.mem.Allocator.Error!void {

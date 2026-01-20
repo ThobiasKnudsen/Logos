@@ -120,6 +120,7 @@ pub const LexerConfig = struct {
             .{ .pattern = "-", .token_type = .operator },
             .{ .pattern = "\\*", .token_type = .operator },
             .{ .pattern = "/", .token_type = .operator },
+            .{ .pattern = "%", .token_type = .operator },
             .{ .pattern = "\\^", .token_type = .operator },
             .{ .pattern = "<", .token_type = .operator },
             .{ .pattern = ">", .token_type = .operator },

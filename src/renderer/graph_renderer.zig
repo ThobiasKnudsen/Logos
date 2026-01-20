@@ -33,7 +33,7 @@ const BackendTextureTarget = extern struct {
 };
 
 /// Grid rendering configuration
-const GRID_LINE_COLOR: dvui.Color = dvui.Color.fromHex("#333333");
+const GRID_LINE_COLOR: dvui.Color = dvui.Color.fromHex("#FFFFFF66");
 const GRID_LABEL_COLOR: dvui.Color = dvui.Color.fromHex("#888888");
 const GRID_LABEL_PADDING: f32 = 4.0;
 const DEFAULT_GRID_LINES_PER_AXIS: usize = 5;
@@ -314,7 +314,6 @@ pub const GraphRenderer = struct {
         std.log.info("Shader test passed!", .{});
     }
 
-
     /// Poll for render completion (non-blocking)
     pub fn pollCompletion(self: *GraphRenderer) bool {
         return self.gpu_pipeline.pollCompletion();
@@ -398,7 +397,6 @@ pub const GraphRenderer = struct {
                     }
                 }
             }
-
         }
 
         // Render visual content with grid overlay
@@ -421,7 +419,7 @@ pub const GraphRenderer = struct {
         self.gpu_pipeline.setAxisBounds(
             @floatCast(self.axis_state.axis1.start),
             @floatCast(self.axis_state.axis1.end),
-            @floatCast(self.axis_state.axis2.end),   // swapped: max becomes min
+            @floatCast(self.axis_state.axis2.end), // swapped: max becomes min
             @floatCast(self.axis_state.axis2.start), // swapped: min becomes max
         );
     }
@@ -780,7 +778,6 @@ pub const GraphRenderer = struct {
             .color_text = dvui.Color.fromHex("#666666"),
         });
     }
-
 
     /// Test shader compilation with a sample GLSL
     pub fn testCompilation(self: *GraphRenderer) !void {
