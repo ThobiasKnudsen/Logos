@@ -1,0 +1,51 @@
+add factorial function.
+rare symbols only show as rectangles, e.g π, →, ŋ. 
+add symbolic calculations with SymEngine and/or GiNaC. 
+Changing the plotting area when changing tab. 
+make tab work for indentation and also auto indent when pressing endter on lines that are indented.
+Better coloring for the syntax and for the ui in general. 
+make ctrl + '+' work so that text and buttons can become larger. 
+make the stop button actually stop the plotting.
+create a restart button.
+Ask for saving unsaved files and remember opened files when closing so that when opening you get the same files again.
+make the application pause working when the window is not visible. 
+make a box for each return so that each plot can be manage by each box on the left side and you can stop individual plots and change color on individual plots and more, as well as when writing each block can have multiple lines when clicking enter, but when a line is actually plotting something enter rather play off the box and remove the typeing cursor from the box. This means you cannot have any lines after a line the plots or prints anything. If it prints anything it will appear right under the box and the next box will be under there again. Bellow the last box is a plus sign so you can create a new box without being done with the prior box, but when youre at the last box and clicking enter causes a plot or print a new box will automatically be made as well. There should also be a transparent copy icon on the top right corner of each box to copy all the containing text and the corners of the boxes should be rounded off. Whenever the last line which plots or prints occurs, it should at least always print what ever was interpreted so that you can see if the original text was manipulated with symbolic calulations before being plotted to the render area. Sometimes you dont want to plot anything because 4+9 doesnt contain axis1 or axis2 so it should rather only be printed. Some goes with some expression containing both x and y but the answer ends up being only a number so that it does need to be plottet. 
+
+This doesnt work:
+	e: 2.71828,
+	f(x): 2*e^(-2*x),
+	F(x): (
+	    delta: 0.01,
+	    sum: 0,
+	    for(i:0, i<x, i:i+delta) (
+	        sum: sum + f(i)*delta,
+	    ),
+	    sum,
+	),
+
+	fact(n): (
+	    sum: 0,
+	    for(i:1, i<=n, i:i+1) (
+	        sum: sum*i,
+	    ),
+	    sum,
+	),
+
+	f2(x): (
+	    (fact(20))/(fact(x)*fact(20-x)) * 0.3^x * 0.7^(20-x),
+	),
+	F2(x): (
+	    sum: 0,
+	    for(i:0, i<x, i:i+1) (
+	        sum: sum+f2(i),
+	    ),
+	    sum,
+	),
+
+	y=F(x) or y=f(x) or y=f2(x) or y=F2(x), 
+
+This doesnt work:
+	y=81*x^(-4) and x>=3
+
+	but this does:
+		y=81*x^(-4) and x>3

@@ -890,6 +890,9 @@ pub const GraphRenderer = struct {
 
     /// Handle mouse scroll for zoom
     pub fn handleScroll(self: *GraphRenderer, delta: f32, x: f32, y: f32, panel_width: f32, panel_height: f32) void {
+        // Detect mouse zone based on scroll position
+        const mouse_zone = detectMouseZone(x, y, panel_width, panel_height);
+
         // Convert to world coordinates (full panel dimensions)
         const world = self.axis_state.screenToWorld(x, y, panel_width, panel_height);
 
@@ -897,7 +900,7 @@ pub const GraphRenderer = struct {
         const factor: f64 = if (delta > 0) 0.9 else 1.1;
 
         // Zoom based on current mouse zone
-        switch (self.current_mouse_zone) {
+        switch (mouse_zone) {
             .center => {
                 // Zoom both axes
                 self.axis_state.zoomAt(factor, world.x, world.y);
