@@ -544,7 +544,8 @@ pub const GpuPipeline = struct {
 
     /// Render to an external texture (for dvui integration)
     /// The texture must have SDL_GPU_TEXTUREUSAGE_COLOR_TARGET flag
-    pub fn renderToExternalTexture(self: *GpuPipeline, external_texture: *anyopaque, width: u32, height: u32) !bool {
+    /// If clear_first is false, preserves existing texture content (for multi-pass rendering)
+    pub fn renderToExternalTexture(self: *GpuPipeline, external_texture: *anyopaque, width: u32, height: u32, clear_first: bool) !bool {
         if (self.is_rendering) {
             return false;
         }
@@ -572,9 +573,8 @@ pub const GpuPipeline = struct {
         var color_target = std.mem.zeroes(c.SDL_GPUColorTargetInfo);
         color_target.texture = target_texture;
         color_target.clear_color = .{ .r = 0.0, .g = 0.0, .b = 0.0, .a = 1.0 };
-        // Use CLEAR to ensure fresh content - the fullscreen shader covers everything anyway
-        // This prevents showing old/stale texture content
-        color_target.load_op = c.SDL_GPU_LOADOP_CLEAR;
+        // For multi-pass: first pass clears, subsequent passes preserve content
+        color_target.load_op = if (clear_first) c.SDL_GPU_LOADOP_CLEAR else c.SDL_GPU_LOADOP_LOAD;
         color_target.store_op = c.SDL_GPU_STOREOP_STORE;
 
         // Begin render pass

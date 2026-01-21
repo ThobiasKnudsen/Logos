@@ -10,6 +10,7 @@ const session = @import("../../session/session.zig");
 const renderer = @import("../../renderer/renderer.zig");
 
 const EditorPanel = @import("editor_panel.zig").EditorPanel;
+const NotebookPanel = @import("notebook_panel.zig").NotebookPanel;
 const EditorToolbar = @import("editor_toolbar.zig").EditorToolbar;
 
 pub const SplitView = struct {
@@ -98,8 +99,8 @@ pub const SplitView = struct {
             // Toolbar at top - pass graph_renderer so Play button can trigger rendering
             _ = self.editor_toolbar.render(active_session, graph_renderer);
 
-            // Editor panel below toolbar
-            EditorPanel.render(active_session);
+            // Notebook panel below toolbar (multi-cell interface)
+            NotebookPanel.render(active_session, graph_renderer);
         }
 
         // Right panel - Graph renderer (second pane)

@@ -153,7 +153,9 @@ pub const StatusBar = struct {
                         .padding = .{ .x = 8, .y = 0, .w = 8, .h = 0 },
                     });
 
-                    const line_count = countLines(sess.content.items);
+                    const all_content = sess.getAllCellsContent() catch "";
+                    defer if (all_content.len > 0) sess.allocator.free(all_content);
+                    const line_count = countLines(all_content);
 
                     // Line count
                     if (line_count == 1) {

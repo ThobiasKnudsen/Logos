@@ -14,6 +14,7 @@ const AstNode = ast.AstNode;
 const Builtin = ast.Builtin;
 const getBuiltin = ast.getBuiltin;
 const PrimitiveType = ast.PrimitiveType;
+const code_cell = @import("../session/code_cell.zig");
 
 /// Maximum magnitude for whole number float literals.
 /// Numbers larger than this use scientific notation which includes a decimal point.
@@ -576,6 +577,96 @@ pub const GlslGenerator = struct {
         };
     }
 
+    /// Determine output type for a cell based on its AST node
+    /// Checks if expression references axis variables to determine if it should be plotted
+    pub fn determineOutputType(node: *const AstNode) code_cell.OutputType {
+        // First check if it's a scalar (number literal)
+        if (node.data == .number) {
+            return .text_only;
+        }
+
+        // Check if expression contains axis1/axis2 references
+        const has_axis_ref = containsAxisReference(node);
+
+        // Check the expression type
+        const is_boolean = isNodeBoolean(node);
+        const is_tuple = node.data == .tuple;
+
+        if (has_axis_ref) {
+            // Contains axis variables - should be plotted
+            if (is_boolean or is_tuple) {
+                return .plot_only; // Plot boolean regions or tuples
+            } else {
+                return .both; // Plot and show value for scalar expressions
+            }
+        } else {
+            // No axis variables - just show as text
+            return .text_only;
+        }
+    }
+
+    /// Check if a node contains references to axis1, axis2, x, or y
+    fn containsAxisReference(node: *const AstNode) bool {
+        return switch (node.data) {
+            .identifier => |name| {
+                return std.mem.eql(u8, name, "x") or
+                    std.mem.eql(u8, name, "y") or
+                    std.mem.eql(u8, name, "axis1") or
+                    std.mem.eql(u8, name, "axis2");
+            },
+            .apply => |op| {
+                for (op.args) |arg| {
+                    if (containsAxisReference(arg)) return true;
+                }
+                return false;
+            },
+            .tuple => |elements| {
+                for (elements) |elem| {
+                    if (containsAxisReference(elem)) return true;
+                }
+                return false;
+            },
+            .property_access => |pa| {
+                return containsAxisReference(pa.base);
+            },
+            .index => |idx| {
+                return containsAxisReference(idx.base) or containsAxisReference(idx.index_expr);
+            },
+            .if_expr => |ie| {
+                return containsAxisReference(ie.condition) or
+                    containsAxisReference(ie.then_branch) or
+                    (ie.else_branch != null and containsAxisReference(ie.else_branch.?));
+            },
+            .cast => |c| {
+                return containsAxisReference(c.operand);
+            },
+            .block => |stmts| {
+                for (stmts) |stmt| {
+                    if (containsAxisReference(stmt)) return true;
+                }
+                return false;
+            },
+            .binding => |b| {
+                return containsAxisReference(b.value);
+            },
+            else => false,
+        };
+    }
+
+    /// Check if a node represents a boolean expression
+    fn isNodeBoolean(node: *const AstNode) bool {
+        return switch (node.data) {
+            .bool_lit => true,
+            .apply => |op| {
+                if (getBuiltin(op.name)) |builtin| {
+                    return builtin.category == .comparison or builtin.category == .logical;
+                }
+                return false;
+            },
+            else => false,
+        };
+    }
+
     /// Generate a complete fragment shader for one output
     fn generateShader(self: *Self, output: *const AstNode, output_type: OutputType, root: *const AstNode) !void {
         // Emit shader header
@@ -1003,7 +1094,8 @@ pub const GlslGenerator = struct {
                 try self.writeLine("if (result) {");
                 try self.writeLine("    out_color = vec4(primary_color.rgb, 1.0);");
                 try self.writeLine("} else {");
-                try self.writeLine("    out_color = vec4(background_color.rgb, 1.0);");
+                try self.writeLine("    // Transparent for multi-pass rendering");
+                try self.writeLine("    out_color = vec4(0.0, 0.0, 0.0, 0.0);");
                 try self.writeLine("}");
             },
             .scalar => {

@@ -279,27 +279,40 @@ pub const EditorToolbar = struct {
         }
     }
 
-    /// Tokenize, parse, generate GLSL, and send to GPU for rendering
+    /// Tokenize, parse, generate GLSL, and assign shaders to cells
     fn tokenizeAndRender(self: *EditorToolbar, active_session: *session.TabSession, graph_renderer: *renderer.GraphRenderer) void {
         // First do the tokenize/parse/generate flow
         self.tokenizeContent(active_session);
 
-        // If successful, send the first shader to the GPU
+        // If successful, assign shaders to their corresponding cells
         if (active_session.parse_state.status == .ready) {
             if (active_session.parse_state.generated_shaders) |shaders| {
-                if (shaders.len > 0) {
-                    // Send the first shader to the GPU pipeline
-                    graph_renderer.updateShader(shaders[0].source) catch |err| {
-                        std.log.err("Failed to update GPU shader: {}", .{err});
-                        active_session.parse_state.status = .err;
-                        active_session.parse_state.error_message = "GPU shader update failed";
-                        return;
+                // Assign each shader to its corresponding cell with non-empty content
+                // Shaders are generated in order of output expressions from non-empty cells
+                var shader_idx: usize = 0;
+                for (active_session.cells.items) |*cell| {
+                    // Skip empty cells
+                    if (cell.content.items.len == 0) continue;
+                    if (shader_idx >= shaders.len) break;
+
+                    // Store shader in cell's output
+                    cell.output = .{
+                        .text = null,
+                        .shader = shaders[shader_idx],
+                        .output_type = .plot_only,
+                        .error_msg = null,
                     };
 
-                    // Don't enable animation automatically - expressions are usually static
-                    // User can enable animation later if needed (for time-based shaders)
-                    graph_renderer.setAnimating(false);
-                    std.log.info("Shader sent to GPU pipeline - rendering active (static, no animation)", .{});
+                    shader_idx += 1;
+                }
+
+                std.log.info("Assigned {} shaders to cells", .{shader_idx});
+
+                // Send all shaders to renderer for multi-pass rendering
+                if (shaders.len > 0) {
+                    graph_renderer.updateShaders(shaders, active_session) catch |err| {
+                        std.log.err("Failed to update GPU shaders: {}", .{err});
+                    };
                 }
             }
         }
@@ -307,7 +320,13 @@ pub const EditorToolbar = struct {
 
     /// Tokenize the content and store tokens in parse state
     fn tokenizeContent(self: *EditorToolbar, active_session: *session.TabSession) void {
-        const content = active_session.content.items;
+        // Get all cells content (concatenated for now, will be per-cell later)
+        const content = active_session.getAllCellsContent() catch {
+            active_session.parse_state.status = .err;
+            active_session.parse_state.error_message = "Failed to get cells content";
+            return;
+        };
+        defer active_session.allocator.free(content);
 
         // Start new parse cycle
         active_session.parse_state.startNewParse();
@@ -362,7 +381,9 @@ pub const EditorToolbar = struct {
         }
 
         // DEBUG: Print all tokens
-        debugPrintTokens(tokens, active_session.content.items);
+        const debug_content = active_session.getAllCellsContent() catch "";
+        defer if (debug_content.len > 0) active_session.allocator.free(debug_content);
+        debugPrintTokens(tokens, debug_content);
 
         active_session.parse_state.status = .parsing;
 
@@ -381,8 +402,11 @@ pub const EditorToolbar = struct {
             if (parser.errors.items.len > 0) {
                 const first_err = parser.errors.items[0];
 
+                // Get content for error location and context
+                const content = active_session.getAllCellsContent() catch "";
+                defer if (content.len > 0) active_session.allocator.free(content);
+
                 // Format error with line/column info
-                const content = active_session.content.items;
                 const loc = session.parse_state.byteOffsetToLocation(content, first_err.byte_start);
 
                 // Create formatted message with location

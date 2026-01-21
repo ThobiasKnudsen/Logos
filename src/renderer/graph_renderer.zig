@@ -54,6 +54,13 @@ pub const MouseZone = enum {
     axis2_edge,
 };
 
+/// Shader info for one cell with pre-compiled pipeline
+pub const CellShaderInfo = struct {
+    glsl_source: []const u8,
+    color: [3]u8, // RGB color for this cell's plot
+    pipeline: ?GpuPipeline, // Pre-compiled pipeline for this shader
+};
+
 pub const GraphRenderer = struct {
     allocator: std.mem.Allocator,
 
@@ -69,6 +76,9 @@ pub const GraphRenderer = struct {
 
     /// Current generated GLSL (null if none)
     current_glsl: ?[]const u8,
+
+    /// Multiple shaders for multi-pass rendering
+    cell_shaders: std.ArrayList(CellShaderInfo),
 
     /// Error message from last operation
     last_error: ?[]const u8,
@@ -118,6 +128,7 @@ pub const GraphRenderer = struct {
             .is_initialized = false,
             .init_attempted = false,
             .current_glsl = null,
+            .cell_shaders = .{ .items = &.{}, .capacity = 0 },
             .last_error = null,
             .start_time = std.time.milliTimestamp(),
             .is_animating = false,
@@ -168,6 +179,14 @@ pub const GraphRenderer = struct {
         if (self.current_glsl) |glsl| {
             self.allocator.free(glsl);
         }
+        // Free cell shaders and their pipelines
+        for (self.cell_shaders.items) |*shader_info| {
+            self.allocator.free(shader_info.glsl_source);
+            if (shader_info.pipeline) |*pipeline| {
+                pipeline.deinit();
+            }
+        }
+        self.cell_shaders.deinit(self.allocator);
         if (self.last_error) |err| {
             self.allocator.free(err);
         }
@@ -193,7 +212,9 @@ pub const GraphRenderer = struct {
         // Check if we need to re-render
         if (!active_session.render_state.needs_update) {
             // Check content hash to see if content changed
-            const new_hash = std.hash.Wyhash.hash(0, active_session.content.items);
+            const all_content = active_session.getAllCellsContent() catch return;
+            defer active_session.allocator.free(all_content);
+            const new_hash = std.hash.Wyhash.hash(0, all_content);
             if (new_hash == self.cached_content_hash) {
                 return;
             }
@@ -253,6 +274,87 @@ pub const GraphRenderer = struct {
 
         std.log.info("[GraphRenderer] Shader updated successfully ✓", .{});
         std.log.info("[GraphRenderer] ========== UPDATE SHADER END ==========", .{});
+    }
+
+    /// Update with multiple shaders for multi-pass rendering
+    /// Called when we have multiple cells with different plots
+    pub fn updateShaders(self: *GraphRenderer, cell_shaders_list: []const @import("../lang/glsl_gen.zig").GeneratedShader, active_session: *session.TabSession) !void {
+        std.log.info("[GraphRenderer] ========== UPDATE SHADERS (MULTI-PASS) START ==========", .{});
+        std.log.info("[GraphRenderer] Number of shaders: {}", .{cell_shaders_list.len});
+
+        // Clear previous error
+        self.clearError();
+
+        if (!self.is_initialized) {
+            std.log.err("[GraphRenderer] Cannot update shaders: not initialized", .{});
+            return error.NotInitialized;
+        }
+
+        // Free old cell shaders and pipelines
+        for (self.cell_shaders.items) |*shader_info| {
+            self.allocator.free(shader_info.glsl_source);
+            if (shader_info.pipeline) |*pipeline| {
+                pipeline.releaseGpuResources();
+                pipeline.deinit();
+            }
+        }
+        self.cell_shaders.clearRetainingCapacity();
+
+        // Compile and store each shader with its own pipeline
+        var cell_idx: usize = 0;
+        for (cell_shaders_list) |shader| {
+            // Find the cell that corresponds to this shader
+            var color: [3]u8 = .{ 255, 85, 0 }; // default orange
+            var current_cell_idx: usize = 0;
+            for (active_session.cells.items) |*cell| {
+                if (cell.content.items.len == 0) continue; // Skip empty cells
+                if (current_cell_idx == cell_idx) {
+                    color = cell.color;
+                    break;
+                }
+                current_cell_idx += 1;
+            }
+
+            // Create and compile pipeline for this shader
+            var pipeline = GpuPipeline.init(self.allocator);
+            if (self.backend) |backend| {
+                pipeline.initWithDevice(backend.device) catch |err| {
+                    std.log.err("[GraphRenderer] Pipeline init failed for shader {}: {}", .{ cell_idx, err });
+                    continue;
+                };
+                pipeline.updateFragmentShader(shader.source) catch |err| {
+                    std.log.err("[GraphRenderer] Shader compile failed for cell {}: {}", .{ cell_idx, err });
+                    pipeline.deinit();
+                    continue;
+                };
+            }
+
+            const shader_info = CellShaderInfo{
+                .glsl_source = try self.allocator.dupe(u8, shader.source),
+                .color = color,
+                .pipeline = pipeline,
+            };
+            try self.cell_shaders.append(self.allocator, shader_info);
+            cell_idx += 1;
+        }
+
+        std.log.info("[GraphRenderer] Compiled {} pipelines for multi-pass rendering", .{self.cell_shaders.items.len});
+
+        // Store first shader in current_glsl for backward compatibility
+        if (cell_shaders_list.len > 0) {
+            if (self.current_glsl) |old| {
+                self.allocator.free(old);
+            }
+            self.current_glsl = try self.allocator.dupe(u8, cell_shaders_list[0].source);
+        }
+
+        // Mark that we need to re-render
+        self.needs_initial_render = true;
+        self.has_rendered_once = false;
+        self.render_target = null; // Invalidate to force recreation
+
+        std.log.info("[GraphRenderer] Multi-pass shaders updated successfully ✓", .{});
+        std.log.info("[GraphRenderer] ========== UPDATE SHADERS END ==========", .{});
     }
 
     /// Run automated shader test - parses "x²+y²=9" and tries to render
@@ -355,8 +457,8 @@ pub const GraphRenderer = struct {
         // Always ensure we have a render target (even before shader is loaded)
         self.ensureRenderTarget(panel_width, panel_height);
 
-        // Try to render if initialized and shader is active
-        if (self.is_initialized and self.current_glsl != null) {
+        // Try to render if initialized
+        if (self.is_initialized) {
             // Poll for completion FIRST so we can start a new render this frame if the previous one finished
             if (self.pollCompletion()) {
                 // Mark that we've rendered successfully
@@ -364,7 +466,6 @@ pub const GraphRenderer = struct {
             }
 
             // Only submit render if not currently rendering
-            // This ensures continuous rendering to the texture target
             const is_rendering = self.isRendering();
 
             if (!is_rendering) {
@@ -382,14 +483,40 @@ pub const GraphRenderer = struct {
                         @floatFromInt(panel_height),
                     );
 
-                    // Render to the external texture
-                    _ = self.gpu_pipeline.renderToExternalTexture(
-                        backend_target.texture,
-                        panel_width,
-                        panel_height,
-                    ) catch |err| {
-                        std.log.err("[GraphRenderer] Render failed: {}", .{err});
-                    };
+                    // Multi-pass rendering: render each cell's pre-compiled pipeline
+                    if (self.cell_shaders.items.len > 0) {
+                        // Render each shader in sequence using pre-compiled pipelines
+                        for (self.cell_shaders.items, 0..) |*shader_info, i| {
+                            if (shader_info.pipeline) |*pipeline| {
+                                // Update uniforms for this pass
+                                pipeline.updateUniforms(elapsed, @floatFromInt(panel_width), @floatFromInt(panel_height));
+
+                                // First pass clears, subsequent passes preserve content
+                                const clear_first = (i == 0);
+
+                                // Render this pipeline to the texture
+                                _ = pipeline.renderToExternalTexture(
+                                    backend_target.texture,
+                                    panel_width,
+                                    panel_height,
+                                    clear_first,
+                                ) catch |err| {
+                                    std.log.err("[GraphRenderer] Render pass {} failed: {}", .{ i, err });
+                                    continue;
+                                };
+                            }
+                        }
+                    } else if (self.current_glsl != null) {
+                        // Fallback: single shader rendering (backward compatibility)
+                        _ = self.gpu_pipeline.renderToExternalTexture(
+                            backend_target.texture,
+                            panel_width,
+                            panel_height,
+                            true, // Always clear for single shader
+                        ) catch |err| {
+                            std.log.err("[GraphRenderer] Render failed: {}", .{err});
+                        };
+                    }
 
                     // Mark first render after shader update as complete
                     if (self.needs_initial_render) {

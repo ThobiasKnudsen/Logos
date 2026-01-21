@@ -1,0 +1,138 @@
+//! Code Cell - A single executable unit in the notebook interface
+//!
+//! Each cell contains code, execution state, and output (text and/or plot).
+//! Cells can be finalized (output produced) or editable (no output yet).
+
+const std = @import("std");
+const glsl_gen = @import("../lang/glsl_gen.zig");
+
+const Allocator = std.mem.Allocator;
+
+/// Output type for a cell
+pub const OutputType = enum {
+    none, // No output yet
+    text_only, // Scalar result, just print
+    plot_only, // Contains axis vars, just plot
+    both, // Print value and plot
+    err, // Execution error
+};
+
+/// Cell output result
+pub const CellOutput = struct {
+    /// Printed/evaluated result text (stored for reload)
+    text: ?[]const u8,
+    /// GLSL shader if plottable
+    shader: ?glsl_gen.GeneratedShader,
+    /// How to display this output
+    output_type: OutputType,
+    /// Error message if execution failed
+    error_msg: ?[]const u8,
+
+    pub fn deinit(self: *CellOutput, allocator: Allocator) void {
+        if (self.text) |t| {
+            allocator.free(t);
+        }
+        if (self.shader) |s| {
+            allocator.free(s.source);
+        }
+        if (self.error_msg) |e| {
+            allocator.free(e);
+        }
+    }
+};
+
+/// A single code cell in the notebook
+pub const CodeCell = struct {
+    /// Unique ID for dvui widget IDs
+    id: usize,
+    /// Code content for this cell
+    content: std.ArrayList(u8),
+    /// Execution result (null if not executed yet)
+    output: ?CellOutput,
+    /// RGB color for this cell's plot (0-255 range)
+    color: [3]u8,
+    /// True when output produced, cell becomes read-only
+    is_finalized: bool,
+    /// Cursor position within this cell (byte index)
+    cursor_index: usize,
+
+    /// Initialize a new empty cell
+    pub fn init(_: Allocator, id: usize) CodeCell {
+        return .{
+            .id = id,
+            .content = .{ .items = &.{}, .capacity = 0 },
+            .output = null,
+            .color = autoAssignColor(id),
+            .is_finalized = false,
+            .cursor_index = 0,
+        };
+    }
+
+    /// Initialize a cell with existing content
+    pub fn initWithContent(allocator: Allocator, id: usize, initial_content: []const u8) !CodeCell {
+        var cell = CodeCell.init(allocator, id);
+        try cell.content.appendSlice(allocator, initial_content);
+        return cell;
+    }
+
+    pub fn deinit(self: *CodeCell, allocator: Allocator) void {
+        self.content.deinit(allocator);
+        if (self.output) |*out| {
+            out.deinit(allocator);
+        }
+    }
+
+    /// Set custom color for this cell's plot
+    pub fn setColor(self: *CodeCell, rgb: [3]u8) void {
+        self.color = rgb;
+    }
+
+    /// Get color as normalized vec4 (for shader uniforms)
+    pub fn getColorVec4(self: *const CodeCell) [4]f32 {
+        return .{
+            @as(f32, @floatFromInt(self.color[0])) / 255.0,
+            @as(f32, @floatFromInt(self.color[1])) / 255.0,
+            @as(f32, @floatFromInt(self.color[2])) / 255.0,
+            1.0,
+        };
+    }
+
+    /// Get color as hex string for JSON serialization
+    pub fn getColorHex(self: *const CodeCell, allocator: Allocator) ![]const u8 {
+        return std.fmt.allocPrint(allocator, "#{x:0>2}{x:0>2}{x:0>2}", .{
+            self.color[0],
+            self.color[1],
+            self.color[2],
+        });
+    }
+
+    /// Set color from hex string (e.g., "#ff5500")
+    pub fn setColorFromHex(self: *CodeCell, hex: []const u8) !void {
+        if (hex.len != 7 or hex[0] != '#') {
+            return error.InvalidHexColor;
+        }
+        self.color[0] = try std.fmt.parseInt(u8, hex[1..3], 16);
+        self.color[1] = try std.fmt.parseInt(u8, hex[3..5], 16);
+        self.color[2] = try std.fmt.parseInt(u8, hex[5..7], 16);
+    }
+
+    /// Finalize this cell (mark as read-only with output)
+    pub fn finalize(self: *CodeCell) void {
+        self.is_finalized = true;
+    }
+
+    /// Auto-assign a color from a palette based on cell ID
+    fn autoAssignColor(id: usize) [3]u8 {
+        const palette = [_][3]u8{
+            .{ 255, 85, 0 }, // Orange
+            .{ 0, 170, 255 }, // Blue
+            .{ 255, 0, 0 }, // Red
+            .{ 0, 255, 127 }, // Spring green
+            .{ 255, 0, 255 }, // Magenta
+            .{ 255, 255, 0 }, // Yellow
+            .{ 0, 255, 255 }, // Cyan
+            .{ 170, 85, 255 }, // Purple
+        };
+        return palette[id % palette.len];
+    }
+};
