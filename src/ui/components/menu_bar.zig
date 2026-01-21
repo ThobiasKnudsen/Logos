@@ -34,7 +34,7 @@ pub const MenuBar = struct {
 
         // Menu bar container with subtle background
         var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .color_fill = theme.colors.bg_secondary,
+            .color_fill = theme.colors.bg_primary,
             .background = true,
             .expand = .horizontal,
             .padding = .{ .x = 4, .y = 2, .w = 4, .h = 2 },

@@ -187,7 +187,7 @@ pub const TabBar = struct {
         // Outer tab container with background - this creates the unified appearance
         var tab_box = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .id_extra = idx,
-            .color_fill = if (is_active) theme.colors.bg_elevated else theme.colors.bg_secondary,
+            .color_fill = if (is_active) theme.colors.bg_elevated else theme.colors.bg_primary,
             .background = true,
         });
         defer tab_box.deinit();

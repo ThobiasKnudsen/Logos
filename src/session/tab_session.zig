@@ -357,10 +357,6 @@ pub const TabSession = struct {
 
     /// Remove a cell at the specified index (ensures at least one cell remains)
     pub fn removeCell(self: *TabSession, index: usize) !void {
-        if (self.cells.items.len <= 1) {
-            // Keep at least one cell
-            return error.CannotRemoveLastCell;
-        }
         if (index >= self.cells.items.len) {
             return error.InvalidIndex;
         }
@@ -369,7 +365,7 @@ pub const TabSession = struct {
         cell.deinit(self.allocator);
 
         // Adjust active cell index if needed
-        if (self.active_cell_index >= self.cells.items.len) {
+        if (self.cells.items.len > 0 and self.active_cell_index >= self.cells.items.len) {
             self.active_cell_index = self.cells.items.len - 1;
         }
 

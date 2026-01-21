@@ -57,7 +57,7 @@ pub const MouseZone = enum {
 /// Shader info for one cell with pre-compiled pipeline
 pub const CellShaderInfo = struct {
     glsl_source: []const u8,
-    color: [3]u8, // RGB color for this cell's plot
+    color: [4]u8, // RGBA color for this cell's plot
     pipeline: ?GpuPipeline, // Pre-compiled pipeline for this shader
 };
 
@@ -304,7 +304,7 @@ pub const GraphRenderer = struct {
         var cell_idx: usize = 0;
         for (cell_shaders_list) |shader| {
             // Find the cell that corresponds to this shader
-            var color: [3]u8 = .{ 255, 85, 0 }; // default orange
+            var color: [4]u8 = .{ 255, 85, 0, 255 }; // default orange, fully opaque
             var current_cell_idx: usize = 0;
             for (active_session.cells.items) |*cell| {
                 if (cell.content.items.len == 0) continue; // Skip empty cells
@@ -488,6 +488,14 @@ pub const GraphRenderer = struct {
                         // Render each shader in sequence using pre-compiled pipelines
                         for (self.cell_shaders.items, 0..) |*shader_info, i| {
                             if (shader_info.pipeline) |*pipeline| {
+                                // Set this cell's custom color (including alpha)
+                                pipeline.uniforms.primary_color = .{
+                                    @as(f32, @floatFromInt(shader_info.color[0])) / 255.0,
+                                    @as(f32, @floatFromInt(shader_info.color[1])) / 255.0,
+                                    @as(f32, @floatFromInt(shader_info.color[2])) / 255.0,
+                                    @as(f32, @floatFromInt(shader_info.color[3])) / 255.0,
+                                };
+
                                 // Update uniforms for this pass
                                 pipeline.updateUniforms(elapsed, @floatFromInt(panel_width), @floatFromInt(panel_height));
 

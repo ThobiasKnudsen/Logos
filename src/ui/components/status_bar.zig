@@ -33,7 +33,7 @@ pub const StatusBar = struct {
         // Main status bar container
         var status_container = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
-            .color_fill = theme.colors.bg_primary,
+            .color_fill = theme.colors.bg_secondary,
             .background = true,
             .padding = .{ .x = status_padding_x, .y = status_padding_y, .w = status_padding_x, .h = status_padding_y },
         });
@@ -197,4 +197,3 @@ pub const StatusBar = struct {
         return count;
     }
 };
-

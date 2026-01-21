@@ -49,8 +49,8 @@ pub const CodeCell = struct {
     content: std.ArrayList(u8),
     /// Execution result (null if not executed yet)
     output: ?CellOutput,
-    /// RGB color for this cell's plot (0-255 range)
-    color: [3]u8,
+    /// RGBA color for this cell's plot (0-255 range)
+    color: [4]u8,
     /// True when output produced, cell becomes read-only
     is_finalized: bool,
     /// Cursor position within this cell (byte index)
@@ -82,9 +82,27 @@ pub const CodeCell = struct {
         }
     }
 
-    /// Set custom color for this cell's plot
+    /// Set custom color for this cell's plot (RGB, keeps existing alpha)
     pub fn setColor(self: *CodeCell, rgb: [3]u8) void {
-        self.color = rgb;
+        self.color[0] = rgb[0];
+        self.color[1] = rgb[1];
+        self.color[2] = rgb[2];
+        // Keep existing alpha
+    }
+
+    /// Set full RGBA color for this cell's plot
+    pub fn setColorRGBA(self: *CodeCell, rgba: [4]u8) void {
+        self.color = rgba;
+    }
+
+    /// Set color from normalized float values (0.0-1.0 range)
+    pub fn setColorFromFloat(self: *CodeCell, r: f32, g: f32, b: f32, a: f32) void {
+        self.color = .{
+            @intFromFloat(@max(0.0, @min(1.0, r)) * 255.0),
+            @intFromFloat(@max(0.0, @min(1.0, g)) * 255.0),
+            @intFromFloat(@max(0.0, @min(1.0, b)) * 255.0),
+            @intFromFloat(@max(0.0, @min(1.0, a)) * 255.0),
+        };
     }
 
     /// Get color as normalized vec4 (for shader uniforms)
@@ -93,27 +111,36 @@ pub const CodeCell = struct {
             @as(f32, @floatFromInt(self.color[0])) / 255.0,
             @as(f32, @floatFromInt(self.color[1])) / 255.0,
             @as(f32, @floatFromInt(self.color[2])) / 255.0,
-            1.0,
+            @as(f32, @floatFromInt(self.color[3])) / 255.0,
         };
     }
 
-    /// Get color as hex string for JSON serialization
+    /// Get color as hex string for JSON serialization (includes alpha)
     pub fn getColorHex(self: *const CodeCell, allocator: Allocator) ![]const u8 {
-        return std.fmt.allocPrint(allocator, "#{x:0>2}{x:0>2}{x:0>2}", .{
+        return std.fmt.allocPrint(allocator, "#{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{
             self.color[0],
             self.color[1],
             self.color[2],
+            self.color[3],
         });
     }
 
-    /// Set color from hex string (e.g., "#ff5500")
+    /// Set color from hex string (supports both #RRGGBB and #RRGGBBAA)
     pub fn setColorFromHex(self: *CodeCell, hex: []const u8) !void {
-        if (hex.len != 7 or hex[0] != '#') {
+        if (hex.len != 7 and hex.len != 9) {
+            return error.InvalidHexColor;
+        }
+        if (hex[0] != '#') {
             return error.InvalidHexColor;
         }
         self.color[0] = try std.fmt.parseInt(u8, hex[1..3], 16);
         self.color[1] = try std.fmt.parseInt(u8, hex[3..5], 16);
         self.color[2] = try std.fmt.parseInt(u8, hex[5..7], 16);
+        if (hex.len == 9) {
+            self.color[3] = try std.fmt.parseInt(u8, hex[7..9], 16);
+        } else {
+            self.color[3] = 255; // Default to fully opaque
+        }
     }
 
     /// Finalize this cell (mark as read-only with output)
@@ -122,16 +149,16 @@ pub const CodeCell = struct {
     }
 
     /// Auto-assign a color from a palette based on cell ID
-    fn autoAssignColor(id: usize) [3]u8 {
-        const palette = [_][3]u8{
-            .{ 255, 85, 0 }, // Orange
-            .{ 0, 170, 255 }, // Blue
-            .{ 255, 0, 0 }, // Red
-            .{ 0, 255, 127 }, // Spring green
-            .{ 255, 0, 255 }, // Magenta
-            .{ 255, 255, 0 }, // Yellow
-            .{ 0, 255, 255 }, // Cyan
-            .{ 170, 85, 255 }, // Purple
+    fn autoAssignColor(id: usize) [4]u8 {
+        const palette = [_][4]u8{
+            .{ 255, 85, 0, 255 }, // Orange
+            .{ 0, 170, 255, 255 }, // Blue
+            .{ 255, 0, 0, 255 }, // Red
+            .{ 0, 255, 127, 255 }, // Spring green
+            .{ 255, 0, 255, 255 }, // Magenta
+            .{ 255, 255, 0, 255 }, // Yellow
+            .{ 0, 255, 255, 255 }, // Cyan
+            .{ 170, 85, 255, 255 }, // Purple
         };
         return palette[id % palette.len];
     }

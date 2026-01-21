@@ -28,6 +28,15 @@ pub const NotebookPanel = struct {
     // Global lexer instance (initialized lazily)
     var lexer: ?lexer_mod.Lexer = null;
 
+    // Color editor state (for RGBA editing popup)
+    var color_editor_cell_id: ?usize = null;
+    var color_editor_text: std.ArrayList(u8) = undefined;
+    var color_editor_initialized: bool = false;
+    var color_editor_from_rect: dvui.Rect.Natural = .{};
+
+    // Deferred deletion (set during render, executed after render loop)
+    var cell_to_delete: ?usize = null;
+
     /// Initialize the global lexer if not already done
     fn ensureLexer(_: std.mem.Allocator) ?*lexer_mod.Lexer {
         if (lexer == null) {
@@ -39,9 +48,31 @@ pub const NotebookPanel = struct {
         return &lexer.?;
     }
 
+    /// Calculate relative luminance and return appropriate text color (black or white)
+    /// Uses WCAG relative luminance formula for optimal contrast
+    fn getContrastingTextColor(bg_color: dvui.Color) dvui.Color {
+        // Convert to linear RGB (0.0 to 1.0)
+        const r = @as(f32, @floatFromInt(bg_color.r)) / 255.0;
+        const g = @as(f32, @floatFromInt(bg_color.g)) / 255.0;
+        const b = @as(f32, @floatFromInt(bg_color.b)) / 255.0;
+
+        // Calculate relative luminance (WCAG formula)
+        const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+        // If luminance > 0.5, use dark text; otherwise use light text
+        if (luminance > 0.5) {
+            return dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 255 }; // Black
+        } else {
+            return dvui.Color{ .r = 255, .g = 255, .b = 255, .a = 255 }; // White
+        }
+    }
+
     /// Render the notebook panel with all cells
     pub fn render(active_session: *session.TabSession, graph_renderer: *renderer.GraphRenderer) void {
         _ = graph_renderer; // TODO: Will be used for per-cell rendering in Phase 4
+
+        // Reset deferred deletion
+        cell_to_delete = null;
 
         const scale = theme.fonts.getScale();
         const scaled_spacing = cell_spacing * scale;
@@ -69,6 +100,13 @@ pub const NotebookPanel = struct {
 
         // Plus button to add new cell
         renderPlusButton(active_session, scale);
+
+        // Execute deferred deletion after render loop completes
+        if (cell_to_delete) |index| {
+            active_session.removeCell(index) catch |err| {
+                std.log.warn("Could not remove cell at index {d}: {}", .{ index, err });
+            };
+        }
     }
 
     /// Render a single cell
@@ -79,14 +117,12 @@ pub const NotebookPanel = struct {
         corner_radius: f32,
         spacing: f32,
     ) void {
-        const is_active = cell_index == active_session.active_cell_index;
-
         // Cell container box with rounded corners
         var cell_box = dvui.box(@src(), .{ .dir = .vertical }, .{
             .id_extra = cell.id,
             .expand = .horizontal,
             .background = true,
-            .color_fill = if (is_active) theme.colors.bg_elevated else theme.colors.bg_secondary,
+            .color_fill = theme.colors.bg_secondary,
             .corner_radius = .{ .x = corner_radius, .y = corner_radius, .w = corner_radius, .h = corner_radius },
             .padding = .{ .x = spacing, .y = spacing, .w = spacing, .h = spacing },
             .margin = .{ .x = 0, .y = 0, .w = 0, .h = spacing },
@@ -107,7 +143,8 @@ pub const NotebookPanel = struct {
 
     /// Render cell header with color picker and copy button
     fn renderCellHeader(active_session: *session.TabSession, cell: *code_cell.CodeCell, cell_index: usize) void {
-        _ = cell_index;
+        const scale = theme.fonts.getScale();
+        const icon_size = 18 * scale; // Same as play/stop buttons
 
         var header = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .id_extra = cell.id,
@@ -116,45 +153,51 @@ pub const NotebookPanel = struct {
         });
         defer header.deinit();
 
-        // Color picker button (left side)
-        const color_vec4 = cell.getColorVec4();
-        const color = dvui.Color{
-            .r = @intFromFloat(color_vec4[0] * 255),
-            .g = @intFromFloat(color_vec4[1] * 255),
-            .b = @intFromFloat(color_vec4[2] * 255),
-            .a = 255,
-        };
-
-        if (dvui.button(@src(), "Color", .{}, .{
-            .id_extra = cell.id,
-            .color_fill = color,
-            .min_size_content = .{ .w = button_size, .h = button_size },
-            .corner_radius = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
-        })) {
-            // Cycle through color palette on click
-            const palette = [_][3]u8{
-                .{ 255, 85, 0 }, // Orange
-                .{ 0, 170, 255 }, // Blue
-                .{ 255, 0, 0 }, // Red
-                .{ 0, 255, 127 }, // Spring green
-                .{ 255, 0, 255 }, // Magenta
-                .{ 255, 255, 0 }, // Yellow
-                .{ 0, 255, 255 }, // Cyan
-                .{ 170, 85, 255 }, // Purple
+        // Color picker button (left side) - wrapped in scope to close before other elements
+        {
+            const color_vec4 = cell.getColorVec4();
+            const color = dvui.Color{
+                .r = @intFromFloat(color_vec4[0] * 255),
+                .g = @intFromFloat(color_vec4[1] * 255),
+                .b = @intFromFloat(color_vec4[2] * 255),
+                .a = 255,
             };
 
-            // Find current color index and cycle to next
-            var current_idx: usize = 0;
-            for (palette, 0..) |palette_color, i| {
-                if (std.mem.eql(u8, &cell.color, &palette_color)) {
-                    current_idx = i;
-                    break;
-                }
+            var color_btn: dvui.ButtonWidget = undefined;
+            color_btn.init(@src(), .{}, .{
+                .id_extra = cell.id,
+                .color_fill = color,
+                .corner_radius = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
+                .padding = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
+                .margin = .{ .x = 2, .y = 2, .w = 2, .h = 2 },
+                .min_size_content = .{ .w = icon_size, .h = icon_size },
+            });
+            defer color_btn.deinit();
+
+            color_btn.processEvents();
+            color_btn.drawBackground();
+
+            // Draw "Color" label inside the button with contrasting text color
+            const text_color = getContrastingTextColor(color);
+            dvui.labelNoFmt(@src(), "Color", .{}, .{
+                .id_extra = cell.id,
+                .color_text = text_color,
+                .font = theme.fonts.smallFont(),
+            });
+
+            if (color_btn.clicked()) {
+                // Open color editor for this cell (convert to natural coordinates)
+                const btn_rect_scale = color_btn.data().borderRectScale();
+                const btn_rect_natural = btn_rect_scale.r.toNatural();
+                openColorEditor(cell, btn_rect_natural);
             }
-            const next_idx = (current_idx + 1) % palette.len;
-            cell.setColor(palette[next_idx]);
-            active_session.is_modified = true;
-            std.log.info("Changed cell {d} color to palette index {d}", .{ cell.id, next_idx });
+        }
+
+        // Render color editor popup if this cell is being edited
+        if (color_editor_cell_id) |editing_id| {
+            if (editing_id == cell.id) {
+                renderColorEditor(active_session, cell);
+            }
         }
 
         // Spacer
@@ -163,16 +206,36 @@ pub const NotebookPanel = struct {
             spacer.deinit();
         }
 
-        // Copy button (right side)
-        if (dvui.button(@src(), "Copy", .{}, .{
-            .id_extra = cell.id,
-            .background = false,
-            .color_text = theme.colors.text_muted,
-            .min_size_content = .{ .w = button_size, .h = button_size },
+        // Copy button - small icon button
+        const entypo = dvui.entypo;
+        if (dvui.buttonIcon(@src(), "copy", entypo.copy, .{}, .{}, .{
+            .id_extra = cell.id + 1,
+            .color_fill = theme.colors.toolbar_button,
+            .color_fill_hover = theme.colors.toolbar_button_hover,
+            .corner_radius = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
+            .padding = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
+            .margin = .{ .x = 2, .y = 2, .w = 2, .h = 2 },
+            .min_size_content = .{ .w = icon_size, .h = icon_size },
         })) {
             // Copy cell content to clipboard
             dvui.clipboardTextSet(cell.content.items);
             std.log.info("Copied cell {d} to clipboard", .{cell.id});
+        }
+
+        // Delete button (rightmost) - circular icon button
+        const delete_radius = icon_size / 2;
+        if (dvui.buttonIcon(@src(), "delete", entypo.circle_with_cross, .{}, .{}, .{
+            .id_extra = cell.id + 2,
+            .color_fill = theme.colors.toolbar_button,
+            .color_fill_hover = dvui.Color{ .r = 220, .g = 80, .b = 80, .a = 255 }, // Red on hover
+            .corner_radius = .{ .x = delete_radius, .y = delete_radius, .w = delete_radius, .h = delete_radius },
+            .padding = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
+            .margin = .{ .x = 2, .y = 2, .w = 2, .h = 2 },
+            .min_size_content = .{ .w = icon_size, .h = icon_size },
+        })) {
+            // Defer deletion until after render loop completes
+            cell_to_delete = cell_index;
+            std.log.info("Marked cell {d} for deletion", .{cell.id});
         }
     }
 
@@ -204,7 +267,7 @@ pub const NotebookPanel = struct {
             .border = .{},
             .corner_radius = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
             .background = true,
-            .color_fill = theme.colors.editor_bg,
+            .color_fill = theme.colors.bg_elevated,
             .font = scaled_font,
             .theme = &no_focus_theme,
         });
@@ -381,13 +444,19 @@ pub const NotebookPanel = struct {
 
         var button_container = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
-            .gravity_x = 0.5, // Center horizontally
             .margin = .{ .x = 0, .y = 12, .w = 0, .h = 12 },
         });
         defer button_container.deinit();
 
-        if (dvui.button(@src(), "+ New Cell", .{}, .{
-            .min_size_content = .{ .w = scaled_button_size * 4, .h = scaled_button_size },
+        // Left spacer to center button
+        {
+            var spacer = dvui.box(@src(), .{}, .{ .expand = .horizontal });
+            spacer.deinit();
+        }
+
+        // Centered add button
+        if (dvui.button(@src(), "+", .{}, .{
+            .min_size_content = .{ .w = scaled_button_size * 1.5, .h = scaled_button_size },
             .color_fill = theme.colors.toolbar_button,
             .color_fill_hover = theme.colors.toolbar_button_hover,
             .corner_radius = .{ .x = 8, .y = 8, .w = 8, .h = 8 },
@@ -401,5 +470,156 @@ pub const NotebookPanel = struct {
                 active_session.active_cell_index = active_session.cells.items.len - 1;
             }
         }
+
+        // Right spacer to center button
+        {
+            var spacer = dvui.box(@src(), .{}, .{ .expand = .horizontal });
+            spacer.deinit();
+        }
+    }
+
+    /// Open color editor for a cell
+    fn openColorEditor(cell: *code_cell.CodeCell, from_rect: dvui.Rect.Natural) void {
+        color_editor_from_rect = from_rect;
+        if (!color_editor_initialized) {
+            color_editor_text = .{ .items = &.{}, .capacity = 0 };
+            color_editor_initialized = true;
+        }
+
+        // Set current cell as the one being edited
+        color_editor_cell_id = cell.id;
+
+        // Initialize text buffer with current color values as tuple (r, g, b, a)
+        const rgba = cell.getColorVec4();
+
+        // Clear and fill buffer with tuple format
+        color_editor_text.clearRetainingCapacity();
+
+        const allocator = std.heap.page_allocator;
+
+        std.fmt.format(color_editor_text.writer(allocator), "({d:.3}, {d:.3}, {d:.3}, {d:.3})", .{ rgba[0], rgba[1], rgba[2], rgba[3] }) catch {};
+    }
+
+    /// Render color editor popup
+    fn renderColorEditor(active_session: *session.TabSession, cell: *code_cell.CodeCell) void {
+        // Create a floating menu popup with proper width
+        var float_menu = dvui.floatingMenu(@src(), .{ .from = color_editor_from_rect }, .{
+            .id_extra = cell.id,
+            .min_size_content = .{ .w = 240 },
+        });
+        defer float_menu.deinit();
+
+        // Check for Escape key to close menu without applying
+        const evts = dvui.events();
+        for (evts) |*e| {
+            if (e.evt == .key) {
+                const ke = e.evt.key;
+                if (ke.code == .escape and ke.action == .down) {
+                    color_editor_cell_id = null;
+                    e.handled = true;
+                    return;
+                }
+            }
+        }
+
+        var vbox = dvui.box(@src(), .{ .dir = .vertical }, .{
+            .id_extra = cell.id,
+            .expand = .horizontal,
+            .padding = .{ .x = 8, .y = 8, .w = 8, .h = 8 },
+        });
+        defer vbox.deinit();
+
+        dvui.labelNoFmt(@src(), "(red, green, blue, alpha)", .{}, .{
+            .color_text = theme.colors.text_primary,
+        });
+
+        // Single input field for tuple format (wrapped in scope to deinit before buttons)
+        {
+            var text_entry = dvui.textEntry(@src(), .{
+                .text = .{
+                    .array_list = .{
+                        .backing = &color_editor_text,
+                        .allocator = std.heap.page_allocator,
+                    },
+                },
+            }, .{
+                .id_extra = cell.id,
+                .expand = .horizontal,
+                .min_size_content = .{ .w = 200 },
+            });
+            defer text_entry.deinit();
+        }
+
+        // Button row with proper spacing
+        var button_row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .id_extra = cell.id + 100,
+            .expand = .horizontal,
+            .margin = .{ .x = 0, .y = 8, .w = 0, .h = 0 },
+        });
+        defer button_row.deinit();
+
+        // Apply button (left aligned with fixed width)
+        if (dvui.button(@src(), "Apply", .{}, .{
+            .id_extra = cell.id,
+            .min_size_content = .{ .w = 60 },
+        })) {
+            applyColorChanges(active_session, cell);
+            color_editor_cell_id = null;
+        }
+
+        // Spacer to push cancel button to the right
+        {
+            var spacer = dvui.box(@src(), .{}, .{ .expand = .horizontal, .id_extra = cell.id + 200 });
+            spacer.deinit();
+        }
+
+        // Cancel button (right aligned with fixed width)
+        if (dvui.button(@src(), "Cancel", .{}, .{
+            .id_extra = cell.id + 1000,
+            .min_size_content = .{ .w = 60 },
+        })) {
+            color_editor_cell_id = null;
+        }
+    }
+
+    /// Apply color changes from tuple text input
+    fn applyColorChanges(active_session: *session.TabSession, cell: *code_cell.CodeCell) void {
+        // Parse tuple format: (r, g, b, a)
+        const text = color_editor_text.items;
+
+        // Default values if parsing fails
+        var r: f32 = 1.0;
+        var g: f32 = 1.0;
+        var b: f32 = 1.0;
+        var a: f32 = 1.0;
+
+        // Strip parentheses and whitespace
+        const trimmed = std.mem.trim(u8, text, " \t\n\r()");
+
+        // Split by commas
+        var iter = std.mem.splitScalar(u8, trimmed, ',');
+        var idx: usize = 0;
+
+        while (iter.next()) |component| : (idx += 1) {
+            const value = std.fmt.parseFloat(f32, std.mem.trim(u8, component, " \t")) catch {
+                std.log.warn("Failed to parse color component {}: '{s}'", .{ idx, component });
+                continue;
+            };
+
+            switch (idx) {
+                0 => r = value,
+                1 => g = value,
+                2 => b = value,
+                3 => a = value,
+                else => break,
+            }
+        }
+
+        // Update cell color
+        cell.setColorFromFloat(r, g, b, a);
+        active_session.is_modified = true;
+        active_session.render_state.needs_update = true;
+
+        std.log.info("Updated cell {} color to ({d:.3}, {d:.3}, {d:.3}, {d:.3})", .{ cell.id, r, g, b, a });
     }
 };

@@ -91,7 +91,7 @@ pub const SplitView = struct {
         if (paned.showFirst()) {
             var left = dvui.box(@src(), .{ .dir = .vertical }, .{
                 .expand = .both,
-                .color_fill = dvui.Color{ .r = 25, .g = 30, .b = 38, .a = 255 },
+                .color_fill = theme.colors.bg_secondary,
                 .background = true,
             });
             defer left.deinit();
@@ -107,7 +107,7 @@ pub const SplitView = struct {
         if (paned.showSecond()) {
             var right = dvui.box(@src(), .{ .dir = .vertical }, .{
                 .expand = .both,
-                .color_fill = dvui.Color{ .r = 20, .g = 24, .b = 30, .a = 255 },
+                .color_fill = theme.colors.bg_primary,
                 .background = true,
             });
             defer right.deinit();

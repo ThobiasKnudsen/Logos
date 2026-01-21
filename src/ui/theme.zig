@@ -8,19 +8,19 @@ const parse_state = @import("../session/parse_state.zig");
 /// Color palette - deep blue-gray base with warm accents
 pub const colors = struct {
     // Backgrounds
-    pub const bg_primary = dvui.Color{ .r = 22, .g = 27, .b = 34, .a = 255 }; // #161b22
-    pub const bg_secondary = dvui.Color{ .r = 30, .g = 37, .b = 46, .a = 255 }; // #1e252e
-    pub const bg_elevated = dvui.Color{ .r = 40, .g = 49, .b = 61, .a = 255 }; // #28313d
-    pub const bg_hover = dvui.Color{ .r = 52, .g = 63, .b = 78, .a = 255 }; // #343f4e
+    pub const bg_primary = dvui.Color{ .r = 16, .g = 16, .b = 16, .a = 255 };
+    pub const bg_secondary = dvui.Color{ .r = 24, .g = 24, .b = 24, .a = 255 };
+    pub const bg_elevated = dvui.Color{ .r = 40, .g = 40, .b = 40, .a = 255 };
+    pub const bg_hover = dvui.Color{ .r = 96, .g = 96, .b = 96, .a = 255 };
 
     // Borders & dividers
-    pub const border = dvui.Color{ .r = 55, .g = 65, .b = 81, .a = 255 }; // #374151
-    pub const border_focus = dvui.Color{ .r = 99, .g = 179, .b = 237, .a = 255 }; // #63b3ed
+    pub const border = dvui.Color{ .r = 86, .g = 86, .b = 86, .a = 255 };
+    pub const border_focus = dvui.Color{ .r = 180, .g = 180, .b = 180, .a = 255 };
 
     // Text
-    pub const text_primary = dvui.Color{ .r = 237, .g = 242, .b = 247, .a = 255 }; // #edf2f7
-    pub const text_secondary = dvui.Color{ .r = 160, .g = 174, .b = 192, .a = 255 }; // #a0aec0
-    pub const text_muted = dvui.Color{ .r = 113, .g = 128, .b = 150, .a = 255 }; // #718096
+    pub const text_primary = dvui.Color{ .r = 242, .g = 242, .b = 247, .a = 255 };
+    pub const text_secondary = dvui.Color{ .r = 192, .g = 192, .b = 192, .a = 255 };
+    pub const text_muted = dvui.Color{ .r = 128, .g = 128, .b = 128, .a = 255 };
 
     // Accents
     pub const accent_primary = dvui.Color{ .r = 236, .g = 167, .b = 107, .a = 255 }; // #eca76b warm orange
@@ -33,7 +33,7 @@ pub const colors = struct {
     pub const tab_hover = dvui.Color{ .r = 35, .g = 43, .b = 54, .a = 255 };
 
     // Editor
-    pub const editor_bg = dvui.Color{ .r = 18, .g = 22, .b = 28, .a = 255 }; // #12161c
+    pub const editor_bg = dvui.Color{ .r = 18, .g = 22, .b = 28, .a = 255 };
     pub const editor_gutter = dvui.Color{ .r = 30, .g = 37, .b = 46, .a = 255 };
     pub const editor_selection = dvui.Color{ .r = 68, .g = 85, .b = 108, .a = 128 };
 
@@ -108,7 +108,7 @@ pub const radius = struct {
 /// Font size configuration with global zoom control
 pub const fonts = struct {
     // Base font sizes (before zoom)
-    pub const base_editor: f32 = 16.0;
+    pub const base_editor: f32 = 20.0;
     pub const base_ui: f32 = 14.0;
     pub const base_small: f32 = 12.0;
     pub const base_tooltip: f32 = 13.0;

@@ -87,7 +87,7 @@ pub const EditorToolbar = struct {
         var toolbar = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
             .min_size_content = .{ .h = toolbar_height },
-            .color_fill = theme.colors.toolbar_bg,
+            .color_fill = theme.colors.bg_secondary,
             .background = true,
             .padding = .{ .x = button_padding, .y = button_padding, .w = button_padding, .h = button_padding },
         });
