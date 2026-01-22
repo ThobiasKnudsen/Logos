@@ -460,13 +460,45 @@ pub const GraphRenderer = struct {
         // Try to render if initialized
         if (self.is_initialized) {
             // Poll for completion FIRST so we can start a new render this frame if the previous one finished
-            if (self.pollCompletion()) {
+            // For multi-pass rendering, we need to poll ALL cell pipelines
+            var all_complete = true;
+            if (self.cell_shaders.items.len > 0) {
+                // Poll each cell pipeline
+                for (self.cell_shaders.items) |*shader_info| {
+                    if (shader_info.pipeline) |*pipeline| {
+                        if (pipeline.pollCompletion()) {
+                            // This pipeline completed
+                        } else {
+                            all_complete = false;
+                        }
+                    }
+                }
+            } else {
+                // Fallback: poll main pipeline for single-shader mode
+                all_complete = self.pollCompletion();
+            }
+
+            if (all_complete) {
                 // Mark that we've rendered successfully
                 self.has_rendered_once = true;
             }
 
+            // Check if ANY pipeline is still rendering
+            var is_rendering = false;
+            if (self.cell_shaders.items.len > 0) {
+                for (self.cell_shaders.items) |*shader_info| {
+                    if (shader_info.pipeline) |*pipeline| {
+                        if (pipeline.is_rendering) {
+                            is_rendering = true;
+                            break;
+                        }
+                    }
+                }
+            } else {
+                is_rendering = self.isRendering();
+            }
+
             // Only submit render if not currently rendering
-            const is_rendering = self.isRendering();
 
             if (!is_rendering) {
                 // Clear the view update flag since we're actually rendering now
@@ -495,6 +527,14 @@ pub const GraphRenderer = struct {
                                     @as(f32, @floatFromInt(shader_info.color[2])) / 255.0,
                                     @as(f32, @floatFromInt(shader_info.color[3])) / 255.0,
                                 };
+
+                                // Sync axis bounds to this pipeline (needed for pan/zoom)
+                                pipeline.setAxisBounds(
+                                    @floatCast(self.axis_state.axis1.start),
+                                    @floatCast(self.axis_state.axis1.end),
+                                    @floatCast(self.axis_state.axis2.end), // swapped for GPU coordinates
+                                    @floatCast(self.axis_state.axis2.start), // swapped for GPU coordinates
+                                );
 
                                 // Update uniforms for this pass
                                 pipeline.updateUniforms(elapsed, @floatFromInt(panel_width), @floatFromInt(panel_height));
