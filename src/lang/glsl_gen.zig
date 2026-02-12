@@ -1221,9 +1221,9 @@ pub const GlslGenerator = struct {
                 " > "
             else if (std.mem.eql(u8, op_name, "lt"))
                 " < "
-            else if (std.mem.eql(u8, op_name, "ge"))
+            else if (std.mem.eql(u8, op_name, "gte"))
                 " >= "
-            else if (std.mem.eql(u8, op_name, "le"))
+            else if (std.mem.eql(u8, op_name, "lte"))
                 " <= "
             else if (std.mem.eql(u8, op_name, "neq"))
                 " != "
