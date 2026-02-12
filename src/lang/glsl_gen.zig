@@ -843,6 +843,21 @@ pub const GlslGenerator = struct {
         try self.write(") {\n");
         self.indent_level += 1;
 
+        // Clear defined_vars for this function's scope
+        self.defined_vars.clearRetainingCapacity();
+
+        // Add function parameters to defined vars (they're in scope)
+        for (params) |param| {
+            try self.defined_vars.put(param, {});
+        }
+
+        // Add captured variables to defined vars (they're also in scope as parameters)
+        if (self.nested_func_info.get(name)) |info| {
+            for (info.captured_vars) |cap_var| {
+                try self.defined_vars.put(cap_var, {});
+            }
+        }
+
         // Emit function body
         try self.emitFunctionBody(body);
 

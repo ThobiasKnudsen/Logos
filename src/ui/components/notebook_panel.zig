@@ -12,11 +12,17 @@ const renderer = @import("../../renderer/renderer.zig");
 const lexer_mod = @import("../../lang/lexer.zig");
 
 pub const NotebookPanel = struct {
-    // Shared styling constants
-    const cell_spacing: f32 = 12;
-    const cell_padding: f32 = 12;
-    const header_height: f32 = 32;
-    const button_size: f32 = 24;
+    // Shared styling constants - base sizes that scale proportionally
+    const base_unit: f32 = 4; // All sizes derived from this base unit for consistent ratios
+    const cell_spacing: f32 = base_unit * 3; // 12px between cells
+    const cell_padding: f32 = base_unit * 2; // 8px inside cells
+    const header_height: f32 = base_unit * 6; // 24px header
+    const button_size: f32 = base_unit * 5; // 20px buttons
+
+    // Corner radius constants for consistent rounding
+    const small_corner_radius: f32 = base_unit * 1; // 4px - for small buttons
+    const medium_corner_radius: f32 = base_unit * 2; // 8px - for cells and larger buttons
+    const large_corner_radius: f32 = base_unit * 3; // 12px - for prominent elements
 
     // Custom theme for text entry with transparent focus
     const no_focus_theme = blk: {
@@ -77,7 +83,7 @@ pub const NotebookPanel = struct {
         const scale = theme.fonts.getScale();
         const scaled_spacing = cell_spacing * scale;
         const scaled_padding = cell_padding * scale;
-        const corner_radius = theme.radius.md * scale;
+        const scaled_corner = base_unit * scale; // Consistent corner radius
 
         // Outer scroll area for all cells
         var scroll = dvui.scrollArea(@src(), .{}, .{
@@ -95,7 +101,7 @@ pub const NotebookPanel = struct {
 
         // Render each cell
         for (active_session.cells.items, 0..) |*cell, i| {
-            renderCell(active_session, cell, i, corner_radius, scaled_spacing);
+            renderCell(active_session, cell, i, scaled_corner, scaled_spacing);
         }
 
         // Plus button to add new cell
@@ -117,13 +123,19 @@ pub const NotebookPanel = struct {
         corner_radius: f32,
         spacing: f32,
     ) void {
-        // Cell container box with rounded corners
+        _ = corner_radius; // Unused, we use constants now
+        const scale = theme.fonts.getScale();
+        const scaled_cell_corner = large_corner_radius * scale;
+
+        // Cell container box with rounded corners and border
         var cell_box = dvui.box(@src(), .{ .dir = .vertical }, .{
             .id_extra = cell.id,
             .expand = .horizontal,
             .background = true,
-            .color_fill = theme.colors.bg_secondary,
-            .corner_radius = .{ .x = corner_radius, .y = corner_radius, .w = corner_radius, .h = corner_radius },
+            .color_fill = theme.colors.bg_elevated,
+            .border = .{ .x = 1 * scale, .y = 1 * scale, .w = 1 * scale, .h = 1 * scale },
+            .color_border = theme.colors.border,
+            .corner_radius = .{ .x = scaled_cell_corner, .y = scaled_cell_corner, .w = scaled_cell_corner, .h = scaled_cell_corner },
             .padding = .{ .x = spacing, .y = spacing, .w = spacing, .h = spacing },
             .margin = .{ .x = 0, .y = 0, .w = 0, .h = spacing },
         });
@@ -132,28 +144,68 @@ pub const NotebookPanel = struct {
         // Cell header with controls
         renderCellHeader(active_session, cell, cell_index);
 
+        // Separator line between header and editor (extends full width)
+        {
+            const separator_height = 1 * scale;
+            const separator_margin = (base_unit * 0.75) * scale;
+            var separator = dvui.box(@src(), .{}, .{
+                .id_extra = cell.id + 5000,
+                .expand = .horizontal,
+                .background = true,
+                .color_fill = theme.colors.border,
+                .min_size_content = .{ .h = separator_height },
+                .margin = .{ .x = -spacing, .y = separator_margin, .w = -spacing, .h = separator_margin },
+            });
+            separator.deinit();
+        }
+
         // Cell editor
         renderCellEditor(active_session, cell, cell_index);
 
         // Cell output (if any)
         if (cell.output) |output| {
-            renderCellOutput(output);
+            // Separator line between editor and output (extends full width)
+            {
+                const separator_height = 1 * scale;
+                const separator_margin = (base_unit * 0.75) * scale;
+                var separator = dvui.box(@src(), .{}, .{
+                    .id_extra = cell.id + 6000,
+                    .expand = .horizontal,
+                    .background = true,
+                    .color_fill = theme.colors.border,
+                    .min_size_content = .{ .h = separator_height },
+                    .margin = .{ .x = -spacing, .y = separator_margin, .w = -spacing, .h = separator_margin },
+                });
+                separator.deinit();
+            }
+
+            renderCellOutput(cell.id, output);
         }
     }
 
     /// Render cell header with color picker and copy button
     fn renderCellHeader(active_session: *session.TabSession, cell: *code_cell.CodeCell, cell_index: usize) void {
         const scale = theme.fonts.getScale();
-        const icon_size = 18 * scale; // Same as play/stop buttons
+        const scaled_header_height = header_height * scale;
+        const scaled_icon_size = button_size * scale;
+        const scaled_btn_corner = small_corner_radius * scale; // Consistent small corner radius
+        const scaled_btn_padding = base_unit * scale;
+        const scaled_btn_margin = (base_unit / 2) * scale;
 
         var header = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .id_extra = cell.id,
             .expand = .horizontal,
-            .min_size_content = .{ .h = header_height },
+            .min_size_content = .{ .h = scaled_header_height },
         });
         defer header.deinit();
 
-        // Color picker button (left side) - wrapped in scope to close before other elements
+        // Spacer (push buttons to the right)
+        {
+            var spacer = dvui.box(@src(), .{}, .{ .expand = .horizontal, .id_extra = cell.id });
+            spacer.deinit();
+        }
+
+        // Color picker button (right side) - wrapped in scope to close before other elements
         {
             const color_vec4 = cell.getColorVec4();
             const color = dvui.Color{
@@ -167,22 +219,22 @@ pub const NotebookPanel = struct {
             color_btn.init(@src(), .{}, .{
                 .id_extra = cell.id,
                 .color_fill = color,
-                .corner_radius = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
-                .padding = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
-                .margin = .{ .x = 2, .y = 2, .w = 2, .h = 2 },
-                .min_size_content = .{ .w = icon_size, .h = icon_size },
+                .corner_radius = .{ .x = scaled_btn_corner, .y = scaled_btn_corner, .w = scaled_btn_corner, .h = scaled_btn_corner },
+                .padding = .{ .x = scaled_btn_padding, .y = scaled_btn_padding, .w = scaled_btn_padding, .h = scaled_btn_padding },
+                .margin = .{ .x = scaled_btn_margin, .y = scaled_btn_margin, .w = scaled_btn_margin, .h = scaled_btn_margin },
+                .min_size_content = .{ .w = scaled_icon_size, .h = scaled_icon_size },
             });
             defer color_btn.deinit();
 
             color_btn.processEvents();
             color_btn.drawBackground();
 
-            // Draw "Color" label inside the button with contrasting text color
+            // Draw "Color" label inside the button with contrasting text color (larger font)
             const text_color = getContrastingTextColor(color);
             dvui.labelNoFmt(@src(), "Color", .{}, .{
                 .id_extra = cell.id,
                 .color_text = text_color,
-                .font = theme.fonts.smallFont(),
+                .font = theme.fonts.uiFont(),
             });
 
             if (color_btn.clicked()) {
@@ -200,38 +252,32 @@ pub const NotebookPanel = struct {
             }
         }
 
-        // Spacer
-        {
-            var spacer = dvui.box(@src(), .{}, .{ .expand = .horizontal, .id_extra = cell.id });
-            spacer.deinit();
-        }
-
         // Copy button - small icon button
         const entypo = dvui.entypo;
         if (dvui.buttonIcon(@src(), "copy", entypo.copy, .{}, .{}, .{
             .id_extra = cell.id + 1,
-            .color_fill = theme.colors.toolbar_button,
+            .color_fill = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 }, // Transparent
             .color_fill_hover = theme.colors.toolbar_button_hover,
-            .corner_radius = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
-            .padding = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
-            .margin = .{ .x = 2, .y = 2, .w = 2, .h = 2 },
-            .min_size_content = .{ .w = icon_size, .h = icon_size },
+            .corner_radius = .{ .x = scaled_btn_corner, .y = scaled_btn_corner, .w = scaled_btn_corner, .h = scaled_btn_corner },
+            .padding = .{ .x = scaled_btn_padding, .y = scaled_btn_padding, .w = scaled_btn_padding, .h = scaled_btn_padding },
+            .margin = .{ .x = scaled_btn_margin, .y = scaled_btn_margin, .w = scaled_btn_margin, .h = scaled_btn_margin },
+            .min_size_content = .{ .w = scaled_icon_size, .h = scaled_icon_size },
         })) {
             // Copy cell content to clipboard
             dvui.clipboardTextSet(cell.content.items);
             std.log.info("Copied cell {d} to clipboard", .{cell.id});
         }
 
-        // Delete button (rightmost) - circular icon button
-        const delete_radius = icon_size / 2;
+        // Delete button (rightmost) - icon button with red icon
         if (dvui.buttonIcon(@src(), "delete", entypo.circle_with_cross, .{}, .{}, .{
             .id_extra = cell.id + 2,
-            .color_fill = theme.colors.toolbar_button,
-            .color_fill_hover = dvui.Color{ .r = 220, .g = 80, .b = 80, .a = 255 }, // Red on hover
-            .corner_radius = .{ .x = delete_radius, .y = delete_radius, .w = delete_radius, .h = delete_radius },
-            .padding = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
-            .margin = .{ .x = 2, .y = 2, .w = 2, .h = 2 },
-            .min_size_content = .{ .w = icon_size, .h = icon_size },
+            .color_fill = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 }, // Transparent background
+            .color_fill_hover = dvui.Color{ .r = 220, .g = 80, .b = 80, .a = 100 }, // Slight red tint on hover
+            .color_text = dvui.Color{ .r = 220, .g = 80, .b = 80, .a = 255 }, // Red icon
+            .corner_radius = .{ .x = scaled_btn_corner, .y = scaled_btn_corner, .w = scaled_btn_corner, .h = scaled_btn_corner },
+            .padding = .{ .x = scaled_btn_padding, .y = scaled_btn_padding, .w = scaled_btn_padding, .h = scaled_btn_padding },
+            .margin = .{ .x = scaled_btn_margin, .y = scaled_btn_margin, .w = scaled_btn_margin, .h = scaled_btn_margin },
+            .min_size_content = .{ .w = scaled_icon_size, .h = scaled_icon_size },
         })) {
             // Defer deletion until after render loop completes
             cell_to_delete = cell_index;
@@ -242,9 +288,16 @@ pub const NotebookPanel = struct {
     /// Render cell editor (TextEntryWidget)
     fn renderCellEditor(active_session: *session.TabSession, cell: *code_cell.CodeCell, cell_index: usize) void {
         const scaled_font = theme.fonts.editorFont();
+        const scale = theme.fonts.getScale();
 
         // Check if this cell is currently focused
         const is_focused = cell_index == active_session.active_cell_index;
+
+        // Calculate minimum height for exactly one line of text (padding applied separately)
+        const line_height = scaled_font.lineHeight();
+        const scaled_padding_x = base_unit * 2 * scale; // 8px horizontal padding
+        const scaled_padding_y = base_unit * 0.5 * scale; // 2px vertical padding (minimal, consistent)
+        const scaled_text_corner = small_corner_radius * scale;
 
         // Create TextEntryWidget
         var text_entry = dvui.widgetAlloc(dvui.TextEntryWidget);
@@ -261,11 +314,11 @@ pub const NotebookPanel = struct {
         }, .{
             .id_extra = cell.id,
             .expand = .horizontal,
-            .min_size_content = .{ .h = 100 },
+            .min_size_content = .{ .h = line_height }, // Just one line, padding added separately
             .margin = .{},
-            .padding = .{ .x = 8, .y = 8, .w = 8, .h = 8 },
+            .padding = .{ .x = scaled_padding_x, .y = scaled_padding_y, .w = scaled_padding_x, .h = scaled_padding_y },
             .border = .{},
-            .corner_radius = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
+            .corner_radius = .{ .x = scaled_text_corner, .y = scaled_text_corner, .w = scaled_text_corner, .h = scaled_text_corner },
             .background = true,
             .color_fill = theme.colors.bg_elevated,
             .font = scaled_font,
@@ -336,19 +389,33 @@ pub const NotebookPanel = struct {
     }
 
     /// Render cell output (text and/or plot)
-    fn renderCellOutput(output: code_cell.CellOutput) void {
+    fn renderCellOutput(cell_id: usize, output: code_cell.CellOutput) void {
+        const scale = theme.fonts.getScale();
+        const scaled_output_margin = base_unit * 2 * scale; // 8px base margin
+
         var output_box = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
-            .margin = .{ .x = 0, .y = 8, .w = 0, .h = 0 },
+            .margin = .{ .x = 0, .y = scaled_output_margin, .w = 0, .h = 0 },
         });
         defer output_box.deinit();
+
+        const scaled_text_padding_x = base_unit * 2 * scale;
+        const scaled_text_padding_y = base_unit * scale;
+
+        // "Output" label at the top
+        dvui.labelNoFmt(@src(), "Output", .{}, .{
+            .id_extra = cell_id + 7000,
+            .color_text = theme.colors.text_secondary,
+            .font = theme.fonts.smallFont(),
+            .padding = .{ .x = scaled_text_padding_x, .y = 0, .w = scaled_text_padding_x, .h = scaled_text_padding_y },
+        });
 
         // Render text output if present
         if (output.text) |text| {
             dvui.labelNoFmt(@src(), text, .{}, .{
                 .color_text = theme.colors.text_secondary,
                 .font = theme.fonts.editorFont(),
-                .padding = .{ .x = 8, .y = 4, .w = 8, .h = 4 },
+                .padding = .{ .x = scaled_text_padding_x, .y = scaled_text_padding_y, .w = scaled_text_padding_x, .h = scaled_text_padding_y },
             });
         }
 
@@ -364,7 +431,7 @@ pub const NotebookPanel = struct {
 
             dvui.labelNoFmt(@src(), info_text, .{}, .{
                 .color_text = theme.colors.accent_info,
-                .padding = .{ .x = 8, .y = 4, .w = 8, .h = 4 },
+                .padding = .{ .x = scaled_text_padding_x, .y = scaled_text_padding_y, .w = scaled_text_padding_x, .h = scaled_text_padding_y },
             });
         }
 
@@ -372,7 +439,7 @@ pub const NotebookPanel = struct {
         if (output.error_msg) |err_msg| {
             dvui.labelNoFmt(@src(), err_msg, .{}, .{
                 .color_text = theme.colors.accent_primary,
-                .padding = .{ .x = 8, .y = 4, .w = 8, .h = 4 },
+                .padding = .{ .x = scaled_text_padding_x, .y = scaled_text_padding_y, .w = scaled_text_padding_x, .h = scaled_text_padding_y },
             });
         }
     }
@@ -440,11 +507,12 @@ pub const NotebookPanel = struct {
 
     /// Render plus button to add new cell
     fn renderPlusButton(active_session: *session.TabSession, scale: f32) void {
-        const scaled_button_size = button_size * scale;
+        const scaled_button_size = button_size * scale * 1.4; // Even larger button for bigger +
+        const scaled_margin = base_unit * 3 * scale; // 12px base margin
 
         var button_container = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .expand = .horizontal,
-            .margin = .{ .x = 0, .y = 12, .w = 0, .h = 12 },
+            .margin = .{ .x = 0, .y = scaled_margin, .w = 0, .h = scaled_margin },
         });
         defer button_container.deinit();
 
@@ -454,12 +522,15 @@ pub const NotebookPanel = struct {
             spacer.deinit();
         }
 
-        // Centered add button
+        // Centered add button - rounded with border
         if (dvui.button(@src(), "+", .{}, .{
-            .min_size_content = .{ .w = scaled_button_size * 1.5, .h = scaled_button_size },
-            .color_fill = theme.colors.toolbar_button,
+            .min_size_content = .{ .w = scaled_button_size, .h = scaled_button_size },
+            .color_fill = theme.colors.bg_elevated,
             .color_fill_hover = theme.colors.toolbar_button_hover,
-            .corner_radius = .{ .x = 8, .y = 8, .w = 8, .h = 8 },
+            .border = .{ .x = 2 * scale, .y = 2 * scale, .w = 2 * scale, .h = 2 * scale },
+            .color_border = theme.colors.border,
+            .corner_radius = .{ .x = scaled_button_size, .y = scaled_button_size, .w = scaled_button_size, .h = scaled_button_size },
+            .font = theme.fonts.editorFont(),
         })) {
             // Add new cell
             _ = active_session.addCell() catch {
@@ -502,10 +573,14 @@ pub const NotebookPanel = struct {
 
     /// Render color editor popup
     fn renderColorEditor(active_session: *session.TabSession, cell: *code_cell.CodeCell) void {
+        const scale = theme.fonts.getScale();
+        const scaled_popup_width = 240 * scale;
+        const scaled_padding = base_unit * 2 * scale;
+
         // Create a floating menu popup with proper width
         var float_menu = dvui.floatingMenu(@src(), .{ .from = color_editor_from_rect }, .{
             .id_extra = cell.id,
-            .min_size_content = .{ .w = 240 },
+            .min_size_content = .{ .w = scaled_popup_width },
         });
         defer float_menu.deinit();
 
@@ -525,13 +600,17 @@ pub const NotebookPanel = struct {
         var vbox = dvui.box(@src(), .{ .dir = .vertical }, .{
             .id_extra = cell.id,
             .expand = .horizontal,
-            .padding = .{ .x = 8, .y = 8, .w = 8, .h = 8 },
+            .padding = .{ .x = scaled_padding, .y = scaled_padding, .w = scaled_padding, .h = scaled_padding },
         });
         defer vbox.deinit();
 
         dvui.labelNoFmt(@src(), "(red, green, blue, alpha)", .{}, .{
             .color_text = theme.colors.text_primary,
         });
+
+        const scaled_input_width = 200 * scale;
+        const scaled_button_margin = base_unit * 2 * scale;
+        const scaled_button_width = 60 * scale;
 
         // Single input field for tuple format (wrapped in scope to deinit before buttons)
         {
@@ -545,7 +624,7 @@ pub const NotebookPanel = struct {
             }, .{
                 .id_extra = cell.id,
                 .expand = .horizontal,
-                .min_size_content = .{ .w = 200 },
+                .min_size_content = .{ .w = scaled_input_width },
             });
             defer text_entry.deinit();
         }
@@ -554,14 +633,14 @@ pub const NotebookPanel = struct {
         var button_row = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .id_extra = cell.id + 100,
             .expand = .horizontal,
-            .margin = .{ .x = 0, .y = 8, .w = 0, .h = 0 },
+            .margin = .{ .x = 0, .y = scaled_button_margin, .w = 0, .h = 0 },
         });
         defer button_row.deinit();
 
         // Apply button (left aligned with fixed width)
         if (dvui.button(@src(), "Apply", .{}, .{
             .id_extra = cell.id,
-            .min_size_content = .{ .w = 60 },
+            .min_size_content = .{ .w = scaled_button_width },
         })) {
             applyColorChanges(active_session, cell);
             color_editor_cell_id = null;
@@ -576,7 +655,7 @@ pub const NotebookPanel = struct {
         // Cancel button (right aligned with fixed width)
         if (dvui.button(@src(), "Cancel", .{}, .{
             .id_extra = cell.id + 1000,
-            .min_size_content = .{ .w = 60 },
+            .min_size_content = .{ .w = scaled_button_width },
         })) {
             color_editor_cell_id = null;
         }
