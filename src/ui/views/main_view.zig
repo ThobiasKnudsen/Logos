@@ -106,14 +106,20 @@ pub fn mainView(app: *App) bool {
                         keyboard_action = .quit;
                         e.handled = true;
                     },
-                    // Zoom controls: Ctrl+= or Ctrl+Shift+= (which is Ctrl++) and Ctrl+-
-                    // On US keyboards, '+' is Shift+'=' so we check for equal key with or without shift
+                    // Zoom controls: Ctrl+= (US layout) and Ctrl+-
                     .equal => {
-                        // Ctrl+= or Ctrl+Shift+= both zoom in
+                        // Ctrl+= zooms in (same physical key as + on US keyboards)
                         keyboard_action = .zoom_in;
                         e.handled = true;
                     },
                     .kp_add => {
+                        // Keypad + also zooms in
+                        keyboard_action = .zoom_in;
+                        e.handled = true;
+                    },
+                    .unknown => {
+                        // Handle Norwegian/non-US keyboard + key (SDL keysym 43)
+                        // This catches the + key on keyboards where it's separate from =
                         keyboard_action = .zoom_in;
                         e.handled = true;
                     },

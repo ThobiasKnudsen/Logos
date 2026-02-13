@@ -28,3 +28,5 @@
 - Without doing anything, just existing, its consuming lots of resources
 - Ask for removing cell in notebook when clicking cross
 - Make a new cell be created when entering and the semantics of the code creates a plot, otherwise enter should create newline
+- When defining a function in one cell and plotting it in another cell the plot gets the color of the first cell
+- (x>=y and x<=y) doesnt plot the line x=y which it should. Seems like >= becomes > and <= becomes < maybe? No wait it doesn matter anyways

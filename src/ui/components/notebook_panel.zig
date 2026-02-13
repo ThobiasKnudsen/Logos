@@ -147,7 +147,7 @@ pub const NotebookPanel = struct {
         // Separator line between header and editor (extends full width)
         {
             const separator_height = 1 * scale;
-            const separator_margin = (base_unit * 0.75) * scale;
+            const separator_margin = (base_unit * 0.5) * scale;
             var separator = dvui.box(@src(), .{}, .{
                 .id_extra = cell.id + 5000,
                 .expand = .horizontal,
@@ -196,6 +196,7 @@ pub const NotebookPanel = struct {
             .id_extra = cell.id,
             .expand = .horizontal,
             .min_size_content = .{ .h = scaled_header_height },
+            .margin = .{ .x = 0, .y = -(base_unit * 1.5 * scale), .w = 0, .h = 0 },
         });
         defer header.deinit();
 
@@ -220,7 +221,7 @@ pub const NotebookPanel = struct {
                 .id_extra = cell.id,
                 .color_fill = color,
                 .corner_radius = .{ .x = scaled_btn_corner, .y = scaled_btn_corner, .w = scaled_btn_corner, .h = scaled_btn_corner },
-                .padding = .{ .x = scaled_btn_padding, .y = scaled_btn_padding, .w = scaled_btn_padding, .h = scaled_btn_padding },
+                .padding = .{ .x = scaled_btn_padding, .y = scaled_btn_padding * 0.5, .w = scaled_btn_padding, .h = scaled_btn_padding * 0.5 },
                 .margin = .{ .x = scaled_btn_margin, .y = scaled_btn_margin, .w = scaled_btn_margin, .h = scaled_btn_margin },
                 .min_size_content = .{ .w = scaled_icon_size, .h = scaled_icon_size },
             });
@@ -229,12 +230,12 @@ pub const NotebookPanel = struct {
             color_btn.processEvents();
             color_btn.drawBackground();
 
-            // Draw "Color" label inside the button with contrasting text color (larger font)
+            // Draw "Color" label inside the button with contrasting text color (smaller font)
             const text_color = getContrastingTextColor(color);
             dvui.labelNoFmt(@src(), "Color", .{}, .{
                 .id_extra = cell.id,
                 .color_text = text_color,
-                .font = theme.fonts.uiFont(),
+                .font = theme.fonts.smallFont(),
             });
 
             if (color_btn.clicked()) {
@@ -276,7 +277,7 @@ pub const NotebookPanel = struct {
             .color_text = dvui.Color{ .r = 220, .g = 80, .b = 80, .a = 255 }, // Red icon
             .corner_radius = .{ .x = scaled_btn_corner, .y = scaled_btn_corner, .w = scaled_btn_corner, .h = scaled_btn_corner },
             .padding = .{ .x = scaled_btn_padding, .y = scaled_btn_padding, .w = scaled_btn_padding, .h = scaled_btn_padding },
-            .margin = .{ .x = scaled_btn_margin, .y = scaled_btn_margin, .w = scaled_btn_margin, .h = scaled_btn_margin },
+            .margin = .{ .x = scaled_btn_margin, .y = scaled_btn_margin, .w = -(base_unit * scale), .h = scaled_btn_margin },
             .min_size_content = .{ .w = scaled_icon_size, .h = scaled_icon_size },
         })) {
             // Defer deletion until after render loop completes
