@@ -1,6 +1,6 @@
 //! Resizable split view - divides space between editor and graph renderer
 //!
-//! Left panel: Text editor with toolbar
+//! Left panel: Notebook panel with per-cell play/stop controls
 //! Right panel: Graph/plot rendering with custom shaders
 
 const std = @import("std");
@@ -11,7 +11,8 @@ const renderer = @import("../../renderer/renderer.zig");
 
 const EditorPanel = @import("editor_panel.zig").EditorPanel;
 const NotebookPanel = @import("notebook_panel.zig").NotebookPanel;
-const EditorToolbar = @import("editor_toolbar.zig").EditorToolbar;
+const code_cell = @import("../../session/code_cell.zig");
+const glsl_gen = @import("../../lang/glsl_gen.zig");
 
 pub const SplitView = struct {
     /// Split ratio (0.0 to 1.0) - portion of width for left panel
@@ -34,15 +35,12 @@ pub const SplitView = struct {
     reference_pixels_per_unit_x: ?f64 = null,
     reference_pixels_per_unit_y: ?f64 = null,
 
-    /// Editor toolbar state
-    editor_toolbar: EditorToolbar = EditorToolbar.init(),
-
     const handle_width: f32 = 6;
     const separator_color = dvui.Color{ .r = 60, .g = 70, .b = 85, .a = 255 };
     const separator_hover_color = dvui.Color{ .r = 99, .g = 130, .b = 170, .a = 255 };
 
     pub fn deinit(self: *SplitView) void {
-        self.editor_toolbar.deinit();
+        _ = self;
     }
 
     pub fn render(
@@ -96,10 +94,7 @@ pub const SplitView = struct {
             });
             defer left.deinit();
 
-            // Toolbar at top - pass graph_renderer so Play button can trigger rendering
-            _ = self.editor_toolbar.render(active_session, graph_renderer);
-
-            // Notebook panel below toolbar (multi-cell interface)
+            // Notebook panel (multi-cell interface with per-cell play/stop)
             NotebookPanel.render(active_session, graph_renderer);
         }
 
@@ -117,6 +112,9 @@ pub const SplitView = struct {
             const panel_width = rs.r.w;
             const panel_height = rs.r.h;
 
+            // Sync playing cells' shaders to the graph renderer
+            syncPlayingCellShaders(active_session, graph_renderer);
+
             // Adjust axis ranges to maintain aspect ratio (prevent shape distortion)
             self.adjustAxisRanges(graph_renderer, panel_width, panel_height);
 
@@ -129,6 +127,73 @@ pub const SplitView = struct {
 
         // Draw custom separator line over the handle area (full height)
         drawSeparatorLine(paned);
+    }
+
+    /// Hash of the currently synced playing cell shader sources, to avoid redundant updates
+    var last_playing_shaders_hash: u64 = 0;
+
+    /// Sync playing cells' shaders to the graph renderer.
+    /// Only updates when the set of playing shaders actually changes.
+    fn syncPlayingCellShaders(
+        active_session: *session.TabSession,
+        graph_renderer: *renderer.GraphRenderer,
+    ) void {
+        // Build a hash of all playing cell shader sources to detect changes
+        var hasher = std.hash.Wyhash.init(0);
+        var playing_count: usize = 0;
+        var shader_count: usize = 0;
+
+        for (active_session.cells.items) |*cell| {
+            if (cell.is_playing) {
+                playing_count += 1;
+                hasher.update(std.mem.asBytes(&cell.id));
+                hasher.update(std.mem.asBytes(&cell.color));
+                if (cell.output) |output| {
+                    if (output.shader) |shader| {
+                        shader_count += 1;
+                        hasher.update(shader.source);
+                    }
+                }
+            }
+        }
+
+        const current_hash = hasher.final();
+
+        // Skip if nothing changed
+        if (current_hash == last_playing_shaders_hash) {
+            return;
+        }
+        last_playing_shaders_hash = current_hash;
+
+        // Collect shaders from playing cells in cell order
+        if (playing_count > 0 and shader_count > 0) {
+            var playing_shaders: std.ArrayList(glsl_gen.GeneratedShader) = .{ .items = &.{}, .capacity = 0 };
+            defer playing_shaders.deinit(active_session.allocator);
+
+            for (active_session.cells.items) |*cell| {
+                if (cell.is_playing) {
+                    if (cell.output) |output| {
+                        if (output.shader) |shader| {
+                            playing_shaders.append(active_session.allocator, shader) catch continue;
+                        }
+                    }
+                }
+            }
+
+            graph_renderer.updateShaders(playing_shaders.items, active_session) catch |err| {
+                std.log.err("Failed to update GPU shaders: {}", .{err});
+            };
+            graph_renderer.setAnimating(true);
+        } else {
+            // No playing cells or no shaders - clear GPU shaders and stop animation.
+            // This ensures old shaders don't persist on screen when cells are stopped
+            // or when cell content changes to something that produces no shader output.
+            const empty_shaders: []const glsl_gen.GeneratedShader = &.{};
+            graph_renderer.updateShaders(empty_shaders, active_session) catch |err| {
+                std.log.err("Failed to clear GPU shaders: {}", .{err});
+            };
+            graph_renderer.setAnimating(false);
+        }
     }
 
     /// Adjust axis ranges when panel size changes to maintain scale without drift

@@ -61,6 +61,8 @@ pub const SessionManager = struct {
         if (self.default_docs_dir) |dir| {
             self.allocator.free(dir);
         }
+        // Clean up the shared lexer to avoid memory leaks on shutdown
+        TabSession.deinitSharedLexer();
     }
 
     /// Generate a unique "Untitled N" name

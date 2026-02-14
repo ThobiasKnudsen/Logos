@@ -52,7 +52,7 @@ pub const Parser = struct {
         var statements: std.ArrayList(*AstNode) = .{ .items = &.{}, .capacity = 0 };
         errdefer {
             for (statements.items) |stmt| {
-                self.allocator.destroy(stmt);
+                stmt.deinit(self.allocator);
             }
             statements.deinit(self.allocator);
         }
@@ -63,7 +63,10 @@ pub const Parser = struct {
             if (self.isAtEnd()) break;
 
             const stmt = try self.parseStatement();
-            try statements.append(self.allocator, stmt);
+            statements.append(self.allocator, stmt) catch |err| {
+                stmt.deinit(self.allocator);
+                return err;
+            };
 
             // Skip optional comma separator between top-level statements
             self.skipWhitespaceAndComments();
@@ -77,7 +80,12 @@ pub const Parser = struct {
         else
             SourceSpan{ .start = 0, .end = 0 };
 
-        return AstNode.blockNode(self.allocator, try statements.toOwnedSlice(self.allocator), span);
+        const owned = try statements.toOwnedSlice(self.allocator);
+        return AstNode.blockNode(self.allocator, owned, span) catch |err| {
+            for (owned) |stmt| stmt.deinit(self.allocator);
+            self.allocator.free(owned);
+            return err;
+        };
     }
 
     /// Parse a single statement (binding, expression, or control flow)
@@ -111,7 +119,14 @@ pub const Parser = struct {
                     return AstNode.bindingNode(self.allocator, pattern, value, SourceSpan{
                         .start = checkpoint,
                         .end = value.span.end,
-                    });
+                    }) catch |err| {
+                        value.deinit(self.allocator);
+                        switch (pattern) {
+                            .tuple => |names| self.allocator.free(names),
+                            .single => {},
+                        }
+                        return err;
+                    };
                 }
             }
             // Restore and parse as expression
@@ -132,12 +147,21 @@ pub const Parser = struct {
                     if (self.checkText(":")) {
                         _ = self.advance(); // consume ':'
                         self.skipWhitespaceAndComments();
-                        const body = try self.parseExpression();
+                        const body = self.parseExpression() catch |err| {
+                            self.allocator.free(params);
+                            return err;
+                        };
                         return AstNode.functionDef(self.allocator, name_token.text, params, body, SourceSpan{
                             .start = name_token.byte_start,
                             .end = body.span.end,
-                        });
+                        }) catch |err| {
+                            body.deinit(self.allocator);
+                            self.allocator.free(params);
+                            return err;
+                        };
                     }
+                    // Not a function def: free the speculatively allocated params slice
+                    self.allocator.free(params);
                 }
                 // Not a function def, restore and continue
                 self.pos = checkpoint;
@@ -149,7 +173,10 @@ pub const Parser = struct {
                 return AstNode.bindingNode(self.allocator, .{ .single = name_token.text }, value, SourceSpan{
                     .start = name_token.byte_start,
                     .end = value.span.end,
-                });
+                }) catch |err| {
+                    value.deinit(self.allocator);
+                    return err;
+                };
             } else {
                 // Not a binding, restore and parse as expression
                 self.pos = checkpoint;
@@ -168,6 +195,7 @@ pub const Parser = struct {
     /// Parse logical OR: a or b
     fn parseOr(self: *Parser) Error!*AstNode {
         var left = try self.parseAnd();
+        errdefer left.deinit(self.allocator);
 
         while (true) {
             self.skipWhitespaceAndComments();
@@ -176,10 +204,10 @@ pub const Parser = struct {
                 self.skipWhitespaceAndComments();
                 const right = try self.parseAnd();
                 // Create apply("or", [left, right])
-                var args = try self.allocator.alloc(*AstNode, 2);
-                args[0] = left;
-                args[1] = right;
-                left = try AstNode.apply(self.allocator, "or", args, left.span.merge(right.span));
+                left = self.makeBinOp("or", left, right) catch |err| {
+                    right.deinit(self.allocator);
+                    return err;
+                };
             } else {
                 break;
             }
@@ -190,6 +218,7 @@ pub const Parser = struct {
     /// Parse logical AND: a and b
     fn parseAnd(self: *Parser) Error!*AstNode {
         var left = try self.parseComparison();
+        errdefer left.deinit(self.allocator);
 
         while (true) {
             self.skipWhitespaceAndComments();
@@ -197,11 +226,10 @@ pub const Parser = struct {
                 _ = self.advance();
                 self.skipWhitespaceAndComments();
                 const right = try self.parseComparison();
-                // Create apply("and", [left, right])
-                var args = try self.allocator.alloc(*AstNode, 2);
-                args[0] = left;
-                args[1] = right;
-                left = try AstNode.apply(self.allocator, "and", args, left.span.merge(right.span));
+                left = self.makeBinOp("and", left, right) catch |err| {
+                    right.deinit(self.allocator);
+                    return err;
+                };
             } else {
                 break;
             }
@@ -212,17 +240,17 @@ pub const Parser = struct {
     /// Parse comparisons: =, !=, <, >, <=, >=
     fn parseComparison(self: *Parser) Error!*AstNode {
         var left = try self.parseAddSub();
+        errdefer left.deinit(self.allocator);
 
         while (true) {
             self.skipWhitespaceAndComments();
             const op_name = self.matchComparisonOp() orelse break;
             self.skipWhitespaceAndComments();
             const right = try self.parseAddSub();
-            // Create apply(op_name, [left, right])
-            var args = try self.allocator.alloc(*AstNode, 2);
-            args[0] = left;
-            args[1] = right;
-            left = try AstNode.apply(self.allocator, op_name, args, left.span.merge(right.span));
+            left = self.makeBinOp(op_name, left, right) catch |err| {
+                right.deinit(self.allocator);
+                return err;
+            };
         }
         return left;
     }
@@ -230,6 +258,7 @@ pub const Parser = struct {
     /// Parse addition and subtraction: a + b, a - b
     fn parseAddSub(self: *Parser) Error!*AstNode {
         var left = try self.parseMulDiv();
+        errdefer left.deinit(self.allocator);
 
         while (true) {
             self.skipWhitespaceAndComments();
@@ -237,18 +266,18 @@ pub const Parser = struct {
                 _ = self.advance();
                 self.skipWhitespaceAndComments();
                 const right = try self.parseMulDiv();
-                var args = try self.allocator.alloc(*AstNode, 2);
-                args[0] = left;
-                args[1] = right;
-                left = try AstNode.apply(self.allocator, "add", args, left.span.merge(right.span));
+                left = self.makeBinOp("add", left, right) catch |err| {
+                    right.deinit(self.allocator);
+                    return err;
+                };
             } else if (self.checkText("-")) {
                 _ = self.advance();
                 self.skipWhitespaceAndComments();
                 const right = try self.parseMulDiv();
-                var args = try self.allocator.alloc(*AstNode, 2);
-                args[0] = left;
-                args[1] = right;
-                left = try AstNode.apply(self.allocator, "sub", args, left.span.merge(right.span));
+                left = self.makeBinOp("sub", left, right) catch |err| {
+                    right.deinit(self.allocator);
+                    return err;
+                };
             } else {
                 break;
             }
@@ -259,6 +288,7 @@ pub const Parser = struct {
     /// Parse multiplication, division, and modulo: a * b, a / b, a % b
     fn parseMulDiv(self: *Parser) Error!*AstNode {
         var left = try self.parsePower();
+        errdefer left.deinit(self.allocator);
 
         while (true) {
             self.skipWhitespaceAndComments();
@@ -266,10 +296,10 @@ pub const Parser = struct {
                 _ = self.advance();
                 self.skipWhitespaceAndComments();
                 const right = try self.parsePower();
-                var args = try self.allocator.alloc(*AstNode, 2);
-                args[0] = left;
-                args[1] = right;
-                left = try AstNode.apply(self.allocator, "mul", args, left.span.merge(right.span));
+                left = self.makeBinOp("mul", left, right) catch |err| {
+                    right.deinit(self.allocator);
+                    return err;
+                };
             } else if (self.checkText("/")) {
                 // Check it's not a comment
                 if (self.pos + 1 < self.tokens.len) {
@@ -281,18 +311,18 @@ pub const Parser = struct {
                 _ = self.advance();
                 self.skipWhitespaceAndComments();
                 const right = try self.parsePower();
-                var args = try self.allocator.alloc(*AstNode, 2);
-                args[0] = left;
-                args[1] = right;
-                left = try AstNode.apply(self.allocator, "div", args, left.span.merge(right.span));
+                left = self.makeBinOp("div", left, right) catch |err| {
+                    right.deinit(self.allocator);
+                    return err;
+                };
             } else if (self.checkText("%")) {
                 _ = self.advance();
                 self.skipWhitespaceAndComments();
                 const right = try self.parsePower();
-                var args = try self.allocator.alloc(*AstNode, 2);
-                args[0] = left;
-                args[1] = right;
-                left = try AstNode.apply(self.allocator, "mod", args, left.span.merge(right.span));
+                left = self.makeBinOp("mod", left, right) catch |err| {
+                    right.deinit(self.allocator);
+                    return err;
+                };
             } else {
                 break;
             }
@@ -302,17 +332,18 @@ pub const Parser = struct {
 
     /// Parse power/exponentiation: a ^ b (right associative)
     fn parsePower(self: *Parser) Error!*AstNode {
-        const base = try self.parseUnary();
+        var base = try self.parseUnary();
+        errdefer base.deinit(self.allocator);
 
         self.skipWhitespaceAndComments();
         if (self.checkText("^")) {
             _ = self.advance();
             self.skipWhitespaceAndComments();
             const exp = try self.parsePower(); // Right associative
-            var args = try self.allocator.alloc(*AstNode, 2);
-            args[0] = base;
-            args[1] = exp;
-            return AstNode.apply(self.allocator, "pow", args, base.span.merge(exp.span));
+            base = self.makeBinOp("pow", base, exp) catch |err| {
+                exp.deinit(self.allocator);
+                return err;
+            };
         }
         return base;
     }
@@ -325,23 +356,25 @@ pub const Parser = struct {
             const op_token = self.advance().?;
             self.skipWhitespaceAndComments();
             const operand = try self.parseUnary();
-            var args = try self.allocator.alloc(*AstNode, 1);
-            args[0] = operand;
-            return AstNode.apply(self.allocator, "neg", args, SourceSpan{
+            return self.makeUnaryOp("neg", operand, SourceSpan{
                 .start = op_token.byte_start,
                 .end = operand.span.end,
-            });
+            }) catch |err| {
+                operand.deinit(self.allocator);
+                return err;
+            };
         }
         if (self.checkText("!")) {
             const op_token = self.advance().?;
             self.skipWhitespaceAndComments();
             const operand = try self.parseUnary();
-            var args = try self.allocator.alloc(*AstNode, 1);
-            args[0] = operand;
-            return AstNode.apply(self.allocator, "not", args, SourceSpan{
+            return self.makeUnaryOp("not", operand, SourceSpan{
                 .start = op_token.byte_start,
                 .end = operand.span.end,
-            });
+            }) catch |err| {
+                operand.deinit(self.allocator);
+                return err;
+            };
         }
 
         return self.parsePostfix();
@@ -350,6 +383,7 @@ pub const Parser = struct {
     /// Parse postfix operators: x², x.prop, x[i], x(args)
     fn parsePostfix(self: *Parser) Error!*AstNode {
         var node = try self.parsePrimary();
+        errdefer node.deinit(self.allocator);
 
         while (true) {
             self.skipWhitespaceAndComments();
@@ -357,12 +391,13 @@ pub const Parser = struct {
             // Square operator: x²
             if (self.checkText("²") or self.checkText("\xc2\xb2")) {
                 const op_token = self.advance().?;
-                var args = try self.allocator.alloc(*AstNode, 1);
-                args[0] = node;
-                node = try AstNode.apply(self.allocator, "square", args, SourceSpan{
+                node = self.makeUnaryOp("square", node, SourceSpan{
                     .start = node.span.start,
                     .end = op_token.byte_end,
-                });
+                }) catch |err| {
+                    // node will be freed by the function-level errdefer
+                    return err;
+                };
             }
             // Property access: x.prop
             else if (self.checkText(".")) {
@@ -370,11 +405,15 @@ pub const Parser = struct {
                 self.skipWhitespaceAndComments();
                 if (self.check(.identifier) or self.check(.axis)) {
                     const prop_token = self.advance().?;
-                    node = try AstNode.propertyAccess(self.allocator, node, prop_token.text, SourceSpan{
+                    node = AstNode.propertyAccess(self.allocator, node, prop_token.text, SourceSpan{
                         .start = node.span.start,
                         .end = prop_token.byte_end,
-                    });
+                    }) catch |err| {
+                        // node will be freed by the function-level errdefer
+                        return err;
+                    };
                 } else {
+                    // node will be freed by the function-level errdefer
                     return self.addError("Expected property name after '.'");
                 }
             }
@@ -384,8 +423,14 @@ pub const Parser = struct {
                 self.skipWhitespaceAndComments();
                 const index = try self.parseExpression();
                 self.skipWhitespaceAndComments();
-                const close = try self.expectText("]");
-                const idx_node = try self.allocator.create(AstNode);
+                const close = self.expectText("]") catch |err| {
+                    index.deinit(self.allocator);
+                    return err;
+                };
+                const idx_node = self.allocator.create(AstNode) catch |err| {
+                    index.deinit(self.allocator);
+                    return err;
+                };
                 idx_node.* = .{
                     .data = .{ .index = .{ .base = node, .index_expr = index } },
                     .span = SourceSpan{ .start = node.span.start, .end = close.byte_end },
@@ -401,20 +446,28 @@ pub const Parser = struct {
                 };
                 if (!is_callable) break;
 
-                // Get the function name from the identifier
+                // Save the function name and span from the identifier node.
+                // Don't destroy the identifier yet - keep node valid for the errdefer.
                 const func_name = node.data.identifier;
                 const func_start = node.span.start;
+                const ident_node = node;
 
                 _ = self.advance(); // consume '('
                 self.skipWhitespaceAndComments();
 
                 var args: std.ArrayList(*AstNode) = .{ .items = &.{}, .capacity = 0 };
-                errdefer args.deinit(self.allocator);
+                errdefer {
+                    for (args.items) |arg| arg.deinit(self.allocator);
+                    args.deinit(self.allocator);
+                }
 
                 // Parse arguments
                 if (!self.checkText(")")) {
                     const first_arg = try self.parseExpression();
-                    try args.append(self.allocator, first_arg);
+                    args.append(self.allocator, first_arg) catch |err| {
+                        first_arg.deinit(self.allocator);
+                        return err;
+                    };
 
                     while (true) {
                         self.skipWhitespaceAndComments();
@@ -422,7 +475,10 @@ pub const Parser = struct {
                             _ = self.advance();
                             self.skipWhitespaceAndComments();
                             const arg = try self.parseExpression();
-                            try args.append(self.allocator, arg);
+                            args.append(self.allocator, arg) catch |err| {
+                                arg.deinit(self.allocator);
+                                return err;
+                            };
                         } else {
                             break;
                         }
@@ -431,11 +487,20 @@ pub const Parser = struct {
 
                 self.skipWhitespaceAndComments();
                 const close = try self.expectText(")");
+                const owned_args = try args.toOwnedSlice(self.allocator);
                 // Create apply node with the function name
-                node = try AstNode.apply(self.allocator, func_name, try args.toOwnedSlice(self.allocator), SourceSpan{
+                node = AstNode.apply(self.allocator, func_name, owned_args, SourceSpan{
                     .start = func_start,
                     .end = close.byte_end,
-                });
+                }) catch |err| {
+                    for (owned_args) |arg| arg.deinit(self.allocator);
+                    self.allocator.free(owned_args);
+                    // node (ident_node) is still valid; errdefer will free it
+                    return err;
+                };
+                // Apply node created successfully; now free the replaced identifier
+                // node shell (its text is borrowed from tokens, not owned).
+                self.allocator.destroy(ident_node);
             } else {
                 break;
             }
@@ -485,6 +550,7 @@ pub const Parser = struct {
                 _ = self.advance();
                 self.skipWhitespaceAndComments();
                 const operand = try self.parseExpression();
+                errdefer operand.deinit(self.allocator);
                 self.skipWhitespaceAndComments();
                 const close = try self.expectText(")");
 
@@ -542,9 +608,18 @@ pub const Parser = struct {
 
         // If there's a comma, this is a tuple or block
         if (self.checkText(",")) {
+            // first is now owned by elements; cleanup goes through elements only
             var elements: std.ArrayList(*AstNode) = .{ .items = &.{}, .capacity = 0 };
-            errdefer elements.deinit(self.allocator);
-            try elements.append(self.allocator, first);
+            errdefer {
+                for (elements.items) |elem| elem.deinit(self.allocator);
+                elements.deinit(self.allocator);
+            }
+            elements.append(self.allocator, first) catch |err| {
+                // elements list is empty, so its errdefer is a no-op.
+                // We must free first manually.
+                first.deinit(self.allocator);
+                return err;
+            };
 
             // Track if any element is a binding (indicates this is a block)
             var has_binding = (first.data == .binding);
@@ -557,8 +632,11 @@ pub const Parser = struct {
                 if (self.checkText(")")) break;
 
                 const elem = try self.parseStatement();
+                elements.append(self.allocator, elem) catch |err| {
+                    elem.deinit(self.allocator);
+                    return err;
+                };
                 if (elem.data == .binding) has_binding = true;
-                try elements.append(self.allocator, elem);
                 self.skipWhitespaceAndComments();
             }
 
@@ -568,16 +646,28 @@ pub const Parser = struct {
                 .end = close.byte_end,
             };
 
+            const owned = try elements.toOwnedSlice(self.allocator);
             // If any element is a binding, treat as block; otherwise tuple
             if (has_binding) {
-                return AstNode.blockNode(self.allocator, try elements.toOwnedSlice(self.allocator), span);
+                return AstNode.blockNode(self.allocator, owned, span) catch |err| {
+                    for (owned) |elem| elem.deinit(self.allocator);
+                    self.allocator.free(owned);
+                    return err;
+                };
             } else {
-                return AstNode.tupleLit(self.allocator, try elements.toOwnedSlice(self.allocator), span);
+                return AstNode.tupleLit(self.allocator, owned, span) catch |err| {
+                    for (owned) |elem| elem.deinit(self.allocator);
+                    self.allocator.free(owned);
+                    return err;
+                };
             }
         }
 
         // Just a parenthesized expression (or single statement)
-        _ = try self.expectText(")");
+        _ = self.expectText(")") catch |err| {
+            first.deinit(self.allocator);
+            return err;
+        };
         return first;
     }
 
@@ -589,14 +679,17 @@ pub const Parser = struct {
         _ = try self.expectText("(");
         self.skipWhitespaceAndComments();
         const condition = try self.parseExpression();
+        errdefer condition.deinit(self.allocator);
         self.skipWhitespaceAndComments();
         _ = try self.expectText(")");
 
         self.skipWhitespaceAndComments();
         const then_branch = try self.parseExpression();
+        errdefer then_branch.deinit(self.allocator);
 
         self.skipWhitespaceAndComments();
         var else_branch: ?*AstNode = null;
+        errdefer if (else_branch) |eb| eb.deinit(self.allocator);
         var end_pos = then_branch.span.end;
 
         if (self.checkText("else")) {
@@ -620,11 +713,13 @@ pub const Parser = struct {
         _ = try self.expectText("(");
         self.skipWhitespaceAndComments();
         const condition = try self.parseExpression();
+        errdefer condition.deinit(self.allocator);
         self.skipWhitespaceAndComments();
         _ = try self.expectText(")");
 
         self.skipWhitespaceAndComments();
         const body = try self.parseExpression();
+        errdefer body.deinit(self.allocator);
 
         return AstNode.whileLoop(self.allocator, condition, body, SourceSpan{
             .start = while_token.byte_start,
@@ -640,19 +735,23 @@ pub const Parser = struct {
         _ = try self.expectText("(");
         self.skipWhitespaceAndComments();
         const init_stmt = try self.parseStatement();
+        errdefer init_stmt.deinit(self.allocator);
         self.skipWhitespaceAndComments();
         _ = try self.expectText(",");
         self.skipWhitespaceAndComments();
         const condition = try self.parseExpression();
+        errdefer condition.deinit(self.allocator);
         self.skipWhitespaceAndComments();
         _ = try self.expectText(",");
         self.skipWhitespaceAndComments();
         const update = try self.parseStatement();
+        errdefer update.deinit(self.allocator);
         self.skipWhitespaceAndComments();
         _ = try self.expectText(")");
 
         self.skipWhitespaceAndComments();
         const body = try self.parseExpression();
+        errdefer body.deinit(self.allocator);
 
         return AstNode.forLoop(self.allocator, init_stmt, condition, update, body, SourceSpan{
             .start = for_token.byte_start,
@@ -880,6 +979,34 @@ pub const Parser = struct {
         };
     }
 
+    /// Helper to create a binary operation node.
+    /// On success, the returned node owns both `left` and `right`.
+    /// On failure, neither `left` nor `right` is freed (caller must handle).
+    fn makeBinOp(self: *Parser, op_name: []const u8, left: *AstNode, right: *AstNode) Error!*AstNode {
+        const span = left.span.merge(right.span);
+        var args = try self.allocator.alloc(*AstNode, 2);
+        args[0] = left;
+        args[1] = right;
+        return AstNode.apply(self.allocator, op_name, args, span) catch |err| {
+            // apply failed (OOM creating the node), free the args slice
+            // but NOT the children - caller is responsible for those
+            self.allocator.free(args);
+            return err;
+        };
+    }
+
+    /// Helper to create a unary operation node.
+    /// On success, the returned node owns `operand`.
+    /// On failure, `operand` is not freed (caller must handle).
+    fn makeUnaryOp(self: *Parser, op_name: []const u8, operand: *AstNode, span: SourceSpan) Error!*AstNode {
+        var args = try self.allocator.alloc(*AstNode, 1);
+        args[0] = operand;
+        return AstNode.apply(self.allocator, op_name, args, span) catch |err| {
+            self.allocator.free(args);
+            return err;
+        };
+    }
+
     fn addError(self: *Parser, message: []const u8) Error {
         const token = self.peek() orelse Token{
             .text = "",
@@ -1015,7 +1142,7 @@ test "function definition followed by function call with equals" {
     const result = try parseTokens(allocator, tokens);
     defer {
         if (result.errors.len == 0) {
-            allocator.destroy(result.ast);
+            result.ast.deinit(allocator);
         }
         allocator.free(result.errors);
     }

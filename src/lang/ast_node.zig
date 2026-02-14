@@ -443,6 +443,98 @@ pub const AstNode = struct {
         return node;
     }
 
+    // ============ Deinitialization ============
+
+    /// Recursively free this AST node and all of its children.
+    /// Frees heap-allocated slices (args, elements, statements, params,
+    /// binding tuple names) and then destroys each node itself.
+    pub fn deinit(self: *AstNode, allocator: std.mem.Allocator) void {
+        switch (self.data) {
+            // Leaf nodes: no children or owned slices to free
+            .number, .identifier, .bool_lit => {},
+
+            .apply => |op| {
+                // Recursively free each argument node
+                for (op.args) |arg| {
+                    arg.deinit(allocator);
+                }
+                // Free the args slice itself (allocated via allocator.alloc or toOwnedSlice)
+                allocator.free(op.args);
+            },
+
+            .property_access => |acc| {
+                acc.base.deinit(allocator);
+            },
+
+            .tuple => |elements| {
+                for (elements) |elem| {
+                    elem.deinit(allocator);
+                }
+                allocator.free(elements);
+            },
+
+            .cast => |c| {
+                c.operand.deinit(allocator);
+            },
+
+            .index => |idx| {
+                idx.base.deinit(allocator);
+                idx.index_expr.deinit(allocator);
+            },
+
+            .binding => |b| {
+                // Free the binding tuple names slice if it was heap-allocated
+                switch (b.pattern) {
+                    .tuple => |names| allocator.free(names),
+                    .single => {},
+                }
+                b.value.deinit(allocator);
+            },
+
+            .if_expr => |ie| {
+                ie.condition.deinit(allocator);
+                ie.then_branch.deinit(allocator);
+                if (ie.else_branch) |eb| {
+                    eb.deinit(allocator);
+                }
+            },
+
+            .while_loop => |wl| {
+                wl.condition.deinit(allocator);
+                wl.body.deinit(allocator);
+            },
+
+            .for_loop => |fl| {
+                fl.init.deinit(allocator);
+                fl.condition.deinit(allocator);
+                fl.update.deinit(allocator);
+                fl.body.deinit(allocator);
+            },
+
+            .function_def => |fd| {
+                // Free the params slice (allocated via toOwnedSlice in parser)
+                // Note: params contains slices into the token text, which are
+                // not owned by the AST, so we only free the outer slice.
+                if (fd.params.len > 0) {
+                    allocator.free(fd.params);
+                }
+                fd.body.deinit(allocator);
+                // captures is set to &.{} (comptime empty slice) and is never
+                // heap-allocated, so we do not free it.
+            },
+
+            .block => |stmts| {
+                for (stmts) |stmt| {
+                    stmt.deinit(allocator);
+                }
+                allocator.free(stmts);
+            },
+        }
+
+        // Finally, destroy this node itself
+        allocator.destroy(self);
+    }
+
     // ============ Utility Methods ============
 
     /// Check if this node is an axis-dependent expression

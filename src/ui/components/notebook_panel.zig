@@ -43,6 +43,10 @@ pub const NotebookPanel = struct {
     // Deferred deletion (set during render, executed after render loop)
     var cell_to_delete: ?usize = null;
 
+    // Deferred focus: when a new cell is created (e.g. via Enter auto-play),
+    // we need to focus its TextEntryWidget on the next frame.
+    var pending_focus_cell: bool = false;
+
     /// Initialize the global lexer if not already done
     fn ensureLexer(_: std.mem.Allocator) ?*lexer_mod.Lexer {
         if (lexer == null) {
@@ -73,9 +77,16 @@ pub const NotebookPanel = struct {
         }
     }
 
+    // Colors for play/stop buttons
+    const play_green = dvui.Color{ .r = 60, .g = 200, .b = 80, .a = 255 };
+    const play_green_hover = dvui.Color{ .r = 80, .g = 220, .b = 100, .a = 255 };
+    const stop_red = dvui.Color{ .r = 220, .g = 60, .b = 60, .a = 255 };
+    const stop_red_hover = dvui.Color{ .r = 240, .g = 80, .b = 80, .a = 255 };
+    const error_red_border = dvui.Color{ .r = 220, .g = 60, .b = 60, .a = 200 };
+
     /// Render the notebook panel with all cells
     pub fn render(active_session: *session.TabSession, graph_renderer: *renderer.GraphRenderer) void {
-        _ = graph_renderer; // TODO: Will be used for per-cell rendering in Phase 4
+        _ = graph_renderer;
 
         // Reset deferred deletion
         cell_to_delete = null;
@@ -99,9 +110,15 @@ pub const NotebookPanel = struct {
         });
         defer container.deinit();
 
-        // Render each cell
-        for (active_session.cells.items, 0..) |*cell, i| {
-            renderCell(active_session, cell, i, scaled_corner, scaled_spacing);
+        // Render each cell using index-based iteration.
+        // NOTE: We snapshot the cell count at the start. handleEnterKey may add
+        // new cells via addCell(), but we must NOT render those in the same frame
+        // because (a) the cells slice may be reallocated and (b) the new cell
+        // could pick up stale keyboard events.
+        const cell_count = active_session.cells.items.len;
+        var i: usize = 0;
+        while (i < cell_count) : (i += 1) {
+            renderCell(active_session, &active_session.cells.items[i], i, scaled_corner, scaled_spacing);
         }
 
         // Plus button to add new cell
@@ -127,14 +144,18 @@ pub const NotebookPanel = struct {
         const scale = theme.fonts.getScale();
         const scaled_cell_corner = large_corner_radius * scale;
 
+        // Red border when validation error, normal otherwise
+        const border_color = if (cell.has_validation_error) error_red_border else theme.colors.border;
+        const border_width = if (cell.has_validation_error) 2 * scale else 1 * scale;
+
         // Cell container box with rounded corners and border
         var cell_box = dvui.box(@src(), .{ .dir = .vertical }, .{
             .id_extra = cell.id,
             .expand = .horizontal,
             .background = true,
             .color_fill = theme.colors.bg_elevated,
-            .border = .{ .x = 1 * scale, .y = 1 * scale, .w = 1 * scale, .h = 1 * scale },
-            .color_border = theme.colors.border,
+            .border = .{ .x = border_width, .y = border_width, .w = border_width, .h = border_width },
+            .color_border = border_color,
             .corner_radius = .{ .x = scaled_cell_corner, .y = scaled_cell_corner, .w = scaled_cell_corner, .h = scaled_cell_corner },
             .padding = .{ .x = spacing, .y = spacing, .w = spacing, .h = spacing },
             .margin = .{ .x = 0, .y = 0, .w = 0, .h = spacing },
@@ -159,31 +180,68 @@ pub const NotebookPanel = struct {
             separator.deinit();
         }
 
-        // Cell editor
+        // Cell editor (may add new cells via handleEnterKey, which can reallocate cells array)
         renderCellEditor(active_session, cell, cell_index);
 
-        // Cell output (if any)
-        if (cell.output) |output| {
-            // Separator line between editor and output (extends full width)
+        // IMPORTANT: Re-fetch cell pointer after renderCellEditor because handleEnterKey
+        // may call addCell() which can reallocate the cells ArrayList, invalidating
+        // the original 'cell' pointer passed to this function.
+        if (cell_index >= active_session.cells.items.len) return;
+        const current_cell = &active_session.cells.items[cell_index];
+
+        // Show validation error in output section
+        if (current_cell.has_validation_error) {
+            // Separator line
             {
                 const separator_height = 1 * scale;
                 const separator_margin = (base_unit * 0.75) * scale;
                 var separator = dvui.box(@src(), .{}, .{
-                    .id_extra = cell.id + 6000,
+                    .id_extra = current_cell.id + 6500,
                     .expand = .horizontal,
                     .background = true,
-                    .color_fill = theme.colors.border,
+                    .color_fill = error_red_border,
                     .min_size_content = .{ .h = separator_height },
                     .margin = .{ .x = -spacing, .y = separator_margin, .w = -spacing, .h = separator_margin },
                 });
                 separator.deinit();
             }
 
-            renderCellOutput(cell.id, output);
+            // Error message
+            const err_msg = current_cell.validation_error orelse "Validation error";
+            const scaled_text_padding_x = base_unit * 2 * scale;
+            const scaled_text_padding_y = base_unit * scale;
+            dvui.labelNoFmt(@src(), err_msg, .{}, .{
+                .id_extra = current_cell.id + 6600,
+                .color_text = error_red_border,
+                .font = theme.fonts.smallFont(),
+                .padding = .{ .x = scaled_text_padding_x, .y = scaled_text_padding_y, .w = scaled_text_padding_x, .h = scaled_text_padding_y },
+            });
+        }
+
+        // Cell output (if any, and no validation error)
+        if (!current_cell.has_validation_error) {
+            if (current_cell.output) |output| {
+                // Separator line between editor and output (extends full width)
+                {
+                    const separator_height = 1 * scale;
+                    const separator_margin = (base_unit * 0.75) * scale;
+                    var separator = dvui.box(@src(), .{}, .{
+                        .id_extra = current_cell.id + 6000,
+                        .expand = .horizontal,
+                        .background = true,
+                        .color_fill = theme.colors.border,
+                        .min_size_content = .{ .h = separator_height },
+                        .margin = .{ .x = -spacing, .y = separator_margin, .w = -spacing, .h = separator_margin },
+                    });
+                    separator.deinit();
+                }
+
+                renderCellOutput(current_cell.id, output);
+            }
         }
     }
 
-    /// Render cell header with color picker and copy button
+    /// Render cell header with play/stop button, color picker, and copy button
     fn renderCellHeader(active_session: *session.TabSession, cell: *code_cell.CodeCell, cell_index: usize) void {
         const scale = theme.fonts.getScale();
         const scaled_header_height = header_height * scale;
@@ -200,61 +258,103 @@ pub const NotebookPanel = struct {
         });
         defer header.deinit();
 
+        const entypo = dvui.entypo;
+
+        // Only show play/color buttons when cell has plottable output
+        if (cell.output != null and cell.output.?.shader != null) {
+            // Play/Stop button (left side)
+            {
+                const play_icon = if (cell.is_playing) entypo.controller_stop else entypo.controller_play;
+                const play_label = if (cell.is_playing) "stop" else "play";
+                const play_color = if (cell.is_playing) stop_red else play_green;
+                const play_hover = if (cell.is_playing) stop_red_hover else play_green_hover;
+
+                if (dvui.buttonIcon(@src(), play_label, play_icon, .{}, .{}, .{
+                    .id_extra = cell.id + 3,
+                    .color_fill = play_color,
+                    .color_fill_hover = play_hover,
+                    .corner_radius = .{ .x = scaled_btn_corner, .y = scaled_btn_corner, .w = scaled_btn_corner, .h = scaled_btn_corner },
+                    .padding = .{ .x = scaled_btn_padding, .y = scaled_btn_padding, .w = scaled_btn_padding, .h = scaled_btn_padding },
+                    .margin = .{ .x = -(base_unit * scale), .y = scaled_btn_margin, .w = scaled_btn_margin, .h = scaled_btn_margin },
+                    .min_size_content = .{ .w = scaled_icon_size, .h = scaled_icon_size },
+                })) {
+                    if (cell.is_playing) {
+                        // Stop
+                        cell.is_playing = false;
+                        std.log.info("Stopped cell {d}", .{cell.id});
+                    } else {
+                        // Play: validate and parse
+                        active_session.validateAndParseCell(cell_index);
+
+                        if (!cell.has_validation_error) {
+                            cell.is_playing = true;
+                            std.log.info("Playing cell {d}", .{cell.id});
+
+                            // Replay dependent cells
+                            active_session.replayDependentCells(cell_index);
+                        }
+                    }
+                }
+            }
+        }
+
         // Spacer (push buttons to the right)
         {
             var spacer = dvui.box(@src(), .{}, .{ .expand = .horizontal, .id_extra = cell.id });
             spacer.deinit();
         }
 
-        // Color picker button (right side) - wrapped in scope to close before other elements
-        {
-            const color_vec4 = cell.getColorVec4();
-            const color = dvui.Color{
-                .r = @intFromFloat(color_vec4[0] * 255),
-                .g = @intFromFloat(color_vec4[1] * 255),
-                .b = @intFromFloat(color_vec4[2] * 255),
-                .a = 255,
-            };
+        // Only show color button when cell has plottable output
+        if (cell.output != null and cell.output.?.shader != null) {
+            // Color picker button (right side) - wrapped in scope to close before other elements
+            {
+                const color_vec4 = cell.getColorVec4();
+                const color = dvui.Color{
+                    .r = @intFromFloat(color_vec4[0] * 255),
+                    .g = @intFromFloat(color_vec4[1] * 255),
+                    .b = @intFromFloat(color_vec4[2] * 255),
+                    .a = 255,
+                };
 
-            var color_btn: dvui.ButtonWidget = undefined;
-            color_btn.init(@src(), .{}, .{
-                .id_extra = cell.id,
-                .color_fill = color,
-                .corner_radius = .{ .x = scaled_btn_corner, .y = scaled_btn_corner, .w = scaled_btn_corner, .h = scaled_btn_corner },
-                .padding = .{ .x = scaled_btn_padding, .y = scaled_btn_padding * 0.5, .w = scaled_btn_padding, .h = scaled_btn_padding * 0.5 },
-                .margin = .{ .x = scaled_btn_margin, .y = scaled_btn_margin, .w = scaled_btn_margin, .h = scaled_btn_margin },
-                .min_size_content = .{ .w = scaled_icon_size, .h = scaled_icon_size },
-            });
-            defer color_btn.deinit();
+                var color_btn: dvui.ButtonWidget = undefined;
+                color_btn.init(@src(), .{}, .{
+                    .id_extra = cell.id,
+                    .color_fill = color,
+                    .corner_radius = .{ .x = scaled_btn_corner, .y = scaled_btn_corner, .w = scaled_btn_corner, .h = scaled_btn_corner },
+                    .padding = .{ .x = scaled_btn_padding, .y = scaled_btn_padding * 0.5, .w = scaled_btn_padding, .h = scaled_btn_padding * 0.5 },
+                    .margin = .{ .x = scaled_btn_margin, .y = scaled_btn_margin, .w = scaled_btn_margin, .h = scaled_btn_margin },
+                    .min_size_content = .{ .w = scaled_icon_size, .h = scaled_icon_size },
+                });
+                defer color_btn.deinit();
 
-            color_btn.processEvents();
-            color_btn.drawBackground();
+                color_btn.processEvents();
+                color_btn.drawBackground();
 
-            // Draw "Color" label inside the button with contrasting text color (smaller font)
-            const text_color = getContrastingTextColor(color);
-            dvui.labelNoFmt(@src(), "Color", .{}, .{
-                .id_extra = cell.id,
-                .color_text = text_color,
-                .font = theme.fonts.smallFont(),
-            });
+                // Draw "Color" label inside the button with contrasting text color (smaller font)
+                const text_color = getContrastingTextColor(color);
+                dvui.labelNoFmt(@src(), "Color", .{}, .{
+                    .id_extra = cell.id,
+                    .color_text = text_color,
+                    .font = theme.fonts.smallFont(),
+                });
 
-            if (color_btn.clicked()) {
-                // Open color editor for this cell (convert to natural coordinates)
-                const btn_rect_scale = color_btn.data().borderRectScale();
-                const btn_rect_natural = btn_rect_scale.r.toNatural();
-                openColorEditor(cell, btn_rect_natural);
+                if (color_btn.clicked()) {
+                    // Open color editor for this cell (convert to natural coordinates)
+                    const btn_rect_scale = color_btn.data().borderRectScale();
+                    const btn_rect_natural = btn_rect_scale.r.toNatural();
+                    openColorEditor(cell, btn_rect_natural);
+                }
             }
-        }
 
-        // Render color editor popup if this cell is being edited
-        if (color_editor_cell_id) |editing_id| {
-            if (editing_id == cell.id) {
-                renderColorEditor(active_session, cell);
+            // Render color editor popup if this cell is being edited
+            if (color_editor_cell_id) |editing_id| {
+                if (editing_id == cell.id) {
+                    renderColorEditor(active_session, cell);
+                }
             }
         }
 
         // Copy button - small icon button
-        const entypo = dvui.entypo;
         if (dvui.buttonIcon(@src(), "copy", entypo.copy, .{}, .{}, .{
             .id_extra = cell.id + 1,
             .color_fill = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 }, // Transparent
@@ -328,13 +428,61 @@ pub const NotebookPanel = struct {
         text_entry.data().was_allocated_on_widget_stack = true;
         defer text_entry.deinit();
 
+        // If this cell was just created (e.g. via Enter auto-play) and needs focus,
+        // explicitly focus the TextEntryWidget so the user can start typing immediately.
+        if (is_focused and pending_focus_cell) {
+            dvui.focusWidget(text_entry.data().id, null, null);
+            pending_focus_cell = false;
+        }
+
+        // Capture content and cursor BEFORE processEvents (for Enter key detection).
+        // processEvents will insert a newline if Enter is pressed, so we need
+        // the pre-Enter state to decide if we should auto-play.
+        const content_before = active_session.allocator.dupe(u8, cell.content.items) catch null;
+        defer if (content_before) |cb| active_session.allocator.free(cb);
+        const cursor_before = text_entry.textLayout.selection.cursor;
+
         // Process input events
         text_entry.processEvents();
 
-        // Mark session as modified if text changed
+        // Detect if Enter key was pressed (content grew by at least 1 and a newline was added)
+        var enter_pressed = false;
+        if (content_before) |cb| {
+            if (cell.content.items.len > cb.len) {
+                // Check if a newline was inserted (Enter key)
+                const diff = cell.content.items.len - cb.len;
+                if (diff >= 1) {
+                    // Look for a newline in the newly inserted region
+                    const insert_start = @min(cursor_before, cell.content.items.len);
+                    const insert_end = @min(insert_start + diff, cell.content.items.len);
+                    for (cell.content.items[insert_start..insert_end]) |c| {
+                        if (c == '\n') {
+                            enter_pressed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Mark session as modified if text changed, validate, and stop if playing
         if (text_entry.text_changed) {
             active_session.is_modified = true;
             active_session.render_state.needs_update = true;
+
+            // If cell was playing, stop it on edit (but not if Enter auto-play will handle it)
+            if (cell.is_playing and !enter_pressed) {
+                cell.is_playing = false;
+                std.log.info("Cell {d} stopped due to edit", .{cell.id});
+            }
+
+            // Validate the cell content (skip if Enter auto-play will handle it)
+            if (!enter_pressed) {
+                active_session.validateAndParseCell(cell_index);
+
+                // If this cell was updated, replay any dependent playing cells
+                active_session.replayDependentCells(cell_index);
+            }
         }
 
         // Get content for rendering
@@ -352,8 +500,12 @@ pub const NotebookPanel = struct {
             active_session.updateCursorPosition(text_entry.textLayout.selection.cursor);
         }
 
-        // Handle Enter key for cell finalization
-        handleEnterKey(active_session, cell, cell_index);
+        // Handle Enter key for cell finalization (uses pre-Enter content/cursor)
+        if (enter_pressed) {
+            if (content_before) |cb| {
+                handleEnterKey(active_session, cell, cell_index, cb, cursor_before);
+            }
+        }
     }
 
     /// Render text with syntax highlighting
@@ -413,11 +565,20 @@ pub const NotebookPanel = struct {
 
         // Render text output if present
         if (output.text) |text| {
-            dvui.labelNoFmt(@src(), text, .{}, .{
-                .color_text = theme.colors.text_secondary,
-                .font = theme.fonts.editorFont(),
-                .padding = .{ .x = scaled_text_padding_x, .y = scaled_text_padding_y, .w = scaled_text_padding_x, .h = scaled_text_padding_y },
-            });
+            // Validate UTF-8 before passing to dvui to prevent crashes
+            if (text.len > 0 and std.unicode.utf8ValidateSlice(text)) {
+                dvui.labelNoFmt(@src(), text, .{}, .{
+                    .color_text = theme.colors.text_secondary,
+                    .font = theme.fonts.editorFont(),
+                    .padding = .{ .x = scaled_text_padding_x, .y = scaled_text_padding_y, .w = scaled_text_padding_x, .h = scaled_text_padding_y },
+                });
+            } else if (text.len > 0) {
+                dvui.labelNoFmt(@src(), "[invalid UTF-8 output]", .{}, .{
+                    .color_text = theme.colors.accent_primary,
+                    .font = theme.fonts.editorFont(),
+                    .padding = .{ .x = scaled_text_padding_x, .y = scaled_text_padding_y, .w = scaled_text_padding_x, .h = scaled_text_padding_y },
+                });
+            }
         }
 
         // Render plot output if present
@@ -438,50 +599,105 @@ pub const NotebookPanel = struct {
 
         // Render error if present
         if (output.error_msg) |err_msg| {
-            dvui.labelNoFmt(@src(), err_msg, .{}, .{
-                .color_text = theme.colors.accent_primary,
-                .padding = .{ .x = scaled_text_padding_x, .y = scaled_text_padding_y, .w = scaled_text_padding_x, .h = scaled_text_padding_y },
-            });
+            if (err_msg.len > 0 and std.unicode.utf8ValidateSlice(err_msg)) {
+                dvui.labelNoFmt(@src(), err_msg, .{}, .{
+                    .color_text = theme.colors.accent_primary,
+                    .padding = .{ .x = scaled_text_padding_x, .y = scaled_text_padding_y, .w = scaled_text_padding_x, .h = scaled_text_padding_y },
+                });
+            }
         }
     }
 
-    /// Handle Enter key for cell finalization
-    fn handleEnterKey(active_session: *session.TabSession, cell: *code_cell.CodeCell, cell_index: usize) void {
-        // Check if Enter was pressed
-        var enter_pressed = false;
-        const evts = dvui.events();
-        for (evts) |*e| {
-            if (e.evt == .key) {
-                const ke = e.evt.key;
-                if (ke.code == .enter and ke.action == .down) {
-                    // Check if this is the last cell and cell has content that produces output
-                    const is_last_cell = cell_index == active_session.cells.items.len - 1;
-                    const has_output_content = cell.content.items.len > 0 and looksLikeOutputExpression(cell.content.items);
+    /// Handle Enter key: if cursor is on last line and content looks renderable,
+    /// auto-play the cell and create a new cell if this is the last one.
+    ///
+    /// IMPORTANT: This must be called BEFORE text_entry.processEvents() so that
+    /// we can inspect the content before the newline is inserted by the Enter key.
+    /// The content and cursor position at call time reflect the state BEFORE the
+    /// Enter key's newline is added.
+    fn handleEnterKey(active_session: *session.TabSession, cell: *code_cell.CodeCell, cell_index: usize, content_before_enter: []const u8, cursor_before_enter: usize) void {
+        // Check if cursor was on the last line of the cell content (before newline insertion)
+        const is_on_last_line = isOnLastLine(content_before_enter, cursor_before_enter);
 
-                    if (is_last_cell and has_output_content and cell.output != null) {
-                        // Cell has output and it's the last cell - auto-create new cell
-                        enter_pressed = true;
-                        e.handled = true;
-                    }
-                }
+        if (!is_on_last_line) return;
+
+        // Get the last line content and check if it looks renderable
+        const last_line = getLastLine(content_before_enter);
+        if (last_line.len == 0 or !looksLikeOutputExpression(last_line)) return;
+
+        // Remove the newline that processEvents just inserted at the cursor position.
+        // The Enter key added a '\n' at cursor_before_enter. Since we're going to
+        // auto-play instead of inserting a newline, we need to undo this insertion.
+        {
+            const insert_pos = @min(cursor_before_enter, cell.content.items.len);
+            if (insert_pos < cell.content.items.len and cell.content.items[insert_pos] == '\n') {
+                // Remove the newline by shifting content left
+                std.mem.copyForwards(
+                    u8,
+                    cell.content.items[insert_pos..cell.content.items.len - 1],
+                    cell.content.items[insert_pos + 1 .. cell.content.items.len],
+                );
+                cell.content.items.len -= 1;
+            } else if (cell.content.items.len > 0 and cell.content.items[cell.content.items.len - 1] == '\n') {
+                // Fallback: remove trailing newline
+                cell.content.items.len -= 1;
             }
         }
 
-        if (enter_pressed) {
-            // Finalize current cell
-            active_session.finalizeCell(cell_index);
+        // Validate and play the cell
+        active_session.validateAndParseCell(cell_index);
 
-            // Create new cell
+        if (!cell.has_validation_error) {
+            cell.is_playing = true;
+            std.log.info("Auto-playing cell {d} on Enter", .{cell.id});
+        }
+
+        // If last cell, create a new one and focus it
+        const is_last_cell = cell_index == active_session.cells.items.len - 1;
+        if (is_last_cell) {
             _ = active_session.addCell() catch {
                 std.log.err("Failed to add new cell after Enter", .{});
                 return;
             };
-
-            // Set new cell as active
             active_session.active_cell_index = active_session.cells.items.len - 1;
-
+            // Request focus for the new cell on the next frame
+            pending_focus_cell = true;
             std.log.info("Auto-created new cell after Enter in last cell", .{});
         }
+
+        // Replay dependent cells AFTER the new cell has been created
+        // (so we don't accidentally try to replay it)
+        if (!cell.has_validation_error) {
+            active_session.replayDependentCells(cell_index);
+        }
+    }
+
+    /// Check if a cursor position is on the last line of content
+    fn isOnLastLine(content: []const u8, cursor: usize) bool {
+        // If cursor is at or past the end, it's on the last line
+        if (cursor >= content.len) return true;
+
+        // Check if there's a newline after the cursor
+        for (content[cursor..]) |c| {
+            if (c == '\n') return false;
+        }
+        return true;
+    }
+
+    /// Get the last line of content
+    fn getLastLine(content: []const u8) []const u8 {
+        if (content.len == 0) return "";
+
+        // Find the last newline
+        var last_newline: ?usize = null;
+        for (content, 0..) |c, i| {
+            if (c == '\n') last_newline = i;
+        }
+
+        if (last_newline) |nl| {
+            return std.mem.trim(u8, content[nl + 1 ..], " \t\r");
+        }
+        return std.mem.trim(u8, content, " \t\r\n");
     }
 
     /// Check if content looks like it would produce an output expression

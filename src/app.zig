@@ -56,9 +56,11 @@ pub const App = struct {
         // Initialize graph renderer with the backend now that SDL is ready
         self.graph_renderer.initWithDevice(&backend);
 
+        var interrupted = false;
+
         main_loop: while (true) {
-            // Continuous rendering - get current time directly
-            const nstime = std.time.nanoTimestamp();
+            // beginWait coordinates with waitTime below to run frames only when needed
+            const nstime = win.beginWait(interrupted);
 
             // Begin dvui frame
             try win.begin(nstime);
@@ -75,8 +77,13 @@ pub const App = struct {
                 self.graph_renderer.update(active);
             }
 
-            // End dvui frame
-            _ = try win.end(.{});
+            // If the graph renderer is animating, request continuous redraws
+            if (self.graph_renderer.is_animating) {
+                win.refreshWindow(@src(), null);
+            }
+
+            // End dvui frame - returns wait time hint (null = wait indefinitely)
+            const end_micros = try win.end(.{});
 
             // Cursor management
             try backend.setCursor(win.cursorRequested());
@@ -84,6 +91,10 @@ pub const App = struct {
 
             // Render to screen
             try backend.renderPresent();
+
+            // Wait for events or timeout — sleeps when idle, spins when animating
+            const wait_event_micros = win.waitTime(end_micros);
+            interrupted = try backend.waitEventTimeout(wait_event_micros);
         }
 
         // Release GPU resources before backend is destroyed

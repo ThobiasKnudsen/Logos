@@ -25,7 +25,7 @@ pub fn main() !void {
     const result = try parser.parseTokens(allocator, tokens);
     defer {
         if (result.errors.len == 0) {
-            allocator.destroy(result.ast);
+            result.ast.deinit(allocator);
         }
         allocator.free(result.errors);
     }

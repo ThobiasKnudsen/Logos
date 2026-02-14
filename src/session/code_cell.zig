@@ -1,7 +1,7 @@
 //! Code Cell - A single executable unit in the notebook interface
 //!
 //! Each cell contains code, execution state, and output (text and/or plot).
-//! Cells can be finalized (output produced) or editable (no output yet).
+//! Cells have per-cell play/stop controls and validation state.
 
 const std = @import("std");
 const glsl_gen = @import("../lang/glsl_gen.zig");
@@ -51,8 +51,12 @@ pub const CodeCell = struct {
     output: ?CellOutput,
     /// RGBA color for this cell's plot (0-255 range)
     color: [4]u8,
-    /// True when output produced, cell becomes read-only
-    is_finalized: bool,
+    /// Whether this cell is actively playing (rendering its shader)
+    is_playing: bool,
+    /// Whether this cell has a validation error
+    has_validation_error: bool,
+    /// Validation error message (if any)
+    validation_error: ?[]const u8,
     /// Cursor position within this cell (byte index)
     cursor_index: usize,
 
@@ -63,7 +67,9 @@ pub const CodeCell = struct {
             .content = .{ .items = &.{}, .capacity = 0 },
             .output = null,
             .color = autoAssignColor(id),
-            .is_finalized = false,
+            .is_playing = false,
+            .has_validation_error = false,
+            .validation_error = null,
             .cursor_index = 0,
         };
     }
@@ -79,6 +85,10 @@ pub const CodeCell = struct {
         self.content.deinit(allocator);
         if (self.output) |*out| {
             out.deinit(allocator);
+        }
+        if (self.validation_error) |err| {
+            allocator.free(err);
+            self.validation_error = null;
         }
     }
 
@@ -141,11 +151,6 @@ pub const CodeCell = struct {
         } else {
             self.color[3] = 255; // Default to fully opaque
         }
-    }
-
-    /// Finalize this cell (mark as read-only with output)
-    pub fn finalize(self: *CodeCell) void {
-        self.is_finalized = true;
     }
 
     /// Auto-assign a color from a palette based on cell ID

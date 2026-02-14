@@ -49,6 +49,7 @@ fn testPipelineCreation(allocator: std.mem.Allocator, device: *c.SDL_GPUDevice, 
     std.debug.print("Step 2: Parse...\n", .{});
     const parse_result = try parser.parseTokens(allocator, tokens);
     defer allocator.free(parse_result.errors);
+    defer parse_result.ast.deinit(allocator);
     std.debug.print("  AST valid: true\n", .{});
 
     std.debug.print("Step 3: Generate GLSL...\n", .{});

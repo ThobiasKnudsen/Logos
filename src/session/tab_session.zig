@@ -6,6 +6,9 @@
 const std = @import("std");
 const parse_state = @import("parse_state.zig");
 const code_cell = @import("code_cell.zig");
+const lexer_mod = @import("../lang/lexer.zig");
+const parser_mod = @import("../lang/parser.zig");
+const glsl_gen = @import("../lang/glsl_gen.zig");
 
 pub const TabSession = struct {
     allocator: std.mem.Allocator,
@@ -372,11 +375,223 @@ pub const TabSession = struct {
         self.is_modified = true;
     }
 
-    /// Finalize a cell (mark as having output, read-only)
-    pub fn finalizeCell(self: *TabSession, index: usize) void {
-        if (index < self.cells.items.len) {
-            self.cells.items[index].finalize();
-            self.is_modified = true;
+    /// Shared lexer instance (initialized on first use)
+    var shared_lexer: ?lexer_mod.Lexer = null;
+
+    /// Ensure lexer is initialized and return a pointer to it
+    fn ensureLexer(allocator: std.mem.Allocator) !*lexer_mod.Lexer {
+        if (shared_lexer == null) {
+            shared_lexer = try lexer_mod.Lexer.init(allocator, lexer_mod.LexerConfig.logosPatterns());
+        }
+        return &shared_lexer.?;
+    }
+
+    /// Deinitialize the shared lexer to free all associated memory.
+    /// Should be called during application shutdown (e.g., from SessionManager.deinit).
+    pub fn deinitSharedLexer() void {
+        if (shared_lexer) |*lex| {
+            lex.deinit();
+            shared_lexer = null;
+        }
+    }
+
+    /// Get content of cells 0..cell_index concatenated (context for parsing cell N)
+    pub fn getAllCellsContentUpTo(self: *TabSession, cell_index: usize) ![]const u8 {
+        var buffer: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
+        errdefer buffer.deinit(self.allocator);
+
+        const end = @min(cell_index, self.cells.items.len);
+        for (self.cells.items[0..end], 0..) |*cell, i| {
+            if (i > 0) {
+                try buffer.append(self.allocator, '\n');
+            }
+            try buffer.appendSlice(self.allocator, cell.content.items);
+        }
+
+        return buffer.toOwnedSlice(self.allocator);
+    }
+
+    /// Get content of cells 0..cell_index+1 concatenated (context + cell itself)
+    pub fn getAllCellsContentIncluding(self: *TabSession, cell_index: usize) ![]const u8 {
+        var buffer: std.ArrayList(u8) = .{ .items = &.{}, .capacity = 0 };
+        errdefer buffer.deinit(self.allocator);
+
+        const end = @min(cell_index + 1, self.cells.items.len);
+        for (self.cells.items[0..end], 0..) |*cell, i| {
+            if (i > 0) {
+                try buffer.append(self.allocator, '\n');
+            }
+            try buffer.appendSlice(self.allocator, cell.content.items);
+        }
+
+        return buffer.toOwnedSlice(self.allocator);
+    }
+
+    /// Validate and parse a single cell with context from all previous cells.
+    /// Sets the cell's validation_error and has_validation_error fields.
+    /// On success, generates a shader if the cell has root-scope output.
+    pub fn validateAndParseCell(self: *TabSession, cell_index: usize) void {
+        if (cell_index >= self.cells.items.len) return;
+
+        var cell = &self.cells.items[cell_index];
+
+        // Clear previous validation state
+        cell.has_validation_error = false;
+        if (cell.validation_error) |err| {
+            self.allocator.free(err);
+            cell.validation_error = null;
+        }
+
+        // Clear previous output
+        if (cell.output) |*out| {
+            out.deinit(self.allocator);
+            cell.output = null;
+        }
+
+        const cell_content = cell.content.items;
+
+        // Skip empty cells
+        if (std.mem.trim(u8, cell_content, " \t\n\r").len == 0) {
+            return;
+        }
+
+        // Get all content up to and including this cell for parsing
+        const full_content = self.getAllCellsContentIncluding(cell_index) catch |err| {
+            cell.has_validation_error = true;
+            cell.validation_error = std.fmt.allocPrint(self.allocator, "Failed to get cell content: {}", .{err}) catch null;
+            return;
+        };
+        defer self.allocator.free(full_content);
+
+        // Get lexer
+        const lex = ensureLexer(self.allocator) catch |err| {
+            cell.has_validation_error = true;
+            cell.validation_error = std.fmt.allocPrint(self.allocator, "Lexer init failed: {}", .{err}) catch null;
+            return;
+        };
+
+        // Tokenize
+        const tokens = lex.tokenize(full_content) catch |err| {
+            cell.has_validation_error = true;
+            cell.validation_error = std.fmt.allocPrint(self.allocator, "Lexer error: {}", .{err}) catch null;
+            return;
+        };
+        defer lex.allocator.free(tokens);
+
+        if (tokens.len == 0) {
+            return;
+        }
+
+        // Parse
+        var parser = parser_mod.Parser.init(self.allocator, tokens);
+        defer parser.deinit();
+
+        const ast = parser.parse() catch |err| {
+            cell.has_validation_error = true;
+
+            if (parser.errors.items.len > 0) {
+                const first_err = parser.errors.items[0];
+                const loc = parse_state.byteOffsetToLocation(full_content, first_err.byte_start);
+                cell.validation_error = std.fmt.allocPrint(
+                    self.allocator,
+                    "{s} (Ln {d}, Col {d})",
+                    .{ first_err.message, loc.line, loc.column },
+                ) catch std.fmt.allocPrint(self.allocator, "Parse error: {}", .{err}) catch null;
+            } else {
+                cell.validation_error = std.fmt.allocPrint(self.allocator, "Parse error: {}", .{err}) catch null;
+            }
+            return;
+        };
+        defer ast.deinit(self.allocator);
+
+        // Generate GLSL shaders
+        var generator = glsl_gen.GlslGenerator.init(self.allocator);
+        defer generator.deinit();
+
+        const result = generator.generate(ast) catch |err| {
+            cell.has_validation_error = true;
+            cell.validation_error = std.fmt.allocPrint(self.allocator, "GLSL generation failed: {}", .{err}) catch null;
+            return;
+        };
+        defer {
+            // Free the errors array
+            self.allocator.free(result.errors);
+        }
+
+        if (result.shaders.len == 0) {
+            // No root outputs in this cell - that's OK, it just defines functions/variables
+            // Free the empty shaders slice
+            self.allocator.free(result.shaders);
+            return;
+        }
+
+        // Use the last shader (which corresponds to this cell's output)
+        // In a multi-cell parse, the shaders include outputs from all cells up to this one.
+        // We want the last one which is this cell's contribution.
+        const last_shader = result.shaders[result.shaders.len - 1];
+
+        // Store output in cell
+        cell.output = .{
+            .text = null,
+            .shader = .{
+                .source = self.allocator.dupe(u8, last_shader.source) catch {
+                    cell.has_validation_error = true;
+                    cell.validation_error = std.fmt.allocPrint(self.allocator, "Failed to copy shader source", .{}) catch null;
+                    // Free all shader sources
+                    for (result.shaders) |shader| {
+                        self.allocator.free(shader.source);
+                    }
+                    self.allocator.free(result.shaders);
+                    return;
+                },
+                .output_type = last_shader.output_type,
+                .color_seed = last_shader.color_seed,
+                .index = last_shader.index,
+            },
+            .output_type = .plot_only,
+            .error_msg = null,
+        };
+
+        // Free all shader sources from the result (we duped the one we need)
+        for (result.shaders) |shader| {
+            self.allocator.free(shader.source);
+        }
+        self.allocator.free(result.shaders);
+
+        std.log.info("Cell {d} validated and parsed successfully, shader generated", .{cell_index});
+    }
+
+    /// Find cells that depend on the given cell.
+    /// A cell B depends on cell A if B comes after A and B's content references
+    /// variables/functions that could be defined in A.
+    /// For simplicity, we consider all playing cells after cell_index as potentially dependent.
+    pub fn findDependentCells(self: *TabSession, cell_index: usize) []usize {
+        // Simple dependency: all cells after cell_index that are playing
+        var dependents: std.ArrayList(usize) = .{ .items = &.{}, .capacity = 0 };
+
+        for (cell_index + 1..self.cells.items.len) |i| {
+            if (self.cells.items[i].is_playing) {
+                dependents.append(self.allocator, i) catch continue;
+            }
+        }
+
+        return dependents.toOwnedSlice(self.allocator) catch &.{};
+    }
+
+    /// Replay all dependent cells that are currently playing.
+    /// Called when a cell is updated that other cells might depend on.
+    pub fn replayDependentCells(self: *TabSession, cell_index: usize) void {
+        const dependents = self.findDependentCells(cell_index);
+        defer self.allocator.free(dependents);
+
+        for (dependents) |dep_idx| {
+            // Bounds check: cell might have been removed or index is stale
+            if (dep_idx >= self.cells.items.len) {
+                std.log.warn("Skipping replay of out-of-bounds cell {d} (len={d})", .{ dep_idx, self.cells.items.len });
+                continue;
+            }
+            std.log.info("Replaying dependent cell {d}", .{dep_idx});
+            self.validateAndParseCell(dep_idx);
         }
     }
 

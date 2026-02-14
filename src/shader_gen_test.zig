@@ -166,6 +166,7 @@ fn testExpression(allocator: std.mem.Allocator, expression: []const u8) !TestRes
         return result;
     }
     defer allocator.free(parse_result.errors);
+    defer parse_result.ast.deinit(allocator);
 
     result.ast_valid = true;
     std.debug.print("AST generated successfully\n", .{});
@@ -275,7 +276,6 @@ fn printSummary(results: []const TestResult) void {
 
 // The main problematic expression that crashes
 test "x²+y²>1 shader generation" {
-    // Use arena allocator since AST nodes don't have proper cleanup yet
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();

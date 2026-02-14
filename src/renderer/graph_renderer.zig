@@ -305,14 +305,16 @@ pub const GraphRenderer = struct {
         for (cell_shaders_list) |shader| {
             // Find the cell that corresponds to this shader
             var color: [4]u8 = .{ 255, 85, 0, 255 }; // default orange, fully opaque
-            var current_cell_idx: usize = 0;
+            var playing_cell_idx: usize = 0;
             for (active_session.cells.items) |*cell| {
-                if (cell.content.items.len == 0) continue; // Skip empty cells
-                if (current_cell_idx == cell_idx) {
-                    color = cell.color;
-                    break;
+                // Only count playing cells that have shader output
+                if (cell.is_playing and cell.output != null and cell.output.?.shader != null) {
+                    if (playing_cell_idx == cell_idx) {
+                        color = cell.color;
+                        break;
+                    }
+                    playing_cell_idx += 1;
                 }
-                current_cell_idx += 1;
             }
 
             // Create and compile pipeline for this shader
@@ -380,12 +382,14 @@ pub const GraphRenderer = struct {
         };
         defer allocator.free(tokens);
 
-        // Parse (NOTE: AST nodes are intentionally not freed to avoid complicating the test)
+        // Parse
         var parse = parser.Parser.init(allocator, tokens);
+        defer parse.deinit();
         const ast = parse.parse() catch |err| {
             std.log.err("Parsing failed: {}", .{err});
             return err;
         };
+        defer ast.deinit(allocator);
 
         // Generate GLSL
         var gen = glsl_gen.GlslGenerator.init(allocator);

@@ -83,6 +83,8 @@ pub const GlslGenerator = struct {
     color_seed: u32,
     /// Temporary variable counter
     temp_counter: usize,
+    /// Tracks allocated temp names so they can be freed
+    temp_names: std.ArrayList([]const u8),
 
     const Self = @This();
 
@@ -99,6 +101,7 @@ pub const GlslGenerator = struct {
             .errors = .{ .items = &.{}, .capacity = 0 },
             .color_seed = 0x12345678,
             .temp_counter = 0,
+            .temp_names = .{ .items = &.{}, .capacity = 0 },
         };
     }
 
@@ -113,7 +116,17 @@ pub const GlslGenerator = struct {
             entry.value_ptr.deinit(self.allocator);
         }
         self.function_deps.deinit();
+        // Free captured_vars slices stored in nested_func_info
+        var nfi_iter = self.nested_func_info.iterator();
+        while (nfi_iter.next()) |entry| {
+            self.allocator.free(entry.value_ptr.captured_vars);
+        }
         self.nested_func_info.deinit();
+        // Free allocated temp variable names
+        for (self.temp_names.items) |name| {
+            self.allocator.free(name);
+        }
+        self.temp_names.deinit(self.allocator);
         self.errors.deinit(self.allocator);
     }
 
@@ -123,6 +136,11 @@ pub const GlslGenerator = struct {
         self.indent_level = 0;
         self.defined_vars.clearRetainingCapacity();
         self.emitted_functions.clearRetainingCapacity();
+        // Free allocated temp variable names from previous shader generation
+        for (self.temp_names.items) |name| {
+            self.allocator.free(name);
+        }
+        self.temp_names.clearRetainingCapacity();
         self.temp_counter = 0;
     }
 
@@ -251,6 +269,10 @@ pub const GlslGenerator = struct {
                 // If this is a nested function, track captured variables
                 if (parent_func != null) {
                     const captured = try self.findCapturedVars(fd.body, fd.params, parent_scope_vars);
+                    // Free old captured_vars if this function was already tracked
+                    if (self.nested_func_info.get(fd.name)) |old_info| {
+                        self.allocator.free(old_info.captured_vars);
+                    }
                     try self.nested_func_info.put(fd.name, .{
                         .node = node,
                         .parent_func = parent_func,
@@ -278,6 +300,10 @@ pub const GlslGenerator = struct {
                     // Track captured variables for nested function
                     if (parent_func != null) {
                         const captured = try self.findCapturedVars(nested_fd.body, nested_fd.params, parent_scope_vars);
+                        // Free old captured_vars if this function was already tracked
+                        if (self.nested_func_info.get(nested_fd.name)) |old_info| {
+                            self.allocator.free(old_info.captured_vars);
+                        }
                         try self.nested_func_info.put(nested_fd.name, .{
                             .node = b.value,
                             .parent_func = parent_func,
@@ -1635,6 +1661,7 @@ pub const GlslGenerator = struct {
     fn genTempName(self: *Self) ![]const u8 {
         const name = try std.fmt.allocPrint(self.allocator, "_tmp{d}", .{self.temp_counter});
         self.temp_counter += 1;
+        try self.temp_names.append(self.allocator, name);
         return name;
     }
 
