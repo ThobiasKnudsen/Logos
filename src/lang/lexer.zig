@@ -202,14 +202,17 @@ pub const Lexer = struct {
             // Try to match a token
             const match_result = self.trie.get(remaining) catch |err| {
                 if (err == regex_trie.RegexTrieError.NodeNotFound) {
-                    // No match - treat as unknown single character
+                    // No match - consume the full UTF-8 codepoint (not just 1 byte)
+                    // to avoid splitting multi-byte characters like π (0xCF 0x80) across tokens.
+                    const byte_len = std.unicode.utf8ByteSequenceLength(content[pos]) catch 1;
+                    const end = @min(pos + byte_len, content.len);
                     try tokens.append(self.allocator, .{
-                        .text = content[pos .. pos + 1],
+                        .text = content[pos..end],
                         .token_type = .unknown,
                         .byte_start = pos,
-                        .byte_end = pos + 1,
+                        .byte_end = end,
                     });
-                    pos += 1;
+                    pos = end;
                     continue;
                 }
                 return err;

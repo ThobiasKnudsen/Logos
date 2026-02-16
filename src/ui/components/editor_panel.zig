@@ -188,7 +188,7 @@ pub const EditorPanel = struct {
 
         // Render each token with its syntax color
         for (tokens) |token| {
-            const color = theme.syntax.colorForTokenType(token.token_type);
+            const color = theme.syntax.colorForToken(token.token_type, token.text);
             text_entry.textLayout.addText(token.text, base_opts.override(.{ .color_text = color }));
         }
 

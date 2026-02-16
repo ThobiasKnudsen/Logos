@@ -1,7 +1,9 @@
 //! Visual theme constants - colors, fonts, spacing
 //!
-//! Inspired by modern code editors with a dark, focused aesthetic.
+//! Syntax highlighting themes are loaded from .logos.theme.json in the
+//! working directory. The file is auto-created with defaults if missing.
 
+const std = @import("std");
 const dvui = @import("dvui");
 const parse_state = @import("../session/parse_state.zig");
 
@@ -49,37 +51,424 @@ pub const colors = struct {
     pub const toolbar_button_active = dvui.Color{ .r = 75, .g = 165, .b = 95, .a = 255 }; // green for play
 };
 
-/// Syntax highlighting colors - inspired by One Dark Pro
-pub const syntax = struct {
-    pub const keyword = dvui.Color{ .r = 198, .g = 120, .b = 221, .a = 255 }; // #c678dd purple
-    pub const identifier = dvui.Color{ .r = 224, .g = 108, .b = 117, .a = 255 }; // #e06c75 red
-    pub const number = dvui.Color{ .r = 209, .g = 154, .b = 102, .a = 255 }; // #d19a66 orange
-    pub const operator = dvui.Color{ .r = 86, .g = 182, .b = 194, .a = 255 }; // #56b6c2 cyan
-    pub const string = dvui.Color{ .r = 152, .g = 195, .b = 121, .a = 255 }; // #98c379 green
-    pub const comment = dvui.Color{ .r = 92, .g = 99, .b = 112, .a = 255 }; // #5c6370 gray
-    pub const punctuation = dvui.Color{ .r = 171, .g = 178, .b = 191, .a = 255 }; // #abb2bf light gray
-    pub const whitespace = dvui.Color{ .r = 171, .g = 178, .b = 191, .a = 255 }; // same as punctuation
-    pub const builtin = dvui.Color{ .r = 97, .g = 175, .b = 239, .a = 255 }; // #61afef blue
-    pub const axis = dvui.Color{ .r = 229, .g = 192, .b = 123, .a = 255 }; // #e5c07b yellow
-    pub const type_name = dvui.Color{ .r = 86, .g = 182, .b = 194, .a = 255 }; // #56b6c2 cyan
-    pub const unknown = dvui.Color{ .r = 224, .g = 108, .b = 117, .a = 255 }; // #e06c75 red (error-ish)
+// ============================================================================
+// Syntax Highlighting — loaded from .logos.theme.json
+// ============================================================================
 
-    /// Get color for a token type
-    pub fn colorForTokenType(token_type: parse_state.TokenType) dvui.Color {
-        return switch (token_type) {
-            .keyword => keyword,
-            .identifier => identifier,
-            .number => number,
-            .operator => operator,
-            .string => string,
-            .comment => comment,
-            .punctuation => punctuation,
-            .whitespace => whitespace,
-            .builtin => builtin,
-            .axis => axis,
-            .type_name => type_name,
-            .unknown => unknown,
+pub const SyntaxTheme = struct {
+    keyword: dvui.Color,
+    identifier: dvui.Color,
+    math_variable: dvui.Color,
+    number: dvui.Color,
+    operator: dvui.Color,
+    string: dvui.Color,
+    comment: dvui.Color,
+    punctuation: dvui.Color,
+    whitespace: dvui.Color,
+    builtin: dvui.Color,
+    axis: dvui.Color,
+    type_name: dvui.Color,
+    unknown: dvui.Color,
+};
+
+fn hex(comptime rgb: u24) dvui.Color {
+    return .{
+        .r = @truncate(rgb >> 16),
+        .g = @truncate(rgb >> 8),
+        .b = @truncate(rgb),
+        .a = 255,
+    };
+}
+
+// Field names in the order they appear in JSON / SyntaxTheme struct
+const field_names = [_][]const u8{
+    "keyword",
+    "identifier",
+    "math_variable",
+    "number",
+    "operator",
+    "string",
+    "comment",
+    "punctuation",
+    "whitespace",
+    "builtin",
+    "axis",
+    "type_name",
+    "unknown",
+};
+
+fn getField(t: *const SyntaxTheme, comptime name: []const u8) dvui.Color {
+    return @field(t, name);
+}
+
+fn setField(t: *SyntaxTheme, comptime name: []const u8, c: dvui.Color) void {
+    @field(t, name) = c;
+}
+
+// ============================================================================
+// Built-in default themes (used to generate .logos.theme.json on first run)
+// ============================================================================
+
+const theme_names = [_][]const u8{
+    "one_dark",
+    "monokai",
+    "dracula",
+    "catppuccin",
+    "gruvbox",
+    "nord",
+    "solarized",
+};
+
+const default_themes = [_]SyntaxTheme{
+    // One Dark Pro
+    .{
+        .keyword = hex(0xc678dd),
+        .identifier = hex(0xe06c75),
+        .math_variable = hex(0xe5c07b),
+        .number = hex(0xd19a66),
+        .operator = hex(0x56b6c2),
+        .string = hex(0x98c379),
+        .comment = hex(0x5c6370),
+        .punctuation = hex(0xabb2bf),
+        .whitespace = hex(0xabb2bf),
+        .builtin = hex(0x61afef),
+        .axis = hex(0xd19a66),
+        .type_name = hex(0xe5c07b),
+        .unknown = hex(0xe06c75),
+    },
+    // Monokai Pro
+    .{
+        .keyword = hex(0xff6188),
+        .identifier = hex(0xa9dc76),
+        .math_variable = hex(0xffd866),
+        .number = hex(0xab9df2),
+        .operator = hex(0xff6188),
+        .string = hex(0xffd866),
+        .comment = hex(0x727072),
+        .punctuation = hex(0x939293),
+        .whitespace = hex(0x939293),
+        .builtin = hex(0x78dce8),
+        .axis = hex(0xfc9867),
+        .type_name = hex(0x78dce8),
+        .unknown = hex(0xfc9867),
+    },
+    // Dracula
+    .{
+        .keyword = hex(0xff79c6),
+        .identifier = hex(0x50fa7b),
+        .math_variable = hex(0xf8f8f2),
+        .number = hex(0xbd93f9),
+        .operator = hex(0xff79c6),
+        .string = hex(0xf1fa8c),
+        .comment = hex(0x6272a4),
+        .punctuation = hex(0xf8f8f2),
+        .whitespace = hex(0xf8f8f2),
+        .builtin = hex(0x8be9fd),
+        .axis = hex(0xffb86c),
+        .type_name = hex(0x8be9fd),
+        .unknown = hex(0xff5555),
+    },
+    // Catppuccin Mocha
+    .{
+        .keyword = hex(0xcba6f7),
+        .identifier = hex(0xa6e3a1),
+        .math_variable = hex(0xf38ba8),
+        .number = hex(0xfab387),
+        .operator = hex(0x89dceb),
+        .string = hex(0xa6e3a1),
+        .comment = hex(0x6c7086),
+        .punctuation = hex(0xbac2de),
+        .whitespace = hex(0xbac2de),
+        .builtin = hex(0x89b4fa),
+        .axis = hex(0xf9e2af),
+        .type_name = hex(0x94e2d5),
+        .unknown = hex(0xf38ba8),
+    },
+    // Gruvbox Dark
+    .{
+        .keyword = hex(0xfb4934),
+        .identifier = hex(0x83a598),
+        .math_variable = hex(0xfabd2f),
+        .number = hex(0xd3869b),
+        .operator = hex(0xfe8019),
+        .string = hex(0xb8bb26),
+        .comment = hex(0x928374),
+        .punctuation = hex(0xa89984),
+        .whitespace = hex(0xa89984),
+        .builtin = hex(0x8ec07c),
+        .axis = hex(0xfabd2f),
+        .type_name = hex(0x83a598),
+        .unknown = hex(0xfb4934),
+    },
+    // Nord
+    .{
+        .keyword = hex(0x81a1c1),
+        .identifier = hex(0x88c0d0),
+        .math_variable = hex(0xd8dee9),
+        .number = hex(0xb48ead),
+        .operator = hex(0x81a1c1),
+        .string = hex(0xa3be8c),
+        .comment = hex(0x616e88),
+        .punctuation = hex(0xd8dee9),
+        .whitespace = hex(0xd8dee9),
+        .builtin = hex(0x88c0d0),
+        .axis = hex(0xebcb8b),
+        .type_name = hex(0x8fbcbb),
+        .unknown = hex(0xbf616a),
+    },
+    // Solarized Dark
+    .{
+        .keyword = hex(0x859900),
+        .identifier = hex(0x268bd2),
+        .math_variable = hex(0xcb4b16),
+        .number = hex(0xd33682),
+        .operator = hex(0x93a1a1),
+        .string = hex(0x2aa198),
+        .comment = hex(0x586e75),
+        .punctuation = hex(0x839496),
+        .whitespace = hex(0x839496),
+        .builtin = hex(0x268bd2),
+        .axis = hex(0xb58900),
+        .type_name = hex(0xcb4b16),
+        .unknown = hex(0xdc322f),
+    },
+};
+
+const default_selected = "catppuccin";
+const theme_file = ".logos.theme.json";
+
+// ============================================================================
+// Runtime state
+// ============================================================================
+
+pub const syntax = struct {
+    var active: SyntaxTheme = default_themes[3]; // catppuccin
+    var current_name: [64]u8 = nameBuffer(default_selected);
+    var current_name_len: usize = default_selected.len;
+
+    // Loaded theme data (names + colors) from JSON
+    var loaded_themes: [max_themes]SyntaxTheme = undefined;
+    var loaded_names: [max_themes][64]u8 = undefined;
+    var loaded_name_lens: [max_themes]usize = undefined;
+    var loaded_count: usize = 0;
+
+    const max_themes = 16;
+
+    fn nameBuffer(comptime name: []const u8) [64]u8 {
+        var buf: [64]u8 = .{0} ** 64;
+        @memcpy(buf[0..name.len], name);
+        return buf;
+    }
+
+    pub fn init() void {
+        loadFromFile() catch {
+            // File doesn't exist or is invalid — use defaults and create it
+            loadDefaults();
+            saveToFile() catch |err| {
+                std.log.warn("Could not create {s}: {}", .{ theme_file, err });
+            };
         };
+    }
+
+    fn loadDefaults() void {
+        loaded_count = theme_names.len;
+        for (theme_names, 0..) |name, i| {
+            loaded_themes[i] = default_themes[i];
+            loaded_name_lens[i] = name.len;
+            loaded_names[i] = .{0} ** 64;
+            @memcpy(loaded_names[i][0..name.len], name);
+        }
+        // Set default selection
+        current_name = nameBuffer(default_selected);
+        current_name_len = default_selected.len;
+        active = default_themes[3]; // catppuccin
+    }
+
+    fn loadFromFile() !void {
+        const file = try std.fs.cwd().openFile(theme_file, .{});
+        defer file.close();
+
+        const content = try file.readToEndAlloc(std.heap.page_allocator, 1024 * 64);
+        defer std.heap.page_allocator.free(content);
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, content, .{});
+        defer parsed.deinit();
+
+        const root = parsed.value;
+        if (root != .object) return error.InvalidFormat;
+
+        // Read "selected"
+        if (root.object.get("selected")) |sel| {
+            if (sel == .string) {
+                const name = sel.string;
+                if (name.len <= 64) {
+                    current_name_len = name.len;
+                    current_name = .{0} ** 64;
+                    @memcpy(current_name[0..name.len], name);
+                }
+            }
+        }
+
+        // Read "themes"
+        const themes_val = root.object.get("themes") orelse return error.InvalidFormat;
+        if (themes_val != .object) return error.InvalidFormat;
+
+        loaded_count = 0;
+        var it = themes_val.object.iterator();
+        while (it.next()) |entry| {
+            if (loaded_count >= max_themes) break;
+            const name = entry.key_ptr.*;
+            const theme_obj = entry.value_ptr.*;
+            if (theme_obj != .object) continue;
+            if (name.len > 64) continue;
+
+            loaded_name_lens[loaded_count] = name.len;
+            loaded_names[loaded_count] = .{0} ** 64;
+            @memcpy(loaded_names[loaded_count][0..name.len], name);
+
+            // Start from catppuccin defaults for any missing fields
+            var t = default_themes[3];
+            inline for (field_names) |fname| {
+                if (theme_obj.object.get(fname)) |color_val| {
+                    if (color_val == .string) {
+                        if (parseHexColor(color_val.string)) |c| {
+                            setField(&t, fname, c);
+                        }
+                    }
+                }
+            }
+            loaded_themes[loaded_count] = t;
+            loaded_count += 1;
+        }
+
+        // Apply the selected theme
+        applyByName(current_name[0..current_name_len]);
+    }
+
+    fn applyByName(name: []const u8) void {
+        for (0..loaded_count) |i| {
+            if (std.mem.eql(u8, loaded_names[i][0..loaded_name_lens[i]], name)) {
+                active = loaded_themes[i];
+                return;
+            }
+        }
+        // Not found — use first loaded theme
+        if (loaded_count > 0) {
+            active = loaded_themes[0];
+            current_name_len = loaded_name_lens[0];
+            current_name = loaded_names[0];
+        }
+    }
+
+    pub fn setThemeByName(name: []const u8) void {
+        if (name.len > 64) return;
+        current_name = .{0} ** 64;
+        @memcpy(current_name[0..name.len], name);
+        current_name_len = name.len;
+        applyByName(name);
+        saveToFile() catch |err| {
+            std.log.warn("Could not save theme selection: {}", .{err});
+        };
+    }
+
+    pub fn currentThemeName() []const u8 {
+        return current_name[0..current_name_len];
+    }
+
+    pub fn themeCount() usize {
+        return loaded_count;
+    }
+
+    pub fn themeName(idx: usize) []const u8 {
+        return loaded_names[idx][0..loaded_name_lens[idx]];
+    }
+
+    /// Get the color for a token. Single-letter identifiers (math variables
+    /// like x, y, n) get the math_variable color; everything else uses
+    /// the standard color for its token type.
+    pub fn colorForToken(token_type: parse_state.TokenType, text: []const u8) dvui.Color {
+        if (token_type == .identifier and text.len == 1) {
+            return active.math_variable;
+        }
+        return switch (token_type) {
+            .keyword => active.keyword,
+            .identifier => active.identifier,
+            .number => active.number,
+            .operator => active.operator,
+            .string => active.string,
+            .comment => active.comment,
+            .punctuation => active.punctuation,
+            .whitespace => active.whitespace,
+            .builtin => active.builtin,
+            .axis => active.axis,
+            .type_name => active.type_name,
+            .unknown => active.unknown,
+        };
+    }
+
+    // ---- JSON I/O helpers ----
+
+    fn parseHexColor(s: []const u8) ?dvui.Color {
+        // Accept "#RRGGBB" format
+        if (s.len != 7 or s[0] != '#') return null;
+        const r = std.fmt.parseUnsigned(u8, s[1..3], 16) catch return null;
+        const g = std.fmt.parseUnsigned(u8, s[3..5], 16) catch return null;
+        const b = std.fmt.parseUnsigned(u8, s[5..7], 16) catch return null;
+        return .{ .r = r, .g = g, .b = b, .a = 255 };
+    }
+
+    fn colorToHex(buf: *[7]u8, c: dvui.Color) void {
+        const hex_chars = "0123456789abcdef";
+        buf[0] = '#';
+        buf[1] = hex_chars[c.r >> 4];
+        buf[2] = hex_chars[c.r & 0xf];
+        buf[3] = hex_chars[c.g >> 4];
+        buf[4] = hex_chars[c.g & 0xf];
+        buf[5] = hex_chars[c.b >> 4];
+        buf[6] = hex_chars[c.b & 0xf];
+    }
+
+    fn saveToFile() !void {
+        var file = try std.fs.cwd().createFile(theme_file, .{});
+        defer file.close();
+
+        try file.writeAll("{\n");
+
+        // "selected"
+        try file.writeAll("  \"selected\": \"");
+        try file.writeAll(current_name[0..current_name_len]);
+        try file.writeAll("\",\n");
+
+        // "themes"
+        try file.writeAll("  \"themes\": {\n");
+        for (0..loaded_count) |i| {
+            try file.writeAll("    \"");
+            try file.writeAll(loaded_names[i][0..loaded_name_lens[i]]);
+            try file.writeAll("\": {\n");
+
+            const t = &loaded_themes[i];
+            inline for (field_names, 0..) |fname, fi| {
+                var hbuf: [7]u8 = undefined;
+                colorToHex(&hbuf, getField(t, fname));
+                try file.writeAll("      \"");
+                try file.writeAll(fname);
+                try file.writeAll("\": \"");
+                try file.writeAll(&hbuf);
+                if (fi < field_names.len - 1) {
+                    try file.writeAll("\",\n");
+                } else {
+                    try file.writeAll("\"\n");
+                }
+            }
+
+            if (i < loaded_count - 1) {
+                try file.writeAll("    },\n");
+            } else {
+                try file.writeAll("    }\n");
+            }
+        }
+        try file.writeAll("  }\n");
+        try file.writeAll("}\n");
     }
 };
 

@@ -42,6 +42,8 @@ pub const GeneratedShader = struct {
     color_seed: u32,
     /// Index in the output list (for debugging)
     index: usize,
+    /// Byte offset of the source expression in the input text
+    source_start: usize,
 };
 
 /// Result of GLSL generation
@@ -174,6 +176,7 @@ pub const GlslGenerator = struct {
                 .output_type = output_type,
                 .color_seed = self.color_seed,
                 .index = i,
+                .source_start = output.span.start,
             });
         }
 

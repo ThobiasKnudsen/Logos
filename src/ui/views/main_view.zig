@@ -81,6 +81,27 @@ pub fn mainView(app: *App) bool {
     // Check for keyboard shortcuts and window events
     var keyboard_action: components.MenuBar.Action = .none;
     for (dvui.events()) |*e| {
+        // DEBUG: Log text input events to diagnose Unicode issues
+        if (e.evt == .text) {
+            const txt = e.evt.text.txt;
+            if (txt.len > 0 and txt[0] > 127) {
+                // Non-ASCII text received - log bytes for debugging
+                var buf: [64]u8 = undefined;
+                var pos: usize = 0;
+                for (txt) |byte| {
+                    if (pos + 5 < buf.len) {
+                        const hex = "0123456789ABCDEF";
+                        buf[pos] = '0';
+                        buf[pos + 1] = 'x';
+                        buf[pos + 2] = hex[byte >> 4];
+                        buf[pos + 3] = hex[byte & 0x0F];
+                        buf[pos + 4] = ' ';
+                        pos += 5;
+                    }
+                }
+                std.log.info("TEXT INPUT: len={d} bytes=[{s}]", .{ txt.len, buf[0..pos] });
+            }
+        }
         if (e.evt == .key and e.evt.key.action == .down) {
             const ctrl_pressed = e.evt.key.mod.has(.lcontrol) or e.evt.key.mod.has(.rcontrol);
             const shift_pressed = e.evt.key.mod.has(.lshift) or e.evt.key.mod.has(.rshift);
@@ -254,6 +275,12 @@ fn handleMenuAction(app: *App, action: components.MenuBar.Action) bool {
         },
         .reset_zoom => {
             theme.fonts.resetZoom();
+        },
+        .set_theme => |buf| {
+            const len = std.mem.indexOfScalar(u8, &buf, 0) orelse buf.len;
+            if (len > 0) {
+                theme.syntax.setThemeByName(buf[0..len]);
+            }
         },
         else => {},
     }

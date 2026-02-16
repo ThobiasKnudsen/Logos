@@ -525,10 +525,32 @@ pub const TabSession = struct {
             return;
         }
 
-        // Use the last shader (which corresponds to this cell's output)
-        // In a multi-cell parse, the shaders include outputs from all cells up to this one.
-        // We want the last one which is this cell's contribution.
-        const last_shader = result.shaders[result.shaders.len - 1];
+        // Calculate the byte offset where this cell's content starts in full_content.
+        // getAllCellsContentIncluding concatenates cells with '\n' separators.
+        var current_cell_byte_start: usize = 0;
+        for (self.cells.items[0..cell_index]) |c| {
+            current_cell_byte_start += c.content.items.len + 1; // +1 for '\n' separator
+        }
+
+        // Find the last shader whose source expression falls within this cell's byte range.
+        // Shaders from previous cells have source_start < current_cell_byte_start.
+        var this_cell_shader_idx: ?usize = null;
+        for (result.shaders, 0..) |shader, i| {
+            if (shader.source_start >= current_cell_byte_start) {
+                this_cell_shader_idx = i;
+            }
+        }
+
+        if (this_cell_shader_idx == null) {
+            // This cell only defines functions/bindings, no own output
+            for (result.shaders) |shader| {
+                self.allocator.free(shader.source);
+            }
+            self.allocator.free(result.shaders);
+            return;
+        }
+
+        const last_shader = result.shaders[this_cell_shader_idx.?];
 
         // Store output in cell
         cell.output = .{
@@ -547,6 +569,7 @@ pub const TabSession = struct {
                 .output_type = last_shader.output_type,
                 .color_seed = last_shader.color_seed,
                 .index = last_shader.index,
+                .source_start = last_shader.source_start,
             },
             .output_type = .plot_only,
             .error_msg = null,

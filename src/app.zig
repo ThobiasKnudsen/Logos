@@ -3,6 +3,7 @@ const dvui = @import("dvui");
 const SDLBackend = @import("sdl3gpu");
 
 const ui = @import("ui/ui.zig");
+const theme = @import("ui/theme.zig");
 const session = @import("session/session.zig");
 const renderer = @import("renderer/renderer.zig");
 
@@ -12,6 +13,9 @@ pub const App = struct {
     graph_renderer: renderer.GraphRenderer,
 
     pub fn init(allocator: std.mem.Allocator) !App {
+        // Load syntax theme from .logos.theme.json (creates file if missing)
+        theme.syntax.init();
+
         var session_manager = session.SessionManager.init(allocator);
         errdefer session_manager.deinit();
 
@@ -53,10 +57,24 @@ pub const App = struct {
         });
         defer win.deinit();
 
+        // Register DejaVu Sans fonts for broad Unicode coverage
+        // (Greek π, arrows →, math ≤≥≠, Latin Extended ŋ, and more)
+        try win.addFont("DejaVu Sans", @embedFile("fonts/DejaVuSans.ttf"), null);
+        try win.addFont("DejaVu Sans Mono", @embedFile("fonts/DejaVuSansMono.ttf"), null);
+
+        // Override theme fonts to use DejaVu Sans
+        const body_font: dvui.Font = .find(.{ .family = "DejaVu Sans" });
+        const mono_font: dvui.Font = .find(.{ .family = "DejaVu Sans Mono" });
+        win.theme.font_body = body_font;
+        win.theme.font_heading = body_font;
+        win.theme.font_title = body_font.withSize(20);
+        win.theme.font_mono = mono_font;
+
         // Initialize graph renderer with the backend now that SDL is ready
         self.graph_renderer.initWithDevice(&backend);
 
         var interrupted = false;
+        var debug_logged = false;
 
         main_loop: while (true) {
             // beginWait coordinates with waitTime below to run frames only when needed
@@ -64,6 +82,43 @@ pub const App = struct {
 
             // Begin dvui frame
             try win.begin(nstime);
+
+            // One-time font debug: verify glyph rendering for Unicode characters
+            if (!debug_logged) {
+                debug_logged = true;
+                const theme_mono = dvui.themeGet().font_mono;
+                std.log.info("FONT DEBUG: mono family='{s}' size={d}", .{
+                    dvui.Font.string(&theme_mono.family),
+                    @as(u32, @intFromFloat(theme_mono.size)),
+                });
+
+                // Test if the font can actually render target codepoints
+                if (win.fonts.getOrCreate(self.allocator, theme_mono)) |entry| {
+                    const test_codepoints = [_]struct { cp: u32, name: []const u8 }{
+                        .{ .cp = 0x41, .name = "A (ASCII)" },
+                        .{ .cp = 0x03C0, .name = "π (Greek pi)" },
+                        .{ .cp = 0x2192, .name = "→ (right arrow)" },
+                        .{ .cp = 0x014B, .name = "ŋ (eng)" },
+                        .{ .cp = 0x2265, .name = "≥ (gte)" },
+                        .{ .cp = 0x2264, .name = "≤ (lte)" },
+                        .{ .cp = 0x2260, .name = "≠ (neq)" },
+                    };
+                    for (test_codepoints) |tc| {
+                        if (entry.glyphInfoGetOrReplacement(self.allocator, tc.cp)) |gi| {
+                            std.log.info("FONT DEBUG: {s} advance={d} w={d} h={d}", .{
+                                tc.name,
+                                @as(u32, @intFromFloat(gi.advance)),
+                                @as(u32, @intFromFloat(gi.w)),
+                                @as(u32, @intFromFloat(gi.h)),
+                            });
+                        } else |err| {
+                            std.log.err("FONT DEBUG: {s} ERROR: {}", .{ tc.name, err });
+                        }
+                    }
+                } else |err| {
+                    std.log.err("FONT DEBUG: getOrCreate failed: {}", .{err});
+                }
+            }
 
             // Poll SDL events without blocking
             _ = try backend.addAllEvents(&win);

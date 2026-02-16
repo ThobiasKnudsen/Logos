@@ -1,5 +1,4 @@
 - add factorial function.
-- rare symbols only show as rectangles, e.g π, →, ŋ. 
 - add symbolic calculations with SymEngine and/or GiNaC. 
 - Changing the plotting area when changing tab. 
 - make tab work for indentation and also auto indent when pressing endter on lines that are indented.
