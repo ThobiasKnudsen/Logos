@@ -139,13 +139,13 @@ pub const Parser = struct {
             _ = self.advance();
             self.skipWhitespaceAndComments();
 
-            // Function definition: name(params): body
+            // Function definition: name(params): body  OR  name(params) = body
             if (self.checkText("(")) {
                 const params_result = self.tryParseParamList();
                 if (params_result) |params| {
                     self.skipWhitespaceAndComments();
-                    if (self.checkText(":")) {
-                        _ = self.advance(); // consume ':'
+                    if (self.checkText(":") or self.checkText("=")) {
+                        _ = self.advance(); // consume ':' or '='
                         self.skipWhitespaceAndComments();
                         const body = self.parseExpression() catch |err| {
                             self.allocator.free(params);
@@ -1106,11 +1106,11 @@ pub fn parseTokens(allocator: std.mem.Allocator, tokens: []const Token) !struct 
 
 // ============ Tests ============
 
-test "function definition followed by function call with equals" {
+test "function definition with colon syntax" {
     const allocator = std.testing.allocator;
 
-    // Test: a(x,y): (x+y), a(x,y) = 9
-    // First defines function a, then uses it in an equality expression
+    // Test: a(x,y): (x+y)
+    // Defines function a using colon syntax
     const tokens = &[_]Token{
         .{ .text = "a", .token_type = .identifier, .byte_start = 0, .byte_end = 1 },
         .{ .text = "(", .token_type = .punctuation, .byte_start = 1, .byte_end = 2 },
@@ -1125,18 +1125,6 @@ test "function definition followed by function call with equals" {
         .{ .text = "+", .token_type = .operator, .byte_start = 10, .byte_end = 11 },
         .{ .text = "y", .token_type = .identifier, .byte_start = 11, .byte_end = 12 },
         .{ .text = ")", .token_type = .punctuation, .byte_start = 12, .byte_end = 13 },
-        .{ .text = ",", .token_type = .punctuation, .byte_start = 13, .byte_end = 14 },
-        .{ .text = " ", .token_type = .whitespace, .byte_start = 14, .byte_end = 15 },
-        .{ .text = "a", .token_type = .identifier, .byte_start = 15, .byte_end = 16 },
-        .{ .text = "(", .token_type = .punctuation, .byte_start = 16, .byte_end = 17 },
-        .{ .text = "x", .token_type = .identifier, .byte_start = 17, .byte_end = 18 },
-        .{ .text = ",", .token_type = .punctuation, .byte_start = 18, .byte_end = 19 },
-        .{ .text = "y", .token_type = .identifier, .byte_start = 19, .byte_end = 20 },
-        .{ .text = ")", .token_type = .punctuation, .byte_start = 20, .byte_end = 21 },
-        .{ .text = " ", .token_type = .whitespace, .byte_start = 21, .byte_end = 22 },
-        .{ .text = "=", .token_type = .operator, .byte_start = 22, .byte_end = 23 },
-        .{ .text = " ", .token_type = .whitespace, .byte_start = 23, .byte_end = 24 },
-        .{ .text = "9", .token_type = .number, .byte_start = 24, .byte_end = 25 },
     };
 
     const result = try parseTokens(allocator, tokens);
@@ -1147,12 +1135,50 @@ test "function definition followed by function call with equals" {
         allocator.free(result.errors);
     }
 
-    if (result.errors.len > 0) {
-        std.debug.print("\nParse errors:\n", .{});
-        for (result.errors) |err| {
-            std.debug.print("  [{}-{}]: {s}\n", .{ err.byte_start, err.byte_end, err.message });
+    try std.testing.expect(result.errors.len == 0);
+
+    // Verify it's a block containing a function_def
+    try std.testing.expect(result.ast.data == .block);
+    const stmts = result.ast.data.block;
+    try std.testing.expectEqual(@as(usize, 1), stmts.len);
+    try std.testing.expect(stmts[0].data == .function_def);
+    try std.testing.expectEqualStrings("a", stmts[0].data.function_def.name);
+}
+
+test "function definition with equals syntax" {
+    const allocator = std.testing.allocator;
+
+    // Test: f(x) = x^2
+    // Defines function f using equals syntax (standard math notation)
+    const tokens = &[_]Token{
+        .{ .text = "f", .token_type = .identifier, .byte_start = 0, .byte_end = 1 },
+        .{ .text = "(", .token_type = .punctuation, .byte_start = 1, .byte_end = 2 },
+        .{ .text = "x", .token_type = .identifier, .byte_start = 2, .byte_end = 3 },
+        .{ .text = ")", .token_type = .punctuation, .byte_start = 3, .byte_end = 4 },
+        .{ .text = " ", .token_type = .whitespace, .byte_start = 4, .byte_end = 5 },
+        .{ .text = "=", .token_type = .operator, .byte_start = 5, .byte_end = 6 },
+        .{ .text = " ", .token_type = .whitespace, .byte_start = 6, .byte_end = 7 },
+        .{ .text = "x", .token_type = .identifier, .byte_start = 7, .byte_end = 8 },
+        .{ .text = "^", .token_type = .operator, .byte_start = 8, .byte_end = 9 },
+        .{ .text = "2", .token_type = .number, .byte_start = 9, .byte_end = 10 },
+    };
+
+    const result = try parseTokens(allocator, tokens);
+    defer {
+        if (result.errors.len == 0) {
+            result.ast.deinit(allocator);
         }
+        allocator.free(result.errors);
     }
 
     try std.testing.expect(result.errors.len == 0);
+
+    // Verify it's a block containing a function_def
+    try std.testing.expect(result.ast.data == .block);
+    const stmts = result.ast.data.block;
+    try std.testing.expectEqual(@as(usize, 1), stmts.len);
+    try std.testing.expect(stmts[0].data == .function_def);
+    try std.testing.expectEqualStrings("f", stmts[0].data.function_def.name);
+    try std.testing.expectEqual(@as(usize, 1), stmts[0].data.function_def.params.len);
+    try std.testing.expectEqualStrings("x", stmts[0].data.function_def.params[0]);
 }

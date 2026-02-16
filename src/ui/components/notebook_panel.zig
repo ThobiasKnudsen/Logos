@@ -24,13 +24,6 @@ pub const NotebookPanel = struct {
     const medium_corner_radius: f32 = base_unit * 2; // 8px - for cells and larger buttons
     const large_corner_radius: f32 = base_unit * 3; // 12px - for prominent elements
 
-    // Custom theme for text entry with transparent focus
-    const no_focus_theme = blk: {
-        var t = dvui.Theme.builtin.adwaita_dark;
-        t.focus = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 };
-        break :blk t;
-    };
-
     // Global lexer instance (initialized lazily)
     var lexer: ?lexer_mod.Lexer = null;
 
@@ -400,6 +393,12 @@ pub const NotebookPanel = struct {
         const scaled_padding_y = base_unit * 0.5 * scale; // 2px vertical padding (minimal, consistent)
         const scaled_text_corner = small_corner_radius * scale;
 
+        // Create a runtime theme from the window's actual theme (which has DejaVu fonts)
+        // with transparent focus. Using a comptime theme from adwaita_dark would use
+        // Vera Sans Mono which lacks many Unicode glyphs (π, →, ŋ, etc.)
+        var cell_theme = dvui.themeGet();
+        cell_theme.focus = dvui.Color{ .r = 0, .g = 0, .b = 0, .a = 0 };
+
         // Create TextEntryWidget
         var text_entry = dvui.widgetAlloc(dvui.TextEntryWidget);
         text_entry.init(@src(), .{
@@ -423,7 +422,7 @@ pub const NotebookPanel = struct {
             .background = true,
             .color_fill = theme.colors.bg_elevated,
             .font = scaled_font,
-            .theme = &no_focus_theme,
+            .theme = &cell_theme,
         });
         text_entry.data().was_allocated_on_widget_stack = true;
         defer text_entry.deinit();
@@ -533,7 +532,7 @@ pub const NotebookPanel = struct {
         const base_opts = text_entry.data().options.strip();
 
         for (tokens) |token| {
-            const color = theme.syntax.colorForTokenType(token.token_type);
+            const color = theme.syntax.colorForToken(token.token_type, token.text);
             text_entry.textLayout.addText(token.text, base_opts.override(.{ .color_text = color }));
         }
 
@@ -608,26 +607,36 @@ pub const NotebookPanel = struct {
         }
     }
 
-    /// Handle Enter key: if cursor is on last line and content looks renderable,
-    /// auto-play the cell and create a new cell if this is the last one.
+    /// Handle Enter key: if cursor is on last line and content produces plottable
+    /// output, auto-play the cell and create a new cell. Otherwise, let the
+    /// newline through normally (for function definitions, bindings, etc.).
     ///
-    /// IMPORTANT: This must be called BEFORE text_entry.processEvents() so that
-    /// we can inspect the content before the newline is inserted by the Enter key.
-    /// The content and cursor position at call time reflect the state BEFORE the
-    /// Enter key's newline is added.
+    /// Called AFTER text_entry.processEvents() has inserted the newline.
+    /// content_before_enter and cursor_before_enter reflect state BEFORE the
+    /// newline was added.
     fn handleEnterKey(active_session: *session.TabSession, cell: *code_cell.CodeCell, cell_index: usize, content_before_enter: []const u8, cursor_before_enter: usize) void {
         // Check if cursor was on the last line of the cell content (before newline insertion)
         const is_on_last_line = isOnLastLine(content_before_enter, cursor_before_enter);
 
         if (!is_on_last_line) return;
 
-        // Get the last line content and check if it looks renderable
+        // Quick pre-filter: skip obviously non-output lines
         const last_line = getLastLine(content_before_enter);
         if (last_line.len == 0 or !looksLikeOutputExpression(last_line)) return;
 
-        // Remove the newline that processEvents just inserted at the cursor position.
-        // The Enter key added a '\n' at cursor_before_enter. Since we're going to
-        // auto-play instead of inserting a newline, we need to undo this insertion.
+        // Validate the cell to determine if it actually produces output.
+        // The cell content currently has the newline from processEvents — that's
+        // fine, the parser handles trailing whitespace.
+        active_session.validateAndParseCell(cell_index);
+
+        // If the cell has no plottable output (e.g. function definition, binding),
+        // leave the newline in place and return — Enter acts normally.
+        if (cell.has_validation_error or cell.output == null or cell.output.?.shader == null) {
+            return;
+        }
+
+        // Cell has plottable output — remove the newline that processEvents inserted
+        // and finalize the cell.
         {
             const insert_pos = @min(cursor_before_enter, cell.content.items.len);
             if (insert_pos < cell.content.items.len and cell.content.items[insert_pos] == '\n') {
@@ -644,13 +653,9 @@ pub const NotebookPanel = struct {
             }
         }
 
-        // Validate and play the cell
-        active_session.validateAndParseCell(cell_index);
-
-        if (!cell.has_validation_error) {
-            cell.is_playing = true;
-            std.log.info("Auto-playing cell {d} on Enter", .{cell.id});
-        }
+        // Auto-play the cell
+        cell.is_playing = true;
+        std.log.info("Auto-playing cell {d} on Enter", .{cell.id});
 
         // If last cell, create a new one and focus it
         const is_last_cell = cell_index == active_session.cells.items.len - 1;
@@ -667,9 +672,7 @@ pub const NotebookPanel = struct {
 
         // Replay dependent cells AFTER the new cell has been created
         // (so we don't accidentally try to replay it)
-        if (!cell.has_validation_error) {
-            active_session.replayDependentCells(cell_index);
-        }
+        active_session.replayDependentCells(cell_index);
     }
 
     /// Check if a cursor position is on the last line of content
