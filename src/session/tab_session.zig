@@ -187,7 +187,11 @@ pub const TabSession = struct {
         for (root.array.items, 0..) |cell_json, i| {
             if (cell_json != .object) continue;
 
-            const text = if (cell_json.object.get("text")) |t| blk: {
+            const text = if (cell_json.object.get("code")) |t| blk: {
+                if (t == .string) break :blk t.string;
+                break :blk "";
+            } else if (cell_json.object.get("text")) |t| blk: {
+                // Backward compat with old format
                 if (t == .string) break :blk t.string;
                 break :blk "";
             } else "";
@@ -257,8 +261,8 @@ pub const TabSession = struct {
 
             try json_array.appendSlice(self.allocator, "  {\n");
 
-            // Text field (escaped)
-            try json_array.appendSlice(self.allocator, "    \"text\": ");
+            // Code field (escaped)
+            try json_array.appendSlice(self.allocator, "    \"code\": ");
             try appendJsonString(&json_array, self.allocator, cell.content.items);
 
             // Color field
@@ -266,14 +270,6 @@ pub const TabSession = struct {
             const color_hex = try cell.getColorHex(self.allocator);
             defer self.allocator.free(color_hex);
             try appendJsonString(&json_array, self.allocator, color_hex);
-
-            // Last output (if any)
-            if (cell.output) |output| {
-                if (output.text) |text| {
-                    try json_array.appendSlice(self.allocator, ",\n    \"last_output\": ");
-                    try appendJsonString(&json_array, self.allocator, text);
-                }
-            }
 
             try json_array.appendSlice(self.allocator, "\n  }");
         }
