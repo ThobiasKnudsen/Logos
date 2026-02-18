@@ -125,7 +125,10 @@ pub const TabSession = struct {
     pub fn loadFromFile(self: *TabSession) !void {
         const path = self.file_path orelse return error.NoFilePath;
 
-        const file = try std.fs.openFileAbsolute(path, .{});
+        const file = if (std.fs.path.isAbsolute(path))
+            try std.fs.openFileAbsolute(path, .{})
+        else
+            try std.fs.cwd().openFile(path, .{});
         defer file.close();
 
         const stat = try file.stat();
@@ -187,7 +190,11 @@ pub const TabSession = struct {
         for (root.array.items, 0..) |cell_json, i| {
             if (cell_json != .object) continue;
 
-            const text = if (cell_json.object.get("text")) |t| blk: {
+            const text = if (cell_json.object.get("code")) |t| blk: {
+                if (t == .string) break :blk t.string;
+                break :blk "";
+            } else if (cell_json.object.get("text")) |t| blk: {
+                // Backward compat with old format
                 if (t == .string) break :blk t.string;
                 break :blk "";
             } else "";
@@ -237,13 +244,23 @@ pub const TabSession = struct {
 
         // Ensure parent directory exists
         if (std.fs.path.dirname(path)) |dir| {
-            std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-                error.PathAlreadyExists => {},
-                else => return err,
-            };
+            if (std.fs.path.isAbsolute(dir)) {
+                std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => return err,
+                };
+            } else {
+                std.fs.cwd().makePath(dir) catch |err| switch (err) {
+                    error.PathAlreadyExists => {},
+                    else => return err,
+                };
+            }
         }
 
-        const file = try std.fs.createFileAbsolute(path, .{});
+        const file = if (std.fs.path.isAbsolute(path))
+            try std.fs.createFileAbsolute(path, .{})
+        else
+            try std.fs.cwd().createFile(path, .{});
         defer file.close();
 
         // Build JSON array of cells
@@ -257,8 +274,8 @@ pub const TabSession = struct {
 
             try json_array.appendSlice(self.allocator, "  {\n");
 
-            // Text field (escaped)
-            try json_array.appendSlice(self.allocator, "    \"text\": ");
+            // Code field (escaped)
+            try json_array.appendSlice(self.allocator, "    \"code\": ");
             try appendJsonString(&json_array, self.allocator, cell.content.items);
 
             // Color field
@@ -266,14 +283,6 @@ pub const TabSession = struct {
             const color_hex = try cell.getColorHex(self.allocator);
             defer self.allocator.free(color_hex);
             try appendJsonString(&json_array, self.allocator, color_hex);
-
-            // Last output (if any)
-            if (cell.output) |output| {
-                if (output.text) |text| {
-                    try json_array.appendSlice(self.allocator, ",\n    \"last_output\": ");
-                    try appendJsonString(&json_array, self.allocator, text);
-                }
-            }
 
             try json_array.appendSlice(self.allocator, "\n  }");
         }
@@ -715,14 +724,17 @@ pub const TabSession = struct {
 
     /// Set just the directory portion of the file path, keeping the filename
     pub fn setFileDirectory(self: *TabSession, new_dir: []const u8) !void {
-        // Build new path: new_dir + "/" + current name
-        const path_len = new_dir.len + 1 + self.name.len;
+        // Build new path: new_dir + "/" + current name (+ ".logos" if missing)
+        const has_ext = std.mem.endsWith(u8, self.name, ".logos");
+        const ext = if (has_ext) "" else ".logos";
+        const path_len = new_dir.len + 1 + self.name.len + ext.len;
         const new_path = try self.allocator.alloc(u8, path_len);
         defer self.allocator.free(new_path);
 
         @memcpy(new_path[0..new_dir.len], new_dir);
         new_path[new_dir.len] = std.fs.path.sep;
-        @memcpy(new_path[new_dir.len + 1 ..], self.name);
+        @memcpy(new_path[new_dir.len + 1 ..][0..self.name.len], self.name);
+        @memcpy(new_path[new_dir.len + 1 + self.name.len ..][0..ext.len], ext);
 
         // Now set the file path
         if (self.file_path) |old| {

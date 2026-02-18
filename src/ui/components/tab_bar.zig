@@ -258,8 +258,12 @@ pub const TabBar = struct {
                 }
             }
         } else {
-            // Tab name label - just display, clicks handled below
-            dvui.label(@src(), "{s}", .{sess.name}, .{
+            // Tab name label - strip .logos extension for display
+            const display_name = if (std.mem.endsWith(u8, sess.name, ".logos"))
+                sess.name[0 .. sess.name.len - 6]
+            else
+                sess.name;
+            dvui.label(@src(), "{s}", .{display_name}, .{
                 .id_extra = idx,
                 .border = .{},
                 .corner_radius = .{},

@@ -74,7 +74,6 @@ pub const App = struct {
         self.graph_renderer.initWithDevice(&backend);
 
         var interrupted = false;
-        var debug_logged = false;
 
         main_loop: while (true) {
             // beginWait coordinates with waitTime below to run frames only when needed
@@ -82,43 +81,6 @@ pub const App = struct {
 
             // Begin dvui frame
             try win.begin(nstime);
-
-            // One-time font debug: verify glyph rendering for Unicode characters
-            if (!debug_logged) {
-                debug_logged = true;
-                const theme_mono = dvui.themeGet().font_mono;
-                std.log.info("FONT DEBUG: mono family='{s}' size={d}", .{
-                    dvui.Font.string(&theme_mono.family),
-                    @as(u32, @intFromFloat(theme_mono.size)),
-                });
-
-                // Test if the font can actually render target codepoints
-                if (win.fonts.getOrCreate(self.allocator, theme_mono)) |entry| {
-                    const test_codepoints = [_]struct { cp: u32, name: []const u8 }{
-                        .{ .cp = 0x41, .name = "A (ASCII)" },
-                        .{ .cp = 0x03C0, .name = "π (Greek pi)" },
-                        .{ .cp = 0x2192, .name = "→ (right arrow)" },
-                        .{ .cp = 0x014B, .name = "ŋ (eng)" },
-                        .{ .cp = 0x2265, .name = "≥ (gte)" },
-                        .{ .cp = 0x2264, .name = "≤ (lte)" },
-                        .{ .cp = 0x2260, .name = "≠ (neq)" },
-                    };
-                    for (test_codepoints) |tc| {
-                        if (entry.glyphInfoGetOrReplacement(self.allocator, tc.cp)) |gi| {
-                            std.log.info("FONT DEBUG: {s} advance={d} w={d} h={d}", .{
-                                tc.name,
-                                @as(u32, @intFromFloat(gi.advance)),
-                                @as(u32, @intFromFloat(gi.w)),
-                                @as(u32, @intFromFloat(gi.h)),
-                            });
-                        } else |err| {
-                            std.log.err("FONT DEBUG: {s} ERROR: {}", .{ tc.name, err });
-                        }
-                    }
-                } else |err| {
-                    std.log.err("FONT DEBUG: getOrCreate failed: {}", .{err});
-                }
-            }
 
             // Poll SDL events without blocking
             _ = try backend.addAllEvents(&win);
@@ -132,8 +94,9 @@ pub const App = struct {
                 self.graph_renderer.update(active);
             }
 
-            // If the graph renderer is animating, request continuous redraws
-            if (self.graph_renderer.is_animating) {
+            // If the graph renderer is animating or a dialog is pending,
+            // request continuous redraws so we can poll for completion
+            if (self.graph_renderer.is_animating or ui.views.isDialogPending()) {
                 win.refreshWindow(@src(), null);
             }
 

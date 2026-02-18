@@ -284,8 +284,18 @@ pub const syntax = struct {
         active = default_themes[3]; // catppuccin
     }
 
+    fn getThemePath(buf: *[std.fs.max_path_bytes]u8) ![]const u8 {
+        const exe_path = try std.fs.selfExePathAlloc(std.heap.page_allocator);
+        defer std.heap.page_allocator.free(exe_path);
+        const exe_dir = std.fs.path.dirname(exe_path) orelse return error.NoExeDir;
+        const result = std.fmt.bufPrint(buf, "{s}/{s}", .{ exe_dir, theme_file }) catch return error.PathTooLong;
+        return result;
+    }
+
     fn loadFromFile() !void {
-        const file = try std.fs.cwd().openFile(theme_file, .{});
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try getThemePath(&path_buf);
+        const file = try std.fs.openFileAbsolute(path, .{});
         defer file.close();
 
         const content = try file.readToEndAlloc(std.heap.page_allocator, 1024 * 64);
@@ -429,7 +439,9 @@ pub const syntax = struct {
     }
 
     fn saveToFile() !void {
-        var file = try std.fs.cwd().createFile(theme_file, .{});
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try getThemePath(&path_buf);
+        var file = try std.fs.createFileAbsolute(path, .{});
         defer file.close();
 
         try file.writeAll("{\n");
