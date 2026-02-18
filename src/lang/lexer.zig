@@ -226,6 +226,20 @@ pub const Lexer = struct {
 
             const matched_len = match_result.matched;
 
+            // Guard against zero-length matches to prevent infinite loop
+            if (matched_len == 0) {
+                const byte_len = std.unicode.utf8ByteSequenceLength(content[pos]) catch 1;
+                const end = @min(pos + byte_len, content.len);
+                try tokens.append(self.allocator, .{
+                    .text = content[pos..end],
+                    .token_type = .unknown,
+                    .byte_start = pos,
+                    .byte_end = end,
+                });
+                pos = end;
+                continue;
+            }
+
             try tokens.append(self.allocator, .{
                 .text = content[pos .. pos + matched_len],
                 .token_type = token_type,

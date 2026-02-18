@@ -371,6 +371,8 @@ pub const GpuPipeline = struct {
             frag_resources,
         ) catch |err| {
             std.log.err("[GpuPipeline] Fragment shader compilation FAILED: {}", .{err});
+            // Release the already-compiled vertex shader to avoid leaking it
+            c.SDL_ReleaseGPUShader(device, @ptrCast(new_vertex));
             return self.setError("Fragment shader compilation failed");
         };
 

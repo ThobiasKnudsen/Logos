@@ -479,8 +479,11 @@ pub const NotebookPanel = struct {
             if (!enter_pressed) {
                 active_session.validateAndParseCell(cell_index);
 
-                // If this cell was updated, replay any dependent playing cells
-                active_session.replayDependentCells(cell_index);
+                // NOTE: We intentionally do NOT call replayDependentCells here.
+                // Replaying on every keystroke causes severe performance issues
+                // (each keystroke re-parses and re-generates shaders for ALL
+                // dependent playing cells). Dependent cells are replayed when
+                // explicitly played (play button or Enter auto-play) instead.
             }
         }
 

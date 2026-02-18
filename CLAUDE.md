@@ -6,9 +6,23 @@ Zig project. Build with `zig build`, run with `zig build run`.
 
 ## Worktree + Submodule Setup
 
-This repo uses git worktrees (`main`, `managing_files`, etc.) and has vendor submodules with **local-only commits** (not pushed upstream). After creating a new worktree, submodules will be empty or fail to init because the custom commits only exist in `main`'s submodule gitdir.
+This repo uses git worktrees (`main`, `managing_files`, etc.) and has vendor submodules with **local-only commits** (not pushed upstream). After creating a new worktree, submodules will be empty and `zig build` will fail with errors like:
 
-**Run this after creating a new worktree:**
+```
+unable to find artifact 'SDL_shadercross'
+```
+
+### Fix: Initialize submodules in a new worktree
+
+You must run **both steps** in order:
+
+**Step 1 — Clone the submodule repos** (this fetches upstream but can't get the local-only commits yet):
+
+```bash
+git submodule init && git submodule update
+```
+
+**Step 2 — Fetch local-only commits from main's gitdir and checkout the correct refs:**
 
 ```bash
 for sub in vendor/SDL_shadercross_zig vendor/SPIRV-Cross_zig; do
@@ -19,3 +33,5 @@ for sub in vendor/SDL_shadercross_zig vendor/SPIRV-Cross_zig; do
     git -C "$sub" checkout "$expected"
 done
 ```
+
+**Why two steps?** `git submodule update` alone will fail with `fatal: remote error: upload-pack: not our ref ...` because the submodules point to commits that only exist locally in `main`'s gitdir. Step 1 clones the repos so they exist on disk, then Step 2 fetches the missing commits from main.
