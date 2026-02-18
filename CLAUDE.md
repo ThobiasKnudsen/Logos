@@ -35,3 +35,11 @@ done
 ```
 
 **Why two steps?** `git submodule update` alone will fail with `fatal: remote error: upload-pack: not our ref ...` because the submodules point to commits that only exist locally in `main`'s gitdir. Step 1 clones the repos so they exist on disk, then Step 2 fetches the missing commits from main.
+
+### Removing a worktree with submodules
+
+`git worktree remove <name>` will fail with `fatal: working trees containing submodules cannot be moved or removed`. Instead, manually delete and prune:
+
+```bash
+rm -rf ../<worktree_name> && git worktree prune
+```
