@@ -1,32 +1,32 @@
 # Logos
 
-## Build
+Zig project using git worktrees and vendor submodules.
 
-Zig project. Build with `zig build`, run with `zig build run`.
+## Build & Run
 
-## Worktree + Submodule Setup
+**BEFORE running `zig build`, you MUST ensure submodules are initialized.**
+Skipping this will crash with `unable to find artifact 'SDL_shadercross'`.
 
-This repo uses git worktrees (`main`, `managing_files`, etc.) and has vendor submodules with **local-only commits** (not pushed upstream). After creating a new worktree, submodules will be empty and `zig build` will fail with errors like:
+### Check if submodules are already set up
 
+```bash
+ls vendor/SDL_shadercross_zig/build.zig vendor/SPIRV-Cross_zig/build.zig 2>/dev/null
 ```
-unable to find artifact 'SDL_shadercross'
-```
 
-### Fix: Initialize submodules in a new worktree
+If both files exist, skip to **Build**. Otherwise, run the setup below.
 
-You must run **both steps** in order:
-
-**Step 1 — Clone the submodule repos** (this fetches upstream but can't get the local-only commits yet):
+### Submodule setup
 
 ```bash
 git submodule init && git submodule update
 ```
 
-**Step 2 — Fetch local-only commits from main's gitdir and checkout the correct refs:**
+**On worktrees** this will fail with `fatal: remote error: upload-pack: not our ref ...` — that's expected. The submodules reference commits that only exist in `main`'s local gitdir. After the error, run this to fetch those commits:
 
 ```bash
+main_worktree="$(git worktree list | head -1 | awk '{print $1}')"
 for sub in vendor/SDL_shadercross_zig vendor/SPIRV-Cross_zig; do
-    main_gitdir="/home/o/Personal/Code/Logos/main/.git/modules/$sub"
+    main_gitdir="$main_worktree/.git/modules/$sub"
     worktree_gitdir="$(git -C "$sub" rev-parse --git-dir)"
     GIT_DIR="$worktree_gitdir" git fetch "$main_gitdir"
     expected="$(git ls-tree HEAD "$sub" | awk '{print $3}')"
@@ -34,9 +34,16 @@ for sub in vendor/SDL_shadercross_zig vendor/SPIRV-Cross_zig; do
 done
 ```
 
-**Why two steps?** `git submodule update` alone will fail with `fatal: remote error: upload-pack: not our ref ...` because the submodules point to commits that only exist locally in `main`'s gitdir. Step 1 clones the repos so they exist on disk, then Step 2 fetches the missing commits from main.
+On `main` (not a worktree), `git submodule update` should succeed and the above block is not needed.
 
-### Removing a worktree with submodules
+### Build
+
+```bash
+zig build        # build only
+zig build run    # build and run
+```
+
+## Removing a worktree with submodules
 
 `git worktree remove <name>` will fail with `fatal: working trees containing submodules cannot be moved or removed`. Instead, manually delete and prune:
 
