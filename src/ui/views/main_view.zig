@@ -18,6 +18,7 @@ const theme = @import("../theme.zig");
 const components = @import("../components/components.zig");
 
 const App = @import("../../app.zig").App;
+const TabSession = @import("../../session/tab_session.zig").TabSession;
 
 // Re-export theme for convenience
 pub const ui_theme = theme;
@@ -29,14 +30,137 @@ const auto_save_interval_ms: i64 = 2000; // Save every 2 seconds if modified
 /// Persistent state for the split view
 var split_view: components.SplitView = .{};
 
+/// Non-blocking file dialog using zenity as a child process.
+/// Spawns zenity via std.process.Child, polls with waitpid(WNOHANG) each frame,
+/// and reads the result from stdout when the process exits.
+const FileDialog = struct {
+    pid: std.posix.pid_t,
+    stdout_fd: std.posix.fd_t,
+    kind: Kind,
+    folder_tab_idx: usize,
+    result_buf: [4096]u8 = undefined,
+
+    const Kind = enum { open, save, folder_select };
+
+    fn spawn(allocator: std.mem.Allocator, kind: Kind, path: ?[]const u8, folder_idx: usize) !FileDialog {
+        // Build --filename= argument
+        var filename_buf: [512]u8 = undefined;
+        var filename_arg: ?[]const u8 = null;
+        if (path) |p| {
+            // Ensure path ends with / so zenity opens the directory
+            if (p.len > 0 and p[p.len - 1] == '/') {
+                filename_arg = std.fmt.bufPrint(&filename_buf, "--filename={s}", .{p}) catch null;
+            } else {
+                filename_arg = std.fmt.bufPrint(&filename_buf, "--filename={s}/", .{p}) catch null;
+            }
+        }
+
+        // Build argv on the stack — all slices are string literals or point
+        // into filename_buf which lives until after child.spawn().
+        var argv_buf: [10][]const u8 = undefined;
+        var argc: usize = 0;
+        argv_buf[argc] = "zenity";
+        argc += 1;
+        argv_buf[argc] = "--file-selection";
+        argc += 1;
+
+        switch (kind) {
+            .open => {
+                argv_buf[argc] = "--title=Open File";
+                argc += 1;
+            },
+            .save => {
+                argv_buf[argc] = "--save";
+                argc += 1;
+                argv_buf[argc] = "--confirm-overwrite";
+                argc += 1;
+                argv_buf[argc] = "--title=Save File";
+                argc += 1;
+            },
+            .folder_select => {
+                argv_buf[argc] = "--directory";
+                argc += 1;
+                argv_buf[argc] = "--title=Select Folder";
+                argc += 1;
+            },
+        }
+
+        if (filename_arg) |fa| {
+            argv_buf[argc] = fa;
+            argc += 1;
+        }
+
+        if (kind == .open or kind == .save) {
+            argv_buf[argc] = "--file-filter=Logos files | *.logos";
+            argc += 1;
+            argv_buf[argc] = "--file-filter=All files | *";
+            argc += 1;
+        }
+
+        var child = std.process.Child.init(argv_buf[0..argc], allocator);
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Ignore;
+        try child.spawn();
+        try child.waitForSpawn(); // consume err_pipe (non-blocking)
+
+        const pid = child.id;
+        const stdout_fd = child.stdout.?.handle;
+
+        return .{
+            .pid = pid,
+            .stdout_fd = stdout_fd,
+            .kind = kind,
+            .folder_tab_idx = folder_idx,
+        };
+    }
+
+    /// Non-blocking poll. Returns null if still running, empty string if
+    /// cancelled/error, or the selected path (trimmed of trailing newline).
+    fn poll(self: *FileDialog) ?[]const u8 {
+        const w = std.posix.waitpid(self.pid, std.os.linux.W.NOHANG);
+        if (w.pid == 0) return null; // still running
+
+        // Child exited — read stdout for the selected path
+        const file = std.fs.File{ .handle = self.stdout_fd };
+        const n = file.read(&self.result_buf) catch 0;
+        std.posix.close(self.stdout_fd);
+
+        if (n == 0) return ""; // user cancelled (zenity exits 1 with no output)
+
+        // Trim trailing newline
+        const end = if (n > 0 and self.result_buf[n - 1] == '\n') n - 1 else n;
+        return self.result_buf[0..end];
+    }
+
+    fn cleanup(self: *FileDialog) void {
+        // Kill the child if still running and close the pipe
+        _ = std.posix.kill(self.pid, std.posix.SIG.TERM) catch {};
+        _ = std.posix.waitpid(self.pid, 0); // reap
+        std.posix.close(self.stdout_fd);
+    }
+};
+
+var pending_dialog: ?FileDialog = null;
+
+/// Returns true if a dialog child process is running (for continuous redraw).
+pub fn isDialogPending() bool {
+    return pending_dialog != null;
+}
 
 /// Clean up module-level state (must be called on app shutdown)
 pub fn deinit() void {
+    if (pending_dialog) |*pd| {
+        pd.cleanup();
+        pending_dialog = null;
+    }
     split_view.deinit();
 }
 
 /// Returns false if user wants to quit
 pub fn mainView(app: *App) bool {
+    // Poll for completed file dialog (non-blocking)
+    pollDialogResult(app);
+
     // Root container - fills entire window
     var root = dvui.box(@src(), .{ .dir = .vertical }, .{
         .expand = .both,
@@ -81,27 +205,6 @@ pub fn mainView(app: *App) bool {
     // Check for keyboard shortcuts and window events
     var keyboard_action: components.MenuBar.Action = .none;
     for (dvui.events()) |*e| {
-        // DEBUG: Log text input events to diagnose Unicode issues
-        if (e.evt == .text) {
-            const txt = e.evt.text.txt;
-            if (txt.len > 0 and txt[0] > 127) {
-                // Non-ASCII text received - log bytes for debugging
-                var buf: [64]u8 = undefined;
-                var pos: usize = 0;
-                for (txt) |byte| {
-                    if (pos + 5 < buf.len) {
-                        const hex = "0123456789ABCDEF";
-                        buf[pos] = '0';
-                        buf[pos + 1] = 'x';
-                        buf[pos + 2] = hex[byte >> 4];
-                        buf[pos + 3] = hex[byte & 0x0F];
-                        buf[pos + 4] = ' ';
-                        pos += 5;
-                    }
-                }
-                std.log.info("TEXT INPUT: len={d} bytes=[{s}]", .{ txt.len, buf[0..pos] });
-            }
-        }
         if (e.evt == .key and e.evt.key.action == .down) {
             const ctrl_pressed = e.evt.key.mod.has(.lcontrol) or e.evt.key.mod.has(.rcontrol);
             const shift_pressed = e.evt.key.mod.has(.lshift) or e.evt.key.mod.has(.rshift);
@@ -173,18 +276,6 @@ pub fn mainView(app: *App) bool {
     return true;
 }
 
-/// Draw a horizontal separator line
-fn horizontalSeparator(id_extra: usize) void {
-    var sep = dvui.box(@src(), .{}, .{
-        .id_extra = id_extra,
-        .min_size_content = .{ .h = 1 },
-        .expand = .horizontal,
-        .color_fill = theme.colors.border,
-        .background = true,
-    });
-    sep.deinit();
-}
-
 /// Returns false if should quit
 fn handleMenuAction(app: *App, action: components.MenuBar.Action) bool {
     switch (action) {
@@ -198,65 +289,36 @@ fn handleMenuAction(app: *App, action: components.MenuBar.Action) bool {
             } else |_| {}
         },
         .open_file => {
-            // Open native file picker dialog
-            const default_dir = app.session_manager.getDefaultDocsDirectory();
-            if (dvui.dialogNativeFileOpen(app.allocator, .{
-                .title = "Open File",
-                .path = default_dir,
-                .filters = &[_][]const u8{"*.logos"},
-            }) catch null) |selected_file| {
-                defer app.allocator.free(selected_file);
-
-                // Create new session from file
-                const TabSession = @import("../../session/tab_session.zig").TabSession;
-                if (TabSession.initFromFile(app.allocator, selected_file)) |sess| {
-                    app.session_manager.sessions.append(app.allocator, sess) catch |err| {
-                        std.log.err("Failed to add session: {}", .{err});
-                    };
-                    app.session_manager.active_index = app.session_manager.sessions.items.len - 1;
-                } else |err| {
-                    std.log.err("Failed to open file '{s}': {}", .{selected_file, err});
-                }
+            if (pending_dialog == null) {
+                const default_dir = app.session_manager.getDefaultDocsDirectory();
+                pending_dialog = FileDialog.spawn(app.allocator, .open, default_dir, 0) catch |err| blk: {
+                    std.log.err("Failed to spawn file dialog: {}", .{err});
+                    break :blk null;
+                };
             }
         },
         .save => {
             if (app.session_manager.activeSession()) |active_session| {
                 if (active_session.file_path != null) {
-                    // Save to existing file
                     active_session.saveToFile() catch |err| {
                         std.log.err("Failed to save file: {}", .{err});
                     };
-                } else {
-                    // No file path - show save dialog
+                } else if (pending_dialog == null) {
                     const default_dir = app.session_manager.getDefaultDocsDirectory();
-                    if (dvui.dialogNativeFileSave(app.allocator, .{
-                        .title = "Save File",
-                        .path = default_dir,
-                        .filters = &[_][]const u8{"*.logos"},
-                    }) catch null) |selected_path| {
-                        defer app.allocator.free(selected_path);
-
-                        // Set file path and save
-                        if (app.allocator.dupe(u8, selected_path)) |owned_path| {
-                            if (active_session.file_path) |old_path| {
-                                app.allocator.free(old_path);
-                            }
-                            active_session.file_path = owned_path;
-
-                            // Update tab name to match filename
-                            const new_name = std.fs.path.basename(owned_path);
-                            app.session_manager.renameSession(app.session_manager.active_index, new_name) catch |err| {
-                                std.log.err("Failed to rename session: {}", .{err});
-                            };
-
-                            active_session.saveToFile() catch |err| {
-                                std.log.err("Failed to save file: {}", .{err});
-                            };
-                        } else |err| {
-                            std.log.err("Failed to duplicate path: {}", .{err});
-                        }
-                    }
+                    pending_dialog = FileDialog.spawn(app.allocator, .save, default_dir, 0) catch |err| blk: {
+                        std.log.err("Failed to spawn save dialog: {}", .{err});
+                        break :blk null;
+                    };
                 }
+            }
+        },
+        .save_as => {
+            if (pending_dialog == null) {
+                const default_dir = app.session_manager.getDefaultDocsDirectory();
+                pending_dialog = FileDialog.spawn(app.allocator, .save, default_dir, 0) catch |err| blk: {
+                    std.log.err("Failed to spawn save dialog: {}", .{err});
+                    break :blk null;
+                };
             }
         },
         .close_tab => {
@@ -315,10 +377,14 @@ fn handleTabAction(app: *App, action: components.TabBar.Action) void {
             app.session_manager.closeSession(idx);
         },
         .start_edit => |idx| {
-            // Start editing the tab name
+            // Start editing the tab name (strip .logos for editing)
             if (idx < app.session_manager.sessions.items.len) {
-                const current_name = app.session_manager.sessions.items[idx].name;
-                components.TabBar.startEditing(idx, current_name);
+                const full_name = app.session_manager.sessions.items[idx].name;
+                const display_name = if (std.mem.endsWith(u8, full_name, ".logos"))
+                    full_name[0 .. full_name.len - 6]
+                else
+                    full_name;
+                components.TabBar.startEditing(idx, display_name);
             }
         },
         .finish_edit => |edit_info| {
@@ -334,22 +400,97 @@ fn handleTabAction(app: *App, action: components.TabBar.Action) void {
             components.TabBar.cancelEditing();
         },
         .change_folder => |idx| {
-            // Open native folder picker dialog
-            if (idx < app.session_manager.sessions.items.len) {
+            if (pending_dialog == null and idx < app.session_manager.sessions.items.len) {
                 const current_dir = if (app.session_manager.sessions.items[idx].file_path) |path|
                     std.fs.path.dirname(path)
                 else
                     app.session_manager.getDefaultDocsDirectory();
+                pending_dialog = FileDialog.spawn(app.allocator, .folder_select, current_dir, idx) catch |err| {
+                    std.log.err("Failed to spawn folder dialog: {}", .{err});
+                    return;
+                };
+            }
+        },
+    }
+}
 
-                if (dvui.dialogNativeFolderSelect(app.allocator, .{
-                    .title = "Select Folder for File",
-                    .path = current_dir,
-                }) catch null) |selected_dir| {
-                    defer app.allocator.free(selected_dir);
-                    app.session_manager.setSessionDirectory(idx, selected_dir) catch |err| {
-                        std.log.err("Failed to set session directory: {}", .{err});
-                    };
+/// Non-blocking poll: check if the zenity child process has exited.
+/// If so, process its result (open file, save, or folder select).
+fn pollDialogResult(app: *App) void {
+    var pd = &(pending_dialog orelse return);
+    const selected = pd.poll() orelse return; // still running
+
+    const kind = pd.kind;
+    const folder_idx = pd.folder_tab_idx;
+
+    // Copy result before nullifying pending_dialog, because `selected`
+    // points into pd.result_buf which lives inside the optional.
+    var local_buf: [4096]u8 = undefined;
+    const len = @min(selected.len, local_buf.len);
+    @memcpy(local_buf[0..len], selected[0..len]);
+    const result = local_buf[0..len];
+
+    pending_dialog = null;
+
+    if (result.len == 0) return; // user cancelled
+
+    switch (kind) {
+        .open => {
+            if (TabSession.initFromFile(app.allocator, result)) |sess| {
+                app.session_manager.sessions.append(app.allocator, sess) catch |err| {
+                    std.log.err("Failed to add session: {}", .{err});
+                    return;
+                };
+                app.session_manager.active_index = app.session_manager.sessions.items.len - 1;
+
+                // Auto-interpret all cells in the opened file
+                if (app.session_manager.activeSession()) |active| {
+                    for (0..active.cells.items.len) |i| {
+                        active.validateAndParseCell(i);
+                        if (!active.cells.items[i].has_validation_error) {
+                            active.cells.items[i].is_playing = true;
+                        }
+                    }
                 }
+            } else |err| {
+                std.log.err("Failed to open file '{s}': {}", .{ result, err });
+            }
+        },
+        .save => {
+            const active_session = app.session_manager.activeSession() orelse return;
+
+            // Ensure the path ends with .logos
+            const has_ext = std.mem.endsWith(u8, result, ".logos");
+            const owned_path = if (has_ext)
+                app.allocator.dupe(u8, result) catch |err| {
+                    std.log.err("Failed to duplicate path: {}", .{err});
+                    return;
+                }
+            else
+                std.fmt.allocPrint(app.allocator, "{s}.logos", .{result}) catch |err| {
+                    std.log.err("Failed to allocate path: {}", .{err});
+                    return;
+                };
+
+            if (active_session.file_path) |old_path| {
+                app.allocator.free(old_path);
+            }
+            active_session.file_path = owned_path;
+
+            const new_name = std.fs.path.basename(owned_path);
+            app.session_manager.renameSession(app.session_manager.active_index, new_name) catch |err| {
+                std.log.err("Failed to rename session: {}", .{err});
+            };
+
+            active_session.saveToFile() catch |err| {
+                std.log.err("Failed to save file: {}", .{err});
+            };
+        },
+        .folder_select => {
+            if (folder_idx < app.session_manager.sessions.items.len) {
+                app.session_manager.setSessionDirectory(folder_idx, result) catch |err| {
+                    std.log.err("Failed to set session directory: {}", .{err});
+                };
             }
         },
     }

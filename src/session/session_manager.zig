@@ -151,7 +151,15 @@ pub const SessionManager = struct {
         if (index >= self.sessions.items.len) return;
 
         var sess = &self.sessions.items[index];
-        try sess.setName(new_name);
+
+        // Ensure non-Untitled names end with .logos
+        if (!std.mem.startsWith(u8, new_name, "Untitled") and !std.mem.endsWith(u8, new_name, ".logos")) {
+            const with_ext = try std.fmt.allocPrint(sess.allocator, "{s}.logos", .{new_name});
+            defer sess.allocator.free(with_ext);
+            try sess.setName(with_ext);
+        } else {
+            try sess.setName(new_name);
+        }
 
         // If renamed from Untitled to a real name, set up file path in default docs dir
         if (!std.mem.startsWith(u8, new_name, "Untitled") and sess.file_path == null) {

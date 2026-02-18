@@ -53,29 +53,29 @@ pub const MenuBar = struct {
 
             if (dvui.menuItemLabel(@src(), "New Session   Ctrl+N", .{}, .{ .expand = .horizontal }) != null) {
                 action = .new_session;
-                m.close();
+                fw.close();
             }
             if (dvui.menuItemLabel(@src(), "Open...       Ctrl+O", .{}, .{ .expand = .horizontal }) != null) {
                 action = .open_file;
-                m.close();
+                fw.close();
             }
             _ = dvui.separator(@src(), .{});
             if (dvui.menuItemLabel(@src(), "Save          Ctrl+S", .{}, .{ .expand = .horizontal }) != null) {
                 action = .save;
-                m.close();
+                fw.close();
             }
             if (dvui.menuItemLabel(@src(), "Save As...    Ctrl+Shift+S", .{}, .{ .expand = .horizontal }) != null) {
                 action = .save_as;
-                m.close();
+                fw.close();
             }
             _ = dvui.separator(@src(), .{});
             if (dvui.menuItemLabel(@src(), "Close Tab     Ctrl+W", .{}, .{ .expand = .horizontal }) != null) {
                 action = .close_tab;
-                m.close();
+                fw.close();
             }
             if (dvui.menuItemLabel(@src(), "Quit          Ctrl+Q", .{}, .{ .expand = .horizontal }) != null) {
                 action = .quit;
-                m.close();
+                fw.close();
             }
         }
 
@@ -86,24 +86,24 @@ pub const MenuBar = struct {
 
             if (dvui.menuItemLabel(@src(), "Undo    Ctrl+Z", .{}, .{ .expand = .horizontal }) != null) {
                 action = .undo;
-                m.close();
+                fw.close();
             }
             if (dvui.menuItemLabel(@src(), "Redo    Ctrl+Y", .{}, .{ .expand = .horizontal }) != null) {
                 action = .redo;
-                m.close();
+                fw.close();
             }
             _ = dvui.separator(@src(), .{});
             if (dvui.menuItemLabel(@src(), "Cut     Ctrl+X", .{}, .{ .expand = .horizontal }) != null) {
                 action = .cut;
-                m.close();
+                fw.close();
             }
             if (dvui.menuItemLabel(@src(), "Copy    Ctrl+C", .{}, .{ .expand = .horizontal }) != null) {
                 action = .copy;
-                m.close();
+                fw.close();
             }
             if (dvui.menuItemLabel(@src(), "Paste   Ctrl+V", .{}, .{ .expand = .horizontal }) != null) {
                 action = .paste;
-                m.close();
+                fw.close();
             }
         }
 
@@ -114,15 +114,15 @@ pub const MenuBar = struct {
 
             if (dvui.menuItemLabel(@src(), "Zoom In   Ctrl+=", .{}, .{ .expand = .horizontal }) != null) {
                 action = .zoom_in;
-                m.close();
+                fw.close();
             }
             if (dvui.menuItemLabel(@src(), "Zoom Out  Ctrl+-", .{}, .{ .expand = .horizontal }) != null) {
                 action = .zoom_out;
-                m.close();
+                fw.close();
             }
             if (dvui.menuItemLabel(@src(), "Reset Zoom  Ctrl+0", .{}, .{ .expand = .horizontal }) != null) {
                 action = .reset_zoom;
-                m.close();
+                fw.close();
             }
             _ = dvui.separator(@src(), .{});
 
@@ -153,7 +153,7 @@ pub const MenuBar = struct {
                             var name_buf: [64]u8 = .{0} ** 64;
                             @memcpy(name_buf[0..name.len], name);
                             action = .{ .set_theme = name_buf };
-                            m.close();
+                            fw.close();
                         }
                     }
                 }
