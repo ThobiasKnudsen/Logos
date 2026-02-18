@@ -322,10 +322,13 @@ pub const GraphRenderer = struct {
             if (self.backend) |backend| {
                 pipeline.initWithDevice(backend.device) catch |err| {
                     std.log.err("[GraphRenderer] Pipeline init failed for shader {}: {}", .{ cell_idx, err });
+                    pipeline.releaseGpuResources();
+                    pipeline.deinit();
                     continue;
                 };
                 pipeline.updateFragmentShader(shader.source) catch |err| {
                     std.log.err("[GraphRenderer] Shader compile failed for cell {}: {}", .{ cell_idx, err });
+                    pipeline.releaseGpuResources();
                     pipeline.deinit();
                     continue;
                 };

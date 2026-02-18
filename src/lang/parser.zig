@@ -128,6 +128,11 @@ pub const Parser = struct {
                         return err;
                     };
                 }
+                // Not a binding: free the speculatively allocated pattern
+                switch (pattern) {
+                    .tuple => |names| self.allocator.free(names),
+                    .single => {},
+                }
             }
             // Restore and parse as expression
             self.pos = checkpoint;
