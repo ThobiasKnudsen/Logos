@@ -14,9 +14,28 @@ use wgpu::{
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::ui::layout::LayoutResult;
+use crate::ui::layout::{LayoutResult, Rect};
 use crate::ui::theme::{colors, fonts, spacing, Rgba};
 use rects::{RectInstance, RectRenderer};
+
+/// Info about a single tab, passed from AppState to the renderer.
+pub struct TabInfo {
+    pub name: String,
+    pub is_active: bool,
+    pub is_modified: bool,
+}
+
+/// Hit-test rectangles returned by update_tab_bar for mouse handling.
+#[derive(Debug, Clone, Copy)]
+pub struct TabHitRect {
+    pub full: Rect,
+    pub close: Rect,
+}
+
+const TAB_PAD_H: f32 = 12.0;
+const TAB_CLOSE_SIZE: f32 = 14.0;
+const TAB_CLOSE_PAD: f32 = 6.0;
+const TAB_GAP: f32 = 2.0;
 
 /// Handles all GPU rendering: wgpu setup, text via glyphon, rects via instanced draw.
 pub struct Renderer {
@@ -38,9 +57,16 @@ pub struct Renderer {
 
     // UI label buffers
     menu_label: TextBuffer,
-    tab_label: TextBuffer,
     status_label: TextBuffer,
     graph_label: TextBuffer,
+
+    // Dynamic tab bar
+    tab_labels: Vec<TextBuffer>,
+    tab_close_labels: Vec<TextBuffer>,
+    tab_bg_rects: Vec<(Rect, bool)>, // (rect, is_active)
+    tab_close_rects: Vec<Rect>,
+    plus_label: TextBuffer,
+    plus_rect: Rect,
 
     // Batched rect renderer
     rect_renderer: RectRenderer,
@@ -110,15 +136,15 @@ impl Renderer {
             fonts::menu_size(),
             "File  Edit  View  Help",
         );
-        let tab_label =
-            Self::create_label(&mut font_system, fonts::ui_size(), "Session 1");
         let status_label = Self::create_label(
             &mut font_system,
             fonts::status_size(),
-            "Ready \u{2502} 7 lines \u{2502} Ln 1, Col 1",
+            "Ready \u{2502} Ln 1, Col 1",
         );
         let graph_label =
             Self::create_label(&mut font_system, fonts::ui_size(), "Graph");
+        let plus_label =
+            Self::create_label(&mut font_system, fonts::ui_size(), "+");
 
         // Rect renderer
         let rect_renderer = RectRenderer::new(&device, swapchain_format);
@@ -136,9 +162,14 @@ impl Renderer {
             editor_buffer,
             cursor_pos: (spacing::TEXT_PADDING, spacing::TEXT_PADDING, fonts::editor_line_height()),
             menu_label,
-            tab_label,
             status_label,
             graph_label,
+            tab_labels: Vec::new(),
+            tab_close_labels: Vec::new(),
+            tab_bg_rects: Vec::new(),
+            tab_close_rects: Vec::new(),
+            plus_label,
+            plus_rect: Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
             rect_renderer,
         }
     }
@@ -154,6 +185,17 @@ impl Renderer {
         );
         buf.shape_until_scroll(font_system, false);
         buf
+    }
+
+    /// Measure the pixel width of a text buffer's first layout run.
+    fn measure_label_width(buf: &TextBuffer) -> f32 {
+        let mut max_x = 0.0_f32;
+        for run in buf.layout_runs() {
+            if let Some(last) = run.glyphs.last() {
+                max_x = max_x.max(last.x + last.w);
+            }
+        }
+        max_x
     }
 
     pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
@@ -256,6 +298,68 @@ impl Renderer {
             .shape_until_scroll(&mut self.font_system, false);
     }
 
+    /// Rebuild the tab bar labels and rects from the given tab infos.
+    /// Returns hit rects for each tab and the plus button rect.
+    pub fn update_tab_bar(
+        &mut self,
+        tabs: &[TabInfo],
+        tab_bar_rect: Rect,
+    ) -> (Vec<TabHitRect>, Rect) {
+        self.tab_labels.clear();
+        self.tab_close_labels.clear();
+        self.tab_bg_rects.clear();
+        self.tab_close_rects.clear();
+
+        let tab_h = tab_bar_rect.h;
+        let mut x = tab_bar_rect.x + TAB_GAP;
+        let y = tab_bar_rect.y;
+
+        let mut hit_rects = Vec::with_capacity(tabs.len());
+
+        for tab in tabs {
+            // Build label text: "name" or "name \u{2022}" (bullet for modified)
+            let label_text = if tab.is_modified {
+                format!("{} \u{2022}", tab.name)
+            } else {
+                tab.name.clone()
+            };
+
+            let label = Self::create_label(&mut self.font_system, fonts::ui_size(), &label_text);
+            let text_w = Self::measure_label_width(&label);
+
+            // close button "x"
+            let close_label = Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{00d7}");
+
+            let tab_w = TAB_PAD_H + text_w + TAB_CLOSE_PAD + TAB_CLOSE_SIZE + TAB_PAD_H;
+
+            let tab_rect = Rect { x, y, w: tab_w, h: tab_h };
+            let close_rect = Rect {
+                x: x + tab_w - TAB_PAD_H - TAB_CLOSE_SIZE,
+                y: y + (tab_h - TAB_CLOSE_SIZE) / 2.0,
+                w: TAB_CLOSE_SIZE,
+                h: TAB_CLOSE_SIZE,
+            };
+
+            self.tab_bg_rects.push((tab_rect, tab.is_active));
+            self.tab_close_rects.push(close_rect);
+            self.tab_labels.push(label);
+            self.tab_close_labels.push(close_label);
+
+            hit_rects.push(TabHitRect {
+                full: tab_rect,
+                close: close_rect,
+            });
+
+            x += tab_w + TAB_GAP;
+        }
+
+        // Plus button
+        let plus_w = TAB_PAD_H * 2.0 + 10.0;
+        self.plus_rect = Rect { x, y, w: plus_w, h: tab_h };
+
+        (hit_rects, self.plus_rect)
+    }
+
     pub fn render(&mut self, layout: &LayoutResult) {
         self.viewport.update(
             &self.queue,
@@ -268,12 +372,28 @@ impl Renderer {
         let sw = self.surface_config.width as f32;
         let sh = self.surface_config.height as f32;
 
-        // -- Collect UI background rects --
-        let ui_rects = [
+        // -- Collect UI background rects dynamically --
+        let mut ui_rects = vec![
             // Menu bar
             rect_from(layout.menu_bar, colors::BG_SECONDARY),
-            // Tab bar
+            // Tab bar background
             rect_from(layout.tab_bar, colors::TAB_INACTIVE),
+        ];
+
+        // Per-tab background rects
+        for (rect, is_active) in &self.tab_bg_rects {
+            let color = if *is_active {
+                colors::TAB_ACTIVE
+            } else {
+                colors::TAB_INACTIVE
+            };
+            ui_rects.push(rect_from(*rect, color));
+        }
+
+        // Plus button background
+        ui_rects.push(rect_from(self.plus_rect, colors::TAB_INACTIVE));
+
+        ui_rects.extend_from_slice(&[
             // Left pane (editor)
             rect_from(layout.left_pane, colors::EDITOR_BG),
             // Split handle
@@ -290,88 +410,132 @@ impl Renderer {
                 h: self.cursor_pos.2,
                 color: colors::CURSOR.to_f32_array(),
             },
-        ];
+        ]);
 
-        // -- Prepare text areas --
+        // -- Prepare text areas dynamically --
         let pad = spacing::TEXT_PADDING;
         let lp = layout.left_pane;
-        let text_areas = [
-            // Editor text in left pane
-            TextArea {
-                buffer: &self.editor_buffer,
-                left: lp.x + pad,
-                top: lp.y + pad,
+
+        let mut text_areas: Vec<TextArea> = Vec::new();
+
+        // Editor text in left pane
+        text_areas.push(TextArea {
+            buffer: &self.editor_buffer,
+            left: lp.x + pad,
+            top: lp.y + pad,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: lp.x as i32,
+                top: lp.y as i32,
+                right: (lp.x + lp.w) as i32,
+                bottom: (lp.y + lp.h) as i32,
+            },
+            default_color: colors::TEXT_PRIMARY.to_glyphon(),
+            custom_glyphs: &[],
+        });
+
+        // Menu label
+        text_areas.push(TextArea {
+            buffer: &self.menu_label,
+            left: layout.menu_bar.x + spacing::SM,
+            top: layout.menu_bar.y + spacing::XS,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: layout.menu_bar.x as i32,
+                top: layout.menu_bar.y as i32,
+                right: (layout.menu_bar.x + layout.menu_bar.w) as i32,
+                bottom: (layout.menu_bar.y + layout.menu_bar.h) as i32,
+            },
+            default_color: colors::TEXT_PRIMARY.to_glyphon(),
+            custom_glyphs: &[],
+        });
+
+        // Tab labels
+        let tab_bar = layout.tab_bar;
+        for (i, label) in self.tab_labels.iter().enumerate() {
+            let (tab_rect, _) = &self.tab_bg_rects[i];
+            text_areas.push(TextArea {
+                buffer: label,
+                left: tab_rect.x + TAB_PAD_H,
+                top: tab_rect.y + spacing::SM,
                 scale: 1.0,
                 bounds: TextBounds {
-                    left: lp.x as i32,
-                    top: lp.y as i32,
-                    right: (lp.x + lp.w) as i32,
-                    bottom: (lp.y + lp.h) as i32,
+                    left: tab_bar.x as i32,
+                    top: tab_bar.y as i32,
+                    right: (tab_bar.x + tab_bar.w) as i32,
+                    bottom: (tab_bar.y + tab_bar.h) as i32,
                 },
                 default_color: colors::TEXT_PRIMARY.to_glyphon(),
                 custom_glyphs: &[],
-            },
-            // Menu label
-            TextArea {
-                buffer: &self.menu_label,
-                left: layout.menu_bar.x + spacing::SM,
-                top: layout.menu_bar.y + spacing::XS,
+            });
+        }
+
+        // Tab close labels (x buttons)
+        for (i, close_label) in self.tab_close_labels.iter().enumerate() {
+            let close_rect = &self.tab_close_rects[i];
+            text_areas.push(TextArea {
+                buffer: close_label,
+                left: close_rect.x,
+                top: close_rect.y,
                 scale: 1.0,
                 bounds: TextBounds {
-                    left: layout.menu_bar.x as i32,
-                    top: layout.menu_bar.y as i32,
-                    right: (layout.menu_bar.x + layout.menu_bar.w) as i32,
-                    bottom: (layout.menu_bar.y + layout.menu_bar.h) as i32,
-                },
-                default_color: colors::TEXT_PRIMARY.to_glyphon(),
-                custom_glyphs: &[],
-            },
-            // Tab label
-            TextArea {
-                buffer: &self.tab_label,
-                left: layout.tab_bar.x + spacing::MD,
-                top: layout.tab_bar.y + spacing::SM,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: layout.tab_bar.x as i32,
-                    top: layout.tab_bar.y as i32,
-                    right: (layout.tab_bar.x + layout.tab_bar.w) as i32,
-                    bottom: (layout.tab_bar.y + layout.tab_bar.h) as i32,
-                },
-                default_color: colors::TEXT_PRIMARY.to_glyphon(),
-                custom_glyphs: &[],
-            },
-            // Status label
-            TextArea {
-                buffer: &self.status_label,
-                left: layout.status_bar.x + spacing::MD,
-                top: layout.status_bar.y + spacing::XS,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: layout.status_bar.x as i32,
-                    top: layout.status_bar.y as i32,
-                    right: (layout.status_bar.x + layout.status_bar.w) as i32,
-                    bottom: (layout.status_bar.y + layout.status_bar.h) as i32,
-                },
-                default_color: colors::TEXT_SECONDARY.to_glyphon(),
-                custom_glyphs: &[],
-            },
-            // Graph placeholder
-            TextArea {
-                buffer: &self.graph_label,
-                left: layout.right_pane.x + layout.right_pane.w / 2.0 - 20.0,
-                top: layout.right_pane.y + layout.right_pane.h / 2.0 - 10.0,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: layout.right_pane.x as i32,
-                    top: layout.right_pane.y as i32,
-                    right: (layout.right_pane.x + layout.right_pane.w) as i32,
-                    bottom: (layout.right_pane.y + layout.right_pane.h) as i32,
+                    left: tab_bar.x as i32,
+                    top: tab_bar.y as i32,
+                    right: (tab_bar.x + tab_bar.w) as i32,
+                    bottom: (tab_bar.y + tab_bar.h) as i32,
                 },
                 default_color: colors::TEXT_MUTED.to_glyphon(),
                 custom_glyphs: &[],
+            });
+        }
+
+        // Plus button label
+        text_areas.push(TextArea {
+            buffer: &self.plus_label,
+            left: self.plus_rect.x + TAB_PAD_H,
+            top: self.plus_rect.y + spacing::SM,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: tab_bar.x as i32,
+                top: tab_bar.y as i32,
+                right: (tab_bar.x + tab_bar.w) as i32,
+                bottom: (tab_bar.y + tab_bar.h) as i32,
             },
-        ];
+            default_color: colors::TEXT_MUTED.to_glyphon(),
+            custom_glyphs: &[],
+        });
+
+        // Status label
+        text_areas.push(TextArea {
+            buffer: &self.status_label,
+            left: layout.status_bar.x + spacing::MD,
+            top: layout.status_bar.y + spacing::XS,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: layout.status_bar.x as i32,
+                top: layout.status_bar.y as i32,
+                right: (layout.status_bar.x + layout.status_bar.w) as i32,
+                bottom: (layout.status_bar.y + layout.status_bar.h) as i32,
+            },
+            default_color: colors::TEXT_SECONDARY.to_glyphon(),
+            custom_glyphs: &[],
+        });
+
+        // Graph placeholder
+        text_areas.push(TextArea {
+            buffer: &self.graph_label,
+            left: layout.right_pane.x + layout.right_pane.w / 2.0 - 20.0,
+            top: layout.right_pane.y + layout.right_pane.h / 2.0 - 10.0,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: layout.right_pane.x as i32,
+                top: layout.right_pane.y as i32,
+                right: (layout.right_pane.x + layout.right_pane.w) as i32,
+                bottom: (layout.right_pane.y + layout.right_pane.h) as i32,
+            },
+            default_color: colors::TEXT_MUTED.to_glyphon(),
+            custom_glyphs: &[],
+        });
 
         self.text_renderer
             .prepare(
@@ -425,7 +589,7 @@ impl Renderer {
     }
 }
 
-fn rect_from(r: crate::ui::layout::Rect, color: Rgba) -> RectInstance {
+fn rect_from(r: Rect, color: Rgba) -> RectInstance {
     RectInstance {
         x: r.x,
         y: r.y,
