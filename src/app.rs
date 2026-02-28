@@ -8,7 +8,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::file_dialog::{DialogKind, DialogResult, FileDialog};
-use crate::render::{Renderer, TabHitRect, TabInfo};
+use crate::render::{CellInfo, CellLayout, Renderer, TabHitRect, TabInfo};
 use crate::session::TabManager;
 use crate::ui::layout::{LayoutResult, Rect, UiLayout};
 use crate::ui::theme::{fonts, spacing, split};
@@ -64,8 +64,10 @@ pub(crate) enum HoverTarget {
     WinBtnClose,
     MenuItem(usize),
     DropdownItem(usize),
-    HScrollThumb,
     VScrollThumb,
+    CellEditor(usize),
+    CellDeleteButton(usize),
+    AddCellButton,
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +108,9 @@ struct AppState {
     tab_hit_rects: Vec<TabHitRect>,
     plus_button_rect: Rect,
 
+    // Cell layouts for hit-testing
+    cell_layouts: Vec<CellLayout>,
+
     // Hover
     hover_target: HoverTarget,
 
@@ -114,7 +119,6 @@ struct AppState {
     is_dragging_split: bool,
 
     // Scrollbar dragging
-    is_dragging_h_scroll: bool,
     is_dragging_v_scroll: bool,
     scroll_drag_offset: f32,
 
@@ -135,13 +139,21 @@ const DOUBLE_CLICK_MS: u128 = 400;
 const SCROLL_LINE_PIXELS: f32 = 40.0;
 
 impl AppState {
-    /// Sync renderer with the active tab's buffer and all tab infos.
+    /// Sync renderer with the active tab's cells and all tab infos.
     fn sync_active_tab(&mut self) {
         let lp = self.cached_layout.left_pane;
         let tab = self.tab_manager.active_tab();
-        self.renderer.update_text(
-            tab.buffer.text(),
-            tab.buffer.cursor_byte_offset(),
+        let cell_infos: Vec<CellInfo> = tab
+            .cells
+            .iter()
+            .map(|c| CellInfo {
+                text: c.buffer.text().to_string(),
+                cursor_byte: c.buffer.cursor_byte_offset(),
+            })
+            .collect();
+        self.cell_layouts = self.renderer.update_cells(
+            &cell_infos,
+            tab.active_cell_index,
             lp,
         );
 
@@ -174,8 +186,9 @@ impl AppState {
 
         // Update status bar
         let tab = self.tab_manager.active_tab();
-        let (line, col) = line_col_from(tab.buffer.text(), tab.buffer.cursor_byte_offset());
-        let line_count = tab.buffer.text().lines().count().max(1);
+        let cell = tab.active_cell();
+        let (line, col) = line_col_from(cell.buffer.text(), cell.buffer.cursor_byte_offset());
+        let line_count = cell.buffer.text().lines().count().max(1);
         let name = tab
             .file_path
             .as_ref()
@@ -274,17 +287,34 @@ impl AppState {
             return;
         }
 
-        // Scrollbar thumbs (before general editor area)
+        // Scrollbar thumb
         if let Some(thumb) = self.renderer.v_thumb_rect() {
             if point_in_rect(mx, my, &thumb) {
                 self.set_hover(HoverTarget::VScrollThumb);
                 return;
             }
         }
-        if let Some(thumb) = self.renderer.h_thumb_rect() {
-            if point_in_rect(mx, my, &thumb) {
-                self.set_hover(HoverTarget::HScrollThumb);
+
+        // Cell areas (only if cursor is within the left pane)
+        let lp = self.cached_layout.left_pane;
+        if point_in_rect(mx, my, &lp) {
+            // Check add-cell button
+            let add_rect = self.renderer.add_cell_button_rect();
+            if point_in_rect(mx, my, &add_rect) {
+                self.set_hover(HoverTarget::AddCellButton);
                 return;
+            }
+
+            // Check cells (delete button first, then editor area)
+            for cl in &self.cell_layouts {
+                if point_in_rect(mx, my, &cl.delete_button) {
+                    self.set_hover(HoverTarget::CellDeleteButton(cl.cell_index));
+                    return;
+                }
+                if point_in_rect(mx, my, &cl.editor) {
+                    self.set_hover(HoverTarget::CellEditor(cl.cell_index));
+                    return;
+                }
             }
         }
 
@@ -448,7 +478,7 @@ impl AppState {
 
     /// Returns true if any drag operation is in progress.
     fn is_any_drag_active(&self) -> bool {
-        self.is_dragging_split || self.is_dragging_h_scroll || self.is_dragging_v_scroll
+        self.is_dragging_split || self.is_dragging_v_scroll
     }
 }
 
@@ -482,10 +512,10 @@ impl ApplicationHandler for App {
             cursor_position: (0.0, 0.0),
             tab_hit_rects: Vec::new(),
             plus_button_rect: Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+            cell_layouts: Vec::new(),
             hover_target: HoverTarget::None,
             split_ratio: split::DEFAULT_RATIO,
             is_dragging_split: false,
-            is_dragging_h_scroll: false,
             is_dragging_v_scroll: false,
             scroll_drag_offset: 0.0,
             win_control_rects: WindowControlRects::default(),
@@ -528,13 +558,7 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 state.cursor_position = (position.x as f32, position.y as f32);
 
-                if state.is_dragging_h_scroll {
-                    state.renderer.set_h_scroll_from_drag(
-                        state.cursor_position.0,
-                        state.scroll_drag_offset,
-                    );
-                    state.window.request_redraw();
-                } else if state.is_dragging_v_scroll {
+                if state.is_dragging_v_scroll {
                     state.renderer.set_v_scroll_from_drag(
                         state.cursor_position.1,
                         state.scroll_drag_offset,
@@ -570,7 +594,7 @@ impl ApplicationHandler for App {
 
             // --- Mouse Wheel ---
             WindowEvent::MouseWheel { delta, .. } => {
-                let (dx, dy) = match delta {
+                let (_dx, dy) = match delta {
                     winit::event::MouseScrollDelta::LineDelta(x, y) => {
                         (x * SCROLL_LINE_PIXELS, y * SCROLL_LINE_PIXELS)
                     }
@@ -583,13 +607,8 @@ impl ApplicationHandler for App {
                 let lp = state.cached_layout.left_pane;
                 let (mx, my) = state.cursor_position;
                 if mx >= lp.x && mx <= lp.x + lp.w && my >= lp.y && my <= lp.y + lp.h {
-                    if state.modifiers.shift_key() {
-                        // Shift+scroll = horizontal
-                        state.renderer.scroll_by(-dy, 0.0);
-                    } else {
-                        // Normal scroll: vertical (negate Y because scroll up = negative delta)
-                        state.renderer.scroll_by(-dx, -dy);
-                    }
+                    // Vertical scroll for cell container
+                    state.renderer.scroll_by(0.0, -dy);
                     state.window.request_redraw();
                 }
             }
@@ -606,14 +625,6 @@ impl ApplicationHandler for App {
                         state.is_dragging_split = true;
                         state.window.set_cursor(CursorIcon::ColResize);
                         event_loop.set_control_flow(ControlFlow::Poll);
-                    }
-                    HoverTarget::HScrollThumb => {
-                        state.close_menu();
-                        if let Some(thumb) = state.renderer.h_thumb_rect() {
-                            state.is_dragging_h_scroll = true;
-                            state.scroll_drag_offset = state.cursor_position.0 - thumb.x;
-                            event_loop.set_control_flow(ControlFlow::Poll);
-                        }
                     }
                     HoverTarget::VScrollThumb => {
                         state.close_menu();
@@ -665,7 +676,6 @@ impl ApplicationHandler for App {
                 if state.is_any_drag_active() {
                     let was_split = state.is_dragging_split;
                     state.is_dragging_split = false;
-                    state.is_dragging_h_scroll = false;
                     state.is_dragging_v_scroll = false;
                     if state.pending_dialog.is_none() {
                         event_loop.set_control_flow(ControlFlow::Wait);
@@ -720,6 +730,24 @@ impl ApplicationHandler for App {
                 if point_in_rect(mx, my, &state.plus_button_rect) {
                     state.tab_manager.new_tab();
                     state.sync_active_tab();
+                    return;
+                }
+
+                // Cell interactions
+                match state.hover_target {
+                    HoverTarget::CellEditor(i) => {
+                        state.tab_manager.active_tab_mut().set_active_cell(i);
+                        state.sync_active_tab();
+                    }
+                    HoverTarget::CellDeleteButton(i) => {
+                        state.tab_manager.active_tab_mut().remove_cell(i);
+                        state.sync_active_tab();
+                    }
+                    HoverTarget::AddCellButton => {
+                        state.tab_manager.active_tab_mut().add_cell();
+                        state.sync_active_tab();
+                    }
+                    _ => {}
                 }
             }
 
@@ -745,32 +773,32 @@ impl ApplicationHandler for App {
 
                 let changed = match key_event.logical_key {
                     Key::Named(NamedKey::Backspace) => {
-                        state.tab_manager.active_tab_mut().buffer.backspace()
+                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.backspace()
                     }
                     Key::Named(NamedKey::Delete) => {
-                        state.tab_manager.active_tab_mut().buffer.delete()
+                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.delete()
                     }
                     Key::Named(NamedKey::Enter) => {
-                        state.tab_manager.active_tab_mut().buffer.insert('\n');
+                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.insert('\n');
                         true
                     }
                     Key::Named(NamedKey::ArrowLeft) => {
-                        state.tab_manager.active_tab_mut().buffer.move_left()
+                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_left()
                     }
                     Key::Named(NamedKey::ArrowRight) => {
-                        state.tab_manager.active_tab_mut().buffer.move_right()
+                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_right()
                     }
                     Key::Named(NamedKey::ArrowUp) => {
-                        state.tab_manager.active_tab_mut().buffer.move_up()
+                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_up()
                     }
                     Key::Named(NamedKey::ArrowDown) => {
-                        state.tab_manager.active_tab_mut().buffer.move_down()
+                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_down()
                     }
                     Key::Named(NamedKey::Home) => {
-                        state.tab_manager.active_tab_mut().buffer.move_home()
+                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_home()
                     }
                     Key::Named(NamedKey::End) => {
-                        state.tab_manager.active_tab_mut().buffer.move_end()
+                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_end()
                     }
                     _ => {
                         if state.modifiers.control_key() {
@@ -779,7 +807,7 @@ impl ApplicationHandler for App {
                         if let Some(ref text) = key_event.text {
                             for c in text.chars() {
                                 if !c.is_control() {
-                                    state.tab_manager.active_tab_mut().buffer.insert(c);
+                                    state.tab_manager.active_tab_mut().active_cell_mut().buffer.insert(c);
                                 }
                             }
                             true

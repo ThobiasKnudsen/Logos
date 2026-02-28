@@ -33,12 +33,31 @@ pub struct TabHitRect {
     pub close: Rect,
 }
 
+/// Layout rects for a single cell, used for hit-testing and rendering.
+#[derive(Debug, Clone, Copy)]
+pub struct CellLayout {
+    pub cell_index: usize,
+    pub container: Rect,
+    pub header: Rect,
+    pub delete_button: Rect,
+    pub separator: Rect,
+    pub editor: Rect,
+}
+
+/// Info about a single cell, passed from AppState to the renderer.
+pub struct CellInfo {
+    pub text: String,
+    pub cursor_byte: usize,
+}
+
 const TAB_PAD_H: f32 = 12.0;
 const TAB_CLOSE_SIZE: f32 = 20.0;
 const TAB_CLOSE_PAD: f32 = 6.0;
 const TAB_GAP: f32 = 2.0;
 const TAB_DOT_PAD: f32 = 6.0; // horizontal margin around the modified dot
 const MENU_ITEM_PAD: f32 = 10.0;
+const CELL_HEADER_HEIGHT: f32 = 28.0;
+const CELL_DELETE_SIZE: f32 = 22.0;
 
 /// Handles all GPU rendering: wgpu setup, text via glyphon, rects via instanced draw.
 pub struct Renderer {
@@ -53,25 +72,28 @@ pub struct Renderer {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
 
-    // Editor text buffer (left pane)
-    editor_buffer: TextBuffer,
-    /// Cursor position within the text buffer (content-relative x, y) + line height.
+    // Multi-cell editor buffers (one glyphon buffer per cell)
+    cell_buffers: Vec<TextBuffer>,
+    /// Computed cell layouts for hit-testing and rendering.
+    cell_layouts: Vec<CellLayout>,
+    /// Which cell is currently active (receives keyboard input).
+    active_cell_index: usize,
+    /// Cursor position within the active cell (content-relative x, y) + line height.
     cursor_content_pos: (f32, f32, f32),
-    /// Horizontal scroll offset for the editor.
-    editor_scroll_x: f32,
-    /// Vertical scroll offset for the editor.
-    editor_scroll_y: f32,
-    /// Total content width of the editor (longest line).
-    editor_content_width: f32,
-    /// Total content height of the editor (all lines).
-    editor_content_height: f32,
+    /// Vertical scroll offset for the cell container.
+    cell_scroll_y: f32,
+    /// Total height of all cells stacked.
+    cells_total_height: f32,
     /// Cached editor pane rect for scroll calculations.
     cached_editor_pane: Rect,
+    /// "+" button below cells to add new cell.
+    add_cell_label: TextBuffer,
+    add_cell_rect: Rect,
+    /// Delete button label for cells.
+    cell_delete_label: TextBuffer,
 
-    // Scrollbar geometry for hit-testing
-    h_track_rect: Option<Rect>,
+    // Scrollbar geometry for hit-testing (vertical only for cell container)
     v_track_rect: Option<Rect>,
-    h_thumb_rect: Option<Rect>,
     v_thumb_rect: Option<Rect>,
 
     // UI label buffers
@@ -154,15 +176,7 @@ impl Renderer {
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
 
-        let mut editor_buffer = TextBuffer::new(
-            &mut font_system,
-            Metrics::new(fonts::editor_size(), fonts::editor_line_height()),
-        );
-
-        let physical_height = (physical_size.height as f64 * scale_factor) as f32;
-        // No constraints = no wrapping, all lines laid out.
-        editor_buffer.set_size(&mut font_system, None, None);
-        editor_buffer.shape_until_scroll(&mut font_system, false);
+        let _ = (physical_size.height as f64 * scale_factor) as f32;
 
         // Menu item labels
         let menu_item_labels: Vec<TextBuffer> = app::MENU_NAMES
@@ -185,7 +199,8 @@ impl Renderer {
 
         let rect_renderer = RectRenderer::new(&device, swapchain_format);
 
-        let _ = physical_height; // used only for initial sizing context
+        let add_cell_label = Self::create_label(&mut font_system, fonts::ui_size(), "+ Add Cell");
+        let cell_delete_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{2715}");
 
         let zero_rect = Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
 
@@ -199,16 +214,17 @@ impl Renderer {
             viewport,
             atlas,
             text_renderer,
-            editor_buffer,
+            cell_buffers: Vec::new(),
+            cell_layouts: Vec::new(),
+            active_cell_index: 0,
             cursor_content_pos: (0.0, 0.0, fonts::editor_line_height()),
-            editor_scroll_x: 0.0,
-            editor_scroll_y: 0.0,
-            editor_content_width: 0.0,
-            editor_content_height: 0.0,
+            cell_scroll_y: 0.0,
+            cells_total_height: 0.0,
             cached_editor_pane: zero_rect,
-            h_track_rect: None,
+            add_cell_label,
+            add_cell_rect: zero_rect,
+            cell_delete_label,
             v_track_rect: None,
-            h_thumb_rect: None,
             v_thumb_rect: None,
             status_label,
             graph_label,
@@ -283,12 +299,19 @@ impl Renderer {
         self.win_close_label =
             Self::create_label(&mut self.font_system, fonts::menu_size(), "\u{00D7}");
 
-        self.editor_buffer.set_metrics(
-            &mut self.font_system,
-            Metrics::new(fonts::editor_size(), fonts::editor_line_height()),
-        );
-        self.editor_buffer
-            .shape_until_scroll(&mut self.font_system, false);
+        // Update metrics for all cell buffers
+        for buf in &mut self.cell_buffers {
+            buf.set_metrics(
+                &mut self.font_system,
+                Metrics::new(fonts::editor_size(), fonts::editor_line_height()),
+            );
+            buf.shape_until_scroll(&mut self.font_system, false);
+        }
+
+        self.add_cell_label =
+            Self::create_label(&mut self.font_system, fonts::ui_size(), "+ Add Cell");
+        self.cell_delete_label =
+            Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{2715}");
 
         // Close any open dropdown since label sizes changed
         self.close_dropdown();
@@ -402,135 +425,84 @@ impl Renderer {
 
     // ----- Scroll public API -----
 
-    pub fn h_thumb_rect(&self) -> Option<Rect> {
-        self.h_thumb_rect
-    }
-
     pub fn v_thumb_rect(&self) -> Option<Rect> {
         self.v_thumb_rect
     }
 
-    /// Scroll the editor view by pixel deltas. Clamps to valid range.
-    pub fn scroll_by(&mut self, dx: f32, dy: f32) {
+    /// Scroll the cell container by pixel deltas. Clamps to valid range.
+    /// Also repositions cell layouts and scrollbar to match the new scroll.
+    pub fn scroll_by(&mut self, _dx: f32, dy: f32) {
         let pane = self.cached_editor_pane;
-        let (visible_w, visible_h, _, _) = self.compute_visible_area(pane);
+        let visible_h = pane.h;
 
-        self.editor_scroll_x += dx;
-        self.editor_scroll_y += dy;
+        let old_scroll = self.cell_scroll_y;
+        self.cell_scroll_y += dy;
+        let max_sy = (self.cells_total_height - visible_h).max(0.0);
+        self.cell_scroll_y = self.cell_scroll_y.clamp(0.0, max_sy);
 
-        let max_sx = (self.editor_content_width - visible_w).max(0.0);
-        let max_sy = (self.editor_content_height - visible_h).max(0.0);
-        self.editor_scroll_x = self.editor_scroll_x.clamp(0.0, max_sx);
-        self.editor_scroll_y = self.editor_scroll_y.clamp(0.0, max_sy);
-
-        let has_h = self.h_track_rect.is_some();
-        let has_v = self.v_track_rect.is_some();
-        self.update_scrollbar_rects(pane, has_h, has_v, visible_w, visible_h);
-    }
-
-    /// Set horizontal scroll position from scrollbar thumb drag.
-    pub fn set_h_scroll_from_drag(&mut self, mouse_x: f32, drag_offset: f32) {
-        if let (Some(track), Some(thumb)) = (self.h_track_rect, self.h_thumb_rect) {
-            let pane = self.cached_editor_pane;
-            let (visible_w, visible_h, _, _) = self.compute_visible_area(pane);
-            let max_scroll = (self.editor_content_width - visible_w).max(0.0);
-
-            let new_thumb_x = mouse_x - drag_offset;
-            let range = track.w - thumb.w;
-            if range > 0.0 {
-                let ratio = ((new_thumb_x - track.x) / range).clamp(0.0, 1.0);
-                self.editor_scroll_x = ratio * max_scroll;
+        let delta = self.cell_scroll_y - old_scroll;
+        if delta.abs() > 0.001 {
+            // Shift all cell layouts and add-cell button by the scroll delta
+            for cl in &mut self.cell_layouts {
+                cl.container.y -= delta;
+                cl.header.y -= delta;
+                cl.delete_button.y -= delta;
+                cl.separator.y -= delta;
+                cl.editor.y -= delta;
             }
-
-            let has_h = true;
-            let has_v = self.v_track_rect.is_some();
-            self.update_scrollbar_rects(pane, has_h, has_v, visible_w, visible_h);
+            self.add_cell_rect.y -= delta;
         }
+
+        self.update_scrollbar_rects(pane);
     }
 
     /// Set vertical scroll position from scrollbar thumb drag.
     pub fn set_v_scroll_from_drag(&mut self, mouse_y: f32, drag_offset: f32) {
         if let (Some(track), Some(thumb)) = (self.v_track_rect, self.v_thumb_rect) {
             let pane = self.cached_editor_pane;
-            let (visible_w, visible_h, _, _) = self.compute_visible_area(pane);
-            let max_scroll = (self.editor_content_height - visible_h).max(0.0);
+            let visible_h = pane.h;
+            let max_scroll = (self.cells_total_height - visible_h).max(0.0);
 
             let new_thumb_y = mouse_y - drag_offset;
             let range = track.h - thumb.h;
             if range > 0.0 {
                 let ratio = ((new_thumb_y - track.y) / range).clamp(0.0, 1.0);
-                self.editor_scroll_y = ratio * max_scroll;
+                self.cell_scroll_y = ratio * max_scroll;
             }
 
-            let has_h = self.h_track_rect.is_some();
-            let has_v = true;
-            self.update_scrollbar_rects(pane, has_h, has_v, visible_w, visible_h);
+            self.update_scrollbar_rects(pane);
         }
+    }
+
+    /// Returns the cell layouts for hit-testing.
+    #[allow(dead_code)]
+    pub fn cell_layouts(&self) -> &[CellLayout] {
+        &self.cell_layouts
+    }
+
+    /// Returns the add-cell button rect for hit-testing.
+    pub fn add_cell_button_rect(&self) -> Rect {
+        self.add_cell_rect
     }
 
     // ----- Scroll internals -----
 
-    /// Determine visible editor area accounting for scrollbars.
-    /// Returns (visible_w, visible_h, needs_h_scrollbar, needs_v_scrollbar).
-    fn compute_visible_area(&self, pane: Rect) -> (f32, f32, bool, bool) {
-        let pad = spacing::TEXT_PADDING;
-        let base_w = pane.w - pad * 2.0;
-        let base_h = pane.h - pad * 2.0;
+    /// Recompute vertical scrollbar from cell container state.
+    fn update_scrollbar_rects(&mut self, pane: Rect) {
+        let visible_h = pane.h;
+        let need_v = self.cells_total_height > visible_h;
 
-        // First pass
-        let need_v = self.editor_content_height > base_h;
-        let w1 = if need_v { base_w - spacing::SCROLLBAR_WIDTH } else { base_w };
-        let need_h = self.editor_content_width > w1;
-        let h1 = if need_h { base_h - spacing::SCROLLBAR_HEIGHT } else { base_h };
-        // Second pass: recheck V with reduced height
-        let need_v = self.editor_content_height > h1;
-        let w2 = if need_v { base_w - spacing::SCROLLBAR_WIDTH } else { base_w };
-
-        (w2.max(0.0), h1.max(0.0), need_h, need_v)
-    }
-
-    /// Recompute scrollbar track and thumb rects from current scroll state.
-    fn update_scrollbar_rects(
-        &mut self,
-        pane: Rect,
-        has_h: bool,
-        has_v: bool,
-        visible_w: f32,
-        visible_h: f32,
-    ) {
-        // Horizontal scrollbar
-        if has_h && visible_w > 0.0 && self.editor_content_width > 0.0 {
-            let sb_h = spacing::SCROLLBAR_HEIGHT;
-            let track_w = if has_v { pane.w - spacing::SCROLLBAR_WIDTH } else { pane.w };
-            let sb_y = pane.y + pane.h - sb_h;
-            self.h_track_rect = Some(Rect { x: pane.x, y: sb_y, w: track_w, h: sb_h });
-
-            let ratio = visible_w / self.editor_content_width;
-            let thumb_w = (track_w * ratio).max(spacing::SCROLLBAR_THUMB_MIN_W);
-            let max_scroll = (self.editor_content_width - visible_w).max(0.0);
-            let thumb_x = if max_scroll > 0.0 {
-                pane.x + (self.editor_scroll_x / max_scroll) * (track_w - thumb_w)
-            } else {
-                pane.x
-            };
-            self.h_thumb_rect = Some(Rect { x: thumb_x, y: sb_y, w: thumb_w, h: sb_h });
-        } else {
-            self.h_track_rect = None;
-            self.h_thumb_rect = None;
-        }
-
-        // Vertical scrollbar
-        if has_v && visible_h > 0.0 && self.editor_content_height > 0.0 {
+        if need_v && visible_h > 0.0 && self.cells_total_height > 0.0 {
             let sb_w = spacing::SCROLLBAR_WIDTH;
-            let track_h = if has_h { pane.h - spacing::SCROLLBAR_HEIGHT } else { pane.h };
+            let track_h = pane.h;
             let sb_x = pane.x + pane.w - sb_w;
             self.v_track_rect = Some(Rect { x: sb_x, y: pane.y, w: sb_w, h: track_h });
 
-            let ratio = visible_h / self.editor_content_height;
+            let ratio = visible_h / self.cells_total_height;
             let thumb_h = (track_h * ratio).max(spacing::SCROLLBAR_THUMB_MIN_H);
-            let max_scroll = (self.editor_content_height - visible_h).max(0.0);
+            let max_scroll = (self.cells_total_height - visible_h).max(0.0);
             let thumb_y = if max_scroll > 0.0 {
-                pane.y + (self.editor_scroll_y / max_scroll) * (track_h - thumb_h)
+                pane.y + (self.cell_scroll_y / max_scroll) * (track_h - thumb_h)
             } else {
                 pane.y
             };
@@ -541,72 +513,169 @@ impl Renderer {
         }
     }
 
-    // ----- Text update -----
+    // ----- Cell update -----
 
-    /// Update editor text. No wrapping, no height limit — all content is laid out.
-    /// Auto-scrolls both axes to keep cursor visible.
-    pub fn update_text(
+    /// Update all cell buffers and compute cell layouts.
+    /// Returns the computed cell layouts for hit-testing.
+    pub fn update_cells(
         &mut self,
-        text: &str,
-        cursor_byte: usize,
+        cells: &[CellInfo],
+        active_cell_index: usize,
         pane: Rect,
-    ) {
+    ) -> Vec<CellLayout> {
         self.cached_editor_pane = pane;
+        self.active_cell_index = active_cell_index;
 
-        // No constraints = no wrapping, all lines laid out
-        self.editor_buffer.set_size(
-            &mut self.font_system,
-            None,
-            None,
-        );
-        self.editor_buffer.set_text(
-            &mut self.font_system,
-            text,
-            Attrs::new().family(Family::Monospace),
-            Shaping::Advanced,
-        );
-        self.editor_buffer
-            .shape_until_scroll(&mut self.font_system, false);
+        // Sync cell_buffers count with cells count
+        while self.cell_buffers.len() < cells.len() {
+            let buf = TextBuffer::new(
+                &mut self.font_system,
+                Metrics::new(fonts::editor_size(), fonts::editor_line_height()),
+            );
+            self.cell_buffers.push(buf);
+        }
+        self.cell_buffers.truncate(cells.len());
 
-        // Compute content-relative cursor position
-        let (cx, cy, ch) =
-            Self::compute_cursor_content_pos(&self.editor_buffer, text, cursor_byte);
-        self.cursor_content_pos = (cx, cy, ch);
+        // Set text + shape each buffer, measure heights
+        let cell_pad = spacing::CELL_PADDING;
+        let cell_spacing = spacing::CELL_SPACING;
+        let header_h = CELL_HEADER_HEIGHT;
+        let sep_h = 1.0;
+        let text_pad = spacing::SM;
+        let container_pad = spacing::SM; // internal padding within cell container
 
-        // Measure total content dimensions
-        self.editor_content_width = Self::measure_content_width(&self.editor_buffer);
-        self.editor_content_height = Self::measure_content_height(&self.editor_buffer);
+        let cell_area_width = pane.w - cell_pad * 2.0;
+        // Account for scrollbar width
+        let effective_width = if self.v_track_rect.is_some() {
+            cell_area_width - spacing::SCROLLBAR_WIDTH
+        } else {
+            cell_area_width
+        };
 
-        // Determine scrollbar visibility (affects visible area)
-        let (visible_w, visible_h, has_h, has_v) = self.compute_visible_area(pane);
+        let mut layouts = Vec::with_capacity(cells.len());
+        let mut y_offset = cell_pad; // accumulates from top of cell container
 
-        // Auto-scroll horizontally to keep cursor visible
-        if visible_w > 0.0 {
-            if cx < self.editor_scroll_x {
-                self.editor_scroll_x = cx;
-            }
-            if cx > self.editor_scroll_x + visible_w {
-                self.editor_scroll_x = cx - visible_w;
-            }
-            let max_sx = (self.editor_content_width - visible_w).max(0.0);
-            self.editor_scroll_x = self.editor_scroll_x.clamp(0.0, max_sx);
+        for (i, cell_info) in cells.iter().enumerate() {
+            // Set text
+            self.cell_buffers[i].set_size(&mut self.font_system, None, None);
+            self.cell_buffers[i].set_text(
+                &mut self.font_system,
+                &cell_info.text,
+                Attrs::new().family(Family::Monospace),
+                Shaping::Advanced,
+            );
+            self.cell_buffers[i].shape_until_scroll(&mut self.font_system, false);
+
+            // Measure content height
+            let content_h = Self::measure_content_height(&self.cell_buffers[i])
+                .max(fonts::editor_line_height());
+            let editor_h = content_h + text_pad * 2.0;
+
+            let container_h = container_pad + header_h + sep_h + editor_h + container_pad;
+
+            let screen_y = pane.y + y_offset - self.cell_scroll_y;
+
+            let container = Rect {
+                x: pane.x + cell_pad,
+                y: screen_y,
+                w: effective_width,
+                h: container_h,
+            };
+            let header = Rect {
+                x: container.x + container_pad,
+                y: container.y + container_pad,
+                w: effective_width - container_pad * 2.0,
+                h: header_h,
+            };
+            let delete_button = Rect {
+                x: header.x + header.w - CELL_DELETE_SIZE,
+                y: header.y + (header_h - CELL_DELETE_SIZE) / 2.0,
+                w: CELL_DELETE_SIZE,
+                h: CELL_DELETE_SIZE,
+            };
+            let separator = Rect {
+                x: container.x + container_pad,
+                y: header.y + header_h,
+                w: effective_width - container_pad * 2.0,
+                h: sep_h,
+            };
+            let editor = Rect {
+                x: container.x + container_pad,
+                y: separator.y + sep_h,
+                w: effective_width - container_pad * 2.0,
+                h: editor_h,
+            };
+
+            layouts.push(CellLayout {
+                cell_index: i,
+                container,
+                header,
+                delete_button,
+                separator,
+                editor,
+            });
+
+            y_offset += container_h + cell_spacing;
         }
 
-        // Auto-scroll vertically to keep cursor visible
-        if visible_h > 0.0 {
-            let cursor_bottom = cy + ch;
-            if cy < self.editor_scroll_y {
-                self.editor_scroll_y = cy;
+        // Add cell button
+        let add_btn_h = CELL_HEADER_HEIGHT;
+        let add_btn_w = Self::measure_label_width(&self.add_cell_label) + spacing::MD * 2.0;
+        let add_btn_x = pane.x + cell_pad;
+        let add_btn_y = pane.y + y_offset - self.cell_scroll_y;
+        self.add_cell_rect = Rect {
+            x: add_btn_x,
+            y: add_btn_y,
+            w: add_btn_w,
+            h: add_btn_h,
+        };
+
+        y_offset += add_btn_h + cell_pad;
+        self.cells_total_height = y_offset;
+
+        // Compute cursor position for active cell
+        if active_cell_index < cells.len() {
+            let (cx, cy, ch) = Self::compute_cursor_content_pos(
+                &self.cell_buffers[active_cell_index],
+                &cells[active_cell_index].text,
+                cells[active_cell_index].cursor_byte,
+            );
+            self.cursor_content_pos = (cx, cy, ch);
+
+            // Auto-scroll to keep active cell cursor visible
+            if let Some(active_layout) = layouts.get(active_cell_index) {
+                let cursor_screen_y = active_layout.editor.y + text_pad + cy;
+                let cursor_bottom = cursor_screen_y + ch;
+
+                let old_scroll = self.cell_scroll_y;
+                if cursor_screen_y < pane.y {
+                    self.cell_scroll_y += cursor_screen_y - pane.y;
+                } else if cursor_bottom > pane.y + pane.h {
+                    self.cell_scroll_y += cursor_bottom - (pane.y + pane.h);
+                }
+                let max_sy = (self.cells_total_height - pane.h).max(0.0);
+                self.cell_scroll_y = self.cell_scroll_y.clamp(0.0, max_sy);
+
+                // If scroll changed, shift all layouts by the delta
+                let scroll_delta = self.cell_scroll_y - old_scroll;
+                if scroll_delta.abs() > 0.001 {
+                    for layout in layouts.iter_mut() {
+                        layout.container.y -= scroll_delta;
+                        layout.header.y -= scroll_delta;
+                        layout.delete_button.y -= scroll_delta;
+                        layout.separator.y -= scroll_delta;
+                        layout.editor.y -= scroll_delta;
+                    }
+                    self.add_cell_rect.y -= scroll_delta;
+                }
             }
-            if cursor_bottom > self.editor_scroll_y + visible_h {
-                self.editor_scroll_y = cursor_bottom - visible_h;
-            }
-            let max_sy = (self.editor_content_height - visible_h).max(0.0);
-            self.editor_scroll_y = self.editor_scroll_y.clamp(0.0, max_sy);
         }
 
-        // Compute scrollbar rects for hit-testing
-        self.update_scrollbar_rects(pane, has_h, has_v, visible_w, visible_h);
+        // Update scrollbar
+        self.update_scrollbar_rects(pane);
+
+        self.cell_layouts = layouts.clone();
+        layouts
     }
 
     /// Returns (content_x, content_y, line_height) relative to buffer origin.
@@ -649,6 +718,7 @@ impl Renderer {
         (0.0, last_top + last_height * extra, last_height)
     }
 
+    #[allow(dead_code)]
     fn measure_content_width(buf: &TextBuffer) -> f32 {
         let mut max_w = 0.0_f32;
         for run in buf.layout_runs() {
@@ -744,20 +814,18 @@ impl Renderer {
 
         let sw = self.surface_config.width as f32;
         let sh = self.surface_config.height as f32;
-        let pad = spacing::TEXT_PADDING;
         let lp = layout.left_pane;
+        let text_pad = spacing::SM;
 
-        // Compute editor clip bounds (excluding scrollbar areas)
-        let editor_right = if self.v_track_rect.is_some() {
+        // Pane clip bounds
+        let pane_left = lp.x as i32;
+        let pane_top = lp.y as i32;
+        let pane_right = if self.v_track_rect.is_some() {
             (lp.x + lp.w - spacing::SCROLLBAR_WIDTH) as i32
         } else {
             (lp.x + lp.w) as i32
         };
-        let editor_bottom = if self.h_track_rect.is_some() {
-            (lp.y + lp.h - spacing::SCROLLBAR_HEIGHT) as i32
-        } else {
-            (lp.y + lp.h) as i32
-        };
+        let pane_bottom = (lp.y + lp.h) as i32;
 
         // -- Background rects --
         let mut ui_rects = vec![
@@ -793,9 +861,7 @@ impl Renderer {
             }
         }
 
-        // (Modified dot indicators are drawn as text below)
-
-        // Plus button
+        // Plus button (tab bar)
         let plus_color = if hover == HoverTarget::PlusButton {
             colors::TAB_HOVER
         } else {
@@ -816,36 +882,85 @@ impl Renderer {
         ui_rects.push(rect_from(layout.right_pane, colors::GRAPH_BG));
         ui_rects.push(rect_from(layout.status_bar, colors::BG_SECONDARY));
 
-        // Cursor (adjusted for both scroll axes)
-        let cursor_screen_x = lp.x + pad + self.cursor_content_pos.0 - self.editor_scroll_x;
-        let cursor_screen_y = lp.y + pad + self.cursor_content_pos.1 - self.editor_scroll_y;
-        // Only draw cursor if within visible bounds
-        if cursor_screen_x >= lp.x as f32
-            && cursor_screen_x < editor_right as f32
-            && cursor_screen_y + self.cursor_content_pos.2 > lp.y
-            && cursor_screen_y < editor_bottom as f32
+        // --- Cell container rects ---
+        for (i, cl) in self.cell_layouts.iter().enumerate() {
+            // Skip cells fully outside the visible pane
+            if cl.container.y + cl.container.h < lp.y || cl.container.y > lp.y + lp.h {
+                continue;
+            }
+
+            // Cell border (1px larger rect behind the cell bg)
+            let border_color = if i == self.active_cell_index {
+                colors::BORDER_FOCUS
+            } else {
+                colors::BORDER
+            };
+            let cell_radius = 12.0 * fonts::scale();
+            ui_rects.push(rect_rounded(
+                Rect {
+                    x: cl.container.x - 1.0,
+                    y: cl.container.y - 1.0,
+                    w: cl.container.w + 2.0,
+                    h: cl.container.h + 2.0,
+                },
+                border_color,
+                cell_radius + 1.0,
+            ));
+
+            // Cell container background
+            ui_rects.push(rect_rounded(cl.container, colors::BG_ELEVATED, cell_radius));
+
+            // Header background (slightly different shade for active)
+            if i == self.active_cell_index {
+                ui_rects.push(rect_from(cl.header, colors::BG_SECONDARY));
+            }
+
+            // Delete button hover
+            if hover == HoverTarget::CellDeleteButton(i) {
+                ui_rects.push(rect_from(cl.delete_button, colors::BG_HOVER));
+            }
+
+            // Separator line
+            ui_rects.push(rect_from(cl.separator, colors::BORDER));
+        }
+
+        // Cursor in active cell
+        if let Some(cl) = self.cell_layouts.get(self.active_cell_index) {
+            let cursor_screen_x = cl.editor.x + text_pad + self.cursor_content_pos.0;
+            let cursor_screen_y = cl.editor.y + text_pad + self.cursor_content_pos.1;
+            let ch = self.cursor_content_pos.2;
+
+            // Only draw if within pane bounds
+            if cursor_screen_x >= lp.x
+                && cursor_screen_x < pane_right as f32
+                && cursor_screen_y + ch > lp.y
+                && cursor_screen_y < pane_bottom as f32
+            {
+                ui_rects.push(RectInstance {
+                    x: cursor_screen_x,
+                    y: cursor_screen_y,
+                    w: fonts::CURSOR_WIDTH,
+                    h: ch,
+                    color: colors::CURSOR.to_f32_array(),
+                    corner_radius: 0.0,
+                    _padding: [0.0; 3],
+                });
+            }
+        }
+
+        // Add cell button
+        if self.add_cell_rect.y + self.add_cell_rect.h > lp.y
+            && self.add_cell_rect.y < lp.y + lp.h
         {
-            ui_rects.push(RectInstance {
-                x: cursor_screen_x,
-                y: cursor_screen_y,
-                w: fonts::CURSOR_WIDTH,
-                h: self.cursor_content_pos.2,
-                color: colors::CURSOR.to_f32_array(),
-            });
+            let add_color = if hover == HoverTarget::AddCellButton {
+                colors::BG_HOVER
+            } else {
+                colors::BG_ELEVATED
+            };
+            ui_rects.push(rect_rounded(self.add_cell_rect, add_color, 6.0 * fonts::scale()));
         }
 
         // Scrollbars
-        if let Some(track) = self.h_track_rect {
-            ui_rects.push(rect_from(track, colors::SCROLLBAR_TRACK));
-        }
-        if let Some(thumb) = self.h_thumb_rect {
-            let color = if matches!(hover, HoverTarget::HScrollThumb) {
-                colors::SCROLLBAR_THUMB_HOVER
-            } else {
-                colors::SCROLLBAR_THUMB
-            };
-            ui_rects.push(rect_from(thumb, color));
-        }
         if let Some(track) = self.v_track_rect {
             ui_rects.push(rect_from(track, colors::SCROLLBAR_TRACK));
         }
@@ -856,16 +971,6 @@ impl Renderer {
                 colors::SCROLLBAR_THUMB
             };
             ui_rects.push(rect_from(thumb, color));
-        }
-        // Corner piece when both scrollbars visible
-        if self.h_track_rect.is_some() && self.v_track_rect.is_some() {
-            ui_rects.push(RectInstance {
-                x: lp.x + lp.w - spacing::SCROLLBAR_WIDTH,
-                y: lp.y + lp.h - spacing::SCROLLBAR_HEIGHT,
-                w: spacing::SCROLLBAR_WIDTH,
-                h: spacing::SCROLLBAR_HEIGHT,
-                color: colors::SCROLLBAR_TRACK.to_f32_array(),
-            });
         }
 
         // Window control hover
@@ -882,23 +987,26 @@ impl Renderer {
         // Dropdown background + item hovers (drawn last so they overlay tab bar)
         if self.dropdown_active {
             ui_rects.push(rect_from(self.dropdown_bg, colors::DROPDOWN_BG));
-            // Dropdown border (1px lines)
             let db = self.dropdown_bg;
             ui_rects.push(RectInstance {
                 x: db.x, y: db.y, w: db.w, h: 1.0,
                 color: colors::DROPDOWN_SEPARATOR.to_f32_array(),
+                corner_radius: 0.0, _padding: [0.0; 3],
             });
             ui_rects.push(RectInstance {
                 x: db.x, y: db.y + db.h - 1.0, w: db.w, h: 1.0,
                 color: colors::DROPDOWN_SEPARATOR.to_f32_array(),
+                corner_radius: 0.0, _padding: [0.0; 3],
             });
             ui_rects.push(RectInstance {
                 x: db.x, y: db.y, w: 1.0, h: db.h,
                 color: colors::DROPDOWN_SEPARATOR.to_f32_array(),
+                corner_radius: 0.0, _padding: [0.0; 3],
             });
             ui_rects.push(RectInstance {
                 x: db.x + db.w - 1.0, y: db.y, w: 1.0, h: db.h,
                 color: colors::DROPDOWN_SEPARATOR.to_f32_array(),
+                corner_radius: 0.0, _padding: [0.0; 3],
             });
 
             for (idx, rect) in self.dropdown_item_rects.iter().enumerate() {
@@ -910,96 +1018,88 @@ impl Renderer {
 
         // -- Text areas --
         let mut text_areas: Vec<TextArea> = Vec::new();
-
-        // Editor text (scrolled in both axes)
-        // When dropdown is active and overlaps the editor, split into regions
-        // around the dropdown so text doesn't render through it.
-        let ed_left = lp.x as i32;
-        let ed_top = lp.y as i32;
-        let editor_text_left = lp.x + pad - self.editor_scroll_x;
-        let editor_text_top = lp.y + pad - self.editor_scroll_y;
         let editor_color = colors::TEXT_PRIMARY.to_glyphon();
 
-        let dd_overlaps_editor = self.dropdown_active && {
-            let db = self.dropdown_bg;
-            (db.y + db.h) as i32 > ed_top
-                && (db.x as i32) < editor_right
-                && (db.x + db.w) as i32 > ed_left
-        };
+        // Cell editor text + delete button labels
+        for (i, cl) in self.cell_layouts.iter().enumerate() {
+            // Skip cells fully outside the visible pane
+            if cl.container.y + cl.container.h < lp.y || cl.container.y > lp.y + lp.h {
+                continue;
+            }
 
-        if dd_overlaps_editor {
-            let db = self.dropdown_bg;
-            let dd_left = db.x as i32;
-            let dd_right = (db.x + db.w) as i32;
-            let dd_bottom = (db.y + db.h) as i32;
+            if i < self.cell_buffers.len() {
+                // Clip text to both the cell editor rect and the pane
+                let clip_left = (cl.editor.x as i32).max(pane_left);
+                let clip_top = (cl.editor.y as i32).max(pane_top);
+                let clip_right = ((cl.editor.x + cl.editor.w) as i32).min(pane_right);
+                let clip_bottom = ((cl.editor.y + cl.editor.h) as i32).min(pane_bottom);
 
-            // Region: to the left of dropdown (if dropdown doesn't start at editor left)
-            if dd_left > ed_left {
+                if clip_left < clip_right && clip_top < clip_bottom {
+                    text_areas.push(TextArea {
+                        buffer: &self.cell_buffers[i],
+                        left: cl.editor.x + text_pad,
+                        top: cl.editor.y + text_pad,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: clip_left,
+                            top: clip_top,
+                            right: clip_right,
+                            bottom: clip_bottom,
+                        },
+                        default_color: editor_color,
+                        custom_glyphs: &[],
+                    });
+                }
+            }
+
+            // Delete button label (×)
+            let del = &cl.delete_button;
+            let del_clip_top = (del.y as i32).max(pane_top);
+            let del_clip_bottom = ((del.y + del.h) as i32).min(pane_bottom);
+            if del_clip_top < del_clip_bottom {
+                let label_w = Self::measure_label_width(&self.cell_delete_label);
+                let line_h = fonts::ui_size() * 1.4;
+                let cx = del.x + (del.w - label_w) / 2.0;
+                let cy = del.y + (del.h - line_h) / 2.0;
                 text_areas.push(TextArea {
-                    buffer: &self.editor_buffer,
-                    left: editor_text_left,
-                    top: editor_text_top,
+                    buffer: &self.cell_delete_label,
+                    left: cx,
+                    top: cy,
                     scale: 1.0,
                     bounds: TextBounds {
-                        left: ed_left,
-                        top: ed_top,
-                        right: dd_left,
-                        bottom: dd_bottom.min(editor_bottom),
+                        left: del.x as i32,
+                        top: del_clip_top,
+                        right: (del.x + del.w) as i32,
+                        bottom: del_clip_bottom,
                     },
-                    default_color: editor_color,
+                    default_color: colors::TEXT_MUTED.to_glyphon(),
                     custom_glyphs: &[],
                 });
             }
-            // Region: to the right of dropdown
-            if dd_right < editor_right {
+        }
+
+        // Add cell button label
+        if self.add_cell_rect.y + self.add_cell_rect.h > lp.y
+            && self.add_cell_rect.y < lp.y + lp.h
+        {
+            let clip_top = (self.add_cell_rect.y as i32).max(pane_top);
+            let clip_bottom = ((self.add_cell_rect.y + self.add_cell_rect.h) as i32).min(pane_bottom);
+            if clip_top < clip_bottom {
                 text_areas.push(TextArea {
-                    buffer: &self.editor_buffer,
-                    left: editor_text_left,
-                    top: editor_text_top,
+                    buffer: &self.add_cell_label,
+                    left: self.add_cell_rect.x + spacing::MD,
+                    top: self.add_cell_rect.y + spacing::XS,
                     scale: 1.0,
                     bounds: TextBounds {
-                        left: dd_right,
-                        top: ed_top,
-                        right: editor_right,
-                        bottom: dd_bottom.min(editor_bottom),
+                        left: self.add_cell_rect.x as i32,
+                        top: clip_top,
+                        right: (self.add_cell_rect.x + self.add_cell_rect.w) as i32,
+                        bottom: clip_bottom,
                     },
-                    default_color: editor_color,
+                    default_color: colors::TEXT_MUTED.to_glyphon(),
                     custom_glyphs: &[],
                 });
             }
-            // Region: full width below dropdown
-            if dd_bottom < editor_bottom {
-                text_areas.push(TextArea {
-                    buffer: &self.editor_buffer,
-                    left: editor_text_left,
-                    top: editor_text_top,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: ed_left,
-                        top: dd_bottom,
-                        right: editor_right,
-                        bottom: editor_bottom,
-                    },
-                    default_color: editor_color,
-                    custom_glyphs: &[],
-                });
-            }
-        } else {
-            // No dropdown overlap — full editor bounds
-            text_areas.push(TextArea {
-                buffer: &self.editor_buffer,
-                left: editor_text_left,
-                top: editor_text_top,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: ed_left,
-                    top: ed_top,
-                    right: editor_right,
-                    bottom: editor_bottom,
-                },
-                default_color: editor_color,
-                custom_glyphs: &[],
-            });
         }
 
         // Menu item labels in title bar
@@ -1282,6 +1382,20 @@ fn rect_from(r: Rect, color: Rgba) -> RectInstance {
         w: r.w,
         h: r.h,
         color: color.to_f32_array(),
+        corner_radius: 0.0,
+        _padding: [0.0; 3],
+    }
+}
+
+fn rect_rounded(r: Rect, color: Rgba, radius: f32) -> RectInstance {
+    RectInstance {
+        x: r.x,
+        y: r.y,
+        w: r.w,
+        h: r.h,
+        color: color.to_f32_array(),
+        corner_radius: radius,
+        _padding: [0.0; 3],
     }
 }
 

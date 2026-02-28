@@ -1,3 +1,7 @@
+pub mod cell;
+
+pub use cell::CodeCell;
+
 /// A simple text buffer with cursor for basic editing.
 ///
 /// This is a starter implementation using a plain `String`.
