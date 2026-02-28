@@ -108,6 +108,21 @@ pub mod colors {
 
     // Separator / split handle
     pub const SPLIT_HANDLE: Rgba = Rgba::rgb(50, 50, 55);
+    pub const SPLIT_HANDLE_HOVER: Rgba = Rgba::rgb(80, 80, 90);
+
+    // Window control buttons
+    pub const CLOSE_BUTTON_HOVER: Rgba = Rgba::rgb(196, 43, 28);
+
+    // Menu / dropdown
+    pub const DROPDOWN_BG: Rgba = Rgba::rgb(30, 30, 35);
+    pub const DROPDOWN_HOVER: Rgba = Rgba::rgb(55, 62, 75);
+    pub const DROPDOWN_SEPARATOR: Rgba = Rgba::rgb(60, 60, 65);
+    pub const MENU_ITEM_HOVER: Rgba = Rgba::rgb(50, 55, 65);
+
+    // Scrollbar
+    pub const SCROLLBAR_TRACK: Rgba = Rgba::new(40, 40, 45, 100);
+    pub const SCROLLBAR_THUMB: Rgba = Rgba::new(100, 100, 110, 180);
+    pub const SCROLLBAR_THUMB_HOVER: Rgba = Rgba::new(140, 140, 150, 220);
 
     // Cursor
     pub const CURSOR: Rgba = Rgba::rgb(230, 230, 230);
@@ -128,6 +143,15 @@ pub mod spacing {
     pub const TAB_HEIGHT: f32 = 36.0;
     pub const STATUS_HEIGHT: f32 = 24.0;
     pub const SPLIT_HANDLE_WIDTH: f32 = 6.0;
+    pub const WINDOW_CONTROL_WIDTH: f32 = 46.0;
+
+    pub const DROPDOWN_ITEM_HEIGHT: f32 = 28.0;
+    pub const DROPDOWN_PADDING: f32 = 4.0;
+    pub const DROPDOWN_MIN_WIDTH: f32 = 220.0;
+    pub const SCROLLBAR_HEIGHT: f32 = 8.0;
+    pub const SCROLLBAR_WIDTH: f32 = 8.0;
+    pub const SCROLLBAR_THUMB_MIN_W: f32 = 30.0;
+    pub const SCROLLBAR_THUMB_MIN_H: f32 = 30.0;
 
     pub const GUTTER_WIDTH: f32 = 48.0;
     pub const CELL_PADDING: f32 = 12.0;
@@ -135,6 +159,14 @@ pub mod spacing {
     pub const BUTTON_SIZE: f32 = 24.0;
     pub const HEADER_HEIGHT: f32 = 32.0;
     pub const TEXT_PADDING: f32 = 24.0;
+
+    // Scaled versions — multiply by current zoom factor.
+    pub fn menu_height() -> f32 { MENU_HEIGHT * super::fonts::scale() }
+    pub fn tab_height() -> f32 { TAB_HEIGHT * super::fonts::scale() }
+    pub fn status_height() -> f32 { STATUS_HEIGHT * super::fonts::scale() }
+    pub fn split_handle_width() -> f32 { SPLIT_HANDLE_WIDTH * super::fonts::scale() }
+    pub fn window_control_width() -> f32 { WINDOW_CONTROL_WIDTH * super::fonts::scale() }
+    pub fn dropdown_item_height() -> f32 { DROPDOWN_ITEM_HEIGHT * super::fonts::scale() }
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +186,8 @@ pub mod radius {
 // ---------------------------------------------------------------------------
 
 pub mod fonts {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     pub const BASE_EDITOR: f32 = 20.0;
     pub const BASE_UI: f32 = 14.0;
     pub const BASE_SMALL: f32 = 12.0;
@@ -168,29 +202,25 @@ pub mod fonts {
     pub const LINE_HEIGHT_FACTOR: f32 = 1.4;
     pub const CURSOR_WIDTH: f32 = 2.0;
 
-    /// Zoom state — call the free functions below to mutate.
-    static mut CURRENT_SCALE: f32 = 1.0;
+    /// Zoom state stored as atomic bits (safe, no `unsafe` needed).
+    static CURRENT_SCALE: AtomicU32 = AtomicU32::new(1.0_f32.to_bits());
 
     pub fn scale() -> f32 {
-        unsafe { CURRENT_SCALE }
+        f32::from_bits(CURRENT_SCALE.load(Ordering::Relaxed))
     }
 
     pub fn zoom_in() {
-        unsafe {
-            CURRENT_SCALE = (CURRENT_SCALE + SCALE_STEP).min(MAX_SCALE);
-        }
+        let new = (scale() + SCALE_STEP).min(MAX_SCALE);
+        CURRENT_SCALE.store(new.to_bits(), Ordering::Relaxed);
     }
 
     pub fn zoom_out() {
-        unsafe {
-            CURRENT_SCALE = (CURRENT_SCALE - SCALE_STEP).max(MIN_SCALE);
-        }
+        let new = (scale() - SCALE_STEP).max(MIN_SCALE);
+        CURRENT_SCALE.store(new.to_bits(), Ordering::Relaxed);
     }
 
     pub fn reset_zoom() {
-        unsafe {
-            CURRENT_SCALE = 1.0;
-        }
+        CURRENT_SCALE.store(1.0_f32.to_bits(), Ordering::Relaxed);
     }
 
     pub fn editor_size() -> f32 {

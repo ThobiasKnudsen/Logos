@@ -1,12 +1,12 @@
 /// Taffy-based UI layout for the application shell.
 ///
 /// Computes pixel-perfect rectangles each frame for:
-///   menu_bar, tab_bar, left_pane (editor), split_handle, right_pane (graph), status_bar
+///   title_bar (menu+window chrome), tab_bar, left_pane (editor), split_handle, right_pane (graph), status_bar
 ///
 /// Layout structure (vertical flex):
 /// ```text
 /// root (column)
-/// +-- menu_bar     (height: 28px)
+/// +-- title_bar     (height: 28px, menu + window controls)
 /// +-- tab_bar      (height: 36px)
 /// +-- content_area (flex: 1, row)
 /// |   +-- left_pane    (width: 45%)
@@ -28,7 +28,7 @@ pub struct Rect {
 
 #[derive(Debug, Clone, Copy)]
 pub struct LayoutResult {
-    pub menu_bar: Rect,
+    pub title_bar: Rect,
     pub tab_bar: Rect,
     pub left_pane: Rect,
     pub split_handle: Rect,
@@ -39,7 +39,7 @@ pub struct LayoutResult {
 pub struct UiLayout {
     tree: TaffyTree,
     root: NodeId,
-    menu_bar: NodeId,
+    title_bar: NodeId,
     tab_bar: NodeId,
     content_area: NodeId,
     left_pane: NodeId,
@@ -52,7 +52,7 @@ impl UiLayout {
     pub fn new() -> Self {
         let mut tree = TaffyTree::new();
 
-        let menu_bar = tree
+        let title_bar = tree
             .new_leaf(Style {
                 size: Size {
                     width: Dimension::Percent(1.0),
@@ -136,14 +136,14 @@ impl UiLayout {
                     },
                     ..Default::default()
                 },
-                &[menu_bar, tab_bar, content_area, status_bar],
+                &[title_bar, tab_bar, content_area, status_bar],
             )
             .unwrap();
 
         Self {
             tree,
             root,
-            menu_bar,
+            title_bar,
             tab_bar,
             content_area,
             left_pane,
@@ -151,6 +151,34 @@ impl UiLayout {
             right_pane,
             status_bar,
         }
+    }
+
+    /// Re-apply scaled heights/widths to fixed-size nodes (call after zoom).
+    pub fn apply_scale(&mut self) {
+        let updates: [(NodeId, Option<f32>, Option<f32>); 4] = [
+            (self.title_bar, None, Some(spacing::menu_height())),
+            (self.tab_bar, None, Some(spacing::tab_height())),
+            (self.status_bar, None, Some(spacing::status_height())),
+            (self.split_handle, Some(spacing::split_handle_width()), None),
+        ];
+        for (node, w, h) in updates {
+            let mut style = self.tree.style(node).unwrap().clone();
+            if let Some(width) = w {
+                style.size.width = Dimension::Length(width);
+            }
+            if let Some(height) = h {
+                style.size.height = Dimension::Length(height);
+            }
+            self.tree.set_style(node, style).unwrap();
+        }
+    }
+
+    /// Change the left/right split ratio (0.0–1.0).
+    pub fn set_split_ratio(&mut self, ratio: f32) {
+        let clamped = ratio.clamp(0.05, 0.95);
+        let mut style = self.tree.style(self.left_pane).unwrap().clone();
+        style.size.width = Dimension::Percent(clamped);
+        self.tree.set_style(self.left_pane, style).unwrap();
     }
 
     /// Recompute layout for the given viewport size and return pixel rects.
@@ -179,7 +207,7 @@ impl UiLayout {
             }
         };
 
-        let menu_bar = resolve(self.menu_bar, root_x, root_y);
+        let title_bar = resolve(self.title_bar, root_x, root_y);
         let tab_bar = resolve(self.tab_bar, root_x, root_y);
         let content = resolve(self.content_area, root_x, root_y);
         let left_pane = resolve(self.left_pane, content.x, content.y);
@@ -188,7 +216,7 @@ impl UiLayout {
         let status_bar = resolve(self.status_bar, root_x, root_y);
 
         LayoutResult {
-            menu_bar,
+            title_bar,
             tab_bar,
             left_pane,
             split_handle,
