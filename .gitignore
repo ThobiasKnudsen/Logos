@@ -5,3 +5,8 @@ LogosLang/
 dvui/build/
 build/.venv/
 .logos.theme.json
+
+
+# Added by cargo
+
+/target

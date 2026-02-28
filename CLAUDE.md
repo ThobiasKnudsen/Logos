@@ -1,52 +1,40 @@
-# Logos
+# Logos (Rust)
 
-Zig project using git worktrees and vendor submodules.
+Math-native code editor. Zig-to-Rust rewrite.
 
 ## Build & Run
 
-**BEFORE running `zig build`, you MUST ensure submodules are initialized.**
-Skipping this will crash with `unable to find artifact 'SDL_shadercross'`.
-
-### Check if submodules are already set up
-
 ```bash
-ls vendor/SDL_shadercross_zig/build.zig vendor/SPIRV-Cross_zig/build.zig 2>/dev/null
+cargo run        # build and run
+cargo build      # build only
 ```
 
-If both files exist, skip to **Build**. Otherwise, run the setup below.
+## Architecture
 
-### Submodule setup
+Single crate with module-based organization:
 
-```bash
-git submodule init && git submodule update
-```
+- `app` — Application state, winit event loop
+- `render` — wgpu GPU context, text rendering via glyphon/cosmic-text
+- `editor` — Text buffer, cursor, editing operations
+- `ui` — Layout (Taffy), theme/colors
+- `lang` — AST, lexer, parser, type checker, GLSL codegen (future)
 
-**On worktrees** this will fail with `fatal: remote error: upload-pack: not our ref ...` — that's expected. The submodules reference commits that only exist in `main`'s local gitdir. After the error, run this to fetch those commits:
+## Tech Stack
 
-```bash
-main_worktree="$(git worktree list | head -1 | awk '{print $1}')"
-for sub in vendor/SDL_shadercross_zig vendor/SPIRV-Cross_zig; do
-    main_gitdir="$main_worktree/.git/modules/$sub"
-    worktree_gitdir="$(git -C "$sub" rev-parse --git-dir)"
-    GIT_DIR="$worktree_gitdir" git fetch "$main_gitdir"
-    expected="$(git ls-tree HEAD "$sub" | awk '{print $3}')"
-    git -C "$sub" checkout "$expected"
-done
-```
+- **winit** — Windowing and input
+- **wgpu** — GPU rendering
+- **cosmic-text** (via glyphon) — Text shaping and layout
+- **taffy** — CSS Flexbox/Grid layout engine (future)
+- **ttf-parser** — OpenType MATH table reading (future)
 
-On `main` (not a worktree), `git submodule update` should succeed and the above block is not needed.
+## Fonts
 
-### Build
+- **STIX Two Math** — Math font (OFL)
+- **JuliaMono** — Code font (OFL)
 
-```bash
-zig build        # build only
-zig build run    # build and run
-```
+## Design Decisions
 
-## Removing a worktree with submodules
-
-`git worktree remove <name>` will fail with `fatal: working trees containing submodules cannot be moved or removed`. Instead, manually delete and prune:
-
-```bash
-rm -rf ../<worktree_name> && git worktree prune
-```
+- Source text is always valid code with Unicode symbols (π, ∑, etc.)
+- Two display modes: Math view (default) and Code view (toggle)
+- Lexer + parser run on every keystroke; type checker + codegen run on Play
+- Hybrid retained/immediate rendering architecture
