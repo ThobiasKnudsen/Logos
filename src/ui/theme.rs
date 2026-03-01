@@ -261,7 +261,7 @@ pub mod fonts {
 // ---------------------------------------------------------------------------
 
 pub mod split {
-    pub const DEFAULT_RATIO: f32 = 0.45;
+    pub const DEFAULT_LEFT_WIDTH: f32 = 540.0; // initial left pane width in pixels
     pub const MIN_PANE_SIZE: f32 = 200.0;
 }
 
