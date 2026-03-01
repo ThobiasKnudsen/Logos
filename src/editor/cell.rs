@@ -3,7 +3,7 @@ use super::Buffer;
 #[derive(Debug, Clone)]
 pub enum CellOutput {
     None,
-    Error(String),
+    Error(#[allow(dead_code)] String),
 }
 
 pub struct CodeCell {

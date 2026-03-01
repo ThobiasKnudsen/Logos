@@ -218,11 +218,6 @@ impl ShaderPipelineManager {
         !self.pipelines.is_empty()
     }
 
-    /// Returns the count of active pipelines.
-    pub fn active_count(&self) -> usize {
-        self.pipelines.len()
-    }
-
     /// Render all active shader pipelines into the given surface view.
     /// All pipelines render to the full right pane, overlaid via alpha blending.
     pub fn render(

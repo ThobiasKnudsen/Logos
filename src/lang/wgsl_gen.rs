@@ -99,39 +99,6 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
     Ok(shader)
 }
 
-/// Generate WGSL where the expression is expected to produce a vec4 color directly.
-pub fn generate_color(ast: &AstNode) -> Result<String, String> {
-    let mut ctx = GenContext::new();
-    ctx.collect_functions(ast);
-    let expr = find_result_expr(ast)?;
-    let expr_code = ctx.emit_expr(expr)?;
-
-    let mut shader = String::new();
-    shader.push_str(UNIFORM_STRUCT);
-    shader.push('\n');
-
-    for func in &ctx.functions {
-        shader.push_str(&func.wgsl_code);
-        shader.push('\n');
-    }
-
-    shader.push_str("@fragment\n");
-    shader.push_str("fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {\n");
-    shader.push_str("    let world = mix(u.axis_min, u.axis_max, uv);\n");
-    shader.push_str("    let x = world.x;\n");
-    shader.push_str("    let y = world.y;\n");
-    shader.push_str("    let time = u.time;\n");
-
-    for binding in &ctx.bindings {
-        shader.push_str(&format!("    let {} = {};\n", binding.name, binding.expr));
-    }
-
-    shader.push_str(&format!("    return {};\n", expr_code));
-    shader.push_str("}\n");
-
-    Ok(shader)
-}
-
 const UNIFORM_STRUCT: &str = r#"struct Uniforms {
     time: f32,
     _pad0: f32,
