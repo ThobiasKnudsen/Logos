@@ -395,13 +395,59 @@ pub const THEME_SOLARIZED: SyntaxTheme = SyntaxTheme {
 };
 
 pub const BUILTIN_THEMES: &[(&str, SyntaxTheme)] = &[
+    ("Catppuccin", THEME_CATPPUCCIN),
     ("One Dark", THEME_ONE_DARK),
     ("Monokai", THEME_MONOKAI),
     ("Dracula", THEME_DRACULA),
-    ("Catppuccin", THEME_CATPPUCCIN),
     ("Gruvbox", THEME_GRUVBOX),
     ("Nord", THEME_NORD),
     ("Solarized", THEME_SOLARIZED),
 ];
 
-pub const DEFAULT_SYNTAX_THEME: SyntaxTheme = THEME_CATPPUCCIN;
+// ---------------------------------------------------------------------------
+// Active theme selection — atomic index into BUILTIN_THEMES
+// ---------------------------------------------------------------------------
+
+mod theme_state {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CURRENT_THEME: AtomicUsize = AtomicUsize::new(0); // 0 = Catppuccin
+
+    pub fn index() -> usize {
+        CURRENT_THEME.load(Ordering::Relaxed)
+    }
+
+    pub fn set(idx: usize) {
+        CURRENT_THEME.store(idx, Ordering::Relaxed);
+    }
+}
+
+/// Get the currently active syntax theme.
+pub fn active_syntax_theme() -> SyntaxTheme {
+    let idx = theme_state::index().min(BUILTIN_THEMES.len() - 1);
+    BUILTIN_THEMES[idx].1
+}
+
+/// Get the name of the currently active syntax theme.
+pub fn active_theme_name() -> &'static str {
+    let idx = theme_state::index().min(BUILTIN_THEMES.len() - 1);
+    BUILTIN_THEMES[idx].0
+}
+
+/// Cycle to the next built-in theme. Returns the new theme name.
+pub fn cycle_theme() -> &'static str {
+    let next = (theme_state::index() + 1) % BUILTIN_THEMES.len();
+    theme_state::set(next);
+    BUILTIN_THEMES[next].0
+}
+
+/// Set theme by index (0-based into BUILTIN_THEMES).
+pub fn set_theme(idx: usize) {
+    if idx < BUILTIN_THEMES.len() {
+        theme_state::set(idx);
+    }
+}
+
+/// Number of built-in themes available.
+pub fn theme_count() -> usize {
+    BUILTIN_THEMES.len()
+}

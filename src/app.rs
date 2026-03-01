@@ -13,7 +13,7 @@ use crate::lang;
 use crate::render::{CellInfo, CellLayout, Renderer, TabHitRect, TabInfo};
 use crate::session::TabManager;
 use crate::ui::layout::{LayoutResult, Rect, UiLayout};
-use crate::ui::theme::{fonts, spacing, split};
+use crate::ui::theme::{self, fonts, spacing, split};
 
 // ---------------------------------------------------------------------------
 // Menu definitions
@@ -46,6 +46,7 @@ const MENU_VIEW_ITEMS: &[MenuItemDef] = &[
     MenuItemDef { label: "Zoom In", shortcut: "Ctrl+=" },
     MenuItemDef { label: "Zoom Out", shortcut: "Ctrl+-" },
     MenuItemDef { label: "Reset Zoom", shortcut: "Ctrl+0" },
+    MenuItemDef { label: "Cycle Theme", shortcut: "Ctrl+T" },
 ];
 
 pub(crate) fn menu_items(index: usize) -> &'static [MenuItemDef] {
@@ -215,12 +216,13 @@ impl AppState {
             .unwrap_or_else(|| tab.name.clone());
         let modified = if tab.is_modified { " [modified]" } else { "" };
         self.renderer.update_status(&format!(
-            "{}{} \u{2502} {} lines \u{2502} Ln {}, Col {}",
+            "{}{} \u{2502} {} lines \u{2502} Ln {}, Col {} \u{2502} {}",
             name,
             modified,
             line_count,
             line + 1,
             col + 1,
+            theme::active_theme_name(),
         ));
 
         self.window.request_redraw();
@@ -443,6 +445,7 @@ impl AppState {
             (2, 0) => { self.do_zoom(|_| fonts::zoom_in()); }
             (2, 1) => { self.do_zoom(|_| fonts::zoom_out()); }
             (2, 2) => { self.do_zoom(|_| fonts::reset_zoom()); }
+            (2, 3) => { self.cycle_theme(); }
             _ => {}
         }
     }
@@ -453,6 +456,14 @@ impl AppState {
         self.layout.apply_scale();
         let size = self.window.inner_size();
         self.cached_layout = self.layout.compute(size.width as f32, size.height as f32);
+        self.sync_active_tab();
+    }
+
+    fn cycle_theme(&mut self) {
+        let name = theme::cycle_theme();
+        log::info!("Switched theme to: {}", name);
+        // Force re-highlight by invalidating cached cell texts
+        self.renderer.invalidate_cell_texts();
         self.sync_active_tab();
     }
 
@@ -579,6 +590,12 @@ impl AppState {
             Key::Character(c) if c.as_str() == "0" => {
                 self.close_menu();
                 self.do_zoom(|_| fonts::reset_zoom());
+                true
+            }
+            // Cycle syntax theme
+            Key::Character(c) if c.as_str() == "t" => {
+                self.close_menu();
+                self.cycle_theme();
                 true
             }
             _ => false,

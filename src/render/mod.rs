@@ -4,8 +4,8 @@ pub mod shader_pipeline;
 use std::sync::Arc;
 
 use glyphon::{
-    Attrs, Buffer as TextBuffer, Cache, Family, FontSystem, Metrics, Resolution, Shaping,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Attrs, Buffer as TextBuffer, Cache, Color as GlyphonColor, Family, FontSystem, Metrics,
+    Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use wgpu::{
     CommandEncoderDescriptor, DeviceDescriptor, Instance, InstanceDescriptor, LoadOp,
@@ -354,6 +354,12 @@ impl Renderer {
         self.close_dropdown();
     }
 
+    /// Invalidate cached cell texts so the next sync forces re-highlighting.
+    /// Used when the syntax theme changes without the text itself changing.
+    pub fn invalidate_cell_texts(&mut self) {
+        self.cell_texts.clear();
+    }
+
     pub fn set_maximized_icon(&mut self, is_maximized: bool) {
         let icon = if is_maximized { "\u{274F}" } else { "\u{25A1}" };
         self.win_max_label.set_text(
@@ -614,12 +620,27 @@ impl Renderer {
             let text_changed = self.cell_texts.get(i).map_or(true, |prev| *prev != cell_info.text);
             if text_changed {
                 self.cell_buffers[i].set_size(&mut self.font_system, None, None);
-                self.cell_buffers[i].set_text(
+
+                // Syntax-highlighted rich text
+                let spans = crate::lang::highlight::highlight(&cell_info.text);
+                let default_attrs = Attrs::new().family(Family::Monospace);
+                let rich_spans: Vec<(&str, Attrs)> = spans
+                    .iter()
+                    .map(|s| {
+                        let text_slice = &cell_info.text[s.start..s.end];
+                        let attrs = default_attrs.color(GlyphonColor::rgba(
+                            s.color.r, s.color.g, s.color.b, s.color.a,
+                        ));
+                        (text_slice, attrs)
+                    })
+                    .collect();
+                self.cell_buffers[i].set_rich_text(
                     &mut self.font_system,
-                    &cell_info.text,
-                    Attrs::new().family(Family::Monospace),
+                    rich_spans,
+                    default_attrs,
                     Shaping::Advanced,
                 );
+
                 self.cell_buffers[i].shape_until_scroll(&mut self.font_system, false);
                 // Update cached text
                 if i < self.cell_texts.len() {
