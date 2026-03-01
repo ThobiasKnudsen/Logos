@@ -52,6 +52,8 @@ pub struct CellInfo {
     pub text: String,
     pub cursor_byte: usize,
     pub is_playing: bool,
+    /// Selection range as (start_byte, end_byte), if any.
+    pub selection: Option<(usize, usize)>,
 }
 
 const TAB_PAD_H: f32 = 12.0;
@@ -84,6 +86,8 @@ pub struct Renderer {
     active_cell_index: usize,
     /// Cursor position within the active cell (content-relative x, y) + line height.
     cursor_content_pos: (f32, f32, f32),
+    /// Selection highlight rectangles for the active cell (content-relative).
+    selection_content_rects: Vec<(f32, f32, f32, f32)>,
     /// Vertical scroll offset for the cell container.
     cell_scroll_y: f32,
     /// Total height of all cells stacked.
@@ -234,6 +238,7 @@ impl Renderer {
             cell_layouts: Vec::new(),
             active_cell_index: 0,
             cursor_content_pos: (0.0, 0.0, fonts::editor_line_height()),
+            selection_content_rects: Vec::new(),
             cell_scroll_y: 0.0,
             cells_total_height: 0.0,
             cached_editor_pane: zero_rect,
@@ -689,6 +694,20 @@ impl Renderer {
             );
             self.cursor_content_pos = (cx, cy, ch);
 
+            // Compute selection highlight rects
+            self.selection_content_rects = if let Some((sel_start, sel_end)) =
+                cells[active_cell_index].selection
+            {
+                Self::compute_selection_rects(
+                    &self.cell_buffers[active_cell_index],
+                    &cells[active_cell_index].text,
+                    sel_start,
+                    sel_end,
+                )
+            } else {
+                Vec::new()
+            };
+
             // Auto-scroll to keep active cell cursor visible
             if let Some(active_layout) = layouts.get(active_cell_index) {
                 let cursor_screen_y = active_layout.editor.y + text_pad + cy;
@@ -764,6 +783,107 @@ impl Renderer {
         }
         let extra = (line_idx.saturating_sub(last_line_i)) as f32;
         (0.0, last_top + last_height * extra, last_height)
+    }
+
+    /// Compute content-relative (x, y, w, h) rectangles for a text selection.
+    fn compute_selection_rects(
+        text_buffer: &TextBuffer,
+        text: &str,
+        sel_start: usize,
+        sel_end: usize,
+    ) -> Vec<(f32, f32, f32, f32)> {
+        let start = sel_start.min(text.len());
+        let end = sel_end.min(text.len());
+        if start >= end {
+            return Vec::new();
+        }
+
+        // Compute line and column-byte for start and end
+        let before_start = &text[..start];
+        let start_line = before_start.matches('\n').count();
+        let start_line_begin = before_start.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let start_col_byte = start - start_line_begin;
+
+        let before_end = &text[..end];
+        let end_line = before_end.matches('\n').count();
+        let end_line_begin = before_end.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let end_col_byte = end - end_line_begin;
+
+        let mut rects = Vec::new();
+        let min_sel_width = 6.0; // minimum width for empty-looking lines
+
+        for run in text_buffer.layout_runs() {
+            if run.line_i < start_line || run.line_i > end_line {
+                continue;
+            }
+
+            // Determine the byte-column range to highlight on this line
+            let col_start = if run.line_i == start_line {
+                start_col_byte
+            } else {
+                0
+            };
+            let col_end = if run.line_i == end_line {
+                end_col_byte
+            } else {
+                usize::MAX // entire line
+            };
+
+            if col_start == col_end && run.line_i == start_line && run.line_i == end_line {
+                continue;
+            }
+
+            // Find x position of col_start
+            let x_start = if col_start == 0 {
+                0.0
+            } else {
+                let mut x = run
+                    .glyphs
+                    .last()
+                    .map(|g| g.x + g.w)
+                    .unwrap_or(0.0);
+                for glyph in run.glyphs.iter() {
+                    if glyph.start >= col_start {
+                        x = glyph.x;
+                        break;
+                    }
+                }
+                x
+            };
+
+            // Find x position of col_end
+            let x_end = if col_end == usize::MAX {
+                run.glyphs
+                    .last()
+                    .map(|g| g.x + g.w)
+                    .unwrap_or(0.0)
+                    + min_sel_width // extend past line end for visibility
+            } else {
+                let mut x = run
+                    .glyphs
+                    .last()
+                    .map(|g| g.x + g.w)
+                    .unwrap_or(0.0);
+                for glyph in run.glyphs.iter() {
+                    if glyph.start >= col_end {
+                        x = glyph.x;
+                        break;
+                    }
+                }
+                x
+            };
+
+            let w = (x_end - x_start).max(if run.line_i != end_line {
+                min_sel_width
+            } else {
+                0.0
+            });
+            if w > 0.0 {
+                rects.push((x_start, run.line_top, w, run.line_height));
+            }
+        }
+
+        rects
     }
 
     #[allow(dead_code)]
@@ -982,6 +1102,29 @@ impl Renderer {
 
             // Separator line
             ui_rects.push(rect_from(cl.separator, colors::BORDER));
+        }
+
+        // Selection highlight in active cell
+        if let Some(cl) = self.cell_layouts.get(self.active_cell_index) {
+            for &(sx, sy, sw, sh) in &self.selection_content_rects {
+                let screen_x = cl.editor.x + text_pad + sx;
+                let screen_y = cl.editor.y + text_pad + sy;
+                if screen_x + sw >= lp.x
+                    && screen_x < pane_right as f32
+                    && screen_y + sh > lp.y
+                    && screen_y < pane_bottom as f32
+                {
+                    ui_rects.push(RectInstance {
+                        x: screen_x,
+                        y: screen_y,
+                        w: sw,
+                        h: sh,
+                        color: colors::EDITOR_SELECTION.to_f32_array(),
+                        corner_radius: 2.0,
+                        _padding: [0.0; 3],
+                    });
+                }
+            }
         }
 
         // Cursor in active cell

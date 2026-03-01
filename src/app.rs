@@ -35,6 +35,13 @@ const MENU_FILE_ITEMS: &[MenuItemDef] = &[
     MenuItemDef { label: "Quit", shortcut: "Ctrl+Q" },
 ];
 
+const MENU_EDIT_ITEMS: &[MenuItemDef] = &[
+    MenuItemDef { label: "Cut", shortcut: "Ctrl+X" },
+    MenuItemDef { label: "Copy", shortcut: "Ctrl+C" },
+    MenuItemDef { label: "Paste", shortcut: "Ctrl+V" },
+    MenuItemDef { label: "Select All", shortcut: "Ctrl+A" },
+];
+
 const MENU_VIEW_ITEMS: &[MenuItemDef] = &[
     MenuItemDef { label: "Zoom In", shortcut: "Ctrl+=" },
     MenuItemDef { label: "Zoom Out", shortcut: "Ctrl+-" },
@@ -44,6 +51,7 @@ const MENU_VIEW_ITEMS: &[MenuItemDef] = &[
 pub(crate) fn menu_items(index: usize) -> &'static [MenuItemDef] {
     match index {
         0 => MENU_FILE_ITEMS,
+        1 => MENU_EDIT_ITEMS,
         2 => MENU_VIEW_ITEMS,
         _ => &[],
     }
@@ -136,6 +144,9 @@ struct AppState {
     menu_item_rects: Vec<Rect>,
     open_menu: Option<usize>,
     dropdown_item_rects: Vec<Rect>,
+
+    // Clipboard
+    clipboard: Option<arboard::Clipboard>,
 }
 
 const DOUBLE_CLICK_MS: u128 = 400;
@@ -153,6 +164,7 @@ impl AppState {
                 text: c.buffer.text().to_string(),
                 cursor_byte: c.buffer.cursor_byte_offset(),
                 is_playing: c.is_playing,
+                selection: c.buffer.selection_range(),
             })
             .collect();
         self.cell_layouts = self.renderer.update_cells(
@@ -393,6 +405,38 @@ impl AppState {
                 self.sync_active_tab();
             }
             (0, 5) => { event_loop.exit(); }
+            // Edit menu: Cut, Copy, Paste, Select All
+            (1, 0) => {
+                // Cut
+                if let Some(text) = self.tab_manager.active_tab().active_cell().buffer.selected_text() {
+                    let owned = text.to_string();
+                    if let Some(cb) = self.clipboard.as_mut() { let _ = cb.set_text(&owned); }
+                    self.tab_manager.active_tab_mut().active_cell_mut().buffer.backspace();
+                    self.tab_manager.active_tab_mut().mark_modified();
+                    self.sync_active_tab();
+                }
+            }
+            (1, 1) => {
+                // Copy
+                if let Some(text) = self.tab_manager.active_tab().active_cell().buffer.selected_text() {
+                    if let Some(cb) = self.clipboard.as_mut() { let _ = cb.set_text(text); }
+                }
+            }
+            (1, 2) => {
+                // Paste
+                if let Some(cb) = self.clipboard.as_mut() {
+                    if let Ok(text) = cb.get_text() {
+                        self.tab_manager.active_tab_mut().active_cell_mut().buffer.insert_text(&text);
+                        self.tab_manager.active_tab_mut().mark_modified();
+                        self.sync_active_tab();
+                    }
+                }
+            }
+            (1, 3) => {
+                // Select All
+                self.tab_manager.active_tab_mut().active_cell_mut().buffer.select_all();
+                self.sync_active_tab();
+            }
             // View menu
             (2, 0) => { self.do_zoom(|_| fonts::zoom_in()); }
             (2, 1) => { self.do_zoom(|_| fonts::zoom_out()); }
@@ -457,6 +501,66 @@ impl AppState {
             }
             Key::Character(c) if c.as_str() == "q" => {
                 event_loop.exit();
+                true
+            }
+            // Select all
+            Key::Character(c) if c.as_str() == "a" => {
+                self.close_menu();
+                self.tab_manager.active_tab_mut().active_cell_mut().buffer.select_all();
+                self.sync_active_tab();
+                true
+            }
+            // Copy
+            Key::Character(c) if c.as_str() == "c" => {
+                if let Some(text) = self
+                    .tab_manager
+                    .active_tab()
+                    .active_cell()
+                    .buffer
+                    .selected_text()
+                {
+                    if let Some(cb) = self.clipboard.as_mut() {
+                        let _ = cb.set_text(text);
+                    }
+                }
+                true
+            }
+            // Cut
+            Key::Character(c) if c.as_str() == "x" => {
+                if let Some(text) = self
+                    .tab_manager
+                    .active_tab()
+                    .active_cell()
+                    .buffer
+                    .selected_text()
+                {
+                    let owned = text.to_string();
+                    if let Some(cb) = self.clipboard.as_mut() {
+                        let _ = cb.set_text(&owned);
+                    }
+                    self.tab_manager
+                        .active_tab_mut()
+                        .active_cell_mut()
+                        .buffer
+                        .backspace(); // deletes selection
+                    self.tab_manager.active_tab_mut().mark_modified();
+                    self.sync_active_tab();
+                }
+                true
+            }
+            // Paste
+            Key::Character(c) if c.as_str() == "v" => {
+                if let Some(cb) = self.clipboard.as_mut() {
+                    if let Ok(text) = cb.get_text() {
+                        self.tab_manager
+                            .active_tab_mut()
+                            .active_cell_mut()
+                            .buffer
+                            .insert_text(&text);
+                        self.tab_manager.active_tab_mut().mark_modified();
+                        self.sync_active_tab();
+                    }
+                }
                 true
             }
             // Zoom
@@ -584,6 +688,7 @@ impl ApplicationHandler for App {
             menu_item_rects: Vec::new(),
             open_menu: None,
             dropdown_item_rects: Vec::new(),
+            clipboard: arboard::Clipboard::new().ok(),
         };
 
         state.sync_active_tab();
@@ -844,6 +949,7 @@ impl ApplicationHandler for App {
                     return;
                 }
 
+                let shift = state.modifiers.shift_key();
                 let changed = match key_event.logical_key {
                     Key::Named(NamedKey::Backspace) => {
                         state.tab_manager.active_tab_mut().active_cell_mut().buffer.backspace()
@@ -856,22 +962,22 @@ impl ApplicationHandler for App {
                         true
                     }
                     Key::Named(NamedKey::ArrowLeft) => {
-                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_left()
+                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_left(shift)
                     }
                     Key::Named(NamedKey::ArrowRight) => {
-                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_right()
+                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_right(shift)
                     }
                     Key::Named(NamedKey::ArrowUp) => {
-                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_up()
+                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_up(shift)
                     }
                     Key::Named(NamedKey::ArrowDown) => {
-                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_down()
+                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_down(shift)
                     }
                     Key::Named(NamedKey::Home) => {
-                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_home()
+                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_home(shift)
                     }
                     Key::Named(NamedKey::End) => {
-                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_end()
+                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_end(shift)
                     }
                     _ => {
                         if state.modifiers.control_key() {
