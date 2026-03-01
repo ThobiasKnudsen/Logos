@@ -4,6 +4,7 @@ pub mod ast;
 pub mod parser;
 pub mod wgsl_gen;
 pub mod highlight;
+pub mod reduce;
 
 /// Compile source code through the full pipeline: lex → parse → WGSL gen.
 /// Returns the complete WGSL shader source string.
