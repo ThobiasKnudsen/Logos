@@ -89,9 +89,11 @@ mod integration_tests {
 
     #[test]
     fn test_equality_operator() {
-        // `=` in Logos means equality, should compile to `==` in WGSL
+        // `=` in Logos means equality — uses corner-checking for visible curves
         let shader = compile("x = 0").unwrap();
-        assert!(shader.contains("(x == 0.0)"));
+        // Should have pixel corner variables and straddle check, not simple `==`
+        assert!(shader.contains("x_m"), "equality should use corner checking");
+        assert!(shader.contains("!("), "equality should negate all-same-sign");
     }
 
     #[test]

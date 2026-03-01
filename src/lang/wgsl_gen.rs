@@ -5,7 +5,9 @@ use super::ast::AstNode;
 /// The generated shader:
 /// - Defines the uniform struct matching ShaderUniforms
 /// - Maps user `x`/`y` to world coordinates via axis_min/axis_max
-/// - Maps the final expression to a color output
+/// - For boolean expressions: uses corner-checking for pixel-perfect rendering
+///   (equality → curve straddling, inequalities → all-corners-agree)
+/// - For numeric expressions: clamps to [0, 1] grayscale
 pub fn generate(ast: &AstNode) -> Result<String, String> {
     let mut ctx = GenContext::new();
 
@@ -15,8 +17,7 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
     // Find the expression to evaluate (last non-binding, non-function-def statement)
     let expr = find_result_expr(ast)?;
 
-    // Generate the expression code
-    let expr_code = ctx.emit_expr(expr)?;
+    let is_bool = returns_bool(expr);
 
     // Build the full WGSL shader
     let mut shader = String::new();
@@ -44,13 +45,24 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
         shader.push_str(&format!("    let {} = {};\n", binding.name, binding.expr));
     }
 
-    // Map result to color
-    shader.push_str(&format!("    let _result = {};\n", expr_code));
-    if returns_bool(expr) {
-        // Boolean expressions: convert to 0.0/1.0 via select
+    if is_bool {
+        // Boolean expressions: use corner-checking for pixel-perfect curve rendering.
+        // Compute pixel size in world coordinates, then evaluate at 4 corners.
+        shader.push_str("    let pixel_size = (u.axis_max - u.axis_min) / u.resolution;\n");
+        shader.push_str("    let half_px = pixel_size.x;\n");
+        shader.push_str("    let half_py = pixel_size.y;\n");
+        shader.push_str("    let x_m = x - half_px;\n");
+        shader.push_str("    let x_p = x + half_px;\n");
+        shader.push_str("    let y_m = y - half_py;\n");
+        shader.push_str("    let y_p = y + half_py;\n");
+
+        let corner_code = ctx.emit_bool_with_corners(expr)?;
+        shader.push_str(&format!("    let _result = {};\n", corner_code));
         shader.push_str("    let c = select(0.0, 1.0, _result);\n");
     } else {
         // Numeric expressions: clamp to [0, 1] grayscale
+        let expr_code = ctx.emit_expr(expr)?;
+        shader.push_str(&format!("    let _result = {};\n", expr_code));
         shader.push_str("    let c = clamp(_result, 0.0, 1.0);\n");
     }
     shader.push_str("    return vec4<f32>(c, c, c, 1.0);\n");
@@ -130,6 +142,10 @@ struct GenContext {
     bindings: Vec<EmittedBinding>,
 }
 
+/// Optional x/y substitution for corner-checking.
+/// When `Some`, identifiers "x" and "y" are replaced with the given variable names.
+type CornerSubst<'a> = Option<(&'a str, &'a str)>;
+
 impl GenContext {
     fn new() -> Self {
         Self {
@@ -138,7 +154,7 @@ impl GenContext {
         }
     }
 
-    /// Walk the AST to collect function definitions.
+    /// Walk the AST to collect function definitions and bindings.
     fn collect_functions(&mut self, ast: &AstNode) {
         match ast {
             AstNode::Block(stmts) => {
@@ -176,10 +192,19 @@ impl GenContext {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Standard expression emission (no corner substitution)
+    // -----------------------------------------------------------------------
+
     fn emit_expr(&self, node: &AstNode) -> Result<String, String> {
+        self.emit_expr_internal(node, None)
+    }
+
+    /// Core expression emitter. When `subst` is Some((x_var, y_var)),
+    /// identifiers "x" and "y" are replaced with the corner variable names.
+    fn emit_expr_internal(&self, node: &AstNode, subst: CornerSubst) -> Result<String, String> {
         match node {
             AstNode::Number(n) => {
-                // Ensure float literal for WGSL
                 let s = if n.fract() == 0.0 && !n.is_nan() && !n.is_infinite() {
                     format!("{:.1}", n)
                 } else {
@@ -188,10 +213,21 @@ impl GenContext {
                 Ok(s)
             }
             AstNode::BoolLit(b) => Ok(format!("{}", b)),
-            AstNode::Identifier(name) => Ok(name.clone()),
-            AstNode::Apply { name, args } => self.emit_apply(name, args),
+            AstNode::Identifier(name) => {
+                if let Some((x_var, y_var)) = subst {
+                    if name == "x" {
+                        return Ok(x_var.to_string());
+                    }
+                    if name == "y" {
+                        return Ok(y_var.to_string());
+                    }
+                }
+                Ok(name.clone())
+            }
+            AstNode::Apply { name, args } => self.emit_apply_internal(name, args, subst),
             AstNode::Tuple(items) => {
-                let parts: Result<Vec<_>, _> = items.iter().map(|i| self.emit_expr(i)).collect();
+                let parts: Result<Vec<_>, _> =
+                    items.iter().map(|i| self.emit_expr_internal(i, subst)).collect();
                 let parts = parts?;
                 match items.len() {
                     2 => Ok(format!("vec2<f32>({})", parts.join(", "))),
@@ -201,36 +237,40 @@ impl GenContext {
                 }
             }
             AstNode::Block(stmts) => {
-                // Return the last expression
                 if let Some(last) = stmts.last() {
-                    self.emit_expr(last)
+                    self.emit_expr_internal(last, subst)
                 } else {
                     Ok("0.0".to_string())
                 }
             }
-            AstNode::Binding { .. } => {
-                // Bindings are handled at the top level
-                Ok("0.0".to_string())
-            }
+            AstNode::Binding { .. } => Ok("0.0".to_string()),
             AstNode::IfExpr { condition, then_branch, else_branch } => {
-                let cond = self.emit_expr(condition)?;
-                let then_code = self.emit_expr(then_branch)?;
+                let cond = self.emit_expr_internal(condition, subst)?;
+                let then_code = self.emit_expr_internal(then_branch, subst)?;
                 if let Some(else_b) = else_branch {
-                    let else_code = self.emit_expr(else_b)?;
+                    let else_code = self.emit_expr_internal(else_b, subst)?;
                     Ok(format!("select({}, {}, {})", else_code, then_code, cond))
                 } else {
                     Ok(format!("select(0.0, {}, {})", then_code, cond))
                 }
             }
-            AstNode::FunctionDef { .. } => {
-                // Already collected
-                Ok("0.0".to_string())
-            }
+            AstNode::FunctionDef { .. } => Ok("0.0".to_string()),
         }
     }
 
+    #[allow(dead_code)]
     fn emit_apply(&self, name: &str, args: &[AstNode]) -> Result<String, String> {
-        let emit_args: Result<Vec<_>, _> = args.iter().map(|a| self.emit_expr(a)).collect();
+        self.emit_apply_internal(name, args, None)
+    }
+
+    fn emit_apply_internal(
+        &self,
+        name: &str,
+        args: &[AstNode],
+        subst: CornerSubst,
+    ) -> Result<String, String> {
+        let emit_args: Result<Vec<_>, _> =
+            args.iter().map(|a| self.emit_expr_internal(a, subst)).collect();
         let emitted = emit_args?;
 
         match (name, args.len()) {
@@ -239,7 +279,10 @@ impl GenContext {
             ("sub", 2) => Ok(format!("({} - {})", emitted[0], emitted[1])),
             ("mul", 2) => Ok(format!("({} * {})", emitted[0], emitted[1])),
             ("div", 2) => Ok(format!("({} / {})", emitted[0], emitted[1])),
-            ("mod", 2) => Ok(format!("((({} % {}) + {}) % {})", emitted[0], emitted[1], emitted[1], emitted[1])),
+            ("mod", 2) => Ok(format!(
+                "((({} % {}) + {}) % {})",
+                emitted[0], emitted[1], emitted[1], emitted[1]
+            )),
 
             // Comparison
             ("eq", 2) => Ok(format!("({} == {})", emitted[0], emitted[1])),
@@ -282,10 +325,19 @@ impl GenContext {
             ("pow", 2) => Ok(format!("pow({}, {})", emitted[0], emitted[1])),
             ("min", 2) => Ok(format!("min({}, {})", emitted[0], emitted[1])),
             ("max", 2) => Ok(format!("max({}, {})", emitted[0], emitted[1])),
-            ("clamp", 3) => Ok(format!("clamp({}, {}, {})", emitted[0], emitted[1], emitted[2])),
-            ("mix", 3) => Ok(format!("mix({}, {}, {})", emitted[0], emitted[1], emitted[2])),
+            ("clamp", 3) => Ok(format!(
+                "clamp({}, {}, {})",
+                emitted[0], emitted[1], emitted[2]
+            )),
+            ("mix", 3) => Ok(format!(
+                "mix({}, {}, {})",
+                emitted[0], emitted[1], emitted[2]
+            )),
             ("step", 2) => Ok(format!("step({}, {})", emitted[0], emitted[1])),
-            ("smoothstep", 3) => Ok(format!("smoothstep({}, {}, {})", emitted[0], emitted[1], emitted[2])),
+            ("smoothstep", 3) => Ok(format!(
+                "smoothstep({}, {}, {})",
+                emitted[0], emitted[1], emitted[2]
+            )),
             ("length", 1) => Ok(format!("length({})", emitted[0])),
             ("normalize", 1) => Ok(format!("normalize({})", emitted[0])),
             ("dot", 2) => Ok(format!("dot({}, {})", emitted[0], emitted[1])),
@@ -302,12 +354,118 @@ impl GenContext {
             _ => Ok(format!("{}({})", name, emitted.join(", "))),
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Corner-checking emission for boolean expressions
+    // -----------------------------------------------------------------------
+    // For equations (=): the curve passes through a pixel if the expression
+    //   (LHS - RHS) changes sign across the pixel's four corners.
+    // For inequalities (>, <, etc.): all four corners must satisfy the condition.
+    // For logical ops (and, or, not): recursively apply corner checking.
+
+    /// Emit a boolean expression with corner-checking.
+    /// Assumes x_m, x_p, y_m, y_p variables are available in scope.
+    fn emit_bool_with_corners(&self, node: &AstNode) -> Result<String, String> {
+        match node {
+            AstNode::BoolLit(b) => Ok(format!("{}", b)),
+
+            AstNode::Apply { name, args } => {
+                match name.as_str() {
+                    // Logical ops: recursively apply corner checking
+                    "and" if args.len() == 2 => {
+                        let l = self.emit_bool_with_corners(&args[0])?;
+                        let r = self.emit_bool_with_corners(&args[1])?;
+                        Ok(format!("({} && {})", l, r))
+                    }
+                    "or" if args.len() == 2 => {
+                        let l = self.emit_bool_with_corners(&args[0])?;
+                        let r = self.emit_bool_with_corners(&args[1])?;
+                        Ok(format!("({} || {})", l, r))
+                    }
+                    "not" if args.len() == 1 => {
+                        let inner = self.emit_bool_with_corners(&args[0])?;
+                        Ok(format!("!({})", inner))
+                    }
+                    // Comparison ops: apply corner checking
+                    "eq" | "neq" | "lt" | "gt" | "lte" | "gte" if args.len() == 2 => {
+                        self.emit_comparison_with_corners(name, &args[0], &args[1])
+                    }
+                    // Anything else: fall back to normal emission
+                    _ => self.emit_expr(node),
+                }
+            }
+
+            // Non-boolean nodes or identifiers: emit normally
+            _ => self.emit_expr(node),
+        }
+    }
+
+    /// Emit a comparison with corner checking.
+    ///
+    /// For equality (`eq`): checks if (LHS - RHS) changes sign across 4 corners
+    ///   → `!(sign_at_c1 == sign_at_c2 && sign_at_c2 == sign_at_c3 && sign_at_c3 == sign_at_c4)`
+    ///   This means the curve passes through the pixel.
+    ///
+    /// For inequalities: all 4 corners must satisfy the condition.
+    fn emit_comparison_with_corners(
+        &self,
+        op: &str,
+        lhs: &AstNode,
+        rhs: &AstNode,
+    ) -> Result<String, String> {
+        // The four corners: (x_m, y_m), (x_m, y_p), (x_p, y_m), (x_p, y_p)
+        let corners: [(&str, &str); 4] = [
+            ("x_m", "y_m"),
+            ("x_m", "y_p"),
+            ("x_p", "y_m"),
+            ("x_p", "y_p"),
+        ];
+
+        if op == "eq" {
+            // Equality: curve straddles pixel if corners don't all agree on sign of (LHS - RHS).
+            // We check: (LHS > RHS) at each corner, then test if they're all the same.
+            // If NOT all the same → curve passes through → true.
+            let mut corner_signs = Vec::new();
+            for (xv, yv) in &corners {
+                let l = self.emit_expr_internal(lhs, Some((xv, yv)))?;
+                let r = self.emit_expr_internal(rhs, Some((xv, yv)))?;
+                corner_signs.push(format!("(({}) > ({}))", l, r));
+            }
+            // !(c1 == c2 && c2 == c3 && c3 == c4)
+            Ok(format!(
+                "(!({} == {} && {} == {} && {} == {}))",
+                corner_signs[0], corner_signs[1],
+                corner_signs[1], corner_signs[2],
+                corner_signs[2], corner_signs[3],
+            ))
+        } else {
+            // Inequalities: all four corners must satisfy the condition
+            let wgsl_op = match op {
+                "gt" => ">",
+                "lt" => "<",
+                "gte" => ">=",
+                "lte" => "<=",
+                "neq" => "!=",
+                _ => "==",
+            };
+            let mut parts = Vec::new();
+            for (xv, yv) in &corners {
+                let l = self.emit_expr_internal(lhs, Some((xv, yv)))?;
+                let r = self.emit_expr_internal(rhs, Some((xv, yv)))?;
+                parts.push(format!("(({}) {} ({}))", l, wgsl_op, r));
+            }
+            Ok(format!(
+                "({} && {} && {} && {})",
+                parts[0], parts[1], parts[2], parts[3]
+            ))
+        }
+    }
 }
 
 /// Check if an AST node produces a boolean value in WGSL.
 ///
 /// Comparisons, logical ops, and boolean literals produce `bool` in WGSL,
-/// which cannot be passed to `clamp()`. We use `select()` for these instead.
+/// which cannot be passed to `clamp()`. We use corner-checking for these instead.
 fn returns_bool(node: &AstNode) -> bool {
     match node {
         AstNode::BoolLit(_) => true,
@@ -324,16 +482,15 @@ fn returns_bool(node: &AstNode) -> bool {
 fn find_result_expr(ast: &AstNode) -> Result<&AstNode, String> {
     match ast {
         AstNode::Block(stmts) => {
-            // Walk from the end to find the last expression that isn't a binding or func def
             for stmt in stmts.iter().rev() {
                 match stmt {
                     AstNode::Binding { .. } | AstNode::FunctionDef { .. } => continue,
                     other => return Ok(other),
                 }
             }
-            Err("No result expression found — all statements are bindings or function definitions".to_string())
+            Err("No result expression found — all statements are bindings or function definitions"
+                .to_string())
         }
-        // Single expression at the top level
         other => Ok(other),
     }
 }
@@ -387,13 +544,6 @@ mod tests {
     }
 
     #[test]
-    fn test_equality_generates_comparison() {
-        // `=` in Logos is equality, should generate `==` in WGSL
-        let shader = gen("x = 5");
-        assert!(shader.contains("(x == 5.0)"));
-    }
-
-    #[test]
     fn test_empty_input() {
         let shader = gen("");
         assert!(shader.contains("@fragment"));
@@ -417,7 +567,6 @@ mod tests {
 
     #[test]
     fn test_mandelbrot_like_expr() {
-        // Complex expression similar to real mandelbrot code
         let shader = gen("r: sqrt(x*x + y*y)\nif (r < 2) 1 else 0");
         assert!(shader.contains("let r = sqrt("));
         assert!(shader.contains("select("));
@@ -442,63 +591,87 @@ mod tests {
         assert!(shader.contains("vec3<f32>(x, y, 0.0)"));
     }
 
-    // --- Bool-to-f32 conversion tests ---
-    // WGSL doesn't allow bool in clamp(). Boolean results must use select().
+    // --- Corner-checking tests for boolean expressions ---
 
     #[test]
-    fn test_equality_uses_select_not_clamp() {
-        // `x = 0` produces bool in WGSL; must use select(), not clamp()
+    fn test_equality_uses_corner_checking() {
+        // `x = y` should use corner straddling, not simple `==`
+        let shader = gen("x = y");
+        assert!(shader.contains("x_m"), "should declare corner variables");
+        assert!(shader.contains("x_p"), "should declare corner variables");
+        assert!(shader.contains("y_m"), "should declare corner variables");
+        assert!(shader.contains("y_p"), "should declare corner variables");
+        assert!(shader.contains("pixel_size"), "should compute pixel size");
+        // The result should negate all-same-sign check
+        assert!(shader.contains("!("), "equality uses !(all_same_sign)");
+    }
+
+    #[test]
+    fn test_equality_x_eq_0_uses_corners() {
         let shader = gen("x = 0");
-        assert!(shader.contains("select(0.0, 1.0, _result)"), "bool result should use select");
-        assert!(!shader.contains("clamp(_result"), "bool result must NOT use clamp");
+        assert!(shader.contains("x_m"));
+        assert!(shader.contains("x_p"));
+        assert!(shader.contains("!("), "equality straddle check");
+        assert!(shader.contains("select(0.0, 1.0, _result)"));
     }
 
     #[test]
-    fn test_comparison_lt_uses_select() {
+    fn test_inequality_gt_uses_all_corners() {
+        let shader = gen("x > y");
+        assert!(shader.contains("x_m"));
+        // Inequality: all corners must agree → 4 ANDed conditions
+        assert!(shader.contains("&&"), "inequality ANDs corner checks");
+        assert!(shader.contains("select(0.0, 1.0, _result)"));
+    }
+
+    #[test]
+    fn test_inequality_lt_uses_all_corners() {
         let shader = gen("x < 1");
-        assert!(shader.contains("select(0.0, 1.0, _result)"));
+        assert!(shader.contains("x_m"));
+        assert!(shader.contains("&&"));
     }
 
     #[test]
-    fn test_comparison_gt_uses_select() {
-        let shader = gen("x > 0");
-        assert!(shader.contains("select(0.0, 1.0, _result)"));
-    }
-
-    #[test]
-    fn test_comparison_neq_uses_select() {
-        let shader = gen("x != 0");
-        assert!(shader.contains("select(0.0, 1.0, _result)"));
-    }
-
-    #[test]
-    fn test_comparison_lte_uses_select() {
+    fn test_inequality_lte_uses_all_corners() {
         let shader = gen("x <= 1");
-        assert!(shader.contains("select(0.0, 1.0, _result)"));
+        assert!(shader.contains("x_m"));
+        assert!(shader.contains("<="));
     }
 
     #[test]
-    fn test_comparison_gte_uses_select() {
+    fn test_inequality_gte_uses_all_corners() {
         let shader = gen("x >= 0");
-        assert!(shader.contains("select(0.0, 1.0, _result)"));
+        assert!(shader.contains("x_m"));
+        assert!(shader.contains(">="));
     }
 
     #[test]
-    fn test_logical_and_uses_select() {
-        let shader = gen("x > 0 and x < 1");
-        assert!(shader.contains("select(0.0, 1.0, _result)"));
+    fn test_inequality_neq_uses_all_corners() {
+        let shader = gen("x != 0");
+        assert!(shader.contains("x_m"));
+        assert!(shader.contains("!="));
     }
 
     #[test]
-    fn test_logical_or_uses_select() {
+    fn test_logical_and_recursively_applies_corners() {
+        let shader = gen("x > 0 and y > 0");
+        assert!(shader.contains("x_m"));
+        // Should have corner checks for both sides of `and`
+        assert!(shader.contains("&&"));
+    }
+
+    #[test]
+    fn test_logical_or_recursively_applies_corners() {
         let shader = gen("x < 0 or x > 1");
-        assert!(shader.contains("select(0.0, 1.0, _result)"));
+        assert!(shader.contains("x_m"));
+        assert!(shader.contains("||"));
     }
 
     #[test]
-    fn test_logical_not_uses_select() {
+    fn test_logical_not_applies_corners() {
         let shader = gen("not (x > 0)");
-        assert!(shader.contains("select(0.0, 1.0, _result)"));
+        assert!(shader.contains("x_m"));
+        assert!(shader.contains("!("));
     }
 
     #[test]
@@ -509,24 +682,22 @@ mod tests {
 
     #[test]
     fn test_numeric_expr_still_uses_clamp() {
-        // Normal numeric expressions should still use clamp
         let shader = gen("x * x + y * y");
         assert!(shader.contains("clamp(_result, 0.0, 1.0)"));
-        assert!(!shader.contains("select(0.0, 1.0, _result)"));
+        assert!(!shader.contains("x_m"), "numeric expr should NOT have corner vars");
     }
 
     #[test]
     fn test_if_expr_is_numeric_not_bool() {
-        // `if (cond) 1 else 0` uses select() in the expression itself,
-        // but the result type is f32, so the wrapper should use clamp
         let shader = gen("if (x > 0) 1 else 0");
         assert!(shader.contains("clamp(_result, 0.0, 1.0)"));
+        assert!(!shader.contains("x_m"), "if/else returning f32 should not use corners");
     }
 
     #[test]
-    fn test_binding_then_bool_result_uses_select() {
-        // Multi-line: binding + boolean result expression
+    fn test_binding_then_bool_result_uses_corners() {
         let shader = gen("r: x * x + y * y\nr < 1");
+        assert!(shader.contains("x_m"), "bool result should trigger corner checking");
         assert!(shader.contains("select(0.0, 1.0, _result)"));
     }
 
@@ -534,5 +705,32 @@ mod tests {
     fn test_binding_then_numeric_result_uses_clamp() {
         let shader = gen("r: x * x + y * y\nsin(r)");
         assert!(shader.contains("clamp(_result, 0.0, 1.0)"));
+    }
+
+    #[test]
+    fn test_equality_substitutes_x_y_at_corners() {
+        // For `x = y`, the corner check should substitute x→x_m/x_p and y→y_m/y_p
+        let shader = gen("x = y");
+        // Should contain expressions with corner vars, e.g. "(x_m) > (y_m)"
+        assert!(shader.contains("x_m") && shader.contains("y_m"));
+        assert!(shader.contains("x_p") && shader.contains("y_p"));
+    }
+
+    #[test]
+    fn test_complex_equality_sin_x_eq_y() {
+        // sin(x) = y → should evaluate sin(x_m) vs y_m at corners
+        let shader = gen("sin(x) = y");
+        assert!(shader.contains("sin(x_m)") || shader.contains("sin(x_p)"),
+            "sin should be evaluated at corner x values");
+        assert!(shader.contains("y_m") && shader.contains("y_p"));
+    }
+
+    #[test]
+    fn test_equality_circle_equation() {
+        // x*x + y*y = 1 → unit circle, should be visible with corner checking
+        let shader = gen("x*x + y*y = 1");
+        assert!(shader.contains("x_m"));
+        assert!(shader.contains("y_p"));
+        assert!(shader.contains("!("), "equality uses straddle check");
     }
 }
