@@ -183,7 +183,7 @@ struct AppState {
     hover_target: HoverTarget,
 
     // Split dragging
-    split_ratio: f32,
+    split_left_width: f32,
     is_dragging_split: bool,
 
     // Scrollbar dragging
@@ -808,7 +808,7 @@ impl ApplicationHandler for App {
             plus_button_rect: Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
             cell_layouts: Vec::new(),
             hover_target: HoverTarget::None,
-            split_ratio: split::DEFAULT_RATIO,
+            split_left_width: split::DEFAULT_LEFT_WIDTH,
             is_dragging_split: false,
             is_dragging_v_scroll: false,
             scroll_drag_offset: 0.0,
@@ -845,8 +845,10 @@ impl ApplicationHandler for App {
 
             WindowEvent::Resized(size) => {
                 state.renderer.resize(size);
-                state.cached_layout =
-                    state.layout.compute(size.width as f32, size.height as f32);
+                let (w, h) = (size.width as f32, size.height as f32);
+                state.split_left_width =
+                    state.layout.clamp_left_width(state.split_left_width, w);
+                state.cached_layout = state.layout.compute(w, h);
                 state.recompute_hover();
                 state.sync_active_tab();
             }
@@ -861,28 +863,15 @@ impl ApplicationHandler for App {
                     );
                     state.window.request_redraw();
                 } else if state.is_dragging_split {
-                    let total_w = state.cached_layout.left_pane.w
-                        + state.cached_layout.split_handle.w
-                        + state.cached_layout.right_pane.w;
+                    let content_x = state.cached_layout.left_pane.x;
+                    let desired_width = state.cursor_position.0 - content_x;
 
-                    if total_w > 0.0 {
-                        let content_x = state.cached_layout.left_pane.x;
-                        let cursor_in_content = state.cursor_position.0 - content_x;
-                        let mut ratio = cursor_in_content / total_w;
-
-                        let min_ratio = split::MIN_PANE_SIZE / total_w;
-                        let max_ratio = 1.0 - min_ratio;
-                        ratio = ratio.clamp(min_ratio, max_ratio);
-
-                        state.split_ratio = ratio;
-                        state.layout.set_split_ratio(ratio);
-                        let size = state.window.inner_size();
-                        state.cached_layout = state.layout.compute(
-                            size.width as f32,
-                            size.height as f32,
-                        );
-                        state.sync_active_tab();
-                    }
+                    let size = state.window.inner_size();
+                    let (w, h) = (size.width as f32, size.height as f32);
+                    state.split_left_width =
+                        state.layout.clamp_left_width(desired_width, w);
+                    state.cached_layout = state.layout.compute(w, h);
+                    state.sync_active_tab();
                 } else if state.render_area.is_dragging {
                     // Pan the render area
                     let (mx, my) = state.cursor_position;

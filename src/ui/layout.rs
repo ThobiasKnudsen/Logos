@@ -9,7 +9,7 @@
 /// +-- title_bar     (height: 28px, menu + window controls)
 /// +-- tab_bar      (height: 36px)
 /// +-- content_area (flex: 1, row)
-/// |   +-- left_pane    (width: 45%)
+/// |   +-- left_pane    (width: fixed px, clamped to fit)
 /// |   +-- split_handle (width: 6px)
 /// |   +-- right_pane   (flex: 1)
 /// +-- status_bar   (height: 24px)
@@ -75,7 +75,7 @@ impl UiLayout {
         let left_pane = tree
             .new_leaf(Style {
                 size: Size {
-                    width: Dimension::Percent(0.45),
+                    width: Dimension::Length(crate::ui::theme::split::DEFAULT_LEFT_WIDTH),
                     height: auto(),
                 },
                 flex_shrink: 0.0,
@@ -173,12 +173,22 @@ impl UiLayout {
         }
     }
 
-    /// Change the left/right split ratio (0.0–1.0).
-    pub fn set_split_ratio(&mut self, ratio: f32) {
-        let clamped = ratio.clamp(0.05, 0.95);
+    /// Set the left pane to a fixed pixel width (clamped during `compute`).
+    pub fn set_left_pane_width(&mut self, width: f32) {
         let mut style = self.tree.style(self.left_pane).unwrap().clone();
-        style.size.width = Dimension::Percent(clamped);
+        style.size.width = Dimension::Length(width);
         self.tree.set_style(self.left_pane, style).unwrap();
+    }
+
+    /// Clamp the stored left-pane width so both panes respect `MIN_PANE_SIZE`
+    /// for the given viewport width.  Returns the (possibly adjusted) width.
+    pub fn clamp_left_width(&mut self, left_width: f32, viewport_w: f32) -> f32 {
+        use crate::ui::theme::{spacing, split};
+        let handle = spacing::split_handle_width();
+        let max = (viewport_w - handle - split::MIN_PANE_SIZE).max(split::MIN_PANE_SIZE);
+        let clamped = left_width.clamp(split::MIN_PANE_SIZE, max);
+        self.set_left_pane_width(clamped);
+        clamped
     }
 
     /// Recompute layout for the given viewport size and return pixel rects.
