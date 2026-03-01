@@ -1,4 +1,5 @@
 pub mod rects;
+pub mod shader_pipeline;
 
 use std::sync::Arc;
 
@@ -18,6 +19,7 @@ use crate::app::{self, HoverTarget, MenuItemDef, WindowControlRects};
 use crate::ui::layout::{LayoutResult, Rect};
 use crate::ui::theme::{colors, fonts, spacing, Rgba};
 use rects::{RectInstance, RectRenderer};
+use shader_pipeline::ShaderPipelineManager;
 
 /// Info about a single tab, passed from AppState to the renderer.
 pub struct TabInfo {
@@ -39,6 +41,7 @@ pub struct CellLayout {
     pub cell_index: usize,
     pub container: Rect,
     pub header: Rect,
+    pub play_button: Rect,
     pub delete_button: Rect,
     pub separator: Rect,
     pub editor: Rect,
@@ -48,6 +51,7 @@ pub struct CellLayout {
 pub struct CellInfo {
     pub text: String,
     pub cursor_byte: usize,
+    pub is_playing: bool,
 }
 
 const TAB_PAD_H: f32 = 12.0;
@@ -91,6 +95,12 @@ pub struct Renderer {
     add_cell_rect: Rect,
     /// Delete button label for cells.
     cell_delete_label: TextBuffer,
+    /// Play button label (▶).
+    cell_play_label: TextBuffer,
+    /// Stop button label (■).
+    cell_stop_label: TextBuffer,
+    /// Which cells are currently playing (indexed by cell position in current view).
+    cell_playing: Vec<bool>,
 
     // Scrollbar geometry for hit-testing (vertical only for cell container)
     v_track_rect: Option<Rect>,
@@ -128,6 +138,9 @@ pub struct Renderer {
 
     // Batched rect renderer
     rect_renderer: RectRenderer,
+
+    // Shader pipeline for user code rendering
+    shader_pipeline: ShaderPipelineManager,
 }
 
 impl Renderer {
@@ -198,9 +211,12 @@ impl Renderer {
         let win_close_label = Self::create_label(&mut font_system, fonts::menu_size(), "\u{00D7}");
 
         let rect_renderer = RectRenderer::new(&device, swapchain_format);
+        let shader_pipeline = ShaderPipelineManager::new(&device, swapchain_format);
 
         let add_cell_label = Self::create_label(&mut font_system, fonts::ui_size(), "+ Add Cell");
         let cell_delete_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{2715}");
+        let cell_play_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25B6}");
+        let cell_stop_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25A0}");
 
         let zero_rect = Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
 
@@ -224,6 +240,9 @@ impl Renderer {
             add_cell_label,
             add_cell_rect: zero_rect,
             cell_delete_label,
+            cell_play_label,
+            cell_stop_label,
+            cell_playing: Vec::new(),
             v_track_rect: None,
             v_thumb_rect: None,
             status_label,
@@ -247,6 +266,7 @@ impl Renderer {
             win_max_label,
             win_close_label,
             rect_renderer,
+            shader_pipeline,
         }
     }
 
@@ -312,6 +332,10 @@ impl Renderer {
             Self::create_label(&mut self.font_system, fonts::ui_size(), "+ Add Cell");
         self.cell_delete_label =
             Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{2715}");
+        self.cell_play_label =
+            Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{25B6}");
+        self.cell_stop_label =
+            Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{25A0}");
 
         // Close any open dropdown since label sizes changed
         self.close_dropdown();
@@ -423,6 +447,20 @@ impl Renderer {
         }
     }
 
+    // ----- Shader pipeline public API -----
+
+    pub fn compile_cell_shader(&mut self, cell_id: usize, wgsl_source: &str) -> Result<(), String> {
+        self.shader_pipeline.compile_and_add(&self.device, cell_id, wgsl_source)
+    }
+
+    pub fn remove_cell_shader(&mut self, cell_id: usize) {
+        self.shader_pipeline.remove(cell_id);
+    }
+
+    pub fn has_active_shaders(&self) -> bool {
+        self.shader_pipeline.has_active()
+    }
+
     // ----- Scroll public API -----
 
     pub fn v_thumb_rect(&self) -> Option<Rect> {
@@ -446,6 +484,7 @@ impl Renderer {
             for cl in &mut self.cell_layouts {
                 cl.container.y -= delta;
                 cl.header.y -= delta;
+                cl.play_button.y -= delta;
                 cl.delete_button.y -= delta;
                 cl.separator.y -= delta;
                 cl.editor.y -= delta;
@@ -525,6 +564,7 @@ impl Renderer {
     ) -> Vec<CellLayout> {
         self.cached_editor_pane = pane;
         self.active_cell_index = active_cell_index;
+        self.cell_playing = cells.iter().map(|c| c.is_playing).collect();
 
         // Sync cell_buffers count with cells count
         while self.cell_buffers.len() < cells.len() {
@@ -587,6 +627,12 @@ impl Renderer {
                 w: effective_width - container_pad * 2.0,
                 h: header_h,
             };
+            let play_button = Rect {
+                x: header.x,
+                y: header.y + (header_h - CELL_DELETE_SIZE) / 2.0,
+                w: CELL_DELETE_SIZE,
+                h: CELL_DELETE_SIZE,
+            };
             let delete_button = Rect {
                 x: header.x + header.w - CELL_DELETE_SIZE,
                 y: header.y + (header_h - CELL_DELETE_SIZE) / 2.0,
@@ -610,6 +656,7 @@ impl Renderer {
                 cell_index: i,
                 container,
                 header,
+                play_button,
                 delete_button,
                 separator,
                 editor,
@@ -662,6 +709,7 @@ impl Renderer {
                     for layout in layouts.iter_mut() {
                         layout.container.y -= scroll_delta;
                         layout.header.y -= scroll_delta;
+                        layout.play_button.y -= scroll_delta;
                         layout.delete_button.y -= scroll_delta;
                         layout.separator.y -= scroll_delta;
                         layout.editor.y -= scroll_delta;
@@ -915,6 +963,18 @@ impl Renderer {
                 ui_rects.push(rect_from(cl.header, colors::BG_SECONDARY));
             }
 
+            // Play/Stop button background
+            {
+                let is_playing = i < self.cell_playing.len() && self.cell_playing[i];
+                let is_hovered = hover == HoverTarget::CellPlayButton(i);
+                let btn_color = if is_playing {
+                    if is_hovered { colors::STOP_BUTTON_HOVER } else { colors::STOP_BUTTON }
+                } else {
+                    if is_hovered { colors::PLAY_BUTTON_HOVER } else { colors::PLAY_BUTTON }
+                };
+                ui_rects.push(rect_rounded(cl.play_button, btn_color, 4.0 * fonts::scale()));
+            }
+
             // Delete button hover
             if hover == HoverTarget::CellDeleteButton(i) {
                 ui_rects.push(rect_from(cl.delete_button, colors::BG_HOVER));
@@ -1050,6 +1110,33 @@ impl Renderer {
                         custom_glyphs: &[],
                     });
                 }
+            }
+
+            // Play/Stop button label (▶ or ■)
+            let play = &cl.play_button;
+            let play_clip_top = (play.y as i32).max(pane_top);
+            let play_clip_bottom = ((play.y + play.h) as i32).min(pane_bottom);
+            if play_clip_top < play_clip_bottom {
+                let is_playing = i < self.cell_playing.len() && self.cell_playing[i];
+                let play_buf = if is_playing { &self.cell_stop_label } else { &self.cell_play_label };
+                let label_w = Self::measure_label_width(play_buf);
+                let line_h = fonts::ui_size() * 1.4;
+                let cx = play.x + (play.w - label_w) / 2.0;
+                let cy = play.y + (play.h - line_h) / 2.0;
+                text_areas.push(TextArea {
+                    buffer: play_buf,
+                    left: cx,
+                    top: cy,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: play.x as i32,
+                        top: play_clip_top,
+                        right: (play.x + play.w) as i32,
+                        bottom: play_clip_bottom,
+                    },
+                    default_color: colors::TEXT_PRIMARY.to_glyphon(),
+                    custom_glyphs: &[],
+                });
             }
 
             // Delete button label (×)
@@ -1309,21 +1396,23 @@ impl Renderer {
             custom_glyphs: &[],
         });
 
-        // Graph placeholder
-        text_areas.push(TextArea {
-            buffer: &self.graph_label,
-            left: layout.right_pane.x + layout.right_pane.w / 2.0 - 20.0,
-            top: layout.right_pane.y + layout.right_pane.h / 2.0 - 10.0,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: layout.right_pane.x as i32,
-                top: layout.right_pane.y as i32,
-                right: (layout.right_pane.x + layout.right_pane.w) as i32,
-                bottom: (layout.right_pane.y + layout.right_pane.h) as i32,
-            },
-            default_color: colors::TEXT_MUTED.to_glyphon(),
-            custom_glyphs: &[],
-        });
+        // Graph placeholder (only show when no shaders are active)
+        if !self.shader_pipeline.has_active() {
+            text_areas.push(TextArea {
+                buffer: &self.graph_label,
+                left: layout.right_pane.x + layout.right_pane.w / 2.0 - 20.0,
+                top: layout.right_pane.y + layout.right_pane.h / 2.0 - 10.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: layout.right_pane.x as i32,
+                    top: layout.right_pane.y as i32,
+                    right: (layout.right_pane.x + layout.right_pane.w) as i32,
+                    bottom: (layout.right_pane.y + layout.right_pane.h) as i32,
+                },
+                default_color: colors::TEXT_MUTED.to_glyphon(),
+                custom_glyphs: &[],
+            });
+        }
 
         // -- GPU submit --
         self.text_renderer
@@ -1367,6 +1456,17 @@ impl Renderer {
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .unwrap();
+        }
+
+        // Second pass: render shader pipelines into right pane
+        if self.shader_pipeline.has_active() {
+            self.shader_pipeline.render(
+                &mut encoder,
+                &view,
+                &self.queue,
+                &layout.right_pane,
+                (self.surface_config.width, self.surface_config.height),
+            );
         }
 
         self.queue.submit(Some(encoder.finish()));

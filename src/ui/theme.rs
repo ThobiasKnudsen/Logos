@@ -126,6 +126,12 @@ pub mod colors {
 
     // Cursor
     pub const CURSOR: Rgba = Rgba::rgb(230, 230, 230);
+
+    // Play/Stop button
+    pub const PLAY_BUTTON: Rgba = Rgba::rgb(75, 165, 95);
+    pub const PLAY_BUTTON_HOVER: Rgba = Rgba::rgb(95, 195, 115);
+    pub const STOP_BUTTON: Rgba = Rgba::rgb(196, 60, 50);
+    pub const STOP_BUTTON_HOVER: Rgba = Rgba::rgb(220, 80, 70);
 }
 
 // ---------------------------------------------------------------------------

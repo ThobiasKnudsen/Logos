@@ -7,7 +7,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
+use crate::editor::cell::CellOutput;
 use crate::file_dialog::{DialogKind, DialogResult, FileDialog};
+use crate::lang;
 use crate::render::{CellInfo, CellLayout, Renderer, TabHitRect, TabInfo};
 use crate::session::TabManager;
 use crate::ui::layout::{LayoutResult, Rect, UiLayout};
@@ -66,6 +68,7 @@ pub(crate) enum HoverTarget {
     DropdownItem(usize),
     VScrollThumb,
     CellEditor(usize),
+    CellPlayButton(usize),
     CellDeleteButton(usize),
     AddCellButton,
 }
@@ -149,6 +152,7 @@ impl AppState {
             .map(|c| CellInfo {
                 text: c.buffer.text().to_string(),
                 cursor_byte: c.buffer.cursor_byte_offset(),
+                is_playing: c.is_playing,
             })
             .collect();
         self.cell_layouts = self.renderer.update_cells(
@@ -305,8 +309,12 @@ impl AppState {
                 return;
             }
 
-            // Check cells (delete button first, then editor area)
+            // Check cells (play button, then delete button, then editor area)
             for cl in &self.cell_layouts {
+                if point_in_rect(mx, my, &cl.play_button) {
+                    self.set_hover(HoverTarget::CellPlayButton(cl.cell_index));
+                    return;
+                }
                 if point_in_rect(mx, my, &cl.delete_button) {
                     self.set_hover(HoverTarget::CellDeleteButton(cl.cell_index));
                     return;
@@ -326,6 +334,7 @@ impl AppState {
             self.hover_target = target;
             let icon = match target {
                 HoverTarget::SplitHandle => CursorIcon::ColResize,
+                HoverTarget::CellPlayButton(_) => CursorIcon::Pointer,
                 _ => CursorIcon::Default,
             };
             self.window.set_cursor(icon);
@@ -479,6 +488,57 @@ impl AppState {
     /// Returns true if any drag operation is in progress.
     fn is_any_drag_active(&self) -> bool {
         self.is_dragging_split || self.is_dragging_v_scroll
+    }
+
+    /// Compile and start playing a cell's shader.
+    fn trigger_cell_play(&mut self, cell_index: usize) {
+        let tab = self.tab_manager.active_tab();
+
+        // Concatenate all cell texts up to and including this cell
+        // (so earlier cells can define functions used by later ones)
+        let mut source = String::new();
+        for (i, cell) in tab.cells.iter().enumerate() {
+            if i > cell_index {
+                break;
+            }
+            if !source.is_empty() {
+                source.push('\n');
+            }
+            source.push_str(cell.buffer.text());
+        }
+
+        // Lex → Parse → Generate WGSL
+        match lang::compile(&source) {
+            Ok(wgsl) => {
+                let cell_id = tab.cells[cell_index].id;
+                match self.renderer.compile_cell_shader(cell_id, &wgsl) {
+                    Ok(()) => {
+                        self.tab_manager.active_tab_mut().cells[cell_index].is_playing = true;
+                        self.tab_manager.active_tab_mut().cells[cell_index].output = CellOutput::None;
+                    }
+                    Err(e) => {
+                        log::error!("Shader compilation failed: {}", e);
+                        self.tab_manager.active_tab_mut().cells[cell_index].output =
+                            CellOutput::Error(format!("GPU: {}", e));
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Language pipeline error: {}", e);
+                self.tab_manager.active_tab_mut().cells[cell_index].output =
+                    CellOutput::Error(e);
+            }
+        }
+        self.sync_active_tab();
+    }
+
+    /// Stop playing a cell's shader.
+    fn trigger_cell_stop(&mut self, cell_index: usize) {
+        let cell_id = self.tab_manager.active_tab().cells[cell_index].id;
+        self.renderer.remove_cell_shader(cell_id);
+        self.tab_manager.active_tab_mut().cells[cell_index].is_playing = false;
+        self.tab_manager.active_tab_mut().cells[cell_index].output = CellOutput::None;
+        self.sync_active_tab();
     }
 }
 
@@ -735,11 +795,24 @@ impl ApplicationHandler for App {
 
                 // Cell interactions
                 match state.hover_target {
+                    HoverTarget::CellPlayButton(i) => {
+                        let is_playing = state.tab_manager.active_tab().cells[i].is_playing;
+                        if is_playing {
+                            state.trigger_cell_stop(i);
+                        } else {
+                            state.trigger_cell_play(i);
+                        }
+                    }
                     HoverTarget::CellEditor(i) => {
                         state.tab_manager.active_tab_mut().set_active_cell(i);
                         state.sync_active_tab();
                     }
                     HoverTarget::CellDeleteButton(i) => {
+                        // Stop shader if playing before removing
+                        let cell = &state.tab_manager.active_tab().cells[i];
+                        if cell.is_playing {
+                            state.renderer.remove_cell_shader(cell.id);
+                        }
                         state.tab_manager.active_tab_mut().remove_cell(i);
                         state.sync_active_tab();
                     }
@@ -841,6 +914,14 @@ impl ApplicationHandler for App {
         let Some(state) = &mut self.state else {
             return;
         };
+
+        // Continuous animation when shaders are active
+        if state.renderer.has_active_shaders() {
+            event_loop.set_control_flow(ControlFlow::Poll);
+            state.window.request_redraw();
+        } else if !state.is_any_drag_active() && state.pending_dialog.is_none() {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
 
         if let Some(dialog) = &state.pending_dialog {
             event_loop.set_control_flow(ControlFlow::Poll);
