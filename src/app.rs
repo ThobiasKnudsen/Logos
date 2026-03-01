@@ -13,6 +13,7 @@ use crate::lang;
 use crate::render::{CellInfo, CellLayout, Renderer, TabHitRect, TabInfo};
 use crate::session::TabManager;
 use crate::ui::layout::{LayoutResult, Rect, UiLayout};
+use crate::render::RenderAreaParams;
 use crate::ui::theme::{fonts, spacing, split};
 
 // ---------------------------------------------------------------------------
@@ -79,6 +80,42 @@ pub(crate) enum HoverTarget {
     CellPlayButton(usize),
     CellDeleteButton(usize),
     AddCellButton,
+    RenderArea,
+}
+
+// ---------------------------------------------------------------------------
+// Mouse zone for render area interaction
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MouseZone {
+    Center,
+    XAxisEdge, // bottom edge — X axis only
+    YAxisEdge, // left edge — Y axis only
+}
+
+struct RenderAreaState {
+    axis_x_min: f32,
+    axis_x_max: f32,
+    axis_y_min: f32,
+    axis_y_max: f32,
+    is_dragging: bool,
+    last_drag_pos: (f32, f32),
+    mouse_zone: MouseZone,
+}
+
+impl Default for RenderAreaState {
+    fn default() -> Self {
+        Self {
+            axis_x_min: -5.0,
+            axis_x_max: 5.0,
+            axis_y_min: -5.0,
+            axis_y_max: 5.0,
+            is_dragging: false,
+            last_drag_pos: (0.0, 0.0),
+            mouse_zone: MouseZone::Center,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +181,9 @@ struct AppState {
     menu_item_rects: Vec<Rect>,
     open_menu: Option<usize>,
     dropdown_item_rects: Vec<Rect>,
+
+    // Render area (right pane) interaction state
+    render_area: RenderAreaState,
 
     // Clipboard
     clipboard: Option<arboard::Clipboard>,
@@ -338,15 +378,38 @@ impl AppState {
             }
         }
 
+        // Right pane (render area)
+        let rp = self.cached_layout.right_pane;
+        if point_in_rect(mx, my, &rp) {
+            self.render_area.mouse_zone = detect_mouse_zone(mx, my, &rp);
+            self.set_hover(HoverTarget::RenderArea);
+            return;
+        }
+
         self.set_hover(HoverTarget::None);
     }
 
     fn set_hover(&mut self, target: HoverTarget) {
-        if self.hover_target != target {
+        // For RenderArea, also check if the zone changed
+        let zone_changed = target == HoverTarget::RenderArea
+            && self.hover_target == HoverTarget::RenderArea;
+
+        if self.hover_target != target || zone_changed {
             self.hover_target = target;
             let icon = match target {
                 HoverTarget::SplitHandle => CursorIcon::ColResize,
                 HoverTarget::CellPlayButton(_) => CursorIcon::Pointer,
+                HoverTarget::RenderArea => match self.render_area.mouse_zone {
+                    MouseZone::Center => {
+                        if self.render_area.is_dragging {
+                            CursorIcon::Grabbing
+                        } else {
+                            CursorIcon::Crosshair
+                        }
+                    }
+                    MouseZone::XAxisEdge => CursorIcon::EwResize,
+                    MouseZone::YAxisEdge => CursorIcon::NsResize,
+                },
                 _ => CursorIcon::Default,
             };
             self.window.set_cursor(icon);
@@ -591,7 +654,7 @@ impl AppState {
 
     /// Returns true if any drag operation is in progress.
     fn is_any_drag_active(&self) -> bool {
-        self.is_dragging_split || self.is_dragging_v_scroll
+        self.is_dragging_split || self.is_dragging_v_scroll || self.render_area.is_dragging
     }
 
     /// Compile and start playing a cell's shader.
@@ -688,6 +751,7 @@ impl ApplicationHandler for App {
             menu_item_rects: Vec::new(),
             open_menu: None,
             dropdown_item_rects: Vec::new(),
+            render_area: RenderAreaState::default(),
             clipboard: arboard::Clipboard::new().ok(),
         };
 
@@ -752,6 +816,39 @@ impl ApplicationHandler for App {
                         );
                         state.sync_active_tab();
                     }
+                } else if state.render_area.is_dragging {
+                    // Pan the render area
+                    let (mx, my) = state.cursor_position;
+                    let rp = state.cached_layout.right_pane;
+                    let dx = mx - state.render_area.last_drag_pos.0;
+                    let dy = my - state.render_area.last_drag_pos.1;
+
+                    let x_range = state.render_area.axis_x_max - state.render_area.axis_x_min;
+                    let y_range = state.render_area.axis_y_max - state.render_area.axis_y_min;
+
+                    match state.render_area.mouse_zone {
+                        MouseZone::Center => {
+                            let world_dx = -dx * x_range / rp.w;
+                            let world_dy = dy * y_range / rp.h;
+                            state.render_area.axis_x_min += world_dx;
+                            state.render_area.axis_x_max += world_dx;
+                            state.render_area.axis_y_min += world_dy;
+                            state.render_area.axis_y_max += world_dy;
+                        }
+                        MouseZone::XAxisEdge => {
+                            let world_dx = -dx * x_range / rp.w;
+                            state.render_area.axis_x_min += world_dx;
+                            state.render_area.axis_x_max += world_dx;
+                        }
+                        MouseZone::YAxisEdge => {
+                            let world_dy = dy * y_range / rp.h;
+                            state.render_area.axis_y_min += world_dy;
+                            state.render_area.axis_y_max += world_dy;
+                        }
+                    }
+
+                    state.render_area.last_drag_pos = (mx, my);
+                    state.window.request_redraw();
                 } else {
                     state.recompute_hover();
                 }
@@ -768,13 +865,60 @@ impl ApplicationHandler for App {
                     }
                 };
 
-                // Check if cursor is over the editor pane
-                let lp = state.cached_layout.left_pane;
                 let (mx, my) = state.cursor_position;
-                if mx >= lp.x && mx <= lp.x + lp.w && my >= lp.y && my <= lp.y + lp.h {
-                    // Vertical scroll for cell container
-                    state.renderer.scroll_by(0.0, -dy);
+
+                // Check if cursor is over the render area (right pane) — zoom
+                let rp = state.cached_layout.right_pane;
+                if point_in_rect(mx, my, &rp) && dy.abs() > 0.001 {
+                    let zone = detect_mouse_zone(mx, my, &rp);
+                    let factor = if dy > 0.0 { 0.97 } else { 1.03 };
+
+                    // Mouse position as ratio within the pane
+                    let rel_x = ((mx - rp.x) / rp.w).clamp(0.0, 1.0);
+                    let rel_y = (1.0 - (my - rp.y) / rp.h).clamp(0.0, 1.0);
+
+                    let ra = &mut state.render_area;
+                    match zone {
+                        MouseZone::Center => {
+                            zoom_axis(
+                                &mut ra.axis_x_min,
+                                &mut ra.axis_x_max,
+                                factor,
+                                rel_x,
+                            );
+                            zoom_axis(
+                                &mut ra.axis_y_min,
+                                &mut ra.axis_y_max,
+                                factor,
+                                rel_y,
+                            );
+                        }
+                        MouseZone::XAxisEdge => {
+                            zoom_axis(
+                                &mut ra.axis_x_min,
+                                &mut ra.axis_x_max,
+                                factor,
+                                rel_x,
+                            );
+                        }
+                        MouseZone::YAxisEdge => {
+                            zoom_axis(
+                                &mut ra.axis_y_min,
+                                &mut ra.axis_y_max,
+                                factor,
+                                rel_y,
+                            );
+                        }
+                    }
                     state.window.request_redraw();
+                }
+                // Check if cursor is over the editor pane — scroll
+                else {
+                    let lp = state.cached_layout.left_pane;
+                    if point_in_rect(mx, my, &lp) {
+                        state.renderer.scroll_by(0.0, -dy);
+                        state.window.request_redraw();
+                    }
                 }
             }
 
@@ -822,6 +966,21 @@ impl ApplicationHandler for App {
                             state.handle_menu_action(event_loop, menu_idx, i);
                         }
                     }
+                    HoverTarget::RenderArea => {
+                        state.close_menu();
+                        state.render_area.is_dragging = true;
+                        state.render_area.last_drag_pos = state.cursor_position;
+                        // Lock the zone at drag start
+                        let rp = state.cached_layout.right_pane;
+                        let (mx, my) = state.cursor_position;
+                        state.render_area.mouse_zone = detect_mouse_zone(mx, my, &rp);
+                        state.window.set_cursor(match state.render_area.mouse_zone {
+                            MouseZone::Center => CursorIcon::Grabbing,
+                            MouseZone::XAxisEdge => CursorIcon::EwResize,
+                            MouseZone::YAxisEdge => CursorIcon::NsResize,
+                        });
+                        event_loop.set_control_flow(ControlFlow::Poll);
+                    }
                     _ => {
                         // Click outside menus closes dropdown
                         if state.open_menu.is_some() {
@@ -842,6 +1001,7 @@ impl ApplicationHandler for App {
                     let was_split = state.is_dragging_split;
                     state.is_dragging_split = false;
                     state.is_dragging_v_scroll = false;
+                    state.render_area.is_dragging = false;
                     if state.pending_dialog.is_none() {
                         event_loop.set_control_flow(ControlFlow::Wait);
                     }
@@ -1003,12 +1163,31 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
+                let rp = state.cached_layout.right_pane;
+                let (mx, my) = state.cursor_position;
+                let mouse_uv = if rp.w > 0.0 && rp.h > 0.0 {
+                    [
+                        ((mx - rp.x) / rp.w).clamp(0.0, 1.0),
+                        (1.0 - (my - rp.y) / rp.h).clamp(0.0, 1.0),
+                    ]
+                } else {
+                    [0.0, 0.0]
+                };
+                let render_params = RenderAreaParams {
+                    axis_x_min: state.render_area.axis_x_min,
+                    axis_x_max: state.render_area.axis_x_max,
+                    axis_y_min: state.render_area.axis_y_min,
+                    axis_y_max: state.render_area.axis_y_max,
+                    mouse_uv,
+                };
+
                 state.renderer.render(
                     &state.cached_layout,
                     state.hover_target,
                     &state.win_control_rects,
                     state.is_dragging_split,
                     state.open_menu,
+                    &render_params,
                 );
             }
 
@@ -1093,4 +1272,27 @@ fn line_col_from(text: &str, cursor_byte: usize) -> (usize, usize) {
 
 fn point_in_rect(x: f32, y: f32, r: &Rect) -> bool {
     x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
+}
+
+/// Detect which interaction zone the mouse is in within the render pane.
+/// Bottom edge → X axis, left edge → Y axis, everything else → center.
+fn detect_mouse_zone(mx: f32, my: f32, pane: &Rect) -> MouseZone {
+    let rel_y = my - pane.y;
+    let rel_x = mx - pane.x;
+    if rel_y > pane.h - spacing::AXIS_ZONE_SIZE {
+        MouseZone::XAxisEdge
+    } else if rel_x < spacing::AXIS_ZONE_SIZE {
+        MouseZone::YAxisEdge
+    } else {
+        MouseZone::Center
+    }
+}
+
+/// Zoom an axis range around a cursor ratio (0..1), preserving the world point under the cursor.
+fn zoom_axis(axis_min: &mut f32, axis_max: &mut f32, factor: f32, cursor_ratio: f32) {
+    let range = *axis_max - *axis_min;
+    let cursor_world = *axis_min + cursor_ratio * range;
+    let new_range = range * factor;
+    *axis_min = cursor_world - cursor_ratio * new_range;
+    *axis_max = cursor_world + (1.0 - cursor_ratio) * new_range;
 }

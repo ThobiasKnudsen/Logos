@@ -56,6 +56,58 @@ pub struct CellInfo {
     pub selection: Option<(usize, usize)>,
 }
 
+/// Parameters for the render area (right pane) passed from AppState.
+pub struct RenderAreaParams {
+    pub axis_x_min: f32,
+    pub axis_x_max: f32,
+    pub axis_y_min: f32,
+    pub axis_y_max: f32,
+    pub mouse_uv: [f32; 2],
+}
+
+const MAX_AXIS_LABELS: usize = 12;
+
+/// Compute "nice" tick positions for an axis range using the 1-2-5 rule.
+fn compute_nice_ticks(axis_min: f32, axis_max: f32, max_ticks: usize) -> (Vec<f32>, f32) {
+    let range = axis_max - axis_min;
+    if range <= f32::EPSILON || max_ticks < 2 {
+        return (vec![], 1.0);
+    }
+    let rough_step = range / max_ticks as f32;
+    let mag = 10.0_f32.powf(rough_step.log10().floor());
+    let normalized = rough_step / mag;
+    let nice_step = if normalized <= 1.5 {
+        mag
+    } else if normalized <= 3.5 {
+        2.0 * mag
+    } else if normalized <= 7.5 {
+        5.0 * mag
+    } else {
+        10.0 * mag
+    };
+    let first = (axis_min / nice_step).ceil() * nice_step;
+    let mut ticks = Vec::new();
+    let mut v = first;
+    while v <= axis_max + nice_step * 0.001 {
+        ticks.push(v);
+        v += nice_step;
+    }
+    (ticks, nice_step)
+}
+
+/// Format a tick value for axis labels.
+fn format_tick(v: f32, step: f32) -> String {
+    if v.abs() < step * 0.01 {
+        return "0".to_string();
+    }
+    let decimals = if step >= 1.0 {
+        0
+    } else {
+        ((-step.log10()).ceil() as usize).min(6)
+    };
+    format!("{:.prec$}", v, prec = decimals)
+}
+
 const TAB_PAD_H: f32 = 12.0;
 const TAB_CLOSE_SIZE: f32 = 20.0;
 const TAB_CLOSE_PAD: f32 = 6.0;
@@ -145,6 +197,12 @@ pub struct Renderer {
 
     // Shader pipeline for user code rendering
     shader_pipeline: ShaderPipelineManager,
+
+    // Axis overlay resources (separate GPU resources to avoid atlas corruption)
+    overlay_rect_renderer: RectRenderer,
+    axis_atlas: TextAtlas,
+    axis_text_renderer: TextRenderer,
+    axis_label_buffers: Vec<TextBuffer>,
 }
 
 impl Renderer {
@@ -217,6 +275,16 @@ impl Renderer {
         let rect_renderer = RectRenderer::new(&device, swapchain_format);
         let shader_pipeline = ShaderPipelineManager::new(&device, swapchain_format);
 
+        // Axis overlay: separate Cache + Atlas + TextRenderer for isolation
+        let axis_cache = Cache::new(&device);
+        let mut axis_atlas = TextAtlas::new(&device, &queue, &axis_cache, swapchain_format);
+        let axis_text_renderer =
+            TextRenderer::new(&mut axis_atlas, &device, MultisampleState::default(), None);
+        let overlay_rect_renderer = RectRenderer::new(&device, swapchain_format);
+        let axis_label_buffers: Vec<TextBuffer> = (0..MAX_AXIS_LABELS * 2)
+            .map(|_| Self::create_label(&mut font_system, fonts::small_size(), "0"))
+            .collect();
+
         let add_cell_label = Self::create_label(&mut font_system, fonts::ui_size(), "+ Add Cell");
         let cell_delete_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{2715}");
         let cell_play_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25B6}");
@@ -272,6 +340,10 @@ impl Renderer {
             win_close_label,
             rect_renderer,
             shader_pipeline,
+            overlay_rect_renderer,
+            axis_atlas,
+            axis_text_renderer,
+            axis_label_buffers,
         }
     }
 
@@ -971,6 +1043,7 @@ impl Renderer {
         win_controls: &WindowControlRects,
         is_dragging_split: bool,
         open_menu: Option<usize>,
+        render_area: &RenderAreaParams,
     ) {
         self.viewport.update(
             &self.queue,
@@ -1557,6 +1630,138 @@ impl Renderer {
             });
         }
 
+        // -- Axis overlay computation --
+        // Labels are drawn directly on the plot (no reserved margin).
+        let rp = layout.right_pane;
+        let label_pad = 4.0_f32; // padding from edges
+
+        let x_range = render_area.axis_x_max - render_area.axis_x_min;
+        let y_range = render_area.axis_y_max - render_area.axis_y_min;
+        let (x_ticks, x_step) =
+            compute_nice_ticks(render_area.axis_x_min, render_area.axis_x_max, 8);
+        let (y_ticks, y_step) =
+            compute_nice_ticks(render_area.axis_y_min, render_area.axis_y_max, 6);
+
+        let x_count = x_ticks.len().min(MAX_AXIS_LABELS);
+        let y_count = y_ticks.len().min(MAX_AXIS_LABELS);
+
+        // Update axis label buffer text
+        for i in 0..x_count {
+            let text = format_tick(x_ticks[i], x_step);
+            self.axis_label_buffers[i].set_text(
+                &mut self.font_system,
+                &text,
+                Attrs::new().family(Family::Monospace),
+                Shaping::Advanced,
+            );
+            self.axis_label_buffers[i].shape_until_scroll(&mut self.font_system, false);
+        }
+        for i in 0..y_count {
+            let text = format_tick(y_ticks[i], y_step);
+            self.axis_label_buffers[MAX_AXIS_LABELS + i].set_text(
+                &mut self.font_system,
+                &text,
+                Attrs::new().family(Family::Monospace),
+                Shaping::Advanced,
+            );
+            self.axis_label_buffers[MAX_AXIS_LABELS + i]
+                .shape_until_scroll(&mut self.font_system, false);
+        }
+
+        // Build axis overlay rects (grid lines + label backing rects)
+        let mut axis_rects: Vec<RectInstance> = Vec::new();
+        let label_h = fonts::small_size() * 1.4;
+        let label_bg = [0.06, 0.07, 0.09, 0.75_f32]; // semi-transparent dark
+
+        // Grid lines spanning full plot
+        if x_range > f32::EPSILON {
+            for &tick in &x_ticks[..x_count] {
+                let t = (tick - render_area.axis_x_min) / x_range;
+                let sx = rp.x + t * rp.w;
+                if sx >= rp.x && sx <= rp.x + rp.w {
+                    axis_rects.push(RectInstance {
+                        x: sx, y: rp.y, w: 1.0, h: rp.h,
+                        color: colors::GRAPH_GRID.to_f32_array(),
+                        corner_radius: 0.0, _padding: [0.0; 3],
+                    });
+                }
+            }
+        }
+        if y_range > f32::EPSILON {
+            for &tick in &y_ticks[..y_count] {
+                let t = (tick - render_area.axis_y_min) / y_range;
+                let sy = rp.y + rp.h - t * rp.h;
+                if sy >= rp.y && sy <= rp.y + rp.h {
+                    axis_rects.push(RectInstance {
+                        x: rp.x, y: sy, w: rp.w, h: 1.0,
+                        color: colors::GRAPH_GRID.to_f32_array(),
+                        corner_radius: 0.0, _padding: [0.0; 3],
+                    });
+                }
+            }
+        }
+
+        // Label backing rects + text areas (on-plot, with semi-transparent bg)
+        let mut axis_text_areas: Vec<TextArea> = Vec::new();
+        let label_color = colors::AXIS_LABEL.to_glyphon();
+        let rp_bounds = TextBounds {
+            left: rp.x as i32,
+            top: rp.y as i32,
+            right: (rp.x + rp.w) as i32,
+            bottom: (rp.y + rp.h) as i32,
+        };
+
+        // X axis labels (along bottom edge)
+        if x_range > f32::EPSILON {
+            for i in 0..x_count {
+                let t = (x_ticks[i] - render_area.axis_x_min) / x_range;
+                let sx = rp.x + t * rp.w;
+                let lw = Self::measure_label_width(&self.axis_label_buffers[i]);
+                let lx = (sx - lw / 2.0).max(rp.x + label_pad);
+                let ly = rp.y + rp.h - label_h - label_pad;
+                // Backing rect
+                axis_rects.push(RectInstance {
+                    x: lx - 2.0, y: ly - 1.0,
+                    w: lw + 4.0, h: label_h + 2.0,
+                    color: label_bg,
+                    corner_radius: 2.0, _padding: [0.0; 3],
+                });
+                axis_text_areas.push(TextArea {
+                    buffer: &self.axis_label_buffers[i],
+                    left: lx, top: ly, scale: 1.0,
+                    bounds: rp_bounds,
+                    default_color: label_color,
+                    custom_glyphs: &[],
+                });
+            }
+        }
+
+        // Y axis labels (along left edge)
+        if y_range > f32::EPSILON {
+            for i in 0..y_count {
+                let t = (y_ticks[i] - render_area.axis_y_min) / y_range;
+                let sy = rp.y + rp.h - t * rp.h;
+                let lw =
+                    Self::measure_label_width(&self.axis_label_buffers[MAX_AXIS_LABELS + i]);
+                let lx = rp.x + label_pad;
+                let ly = (sy - label_h / 2.0).max(rp.y + label_pad);
+                // Backing rect
+                axis_rects.push(RectInstance {
+                    x: lx - 2.0, y: ly - 1.0,
+                    w: lw + 4.0, h: label_h + 2.0,
+                    color: label_bg,
+                    corner_radius: 2.0, _padding: [0.0; 3],
+                });
+                axis_text_areas.push(TextArea {
+                    buffer: &self.axis_label_buffers[MAX_AXIS_LABELS + i],
+                    left: lx, top: ly, scale: 1.0,
+                    bounds: rp_bounds,
+                    default_color: label_color,
+                    custom_glyphs: &[],
+                });
+            }
+        }
+
         // -- GPU submit --
         self.text_renderer
             .prepare(
@@ -1570,6 +1775,18 @@ impl Renderer {
             )
             .unwrap();
 
+        self.axis_text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.axis_atlas,
+                &self.viewport,
+                axis_text_areas,
+                &mut self.swash_cache,
+            )
+            .unwrap();
+
         let frame = self.surface.get_current_texture().unwrap();
         let view = frame
             .texture
@@ -1578,6 +1795,7 @@ impl Renderer {
             .device
             .create_command_encoder(&CommandEncoderDescriptor { label: None });
 
+        // Pass 1: Clear + UI rects + UI text
         {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("main_pass"),
@@ -1601,7 +1819,7 @@ impl Renderer {
                 .unwrap();
         }
 
-        // Second pass: render shader pipelines into right pane
+        // Pass 2: Shader pipelines into right pane
         if self.shader_pipeline.has_active() {
             self.shader_pipeline.render(
                 &mut encoder,
@@ -1609,12 +1827,44 @@ impl Renderer {
                 &self.queue,
                 &layout.right_pane,
                 (self.surface_config.width, self.surface_config.height),
+                [
+                    render_area.axis_x_min,
+                    render_area.axis_y_max,
+                    render_area.axis_x_max,
+                    render_area.axis_y_min,
+                ],
+                render_area.mouse_uv,
             );
+        }
+
+        // Pass 3: Axis overlay (zone backgrounds, grid lines, tick labels)
+        {
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("axis_overlay_pass"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Load,
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            self.overlay_rect_renderer
+                .draw(&self.queue, &mut pass, sw, sh, &axis_rects);
+            self.axis_text_renderer
+                .render(&self.axis_atlas, &self.viewport, &mut pass)
+                .unwrap();
         }
 
         self.queue.submit(Some(encoder.finish()));
         frame.present();
         self.atlas.trim();
+        self.axis_atlas.trim();
     }
 }
 

@@ -99,6 +99,8 @@ pub mod colors {
     pub const GRAPH_BG: Rgba = Rgba::rgb(15, 18, 23);
     pub const GRAPH_GRID: Rgba = Rgba::new(40, 49, 61, 80);
     pub const GRAPH_AXIS: Rgba = Rgba::rgb(113, 128, 150);
+    pub const AXIS_ZONE_BG: Rgba = Rgba::new(15, 18, 23, 210);
+    pub const AXIS_LABEL: Rgba = Rgba::rgb(136, 136, 136);
 
     // Toolbar
     pub const TOOLBAR_BG: Rgba = Rgba::rgb(28, 34, 42);
@@ -160,6 +162,7 @@ pub mod spacing {
     pub const SCROLLBAR_THUMB_MIN_H: f32 = 30.0;
 
     pub const GUTTER_WIDTH: f32 = 48.0;
+    pub const AXIS_ZONE_SIZE: f32 = 40.0;
     pub const CELL_PADDING: f32 = 12.0;
     pub const CELL_SPACING: f32 = 8.0;
     pub const BUTTON_SIZE: f32 = 24.0;
@@ -173,6 +176,7 @@ pub mod spacing {
     pub fn split_handle_width() -> f32 { SPLIT_HANDLE_WIDTH * super::fonts::scale() }
     pub fn window_control_width() -> f32 { WINDOW_CONTROL_WIDTH * super::fonts::scale() }
     pub fn dropdown_item_height() -> f32 { DROPDOWN_ITEM_HEIGHT * super::fonts::scale() }
+    pub fn gutter_width() -> f32 { GUTTER_WIDTH * super::fonts::scale() }
 }
 
 // ---------------------------------------------------------------------------

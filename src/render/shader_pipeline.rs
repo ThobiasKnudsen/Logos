@@ -232,6 +232,8 @@ impl ShaderPipelineManager {
         queue: &wgpu::Queue,
         right_pane: &Rect,
         screen_size: (u32, u32),
+        axis_bounds: [f32; 4], // [x_min, y_min, x_max, y_max]
+        mouse_uv: [f32; 2],
     ) {
         if self.pipelines.is_empty() {
             return;
@@ -246,10 +248,13 @@ impl ShaderPipelineManager {
         let sh = (right_pane.h as u32).min(screen_size.1.saturating_sub(sy));
 
         for cp in self.pipelines.iter() {
-            // Update uniforms — all cells get full right pane resolution
+            // Update uniforms with actual axis bounds from user interaction
             let uniforms = ShaderUniforms {
                 time: elapsed,
                 resolution: [right_pane.w, right_pane.h],
+                mouse: mouse_uv,
+                axis_min: [axis_bounds[0], axis_bounds[1]],
+                axis_max: [axis_bounds[2], axis_bounds[3]],
                 ..Default::default()
             };
             queue.write_buffer(&cp.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
