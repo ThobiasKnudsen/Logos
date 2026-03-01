@@ -4,6 +4,8 @@ use super::Buffer;
 pub enum CellOutput {
     None,
     Error(String),
+    Simplifying,
+    Simplified(String),
 }
 
 pub struct CodeCell {

@@ -45,6 +45,8 @@ pub struct CellLayout {
     pub delete_button: Rect,
     pub separator: Rect,
     pub editor: Rect,
+    /// Output area below the editor (for REDUCE results). Zero-sized if no output.
+    pub output: Rect,
 }
 
 /// Info about a single cell, passed from AppState to the renderer.
@@ -54,6 +56,8 @@ pub struct CellInfo {
     pub is_playing: bool,
     /// Selection range as (start_byte, end_byte), if any.
     pub selection: Option<(usize, usize)>,
+    /// Output text to display below the cell (simplified result, error, etc.)
+    pub output_text: Option<String>,
 }
 
 const TAB_PAD_H: f32 = 12.0;
@@ -82,6 +86,10 @@ pub struct Renderer {
     cell_buffers: Vec<TextBuffer>,
     /// Cached cell text for dirty-checking (skip reshaping unchanged cells).
     cell_texts: Vec<String>,
+    /// Output text buffers (one per cell, for REDUCE results).
+    cell_output_buffers: Vec<TextBuffer>,
+    /// Cached output text for dirty-checking.
+    cell_output_texts: Vec<String>,
     /// Computed cell layouts for hit-testing and rendering.
     cell_layouts: Vec<CellLayout>,
     /// Which cell is currently active (receives keyboard input).
@@ -241,6 +249,8 @@ impl Renderer {
             text_renderer,
             cell_buffers: Vec::new(),
             cell_texts: Vec::new(),
+            cell_output_buffers: Vec::new(),
+            cell_output_texts: Vec::new(),
             cell_layouts: Vec::new(),
             active_cell_index: 0,
             cursor_content_pos: (0.0, 0.0, fonts::editor_line_height()),
@@ -334,6 +344,13 @@ impl Renderer {
 
         // Update metrics for all cell buffers
         for buf in &mut self.cell_buffers {
+            buf.set_metrics(
+                &mut self.font_system,
+                Metrics::new(fonts::editor_size(), fonts::editor_line_height()),
+            );
+            buf.shape_until_scroll(&mut self.font_system, false);
+        }
+        for buf in &mut self.cell_output_buffers {
             buf.set_metrics(
                 &mut self.font_system,
                 Metrics::new(fonts::editor_size(), fonts::editor_line_height()),
@@ -590,6 +607,17 @@ impl Renderer {
         self.cell_buffers.truncate(cells.len());
         self.cell_texts.truncate(cells.len());
 
+        // Sync output buffers count
+        while self.cell_output_buffers.len() < cells.len() {
+            let buf = TextBuffer::new(
+                &mut self.font_system,
+                Metrics::new(fonts::editor_size(), fonts::editor_line_height()),
+            );
+            self.cell_output_buffers.push(buf);
+        }
+        self.cell_output_buffers.truncate(cells.len());
+        self.cell_output_texts.truncate(cells.len());
+
         // Set text + shape each buffer, measure heights
         let cell_pad = spacing::CELL_PADDING;
         let cell_spacing = spacing::CELL_SPACING;
@@ -634,7 +662,43 @@ impl Renderer {
                 .max(fonts::editor_line_height());
             let editor_h = content_h + text_pad * 2.0;
 
-            let container_h = container_pad + header_h + sep_h + editor_h + container_pad;
+            // Update output buffer text if changed
+            let has_output = cell_info.output_text.is_some();
+            let output_text_ref = cell_info.output_text.as_deref().unwrap_or("");
+            let output_changed = self
+                .cell_output_texts
+                .get(i)
+                .map_or(true, |prev| prev != output_text_ref);
+            if output_changed {
+                if has_output {
+                    self.cell_output_buffers[i].set_size(&mut self.font_system, None, None);
+                    self.cell_output_buffers[i].set_text(
+                        &mut self.font_system,
+                        output_text_ref,
+                        Attrs::new().family(Family::Monospace),
+                        Shaping::Advanced,
+                    );
+                    self.cell_output_buffers[i]
+                        .shape_until_scroll(&mut self.font_system, false);
+                }
+                if i < self.cell_output_texts.len() {
+                    self.cell_output_texts[i] = output_text_ref.to_string();
+                } else {
+                    self.cell_output_texts.push(output_text_ref.to_string());
+                }
+            }
+
+            // Measure output height
+            let output_h = if has_output {
+                let out_content_h = Self::measure_content_height(&self.cell_output_buffers[i])
+                    .max(fonts::editor_line_height());
+                out_content_h + text_pad * 2.0
+            } else {
+                0.0
+            };
+
+            let container_h =
+                container_pad + header_h + sep_h + editor_h + output_h + container_pad;
 
             let screen_y = pane.y + y_offset - self.cell_scroll_y;
 
@@ -674,6 +738,12 @@ impl Renderer {
                 w: effective_width - container_pad * 2.0,
                 h: editor_h,
             };
+            let output = Rect {
+                x: container.x + container_pad,
+                y: editor.y + editor_h,
+                w: effective_width - container_pad * 2.0,
+                h: output_h,
+            };
 
             layouts.push(CellLayout {
                 cell_index: i,
@@ -683,6 +753,7 @@ impl Renderer {
                 delete_button,
                 separator,
                 editor,
+                output,
             });
 
             y_offset += container_h + cell_spacing;
@@ -750,6 +821,7 @@ impl Renderer {
                         layout.delete_button.y -= scroll_delta;
                         layout.separator.y -= scroll_delta;
                         layout.editor.y -= scroll_delta;
+                        layout.output.y -= scroll_delta;
                     }
                     self.add_cell_rect.y -= scroll_delta;
                 }
@@ -1134,6 +1206,20 @@ impl Renderer {
 
             // Separator line
             ui_rects.push(rect_from(cl.separator, colors::BORDER));
+
+            // Output separator + subtle background when output is visible
+            if cl.output.h > 0.0 {
+                // Thin separator between editor and output
+                ui_rects.push(rect_from(
+                    Rect {
+                        x: cl.output.x,
+                        y: cl.output.y,
+                        w: cl.output.w,
+                        h: 1.0,
+                    },
+                    colors::BORDER,
+                ));
+            }
         }
 
         // Selection highlight in active cell
@@ -1282,6 +1368,31 @@ impl Renderer {
                             bottom: clip_bottom,
                         },
                         default_color: editor_color,
+                        custom_glyphs: &[],
+                    });
+                }
+            }
+
+            // Output text (REDUCE result) below the editor
+            if cl.output.h > 0.0 && i < self.cell_output_buffers.len() {
+                let clip_left = (cl.output.x as i32).max(pane_left);
+                let clip_top = (cl.output.y as i32).max(pane_top);
+                let clip_right = ((cl.output.x + cl.output.w) as i32).min(pane_right);
+                let clip_bottom = ((cl.output.y + cl.output.h) as i32).min(pane_bottom);
+
+                if clip_left < clip_right && clip_top < clip_bottom {
+                    text_areas.push(TextArea {
+                        buffer: &self.cell_output_buffers[i],
+                        left: cl.output.x + text_pad,
+                        top: cl.output.y + text_pad,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: clip_left,
+                            top: clip_top,
+                            right: clip_right,
+                            bottom: clip_bottom,
+                        },
+                        default_color: colors::TEXT_MUTED.to_glyphon(),
                         custom_glyphs: &[],
                     });
                 }

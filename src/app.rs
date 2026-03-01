@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -10,10 +10,15 @@ use winit::window::{CursorIcon, Window, WindowId};
 use crate::editor::cell::CellOutput;
 use crate::file_dialog::{DialogKind, DialogResult, FileDialog};
 use crate::lang;
+use crate::lang::reduce::service::ReduceService;
+use crate::lang::reduce::translate;
 use crate::render::{CellInfo, CellLayout, Renderer, TabHitRect, TabInfo};
 use crate::session::TabManager;
 use crate::ui::layout::{LayoutResult, Rect, UiLayout};
 use crate::ui::theme::{fonts, spacing, split};
+
+/// Debounce interval before sending an expression to REDUCE.
+const REDUCE_DEBOUNCE: Duration = Duration::from_millis(300);
 
 // ---------------------------------------------------------------------------
 // Menu definitions
@@ -147,6 +152,13 @@ struct AppState {
 
     // Clipboard
     clipboard: Option<arboard::Clipboard>,
+
+    // REDUCE CAS integration
+    reduce_service: ReduceService,
+    /// Last time the active cell was edited (for debounce).
+    last_edit_time: Option<Instant>,
+    /// Cell index that was last edited.
+    last_edited_cell: Option<usize>,
 }
 
 const DOUBLE_CLICK_MS: u128 = 400;
@@ -165,6 +177,12 @@ impl AppState {
                 cursor_byte: c.buffer.cursor_byte_offset(),
                 is_playing: c.is_playing,
                 selection: c.buffer.selection_range(),
+                output_text: match &c.output {
+                    CellOutput::None => None,
+                    CellOutput::Error(e) => Some(format!("Error: {}", e)),
+                    CellOutput::Simplifying => Some("Simplifying...".to_string()),
+                    CellOutput::Simplified(s) => Some(s.clone()),
+                },
             })
             .collect();
         self.cell_layouts = self.renderer.update_cells(
@@ -691,6 +709,9 @@ impl ApplicationHandler for App {
             open_menu: None,
             dropdown_item_rects: Vec::new(),
             clipboard: arboard::Clipboard::new().ok(),
+            reduce_service: ReduceService::new(),
+            last_edit_time: None,
+            last_edited_cell: None,
         };
 
         state.sync_active_tab();
@@ -889,6 +910,10 @@ impl ApplicationHandler for App {
                 for (i, hit) in state.tab_hit_rects.iter().enumerate() {
                     if point_in_rect(mx, my, &hit.full) {
                         state.tab_manager.set_active(i);
+                        // Clear pending REDUCE requests — new tab has its own cells
+                        state.reduce_service.clear_pending();
+                        state.last_edit_time = None;
+                        state.last_edited_cell = None;
                         state.sync_active_tab();
                         return;
                     }
@@ -1000,6 +1025,10 @@ impl ApplicationHandler for App {
 
                 if changed {
                     state.tab_manager.active_tab_mut().mark_modified();
+                    // Record edit time for REDUCE debounce
+                    state.last_edit_time = Some(Instant::now());
+                    state.last_edited_cell =
+                        Some(state.tab_manager.active_tab().active_cell_index);
                     state.sync_active_tab();
                 }
             }
@@ -1023,11 +1052,70 @@ impl ApplicationHandler for App {
             return;
         };
 
+        let mut needs_redraw = false;
+
+        // --- REDUCE: poll for completed responses ---
+        while let Some(resp) = state.reduce_service.try_recv() {
+            // Find the cell by id across all cells in the active tab
+            let tab = state.tab_manager.active_tab_mut();
+            if let Some(cell) = tab.cells.iter_mut().find(|c| c.id == resp.cell_id) {
+                cell.output = match resp.result {
+                    Ok(text) => {
+                        if text.is_empty() {
+                            CellOutput::None
+                        } else {
+                            CellOutput::Simplified(translate::from_reduce(&text))
+                        }
+                    }
+                    Err(e) => CellOutput::Error(e),
+                };
+            }
+            needs_redraw = true;
+        }
+
+        // --- REDUCE: check debounce timer and submit requests ---
+        if let (Some(edit_time), Some(cell_idx)) =
+            (state.last_edit_time, state.last_edited_cell)
+        {
+            if edit_time.elapsed() >= REDUCE_DEBOUNCE {
+                // Debounce expired — send the expression to REDUCE
+                state.last_edit_time = None;
+                state.last_edited_cell = None;
+
+                let tab = state.tab_manager.active_tab();
+                if cell_idx < tab.cells.len() {
+                    let cell = &tab.cells[cell_idx];
+                    let text = cell.buffer.text().trim().to_string();
+                    if !text.is_empty() {
+                        let cell_id = cell.id;
+                        let reduce_expr = translate::to_reduce(&text);
+                        state.reduce_service.submit(cell_id, reduce_expr);
+
+                        // Mark as simplifying
+                        let cell_mut =
+                            &mut state.tab_manager.active_tab_mut().cells[cell_idx];
+                        cell_mut.output = CellOutput::Simplifying;
+                        needs_redraw = true;
+                    }
+                }
+            } else {
+                // Still debouncing — need to poll again soon
+                event_loop.set_control_flow(ControlFlow::Poll);
+            }
+        }
+
+        if needs_redraw {
+            state.sync_active_tab();
+        }
+
         // Continuous animation when shaders are active
         if state.renderer.has_active_shaders() {
             event_loop.set_control_flow(ControlFlow::Poll);
             state.window.request_redraw();
-        } else if !state.is_any_drag_active() && state.pending_dialog.is_none() {
+        } else if !state.is_any_drag_active()
+            && state.pending_dialog.is_none()
+            && state.last_edit_time.is_none()
+        {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
 
