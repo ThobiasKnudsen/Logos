@@ -96,6 +96,7 @@ pub(crate) enum HoverTarget {
     VScrollThumb,
     CellEditor(usize),
     CellPlayButton(usize),
+    CellCopyButton(usize),
     CellDeleteButton(usize),
     AddCellButton,
 }
@@ -343,10 +344,14 @@ impl AppState {
                 return;
             }
 
-            // Check cells (play button, then delete button, then editor area)
+            // Check cells (play button, copy button, delete button, then editor area)
             for cl in &self.cell_layouts {
                 if point_in_rect(mx, my, &cl.play_button) {
                     self.set_hover(HoverTarget::CellPlayButton(cl.cell_index));
+                    return;
+                }
+                if point_in_rect(mx, my, &cl.copy_button) {
+                    self.set_hover(HoverTarget::CellCopyButton(cl.cell_index));
                     return;
                 }
                 if point_in_rect(mx, my, &cl.delete_button) {
@@ -368,7 +373,7 @@ impl AppState {
             self.hover_target = target;
             let icon = match target {
                 HoverTarget::SplitHandle => CursorIcon::ColResize,
-                HoverTarget::CellPlayButton(_) => CursorIcon::Pointer,
+                HoverTarget::CellPlayButton(_) | HoverTarget::CellCopyButton(_) => CursorIcon::Pointer,
                 _ => CursorIcon::Default,
             };
             self.window.set_cursor(icon);
@@ -627,6 +632,18 @@ impl AppState {
             Key::Character(c) if c.as_str() == "t" => {
                 self.close_menu();
                 self.cycle_theme();
+                true
+            }
+            // Run/Stop active cell
+            Key::Named(NamedKey::Enter) => {
+                self.close_menu();
+                let active = self.tab_manager.active_tab().active_cell_index;
+                let is_playing = self.tab_manager.active_tab().cells[active].is_playing;
+                if is_playing {
+                    self.trigger_cell_stop(active);
+                } else {
+                    self.trigger_cell_play(active);
+                }
                 true
             }
             _ => false,
@@ -961,6 +978,12 @@ impl ApplicationHandler for App {
                     HoverTarget::CellEditor(i) => {
                         state.tab_manager.active_tab_mut().set_active_cell(i);
                         state.sync_active_tab();
+                    }
+                    HoverTarget::CellCopyButton(i) => {
+                        let text = state.tab_manager.active_tab().cells[i].buffer.text().to_string();
+                        if let Some(cb) = state.clipboard.as_mut() {
+                            let _ = cb.set_text(&text);
+                        }
                     }
                     HoverTarget::CellDeleteButton(i) => {
                         // Stop shader if playing before removing

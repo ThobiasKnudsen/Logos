@@ -42,6 +42,7 @@ pub struct CellLayout {
     pub container: Rect,
     pub header: Rect,
     pub play_button: Rect,
+    pub copy_button: Rect,
     pub delete_button: Rect,
     pub separator: Rect,
     pub editor: Rect,
@@ -101,10 +102,14 @@ pub struct Renderer {
     add_cell_rect: Rect,
     /// Delete button label for cells.
     cell_delete_label: TextBuffer,
+    /// Copy button label for cells.
+    cell_copy_label: TextBuffer,
     /// Play button label (▶).
     cell_play_label: TextBuffer,
     /// Stop button label (■).
     cell_stop_label: TextBuffer,
+    /// Tooltip label for play/stop button.
+    tooltip_label: TextBuffer,
     /// Which cells are currently playing (indexed by cell position in current view).
     cell_playing: Vec<bool>,
 
@@ -223,10 +228,12 @@ impl Renderer {
         let rect_renderer = RectRenderer::new(&device, swapchain_format);
         let shader_pipeline = ShaderPipelineManager::new(&device, swapchain_format);
 
-        let add_cell_label = Self::create_label(&mut font_system, fonts::ui_size(), "+ Add Cell");
+        let add_cell_label = Self::create_label(&mut font_system, fonts::ui_size(), "+");
         let cell_delete_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{2715}");
+        let cell_copy_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{2398}");
         let cell_play_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25B6}");
         let cell_stop_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25A0}");
+        let tooltip_label = Self::create_label(&mut font_system, fonts::small_size(), "Ctrl+Enter");
 
         let zero_rect = Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
 
@@ -252,8 +259,10 @@ impl Renderer {
             add_cell_label,
             add_cell_rect: zero_rect,
             cell_delete_label,
+            cell_copy_label,
             cell_play_label,
             cell_stop_label,
+            tooltip_label,
             cell_playing: Vec::new(),
             v_track_rect: None,
             v_thumb_rect: None,
@@ -344,13 +353,17 @@ impl Renderer {
         }
 
         self.add_cell_label =
-            Self::create_label(&mut self.font_system, fonts::ui_size(), "+ Add Cell");
+            Self::create_label(&mut self.font_system, fonts::ui_size(), "+");
         self.cell_delete_label =
             Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{2715}");
+        self.cell_copy_label =
+            Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{2398}");
         self.cell_play_label =
             Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{25B6}");
         self.cell_stop_label =
             Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{25A0}");
+        self.tooltip_label =
+            Self::create_label(&mut self.font_system, fonts::small_size(), "Ctrl+Enter");
 
         // Close any open dropdown since label sizes changed
         self.close_dropdown();
@@ -705,6 +718,12 @@ impl Renderer {
                 w: CELL_DELETE_SIZE,
                 h: CELL_DELETE_SIZE,
             };
+            let copy_button = Rect {
+                x: header.x + header.w - CELL_DELETE_SIZE * 2.0 - spacing::XS,
+                y: btn_y,
+                w: CELL_DELETE_SIZE,
+                h: CELL_DELETE_SIZE,
+            };
             // Separator spans full cell width
             let separator = Rect {
                 x: container.x,
@@ -724,6 +743,7 @@ impl Renderer {
                 container,
                 header,
                 play_button,
+                copy_button,
                 delete_button,
                 separator,
                 editor,
@@ -732,19 +752,18 @@ impl Renderer {
             y_offset += container_h + cell_spacing;
         }
 
-        // Add cell button
-        let add_btn_h = CELL_HEADER_HEIGHT;
-        let add_btn_w = Self::measure_label_width(&self.add_cell_label) + spacing::MD * 2.0;
-        let add_btn_x = pane.x + cell_pad;
+        // Add cell button (round, centered)
+        let add_btn_size = 28.0 * fonts::scale();
+        let add_btn_x = pane.x + cell_pad + effective_width / 2.0 - add_btn_size / 2.0;
         let add_btn_y = pane.y + y_offset - self.cell_scroll_y;
         self.add_cell_rect = Rect {
             x: add_btn_x,
             y: add_btn_y,
-            w: add_btn_w,
-            h: add_btn_h,
+            w: add_btn_size,
+            h: add_btn_size,
         };
 
-        y_offset += add_btn_h + cell_pad;
+        y_offset += add_btn_size + cell_pad;
         self.cells_total_height = y_offset;
 
         // Compute cursor position for active cell
@@ -1166,6 +1185,11 @@ impl Renderer {
                 ui_rects.push(rect_rounded(cl.play_button, btn_color, 4.0 * fonts::scale()));
             }
 
+            // Copy button hover
+            if hover == HoverTarget::CellCopyButton(i) {
+                ui_rects.push(rect_from(cl.copy_button, colors::BG_HOVER));
+            }
+
             // Delete button hover
             if hover == HoverTarget::CellDeleteButton(i) {
                 ui_rects.push(rect_from(cl.delete_button, colors::BG_HOVER));
@@ -1222,7 +1246,7 @@ impl Renderer {
             }
         }
 
-        // Add cell button
+        // Add cell button (round)
         if self.add_cell_rect.y + self.add_cell_rect.h > lp.y
             && self.add_cell_rect.y < lp.y + lp.h
         {
@@ -1231,7 +1255,7 @@ impl Renderer {
             } else {
                 colors::BG_ELEVATED
             };
-            ui_rects.push(rect_rounded(self.add_cell_rect, add_color, 6.0 * fonts::scale()));
+            ui_rects.push(rect_rounded(self.add_cell_rect, add_color, self.add_cell_rect.w / 2.0));
         }
 
         // Scrollbars
@@ -1297,14 +1321,14 @@ impl Renderer {
         let mut text_areas: Vec<TextArea> = Vec::new();
         let editor_color = colors::TEXT_PRIMARY.to_glyphon();
 
-        // Dropdown rect for clipping pane content behind it
+        // Dropdown rect for clipping pane content around it
         let dd_clip = if self.dropdown_active {
             Some(self.dropdown_bg)
         } else {
             None
         };
 
-        // Cell editor text + delete button labels
+        // Cell editor text + button labels
         for (i, cl) in self.cell_layouts.iter().enumerate() {
             // Skip cells fully outside the visible pane
             if cl.container.y + cl.container.h < lp.y || cl.container.y > lp.y + lp.h {
@@ -1318,26 +1342,32 @@ impl Renderer {
                 let clip_right = ((cl.editor.x + cl.editor.w) as i32).min(pane_right);
                 let clip_bottom = ((cl.editor.y + cl.editor.h) as i32).min(pane_bottom);
 
-                let mut bounds = TextBounds {
+                let bounds = TextBounds {
                     left: clip_left,
                     top: clip_top,
                     right: clip_right,
                     bottom: clip_bottom,
                 };
-                let visible = dd_clip
-                    .as_ref()
-                    .map_or(true, |dd| clip_bounds_under_dropdown(&mut bounds, dd));
 
-                if visible && bounds.left < bounds.right && bounds.top < bounds.bottom {
-                    text_areas.push(TextArea {
-                        buffer: &self.cell_buffers[i],
-                        left: cl.editor.x + text_pad,
-                        top: cl.editor.y + text_pad,
-                        scale: 1.0,
-                        bounds,
-                        default_color: editor_color,
-                        custom_glyphs: &[],
-                    });
+                // Multi-region clipping: split text around dropdown instead of hiding it
+                let regions = if let Some(dd) = &dd_clip {
+                    clip_bounds_around_dropdown(&bounds, dd)
+                } else {
+                    vec![bounds]
+                };
+
+                for region in regions {
+                    if region.left < region.right && region.top < region.bottom {
+                        text_areas.push(TextArea {
+                            buffer: &self.cell_buffers[i],
+                            left: cl.editor.x + text_pad,
+                            top: cl.editor.y + text_pad,
+                            scale: 1.0,
+                            bounds: region,
+                            default_color: editor_color,
+                            custom_glyphs: &[],
+                        });
+                    }
                 }
             }
 
@@ -1375,6 +1405,40 @@ impl Renderer {
                 }
             }
 
+            // Copy button label (⎘)
+            {
+                let cb = &cl.copy_button;
+                let cb_clip_top = (cb.y as i32).max(pane_top);
+                let cb_clip_bottom = ((cb.y + cb.h) as i32).min(pane_bottom);
+                if cb_clip_top < cb_clip_bottom {
+                    let mut bounds = TextBounds {
+                        left: cb.x as i32,
+                        top: cb_clip_top,
+                        right: (cb.x + cb.w) as i32,
+                        bottom: cb_clip_bottom,
+                    };
+                    let visible = dd_clip
+                        .as_ref()
+                        .map_or(true, |dd| clip_bounds_under_dropdown(&mut bounds, dd));
+
+                    if visible {
+                        let label_w = Self::measure_label_width(&self.cell_copy_label);
+                        let line_h = fonts::ui_size() * 1.4;
+                        let cx = cb.x + (cb.w - label_w) / 2.0;
+                        let cy = cb.y + (cb.h - line_h) / 2.0;
+                        text_areas.push(TextArea {
+                            buffer: &self.cell_copy_label,
+                            left: cx,
+                            top: cy,
+                            scale: 1.0,
+                            bounds,
+                            default_color: colors::TEXT_MUTED.to_glyphon(),
+                            custom_glyphs: &[],
+                        });
+                    }
+                }
+            }
+
             // Delete button label (×)
             let del = &cl.delete_button;
             let del_clip_top = (del.y as i32).max(pane_top);
@@ -1408,7 +1472,44 @@ impl Renderer {
             }
         }
 
-        // Add cell button label
+        // Tooltip for play/stop button hover
+        for (i, cl) in self.cell_layouts.iter().enumerate() {
+            if !matches!(hover, HoverTarget::CellPlayButton(idx) if idx == i) {
+                continue;
+            }
+            // Position tooltip below the play button
+            let tip_w = Self::measure_label_width(&self.tooltip_label) + spacing::SM * 2.0;
+            let tip_h = fonts::small_size() * 1.4 + spacing::XS * 2.0;
+            let tip_x = cl.play_button.x + cl.play_button.w / 2.0 - tip_w / 2.0;
+            let tip_y = cl.play_button.y + cl.play_button.h + spacing::XS;
+            let tip_rect = Rect { x: tip_x, y: tip_y, w: tip_w, h: tip_h };
+
+            // Tooltip background + border
+            ui_rects.push(rect_rounded(
+                Rect { x: tip_rect.x - 1.0, y: tip_rect.y - 1.0, w: tip_rect.w + 2.0, h: tip_rect.h + 2.0 },
+                colors::TOOLTIP_BORDER,
+                4.0 * fonts::scale(),
+            ));
+            ui_rects.push(rect_rounded(tip_rect, colors::TOOLTIP_BG, 4.0 * fonts::scale()));
+
+            // Tooltip text
+            text_areas.push(TextArea {
+                buffer: &self.tooltip_label,
+                left: tip_rect.x + spacing::SM,
+                top: tip_rect.y + spacing::XS,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: tip_rect.x as i32,
+                    top: tip_rect.y as i32,
+                    right: (tip_rect.x + tip_rect.w) as i32,
+                    bottom: (tip_rect.y + tip_rect.h) as i32,
+                },
+                default_color: colors::TEXT_PRIMARY.to_glyphon(),
+                custom_glyphs: &[],
+            });
+        }
+
+        // Add cell button label (centered "+" icon)
         if self.add_cell_rect.y + self.add_cell_rect.h > lp.y
             && self.add_cell_rect.y < lp.y + lp.h
         {
@@ -1425,10 +1526,14 @@ impl Renderer {
                 .map_or(true, |dd| clip_bounds_under_dropdown(&mut bounds, dd));
 
             if visible && bounds.top < bounds.bottom {
+                let label_w = Self::measure_label_width(&self.add_cell_label);
+                let line_h = fonts::ui_size() * 1.4;
+                let cx = self.add_cell_rect.x + (self.add_cell_rect.w - label_w) / 2.0;
+                let cy = self.add_cell_rect.y + (self.add_cell_rect.h - line_h) / 2.0;
                 text_areas.push(TextArea {
                     buffer: &self.add_cell_label,
-                    left: self.add_cell_rect.x + spacing::MD,
-                    top: self.add_cell_rect.y + spacing::XS,
+                    left: cx,
+                    top: cy,
                     scale: 1.0,
                     bounds,
                     default_color: colors::TEXT_MUTED.to_glyphon(),
@@ -1769,6 +1874,77 @@ fn clip_bounds_under_dropdown(bounds: &mut TextBounds, dropdown: &Rect) -> bool 
     // There's overlap. Push top below the dropdown.
     bounds.top = bounds.top.max(dd_bottom);
     bounds.top < bounds.bottom
+}
+
+/// Split TextBounds into multiple visible regions around a dropdown overlay.
+/// Returns up to 4 regions (above, left-of, right-of, below) so that text
+/// remains visible everywhere except directly behind the dropdown.
+fn clip_bounds_around_dropdown(bounds: &TextBounds, dropdown: &Rect) -> Vec<TextBounds> {
+    let dd_left = dropdown.x as i32;
+    let dd_right = (dropdown.x + dropdown.w) as i32;
+    let dd_top = dropdown.y as i32;
+    let dd_bottom = (dropdown.y + dropdown.h) as i32;
+
+    // No vertical overlap → no clipping needed
+    if bounds.top >= dd_bottom || bounds.bottom <= dd_top {
+        return vec![*bounds];
+    }
+    // No horizontal overlap → no clipping needed
+    if bounds.left >= dd_right || bounds.right <= dd_left {
+        return vec![*bounds];
+    }
+
+    let mut result = Vec::with_capacity(4);
+
+    // Part above dropdown (full width)
+    if bounds.top < dd_top {
+        result.push(TextBounds {
+            left: bounds.left,
+            top: bounds.top,
+            right: bounds.right,
+            bottom: dd_top,
+        });
+    }
+
+    // Part to the left of dropdown (within dropdown's vertical range)
+    if bounds.left < dd_left {
+        let clip_top = bounds.top.max(dd_top);
+        let clip_bottom = bounds.bottom.min(dd_bottom);
+        if clip_top < clip_bottom {
+            result.push(TextBounds {
+                left: bounds.left,
+                top: clip_top,
+                right: dd_left,
+                bottom: clip_bottom,
+            });
+        }
+    }
+
+    // Part to the right of dropdown (within dropdown's vertical range)
+    if bounds.right > dd_right {
+        let clip_top = bounds.top.max(dd_top);
+        let clip_bottom = bounds.bottom.min(dd_bottom);
+        if clip_top < clip_bottom {
+            result.push(TextBounds {
+                left: dd_right,
+                top: clip_top,
+                right: bounds.right,
+                bottom: clip_bottom,
+            });
+        }
+    }
+
+    // Part below dropdown (full width)
+    if bounds.bottom > dd_bottom {
+        result.push(TextBounds {
+            left: bounds.left,
+            top: dd_bottom,
+            right: bounds.right,
+            bottom: bounds.bottom,
+        });
+    }
+
+    result
 }
 
 /// Compute clipped TextBounds for an element in the tab bar, excluding the dropdown area.

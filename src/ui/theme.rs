@@ -132,6 +132,10 @@ pub mod colors {
     pub const PLAY_BUTTON_HOVER: Rgba = Rgba::rgb(95, 195, 115);
     pub const STOP_BUTTON: Rgba = Rgba::rgb(196, 60, 50);
     pub const STOP_BUTTON_HOVER: Rgba = Rgba::rgb(220, 80, 70);
+
+    // Tooltip
+    pub const TOOLTIP_BG: Rgba = Rgba::rgb(60, 60, 65);
+    pub const TOOLTIP_BORDER: Rgba = Rgba::rgb(80, 80, 85);
 }
 
 // ---------------------------------------------------------------------------
