@@ -26,9 +26,11 @@ impl FileDialog {
             let result = match kind {
                 DialogKind::Open => rfd::FileDialog::new()
                     .set_title("Open File")
+                    .add_filter("Logos JSON", &["json"])
                     .pick_file(),
                 DialogKind::Save => rfd::FileDialog::new()
                     .set_title("Save File")
+                    .add_filter("Logos JSON", &["json"])
                     .save_file(),
             };
             let _ = tx.send(result);

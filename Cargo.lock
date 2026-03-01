@@ -1672,6 +1672,8 @@ dependencies = [
  "log",
  "pollster",
  "rfd",
+ "serde",
+ "serde_json",
  "taffy",
  "wgpu",
  "winit",
