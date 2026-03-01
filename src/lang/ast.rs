@@ -48,4 +48,12 @@ pub enum AstNode {
         params: Vec<String>,
         body: Box<AstNode>,
     },
+
+    /// For loop: `for(init, condition, update) body`
+    ForLoop {
+        init: Box<AstNode>,
+        condition: Box<AstNode>,
+        update: Box<AstNode>,
+        body: Box<AstNode>,
+    },
 }

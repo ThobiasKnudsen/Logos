@@ -183,7 +183,7 @@ impl ShaderPipelineManager {
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: self.surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
@@ -224,7 +224,7 @@ impl ShaderPipelineManager {
     }
 
     /// Render all active shader pipelines into the given surface view.
-    /// Each pipeline gets a subdivided portion of `right_pane`.
+    /// All pipelines render to the full right pane, overlaid via alpha blending.
     pub fn render(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -238,26 +238,21 @@ impl ShaderPipelineManager {
         }
 
         let elapsed = self.start_time.elapsed().as_secs_f32();
-        let n = self.pipelines.len();
 
-        for (idx, cp) in self.pipelines.iter().enumerate() {
-            // Subdivide right pane vertically among active pipelines
-            let viewport_h = right_pane.h / n as f32;
-            let viewport_y = right_pane.y + idx as f32 * viewport_h;
+        // Compute scissor rect once (same for all pipelines)
+        let sx = (right_pane.x as u32).min(screen_size.0);
+        let sy = (right_pane.y as u32).min(screen_size.1);
+        let sw = (right_pane.w as u32).min(screen_size.0.saturating_sub(sx));
+        let sh = (right_pane.h as u32).min(screen_size.1.saturating_sub(sy));
 
-            // Update uniforms
+        for cp in self.pipelines.iter() {
+            // Update uniforms — all cells get full right pane resolution
             let uniforms = ShaderUniforms {
                 time: elapsed,
-                resolution: [right_pane.w, viewport_h],
+                resolution: [right_pane.w, right_pane.h],
                 ..Default::default()
             };
             queue.write_buffer(&cp.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
-
-            // Compute scissor rect (in physical pixels, clamped to screen)
-            let sx = (right_pane.x as u32).min(screen_size.0);
-            let sy = (viewport_y as u32).min(screen_size.1);
-            let sw = (right_pane.w as u32).min(screen_size.0.saturating_sub(sx));
-            let sh = (viewport_h as u32).min(screen_size.1.saturating_sub(sy));
 
             if sw == 0 || sh == 0 {
                 continue;
@@ -282,9 +277,9 @@ impl ShaderPipelineManager {
                 pass.set_scissor_rect(sx, sy, sw, sh);
                 pass.set_viewport(
                     right_pane.x,
-                    viewport_y,
+                    right_pane.y,
                     right_pane.w,
-                    viewport_h,
+                    right_pane.h,
                     0.0,
                     1.0,
                 );

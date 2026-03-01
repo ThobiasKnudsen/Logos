@@ -1,4 +1,9 @@
+use std::collections::HashSet;
 use super::ast::AstNode;
+
+/// Maximum iterations for generated WGSL `for` loops.
+/// Prevents GPU hang from unbounded loops in user code.
+const MAX_LOOP_ITERATIONS: u32 = 10000;
 
 /// Generate a complete WGSL fragment shader from an AST.
 ///
@@ -11,13 +16,20 @@ use super::ast::AstNode;
 pub fn generate(ast: &AstNode) -> Result<String, String> {
     let mut ctx = GenContext::new();
 
-    // Collect top-level function definitions
+    // Collect top-level function definitions (and bindings if no top-level loops)
     ctx.collect_functions(ast);
 
     // Find the expression to evaluate (last non-binding, non-function-def statement)
     let expr = find_result_expr(ast)?;
 
     let is_bool = returns_bool(expr);
+
+    // Check for top-level for loops
+    let top_has_loops = match ast {
+        AstNode::Block(stmts) => stmts.iter().any(|s| matches!(s, AstNode::ForLoop { .. })),
+        AstNode::ForLoop { .. } => true,
+        _ => false,
+    };
 
     // Build the full WGSL shader
     let mut shader = String::new();
@@ -40,9 +52,23 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
     shader.push_str("    let y = world.y;\n");
     shader.push_str("    let time = u.time;\n");
 
-    // Emit bindings
-    for binding in &ctx.bindings {
-        shader.push_str(&format!("    let {} = {};\n", binding.name, binding.expr));
+    if top_has_loops {
+        // Imperative emission for top-level code with loops
+        let top_stmts = match ast {
+            AstNode::Block(stmts) => stmts.as_slice(),
+            _ => std::slice::from_ref(ast),
+        };
+        let mut declared: HashSet<String> = HashSet::new();
+        declared.insert("x".to_string());
+        declared.insert("y".to_string());
+        declared.insert("time".to_string());
+        let imperative_code = ctx.emit_imperative_stmts(top_stmts, "    ", &mut declared)?;
+        shader.push_str(&imperative_code);
+    } else {
+        // Emit bindings as immutable let
+        for binding in &ctx.bindings {
+            shader.push_str(&format!("    let {} = {};\n", binding.name, binding.expr));
+        }
     }
 
     if is_bool {
@@ -65,7 +91,9 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
         shader.push_str(&format!("    let _result = {};\n", expr_code));
         shader.push_str("    let c = clamp(_result, 0.0, 1.0);\n");
     }
-    shader.push_str("    return vec4<f32>(c, c, c, 1.0);\n");
+    // Output primary_color where drawn (c>0), transparent black where not.
+    // Uses premultiplied alpha so multiple cells overlay correctly.
+    shader.push_str("    return vec4<f32>(u.primary_color.rgb * c, c);\n");
     shader.push_str("}\n");
 
     Ok(shader)
@@ -163,11 +191,36 @@ impl GenContext {
                 }
             }
             AstNode::FunctionDef { name, params, body } => {
-                if let Ok(body_code) = self.emit_expr(body) {
-                    let param_list: Vec<String> = params
-                        .iter()
-                        .map(|p| format!("{}: f32", p))
-                        .collect();
+                let param_list: Vec<String> = params
+                    .iter()
+                    .map(|p| format!("{}: f32", p))
+                    .collect();
+
+                // Check if the body is a block with bindings or loops
+                // (needs imperative emission instead of single-expression return)
+                let needs_imperative = match body.as_ref() {
+                    AstNode::Block(stmts) => stmts.iter().any(|s| {
+                        matches!(s, AstNode::Binding { .. } | AstNode::ForLoop { .. })
+                    }),
+                    _ => false,
+                };
+
+                if needs_imperative {
+                    if let AstNode::Block(stmts) = body.as_ref() {
+                        if let Ok(body_wgsl) = self.emit_function_body(stmts) {
+                            let wgsl_code = format!(
+                                "fn {}({}) -> f32 {{\n{}}}\n",
+                                name,
+                                param_list.join(", "),
+                                body_wgsl,
+                            );
+                            self.functions.push(EmittedFunction {
+                                name: name.clone(),
+                                wgsl_code,
+                            });
+                        }
+                    }
+                } else if let Ok(body_code) = self.emit_expr(body) {
                     let wgsl_code = format!(
                         "fn {}({}) -> f32 {{\n    return {};\n}}\n",
                         name,
@@ -190,6 +243,154 @@ impl GenContext {
             }
             _ => {}
         }
+    }
+
+    /// Emit a function body that contains bindings and/or for loops.
+    /// Returns the WGSL body code including the final `return` statement.
+    fn emit_function_body(&self, stmts: &[AstNode]) -> Result<String, String> {
+        let has_loops = stmts.iter().any(|s| matches!(s, AstNode::ForLoop { .. }));
+        let var_keyword = if has_loops { "var" } else { "let" };
+        let mut code = String::new();
+        let mut declared: HashSet<String> = HashSet::new();
+        let mut result_expr = "0.0".to_string();
+
+        for stmt in stmts {
+            match stmt {
+                AstNode::Binding { name, value } => {
+                    let val = self.emit_expr(value)?;
+                    if declared.contains(name.as_str()) {
+                        code += &format!("    {} = {};\n", name, val);
+                    } else {
+                        code += &format!("    {} {} = {};\n", var_keyword, name, val);
+                        declared.insert(name.clone());
+                    }
+                }
+                AstNode::ForLoop { init, condition, update, body } => {
+                    // Emit init binding
+                    if let AstNode::Binding { name, value } = init.as_ref() {
+                        let val = self.emit_expr(value)?;
+                        if declared.contains(name.as_str()) {
+                            code += &format!("    {} = {};\n", name, val);
+                        } else {
+                            code += &format!("    var {} = {};\n", name, val);
+                            declared.insert(name.clone());
+                        }
+                    }
+                    // Emit loop with iteration guard
+                    let cond = self.emit_expr(condition)?;
+                    code += &format!(
+                        "    for (var _loop_guard: u32 = 0u; _loop_guard < {}u; _loop_guard = _loop_guard + 1u) {{\n",
+                        MAX_LOOP_ITERATIONS
+                    );
+                    code += &format!("        if (!({cond})) {{ break; }}\n");
+                    // Emit body
+                    self.emit_loop_body_stmts(&mut code, body, &mut declared)?;
+                    // Emit update
+                    if let AstNode::Binding { name, value } = update.as_ref() {
+                        let val = self.emit_expr(value)?;
+                        code += &format!("        {} = {};\n", name, val);
+                    }
+                    code += "    }\n";
+                }
+                AstNode::FunctionDef { .. } => {} // Skip nested function defs
+                _ => {
+                    result_expr = self.emit_expr(stmt)?;
+                }
+            }
+        }
+
+        code += &format!("    return {};\n", result_expr);
+        Ok(code)
+    }
+
+    /// Emit statements inside a for loop body.
+    fn emit_loop_body_stmts(
+        &self,
+        code: &mut String,
+        body: &AstNode,
+        declared: &mut HashSet<String>,
+    ) -> Result<(), String> {
+        match body {
+            AstNode::Block(stmts) => {
+                for stmt in stmts {
+                    match stmt {
+                        AstNode::Binding { name, value } => {
+                            let val = self.emit_expr(value)?;
+                            if declared.contains(name.as_str()) {
+                                code.push_str(&format!("        {} = {};\n", name, val));
+                            } else {
+                                code.push_str(&format!("        var {} = {};\n", name, val));
+                                declared.insert(name.clone());
+                            }
+                        }
+                        _ => {} // Non-binding expressions in loop body (side-effect free, skip)
+                    }
+                }
+            }
+            AstNode::Binding { name, value } => {
+                let val = self.emit_expr(value)?;
+                if declared.contains(name.as_str()) {
+                    code.push_str(&format!("        {} = {};\n", name, val));
+                } else {
+                    code.push_str(&format!("        var {} = {};\n", name, val));
+                    declared.insert(name.clone());
+                }
+            }
+            _ => {} // Single expression body — no side effects to emit
+        }
+        Ok(())
+    }
+
+    /// Emit top-level statements imperatively (for blocks with for loops).
+    /// Only emits bindings and loops; skips FunctionDefs and result expressions.
+    fn emit_imperative_stmts(
+        &self,
+        stmts: &[AstNode],
+        indent: &str,
+        declared: &mut HashSet<String>,
+    ) -> Result<String, String> {
+        let mut code = String::new();
+
+        for stmt in stmts {
+            match stmt {
+                AstNode::Binding { name, value } => {
+                    let val = self.emit_expr(value)?;
+                    if declared.contains(name.as_str()) {
+                        code += &format!("{}{} = {};\n", indent, name, val);
+                    } else {
+                        code += &format!("{}var {} = {};\n", indent, name, val);
+                        declared.insert(name.clone());
+                    }
+                }
+                AstNode::ForLoop { init, condition, update, body } => {
+                    if let AstNode::Binding { name, value } = init.as_ref() {
+                        let val = self.emit_expr(value)?;
+                        if declared.contains(name.as_str()) {
+                            code += &format!("{}{} = {};\n", indent, name, val);
+                        } else {
+                            code += &format!("{}var {} = {};\n", indent, name, val);
+                            declared.insert(name.clone());
+                        }
+                    }
+                    let cond = self.emit_expr(condition)?;
+                    code += &format!(
+                        "{}for (var _loop_guard: u32 = 0u; _loop_guard < {}u; _loop_guard = _loop_guard + 1u) {{\n",
+                        indent, MAX_LOOP_ITERATIONS
+                    );
+                    code += &format!("{}    if (!({cond})) {{ break; }}\n", indent);
+                    self.emit_loop_body_stmts(&mut code, body, declared)?;
+                    if let AstNode::Binding { name, value } = update.as_ref() {
+                        let val = self.emit_expr(value)?;
+                        code += &format!("{}    {} = {};\n", indent, name, val);
+                    }
+                    code += &format!("{}}}\n", indent);
+                }
+                AstNode::FunctionDef { .. } => {} // Already collected
+                _ => {} // Result expression handled separately
+            }
+        }
+
+        Ok(code)
     }
 
     // -----------------------------------------------------------------------
@@ -255,6 +456,7 @@ impl GenContext {
                 }
             }
             AstNode::FunctionDef { .. } => Ok("0.0".to_string()),
+            AstNode::ForLoop { .. } => Ok("0.0".to_string()), // Loops emitted imperatively, not as expressions
         }
     }
 
@@ -478,17 +680,17 @@ fn returns_bool(node: &AstNode) -> bool {
     }
 }
 
-/// Find the result expression in the AST (last non-binding, non-function-def node).
+/// Find the result expression in the AST (last non-binding, non-function-def, non-for-loop node).
 fn find_result_expr(ast: &AstNode) -> Result<&AstNode, String> {
     match ast {
         AstNode::Block(stmts) => {
             for stmt in stmts.iter().rev() {
                 match stmt {
-                    AstNode::Binding { .. } | AstNode::FunctionDef { .. } => continue,
+                    AstNode::Binding { .. } | AstNode::FunctionDef { .. } | AstNode::ForLoop { .. } => continue,
                     other => return Ok(other),
                 }
             }
-            Err("No result expression found — all statements are bindings or function definitions"
+            Err("No result expression found — all statements are bindings, function definitions, or loops"
                 .to_string())
         }
         other => Ok(other),
@@ -732,5 +934,63 @@ mod tests {
         assert!(shader.contains("x_m"));
         assert!(shader.contains("y_p"));
         assert!(shader.contains("!("), "equality uses straddle check");
+    }
+
+    // --- For loop tests ---
+
+    #[test]
+    fn test_for_loop_in_function_body() {
+        let shader = gen("f(x): (sum:0, delta:0.01, for(i:0, i<x, i:i+delta) (sum:sum+i*delta), sum)\nf(x)");
+        assert!(shader.contains("fn f(x: f32) -> f32"), "should emit function def");
+        assert!(shader.contains("var sum = 0.0"), "should emit var for mutable binding");
+        assert!(shader.contains("var delta = 0.01"), "should emit var for delta");
+        assert!(shader.contains("var i = 0.0"), "should emit var for loop init");
+        assert!(shader.contains("_loop_guard"), "should have loop guard");
+        assert!(shader.contains("10000u"), "should have max iteration limit");
+        assert!(shader.contains("if (!("), "should have condition check with break");
+        assert!(shader.contains("return sum"), "should return the accumulator");
+    }
+
+    #[test]
+    fn test_for_loop_with_newlines() {
+        // Newlines inside parens should work as separators
+        let input = "f(n): (\n  sum:0\n  for(i:0, i<n, i:i+1) (\n    sum:sum+i\n  )\n  sum\n)\nf(x)";
+        let shader = gen(input);
+        assert!(shader.contains("var sum = 0.0"), "should handle newline-separated block");
+        assert!(shader.contains("var i = 0.0"), "should handle for loop");
+        assert!(shader.contains("return sum"), "should return accumulator");
+    }
+
+    #[test]
+    fn test_for_loop_function_called_with_corners() {
+        // Function with for loop called in boolean expression uses corner checking
+        let input = "F(n): (sum:0, for(i:0, i<n, i:i+1) (sum:sum+i), sum)\nF(x) + F(y) = 9";
+        let shader = gen(input);
+        assert!(shader.contains("fn F(n: f32) -> f32"), "should emit F function");
+        assert!(shader.contains("_loop_guard"), "should have loop guard");
+        assert!(shader.contains("x_m"), "boolean eq should use corner checking");
+        assert!(shader.contains("F(x_m)") || shader.contains("F(x_p)"),
+            "F should be called with corner values");
+    }
+
+    #[test]
+    fn test_function_body_with_bindings_no_loops() {
+        // Function body with bindings but no loops should use let
+        let shader = gen("f(a): (r: a * 2, r + 1)\nf(x)");
+        assert!(shader.contains("let r = (a * 2.0)"), "bindings without loops should use let");
+        assert!(shader.contains("return (r + 1.0)"), "should return last expression");
+    }
+
+    #[test]
+    fn test_users_exact_input() {
+        // The user's exact code (with commas)
+        let input = "f(x): x\u{00B2}\nF(x): (sum:0, delta:0.01, for(i:0, i<x, i:i+delta) (sum:sum+f(x)*delta), sum)\nF(x) + F(y) = 9";
+        let result = crate::lang::compile(input);
+        assert!(result.is_ok(), "User's code should compile, got: {:?}", result);
+        let shader = result.unwrap();
+        assert!(shader.contains("fn f(x: f32) -> f32"), "should define f");
+        assert!(shader.contains("fn F(x: f32) -> f32"), "should define F");
+        assert!(shader.contains("_loop_guard"), "should have loop guard in F");
+        assert!(shader.contains("x_m"), "result should use corner checking");
     }
 }

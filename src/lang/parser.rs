@@ -341,38 +341,39 @@ impl Parser {
                     return Ok(AstNode::Tuple(Vec::new()));
                 }
 
-                // Parse a block: comma-separated statements inside parens.
+                // Parse a block: comma or newline separated statements inside parens.
                 // Could be: (expr), (a, b, c) tuple, or (binding, binding, result) block
-                let first = self.parse_block_item()?;
+                let mut items = vec![self.parse_block_item()?];
                 self.skip_newlines();
 
-                if self.peek().ty == TokenType::Comma {
-                    // Multiple items — could be tuple or block with bindings
-                    let mut items = vec![first];
-                    while self.peek().ty == TokenType::Comma {
+                // Continue parsing items separated by commas and/or newlines
+                while self.peek().ty != TokenType::RParen && !self.at_end() {
+                    // Consume optional comma separator
+                    if self.peek().ty == TokenType::Comma {
                         self.advance();
-                        self.skip_newlines();
-                        if self.peek().ty == TokenType::RParen {
-                            break; // trailing comma
-                        }
-                        items.push(self.parse_block_item()?);
-                        self.skip_newlines();
                     }
-                    self.expect(TokenType::RParen)?;
+                    self.skip_newlines();
+                    if self.peek().ty == TokenType::RParen {
+                        break; // trailing comma/newline
+                    }
+                    items.push(self.parse_block_item()?);
+                    self.skip_newlines();
+                }
+                self.expect(TokenType::RParen)?;
 
-                    // If any item is a Binding or FunctionDef, it's a block
-                    let has_bindings = items.iter().any(|item| {
-                        matches!(item, AstNode::Binding { .. } | AstNode::FunctionDef { .. })
+                if items.len() == 1 {
+                    // Single parenthesized expression
+                    Ok(items.pop().unwrap())
+                } else {
+                    // If any item is a Binding, FunctionDef, or ForLoop, it's a block
+                    let has_block_items = items.iter().any(|item| {
+                        matches!(item, AstNode::Binding { .. } | AstNode::FunctionDef { .. } | AstNode::ForLoop { .. })
                     });
-                    if has_bindings {
+                    if has_block_items {
                         Ok(AstNode::Block(items))
                     } else {
                         Ok(AstNode::Tuple(items))
                     }
-                } else {
-                    // Single parenthesized expression
-                    self.expect(TokenType::RParen)?;
-                    Ok(first)
                 }
             }
             TokenType::If => {
@@ -398,6 +399,25 @@ impl Parser {
                     condition: Box::new(condition),
                     then_branch: Box::new(then_branch),
                     else_branch,
+                })
+            }
+            // For loop: for(init, condition, update) body
+            TokenType::For => {
+                self.advance(); // consume 'for'
+                self.expect(TokenType::LParen)?;
+                let init = self.parse_block_item()?;
+                self.expect(TokenType::Comma)?;
+                let condition = self.parse_expr()?;
+                self.expect(TokenType::Comma)?;
+                let update = self.parse_block_item()?;
+                self.expect(TokenType::RParen)?;
+                self.skip_newlines();
+                let body = self.parse_expr()?;
+                Ok(AstNode::ForLoop {
+                    init: Box::new(init),
+                    condition: Box::new(condition),
+                    update: Box::new(update),
+                    body: Box::new(body),
                 })
             }
             // Type names as cast functions: f32(expr), vec2(a, b), etc.
