@@ -130,15 +130,15 @@ impl<'a> Lexer<'a> {
             return self.lex_number(start);
         }
 
-        // Identifiers / keywords / builtins
-        if ch.is_alphabetic() || ch == '_' {
-            return Ok(self.lex_identifier(start));
-        }
-
-        // Unicode math symbols
+        // Unicode math symbols — must check BEFORE identifiers since some
+        // (like π, τ) are alphabetic in Unicode but should be their own tokens.
         if ch == '\u{00B2}' { // ² superscript
             self.advance();
             return Ok(Token { ty: TokenType::Builtin("square".to_string()), span: (start, self.pos) });
+        }
+        if ch == '\u{00B3}' { // ³ superscript
+            self.advance();
+            return Ok(Token { ty: TokenType::Builtin("cube".to_string()), span: (start, self.pos) });
         }
         if ch == '\u{03C0}' { // π
             self.advance();
@@ -159,6 +159,11 @@ impl<'a> Lexer<'a> {
         if ch == '\u{00F7}' { // ÷ (division sign)
             self.advance();
             return Ok(Token { ty: TokenType::Slash, span: (start, self.pos) });
+        }
+
+        // Identifiers / keywords / builtins
+        if ch.is_alphabetic() || ch == '_' {
+            return Ok(self.lex_identifier(start));
         }
 
         Err(format!("Unexpected character '{}' at position {}", ch, start))
@@ -202,7 +207,9 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_identifier(&mut self, start: usize) -> Token {
-        while self.pos < self.input.len() && self.peek().map_or(false, |c| c.is_alphanumeric() || c == '_') {
+        while self.pos < self.input.len() && self.peek().map_or(false, |c| {
+            (c.is_alphanumeric() || c == '_') && !is_unicode_math_symbol(c)
+        }) {
             self.advance();
         }
         let text = &self.input[start..self.pos];
@@ -265,6 +272,20 @@ impl<'a> Lexer<'a> {
     fn starts_with(&self, s: &str) -> bool {
         self.input[self.pos..].starts_with(s)
     }
+}
+
+/// Unicode math symbols that look alphanumeric but should be separate tokens.
+/// These must NOT be consumed as part of identifiers.
+fn is_unicode_math_symbol(c: char) -> bool {
+    matches!(c,
+        '\u{00B2}'  // ² superscript 2
+        | '\u{00B3}' // ³ superscript 3
+        | '\u{03C0}' // π pi
+        | '\u{03C4}' // τ tau
+        | '\u{2212}' // − unicode minus
+        | '\u{00D7}' // × multiplication sign
+        | '\u{00F7}' // ÷ division sign
+    )
 }
 
 #[cfg(test)]
@@ -379,5 +400,25 @@ mod tests {
         let tokens = lexer.tokenize().unwrap();
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].ty, TokenType::Eof);
+    }
+
+    #[test]
+    fn test_unicode_superscript_not_part_of_identifier() {
+        // ² is alphanumeric in Unicode but must be a separate token, not part of "x"
+        let mut lexer = Lexer::new("x\u{00B2}");
+        let tokens = lexer.tokenize().unwrap();
+        assert!(matches!(tokens[0].ty, TokenType::AxisVar(ref s) if s == "x"),
+            "x should be AxisVar, got {:?}", tokens[0].ty);
+        assert!(matches!(tokens[1].ty, TokenType::Builtin(ref s) if s == "square"),
+            "² should be Builtin(square), got {:?}", tokens[1].ty);
+    }
+
+    #[test]
+    fn test_unicode_pi_not_part_of_identifier() {
+        // π after an identifier should be a separate Number token
+        let mut lexer = Lexer::new("r\u{03C0}");
+        let tokens = lexer.tokenize().unwrap();
+        assert!(matches!(tokens[0].ty, TokenType::Identifier(ref s) if s == "r"));
+        assert!(matches!(tokens[1].ty, TokenType::Number(_)));
     }
 }

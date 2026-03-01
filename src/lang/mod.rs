@@ -123,4 +123,15 @@ mod integration_tests {
         assert!(s2.contains("(x + y)"));
         assert!(s3.contains("(x + y)"));
     }
+
+    #[test]
+    fn test_unicode_superscript_square() {
+        // x² + y² = 9 — common circle equation with Unicode superscript
+        let shader = compile("x\u{00B2} + y\u{00B2} = 9").unwrap();
+        // ² should become (x * x), not literal x²
+        assert!(shader.contains("(x_m * x_m)") || shader.contains("(x * x)"),
+            "Unicode ² should compile to multiplication, got:\n{}", shader);
+        assert!(!shader.contains("\u{00B2}"),
+            "Unicode ² should NOT appear in WGSL output");
+    }
 }
