@@ -186,11 +186,13 @@ impl AppState {
             })
             .collect();
 
-        let (hit_rects, plus_rect) = self
+        if let Some((hit_rects, plus_rect)) = self
             .renderer
-            .update_tab_bar(&tab_infos, self.cached_layout.tab_bar);
-        self.tab_hit_rects = hit_rects;
-        self.plus_button_rect = plus_rect;
+            .update_tab_bar(&tab_infos, self.cached_layout.tab_bar)
+        {
+            self.tab_hit_rects = hit_rects;
+            self.plus_button_rect = plus_rect;
+        }
 
         // Compute window control rects from title bar
         self.win_control_rects = compute_win_control_rects(&self.cached_layout.title_bar);

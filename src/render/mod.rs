@@ -80,6 +80,8 @@ pub struct Renderer {
 
     // Multi-cell editor buffers (one glyphon buffer per cell)
     cell_buffers: Vec<TextBuffer>,
+    /// Cached cell text for dirty-checking (skip reshaping unchanged cells).
+    cell_texts: Vec<String>,
     /// Computed cell layouts for hit-testing and rendering.
     cell_layouts: Vec<CellLayout>,
     /// Which cell is currently active (receives keyboard input).
@@ -112,6 +114,8 @@ pub struct Renderer {
 
     // UI label buffers
     status_label: TextBuffer,
+    /// Cached status bar text for dirty-checking.
+    cached_status_text: String,
     graph_label: TextBuffer,
 
     // Individual menu item labels
@@ -125,7 +129,8 @@ pub struct Renderer {
     dropdown_item_rects: Vec<Rect>,
     dropdown_active: bool,
 
-    // Dynamic tab bar
+    // Dynamic tab bar (cached to avoid rebuilding on every sync)
+    cached_tab_info: Vec<(String, bool, bool)>, // (name, is_active, is_modified)
     tab_labels: Vec<TextBuffer>,
     tab_close_labels: Vec<TextBuffer>,
     tab_modified: Vec<bool>,
@@ -235,6 +240,7 @@ impl Renderer {
             atlas,
             text_renderer,
             cell_buffers: Vec::new(),
+            cell_texts: Vec::new(),
             cell_layouts: Vec::new(),
             active_cell_index: 0,
             cursor_content_pos: (0.0, 0.0, fonts::editor_line_height()),
@@ -251,6 +257,7 @@ impl Renderer {
             v_track_rect: None,
             v_thumb_rect: None,
             status_label,
+            cached_status_text: String::new(),
             graph_label,
             menu_item_labels,
             menu_item_rects: Vec::new(),
@@ -259,6 +266,7 @@ impl Renderer {
             dropdown_bg: zero_rect,
             dropdown_item_rects: Vec::new(),
             dropdown_active: false,
+            cached_tab_info: Vec::new(),
             tab_labels: Vec::new(),
             tab_close_labels: Vec::new(),
             tab_modified: Vec::new(),
@@ -580,6 +588,7 @@ impl Renderer {
             self.cell_buffers.push(buf);
         }
         self.cell_buffers.truncate(cells.len());
+        self.cell_texts.truncate(cells.len());
 
         // Set text + shape each buffer, measure heights
         let cell_pad = spacing::CELL_PADDING;
@@ -601,15 +610,24 @@ impl Renderer {
         let mut y_offset = cell_pad; // accumulates from top of cell container
 
         for (i, cell_info) in cells.iter().enumerate() {
-            // Set text
-            self.cell_buffers[i].set_size(&mut self.font_system, None, None);
-            self.cell_buffers[i].set_text(
-                &mut self.font_system,
-                &cell_info.text,
-                Attrs::new().family(Family::Monospace),
-                Shaping::Advanced,
-            );
-            self.cell_buffers[i].shape_until_scroll(&mut self.font_system, false);
+            // Only reshape if text actually changed (cosmic-text shaping is expensive)
+            let text_changed = self.cell_texts.get(i).map_or(true, |prev| *prev != cell_info.text);
+            if text_changed {
+                self.cell_buffers[i].set_size(&mut self.font_system, None, None);
+                self.cell_buffers[i].set_text(
+                    &mut self.font_system,
+                    &cell_info.text,
+                    Attrs::new().family(Family::Monospace),
+                    Shaping::Advanced,
+                );
+                self.cell_buffers[i].shape_until_scroll(&mut self.font_system, false);
+                // Update cached text
+                if i < self.cell_texts.len() {
+                    self.cell_texts[i].clone_from(&cell_info.text);
+                } else {
+                    self.cell_texts.push(cell_info.text.clone());
+                }
+            }
 
             // Measure content height
             let mut content_h = Self::measure_content_height(&self.cell_buffers[i])
@@ -913,6 +931,10 @@ impl Renderer {
     }
 
     pub fn update_status(&mut self, text: &str) {
+        if self.cached_status_text == text {
+            return;
+        }
+        self.cached_status_text = text.to_string();
         self.status_label.set_text(
             &mut self.font_system,
             text,
@@ -927,7 +949,17 @@ impl Renderer {
         &mut self,
         tabs: &[TabInfo],
         tab_bar_rect: Rect,
-    ) -> (Vec<TabHitRect>, Rect) {
+    ) -> Option<(Vec<TabHitRect>, Rect)> {
+        // Check if tab info has changed; skip expensive label recreation if not
+        let new_info: Vec<(String, bool, bool)> = tabs
+            .iter()
+            .map(|t| (t.name.clone(), t.is_active, t.is_modified))
+            .collect();
+        if new_info == self.cached_tab_info {
+            return None;
+        }
+        self.cached_tab_info = new_info;
+
         self.tab_labels.clear();
         self.tab_close_labels.clear();
         self.tab_modified.clear();
@@ -968,7 +1000,7 @@ impl Renderer {
 
         let plus_w = TAB_PAD_H * 2.0 + 10.0;
         self.plus_rect = Rect { x, y, w: plus_w, h: tab_h };
-        (hit_rects, self.plus_rect)
+        Some((hit_rects, self.plus_rect))
     }
 
     pub fn render(
