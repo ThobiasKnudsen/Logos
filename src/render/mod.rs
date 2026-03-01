@@ -173,7 +173,6 @@ pub struct Renderer {
     status_label: TextBuffer,
     /// Cached status bar text for dirty-checking.
     cached_status_text: String,
-    graph_label: TextBuffer,
 
     // Individual menu item labels
     menu_item_labels: Vec<TextBuffer>,
@@ -275,7 +274,6 @@ impl Renderer {
             fonts::status_size(),
             "Ready \u{2502} Ln 1, Col 1",
         );
-        let graph_label = Self::create_label(&mut font_system, fonts::ui_size(), "Graph");
         let plus_label = Self::create_label(&mut font_system, fonts::ui_size(), "+");
         let dot_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25CF}");
 
@@ -296,7 +294,7 @@ impl Renderer {
             .map(|_| Self::create_label(&mut font_system, fonts::small_size(), "0"))
             .collect();
 
-        let add_cell_label = Self::create_label(&mut font_system, fonts::ui_size(), "+ Add Cell");
+        let add_cell_label = Self::create_label(&mut font_system, fonts::ui_size(), "+");
         let cell_delete_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{2715}");
         let cell_copy_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{2398}");
         let cell_play_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25B6}");
@@ -336,7 +334,6 @@ impl Renderer {
             v_thumb_rect: None,
             status_label,
             cached_status_text: String::new(),
-            graph_label,
             menu_item_labels,
             menu_item_rects: Vec::new(),
             dropdown_item_labels: Vec::new(),
@@ -405,7 +402,6 @@ impl Renderer {
             .map(|name| Self::create_label(&mut self.font_system, fonts::menu_size(), name))
             .collect();
         self.status_label = Self::create_label(&mut self.font_system, fonts::status_size(), "");
-        self.graph_label = Self::create_label(&mut self.font_system, fonts::ui_size(), "Graph");
         self.plus_label = Self::create_label(&mut self.font_system, fonts::ui_size(), "+");
         self.dot_label = Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{25CF}");
         self.win_min_label =
@@ -1823,23 +1819,7 @@ impl Renderer {
             custom_glyphs: &[],
         });
 
-        // Graph placeholder (only show when no shaders are active)
-        if !self.shader_pipeline.has_active() {
-            text_areas.push(TextArea {
-                buffer: &self.graph_label,
-                left: layout.right_pane.x + layout.right_pane.w / 2.0 - 20.0,
-                top: layout.right_pane.y + layout.right_pane.h / 2.0 - 10.0,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: layout.right_pane.x as i32,
-                    top: layout.right_pane.y as i32,
-                    right: (layout.right_pane.x + layout.right_pane.w) as i32,
-                    bottom: (layout.right_pane.y + layout.right_pane.h) as i32,
-                },
-                default_color: t.text_muted.to_glyphon(),
-                custom_glyphs: &[],
-            });
-        }
+        // (render area placeholder removed — empty pane is intentional)
 
         // -- Axis overlay computation --
         // Labels are drawn directly on the plot (no reserved margin).
@@ -1882,7 +1862,6 @@ impl Renderer {
         // Build axis overlay rects (grid lines + label backing rects)
         let mut axis_rects: Vec<RectInstance> = Vec::new();
         let label_h = fonts::small_size() * 1.4;
-        let label_bg = [0.06, 0.07, 0.09, 0.75_f32]; // semi-transparent dark
 
         // Grid lines spanning full plot
         if x_range > f32::EPSILON {
@@ -1930,13 +1909,6 @@ impl Renderer {
                 let lw = Self::measure_label_width(&self.axis_label_buffers[i]);
                 let lx = (sx - lw / 2.0).max(rp.x + label_pad);
                 let ly = rp.y + rp.h - label_h - label_pad;
-                // Backing rect
-                axis_rects.push(RectInstance {
-                    x: lx - 2.0, y: ly - 1.0,
-                    w: lw + 4.0, h: label_h + 2.0,
-                    color: label_bg,
-                    corner_radius: 2.0, _padding: [0.0; 3],
-                });
                 axis_text_areas.push(TextArea {
                     buffer: &self.axis_label_buffers[i],
                     left: lx, top: ly, scale: 1.0,
@@ -1952,17 +1924,8 @@ impl Renderer {
             for i in 0..y_count {
                 let t = (y_ticks[i] - render_area.axis_y_min) / y_range;
                 let sy = rp.y + rp.h - t * rp.h;
-                let lw =
-                    Self::measure_label_width(&self.axis_label_buffers[MAX_AXIS_LABELS + i]);
                 let lx = rp.x + label_pad;
                 let ly = (sy - label_h / 2.0).max(rp.y + label_pad);
-                // Backing rect
-                axis_rects.push(RectInstance {
-                    x: lx - 2.0, y: ly - 1.0,
-                    w: lw + 4.0, h: label_h + 2.0,
-                    color: label_bg,
-                    corner_radius: 2.0, _padding: [0.0; 3],
-                });
                 axis_text_areas.push(TextArea {
                     buffer: &self.axis_label_buffers[MAX_AXIS_LABELS + i],
                     left: lx, top: ly, scale: 1.0,
