@@ -68,16 +68,15 @@ pub struct RenderAreaParams {
 
 const MAX_AXIS_LABELS: usize = 12;
 
-/// Compute "nice" tick positions for an axis range using the 1-2-5 rule.
-fn compute_nice_ticks(axis_min: f32, axis_max: f32, max_ticks: usize) -> (Vec<f32>, f32) {
-    let range = axis_max - axis_min;
+/// Compute a "nice" tick step for a given range and max ticks using the 1-2-5 rule.
+fn compute_nice_step(range: f32, max_ticks: usize) -> f32 {
     if range <= f32::EPSILON || max_ticks < 2 {
-        return (vec![], 1.0);
+        return 1.0;
     }
     let rough_step = range / max_ticks as f32;
     let mag = 10.0_f32.powf(rough_step.log10().floor());
     let normalized = rough_step / mag;
-    let nice_step = if normalized <= 1.5 {
+    if normalized <= 1.5 {
         mag
     } else if normalized <= 3.5 {
         2.0 * mag
@@ -85,15 +84,22 @@ fn compute_nice_ticks(axis_min: f32, axis_max: f32, max_ticks: usize) -> (Vec<f3
         5.0 * mag
     } else {
         10.0 * mag
-    };
-    let first = (axis_min / nice_step).ceil() * nice_step;
+    }
+}
+
+/// Generate tick positions for an axis given a fixed step.
+fn generate_ticks(axis_min: f32, axis_max: f32, step: f32) -> Vec<f32> {
+    if step <= f32::EPSILON {
+        return vec![];
+    }
+    let first = (axis_min / step).ceil() * step;
     let mut ticks = Vec::new();
     let mut v = first;
-    while v <= axis_max + nice_step * 0.001 {
+    while v <= axis_max + step * 0.001 {
         ticks.push(v);
-        v += nice_step;
+        v += step;
     }
-    (ticks, nice_step)
+    ticks
 }
 
 /// Format a tick value for axis labels.
@@ -1828,17 +1834,27 @@ impl Renderer {
 
         let x_range = render_area.axis_x_max - render_area.axis_x_min;
         let y_range = render_area.axis_y_max - render_area.axis_y_min;
-        let (x_ticks, x_step) =
-            compute_nice_ticks(render_area.axis_x_min, render_area.axis_x_max, 8);
-        let (y_ticks, y_step) =
-            compute_nice_ticks(render_area.axis_y_min, render_area.axis_y_max, 6);
+
+        // Compute max ticks per axis based on pixel density (target ~80px between lines)
+        let min_px_spacing = 80.0_f32;
+        let max_ticks_x = (rp.w / min_px_spacing).max(2.0) as usize;
+        let max_ticks_y = (rp.h / min_px_spacing).max(2.0) as usize;
+
+        // Compute nice step independently, then take the larger so both axes
+        // use the same world-space interval (uniform grid).
+        let x_step = compute_nice_step(x_range, max_ticks_x);
+        let y_step = compute_nice_step(y_range, max_ticks_y);
+        let shared_step = x_step.max(y_step);
+
+        let x_ticks = generate_ticks(render_area.axis_x_min, render_area.axis_x_max, shared_step);
+        let y_ticks = generate_ticks(render_area.axis_y_min, render_area.axis_y_max, shared_step);
 
         let x_count = x_ticks.len().min(MAX_AXIS_LABELS);
         let y_count = y_ticks.len().min(MAX_AXIS_LABELS);
 
         // Update axis label buffer text
         for i in 0..x_count {
-            let text = format_tick(x_ticks[i], x_step);
+            let text = format_tick(x_ticks[i], shared_step);
             self.axis_label_buffers[i].set_text(
                 &mut self.font_system,
                 &text,
@@ -1848,7 +1864,7 @@ impl Renderer {
             self.axis_label_buffers[i].shape_until_scroll(&mut self.font_system, false);
         }
         for i in 0..y_count {
-            let text = format_tick(y_ticks[i], y_step);
+            let text = format_tick(y_ticks[i], shared_step);
             self.axis_label_buffers[MAX_AXIS_LABELS + i].set_text(
                 &mut self.font_system,
                 &text,
