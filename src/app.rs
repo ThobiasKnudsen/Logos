@@ -24,7 +24,7 @@ pub(crate) struct MenuItemDef {
     pub shortcut: &'static str,
 }
 
-pub(crate) const MENU_NAMES: &[&str] = &["File", "Edit", "View", "Help"];
+pub(crate) const MENU_NAMES: &[&str] = &["File", "Edit", "View", "Theme", "Help"];
 
 const MENU_FILE_ITEMS: &[MenuItemDef] = &[
     MenuItemDef { label: "New Tab", shortcut: "Ctrl+N" },
@@ -46,7 +46,16 @@ const MENU_VIEW_ITEMS: &[MenuItemDef] = &[
     MenuItemDef { label: "Zoom In", shortcut: "Ctrl+=" },
     MenuItemDef { label: "Zoom Out", shortcut: "Ctrl+-" },
     MenuItemDef { label: "Reset Zoom", shortcut: "Ctrl+0" },
-    MenuItemDef { label: "Cycle Theme", shortcut: "Ctrl+T" },
+];
+
+const MENU_THEME_ITEMS: &[MenuItemDef] = &[
+    MenuItemDef { label: "Catppuccin", shortcut: "" },
+    MenuItemDef { label: "One Dark", shortcut: "" },
+    MenuItemDef { label: "Monokai", shortcut: "" },
+    MenuItemDef { label: "Dracula", shortcut: "" },
+    MenuItemDef { label: "Gruvbox", shortcut: "" },
+    MenuItemDef { label: "Nord", shortcut: "" },
+    MenuItemDef { label: "Solarized", shortcut: "" },
 ];
 
 pub(crate) fn menu_items(index: usize) -> &'static [MenuItemDef] {
@@ -54,8 +63,17 @@ pub(crate) fn menu_items(index: usize) -> &'static [MenuItemDef] {
         0 => MENU_FILE_ITEMS,
         1 => MENU_EDIT_ITEMS,
         2 => MENU_VIEW_ITEMS,
+        3 => MENU_THEME_ITEMS,
         _ => &[],
     }
+}
+
+/// Returns the index of the currently active theme (for highlighting in the Theme menu).
+pub(crate) fn active_theme_index() -> usize {
+    theme::BUILTIN_THEMES
+        .iter()
+        .position(|(name, _)| *name == theme::active_theme_name())
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -364,7 +382,13 @@ impl AppState {
             return;
         }
         let menu_rect = self.menu_item_rects[index];
-        self.dropdown_item_rects = self.renderer.open_dropdown(index, menu_rect);
+        // Theme menu (index 3) highlights the currently active theme
+        let active_item = if index == 3 {
+            Some(active_theme_index())
+        } else {
+            None
+        };
+        self.dropdown_item_rects = self.renderer.open_dropdown(index, menu_rect, active_item);
         self.open_menu = Some(index);
         self.window.request_redraw();
     }
@@ -445,7 +469,8 @@ impl AppState {
             (2, 0) => { self.do_zoom(|_| fonts::zoom_in()); }
             (2, 1) => { self.do_zoom(|_| fonts::zoom_out()); }
             (2, 2) => { self.do_zoom(|_| fonts::reset_zoom()); }
-            (2, 3) => { self.cycle_theme(); }
+            // Theme menu — each item selects a theme by index
+            (3, i) => { self.select_theme(i); }
             _ => {}
         }
     }
@@ -462,7 +487,13 @@ impl AppState {
     fn cycle_theme(&mut self) {
         let name = theme::cycle_theme();
         log::info!("Switched theme to: {}", name);
-        // Force re-highlight by invalidating cached cell texts
+        self.renderer.invalidate_cell_texts();
+        self.sync_active_tab();
+    }
+
+    fn select_theme(&mut self, index: usize) {
+        theme::set_theme(index);
+        log::info!("Selected theme: {}", theme::active_theme_name());
         self.renderer.invalidate_cell_texts();
         self.sync_active_tab();
     }
