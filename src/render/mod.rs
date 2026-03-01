@@ -1849,29 +1849,46 @@ impl Renderer {
         let x_ticks = generate_ticks(render_area.axis_x_min, render_area.axis_x_max, shared_step);
         let y_ticks = generate_ticks(render_area.axis_y_min, render_area.axis_y_max, shared_step);
 
-        let x_count = x_ticks.len().min(MAX_AXIS_LABELS);
-        let y_count = y_ticks.len().min(MAX_AXIS_LABELS);
+        // Subsample ticks evenly when there are more than MAX_AXIS_LABELS,
+        // so labels span the full axis range instead of clustering at one end.
+        let x_label_count = x_ticks.len().min(MAX_AXIS_LABELS);
+        let y_label_count = y_ticks.len().min(MAX_AXIS_LABELS);
+
+        let x_label_indices: Vec<usize> = if x_ticks.len() <= MAX_AXIS_LABELS {
+            (0..x_ticks.len()).collect()
+        } else {
+            (0..x_label_count)
+                .map(|i| i * (x_ticks.len() - 1) / (x_label_count - 1).max(1))
+                .collect()
+        };
+        let y_label_indices: Vec<usize> = if y_ticks.len() <= MAX_AXIS_LABELS {
+            (0..y_ticks.len()).collect()
+        } else {
+            (0..y_label_count)
+                .map(|i| i * (y_ticks.len() - 1) / (y_label_count - 1).max(1))
+                .collect()
+        };
 
         // Update axis label buffer text
-        for i in 0..x_count {
-            let text = format_tick(x_ticks[i], shared_step);
-            self.axis_label_buffers[i].set_text(
+        for (buf_i, &tick_i) in x_label_indices.iter().enumerate() {
+            let text = format_tick(x_ticks[tick_i], shared_step);
+            self.axis_label_buffers[buf_i].set_text(
                 &mut self.font_system,
                 &text,
                 Attrs::new().family(Family::Monospace),
                 Shaping::Advanced,
             );
-            self.axis_label_buffers[i].shape_until_scroll(&mut self.font_system, false);
+            self.axis_label_buffers[buf_i].shape_until_scroll(&mut self.font_system, false);
         }
-        for i in 0..y_count {
-            let text = format_tick(y_ticks[i], shared_step);
-            self.axis_label_buffers[MAX_AXIS_LABELS + i].set_text(
+        for (buf_i, &tick_i) in y_label_indices.iter().enumerate() {
+            let text = format_tick(y_ticks[tick_i], shared_step);
+            self.axis_label_buffers[MAX_AXIS_LABELS + buf_i].set_text(
                 &mut self.font_system,
                 &text,
                 Attrs::new().family(Family::Monospace),
                 Shaping::Advanced,
             );
-            self.axis_label_buffers[MAX_AXIS_LABELS + i]
+            self.axis_label_buffers[MAX_AXIS_LABELS + buf_i]
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
@@ -1879,9 +1896,9 @@ impl Renderer {
         let mut axis_rects: Vec<RectInstance> = Vec::new();
         let label_h = fonts::small_size() * 1.4;
 
-        // Grid lines spanning full plot
+        // Grid lines spanning full plot (not limited by MAX_AXIS_LABELS)
         if x_range > f32::EPSILON {
-            for &tick in &x_ticks[..x_count] {
+            for &tick in &x_ticks {
                 let t = (tick - render_area.axis_x_min) / x_range;
                 let sx = rp.x + t * rp.w;
                 if sx >= rp.x && sx <= rp.x + rp.w {
@@ -1894,7 +1911,7 @@ impl Renderer {
             }
         }
         if y_range > f32::EPSILON {
-            for &tick in &y_ticks[..y_count] {
+            for &tick in &y_ticks {
                 let t = (tick - render_area.axis_y_min) / y_range;
                 let sy = rp.y + rp.h - t * rp.h;
                 if sy >= rp.y && sy <= rp.y + rp.h {
@@ -1919,14 +1936,14 @@ impl Renderer {
 
         // X axis labels (along bottom edge)
         if x_range > f32::EPSILON {
-            for i in 0..x_count {
-                let t = (x_ticks[i] - render_area.axis_x_min) / x_range;
+            for (buf_i, &tick_i) in x_label_indices.iter().enumerate() {
+                let t = (x_ticks[tick_i] - render_area.axis_x_min) / x_range;
                 let sx = rp.x + t * rp.w;
-                let lw = Self::measure_label_width(&self.axis_label_buffers[i]);
+                let lw = Self::measure_label_width(&self.axis_label_buffers[buf_i]);
                 let lx = (sx - lw / 2.0).max(rp.x + label_pad);
                 let ly = rp.y + rp.h - label_h - label_pad;
                 axis_text_areas.push(TextArea {
-                    buffer: &self.axis_label_buffers[i],
+                    buffer: &self.axis_label_buffers[buf_i],
                     left: lx, top: ly, scale: 1.0,
                     bounds: rp_bounds,
                     default_color: label_color,
@@ -1937,13 +1954,13 @@ impl Renderer {
 
         // Y axis labels (along left edge)
         if y_range > f32::EPSILON {
-            for i in 0..y_count {
-                let t = (y_ticks[i] - render_area.axis_y_min) / y_range;
+            for (buf_i, &tick_i) in y_label_indices.iter().enumerate() {
+                let t = (y_ticks[tick_i] - render_area.axis_y_min) / y_range;
                 let sy = rp.y + rp.h - t * rp.h;
                 let lx = rp.x + label_pad;
                 let ly = (sy - label_h / 2.0).max(rp.y + label_pad);
                 axis_text_areas.push(TextArea {
-                    buffer: &self.axis_label_buffers[MAX_AXIS_LABELS + i],
+                    buffer: &self.axis_label_buffers[MAX_AXIS_LABELS + buf_i],
                     left: lx, top: ly, scale: 1.0,
                     bounds: rp_bounds,
                     default_color: label_color,
