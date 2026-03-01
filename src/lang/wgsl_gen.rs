@@ -46,9 +46,13 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
 
     // Map result to color
     shader.push_str(&format!("    let _result = {};\n", expr_code));
-    shader.push_str("    // Map scalar to grayscale; vec4 passes through\n");
-    shader.push_str("    let value = _result;\n");
-    shader.push_str("    let c = clamp(value, 0.0, 1.0);\n");
+    if returns_bool(expr) {
+        // Boolean expressions: convert to 0.0/1.0 via select
+        shader.push_str("    let c = select(0.0, 1.0, _result);\n");
+    } else {
+        // Numeric expressions: clamp to [0, 1] grayscale
+        shader.push_str("    let c = clamp(_result, 0.0, 1.0);\n");
+    }
     shader.push_str("    return vec4<f32>(c, c, c, 1.0);\n");
     shader.push_str("}\n");
 
@@ -300,6 +304,22 @@ impl GenContext {
     }
 }
 
+/// Check if an AST node produces a boolean value in WGSL.
+///
+/// Comparisons, logical ops, and boolean literals produce `bool` in WGSL,
+/// which cannot be passed to `clamp()`. We use `select()` for these instead.
+fn returns_bool(node: &AstNode) -> bool {
+    match node {
+        AstNode::BoolLit(_) => true,
+        AstNode::Apply { name, .. } => matches!(
+            name.as_str(),
+            "eq" | "neq" | "lt" | "gt" | "lte" | "gte" | "and" | "or" | "not"
+        ),
+        AstNode::Block(stmts) => stmts.last().map_or(false, returns_bool),
+        _ => false,
+    }
+}
+
 /// Find the result expression in the AST (last non-binding, non-function-def node).
 fn find_result_expr(ast: &AstNode) -> Result<&AstNode, String> {
     match ast {
@@ -420,5 +440,99 @@ mod tests {
     fn test_tuple_to_vec() {
         let shader = gen("(x, y, 0)");
         assert!(shader.contains("vec3<f32>(x, y, 0.0)"));
+    }
+
+    // --- Bool-to-f32 conversion tests ---
+    // WGSL doesn't allow bool in clamp(). Boolean results must use select().
+
+    #[test]
+    fn test_equality_uses_select_not_clamp() {
+        // `x = 0` produces bool in WGSL; must use select(), not clamp()
+        let shader = gen("x = 0");
+        assert!(shader.contains("select(0.0, 1.0, _result)"), "bool result should use select");
+        assert!(!shader.contains("clamp(_result"), "bool result must NOT use clamp");
+    }
+
+    #[test]
+    fn test_comparison_lt_uses_select() {
+        let shader = gen("x < 1");
+        assert!(shader.contains("select(0.0, 1.0, _result)"));
+    }
+
+    #[test]
+    fn test_comparison_gt_uses_select() {
+        let shader = gen("x > 0");
+        assert!(shader.contains("select(0.0, 1.0, _result)"));
+    }
+
+    #[test]
+    fn test_comparison_neq_uses_select() {
+        let shader = gen("x != 0");
+        assert!(shader.contains("select(0.0, 1.0, _result)"));
+    }
+
+    #[test]
+    fn test_comparison_lte_uses_select() {
+        let shader = gen("x <= 1");
+        assert!(shader.contains("select(0.0, 1.0, _result)"));
+    }
+
+    #[test]
+    fn test_comparison_gte_uses_select() {
+        let shader = gen("x >= 0");
+        assert!(shader.contains("select(0.0, 1.0, _result)"));
+    }
+
+    #[test]
+    fn test_logical_and_uses_select() {
+        let shader = gen("x > 0 and x < 1");
+        assert!(shader.contains("select(0.0, 1.0, _result)"));
+    }
+
+    #[test]
+    fn test_logical_or_uses_select() {
+        let shader = gen("x < 0 or x > 1");
+        assert!(shader.contains("select(0.0, 1.0, _result)"));
+    }
+
+    #[test]
+    fn test_logical_not_uses_select() {
+        let shader = gen("not (x > 0)");
+        assert!(shader.contains("select(0.0, 1.0, _result)"));
+    }
+
+    #[test]
+    fn test_bool_literal_uses_select() {
+        let shader = gen("true");
+        assert!(shader.contains("select(0.0, 1.0, _result)"));
+    }
+
+    #[test]
+    fn test_numeric_expr_still_uses_clamp() {
+        // Normal numeric expressions should still use clamp
+        let shader = gen("x * x + y * y");
+        assert!(shader.contains("clamp(_result, 0.0, 1.0)"));
+        assert!(!shader.contains("select(0.0, 1.0, _result)"));
+    }
+
+    #[test]
+    fn test_if_expr_is_numeric_not_bool() {
+        // `if (cond) 1 else 0` uses select() in the expression itself,
+        // but the result type is f32, so the wrapper should use clamp
+        let shader = gen("if (x > 0) 1 else 0");
+        assert!(shader.contains("clamp(_result, 0.0, 1.0)"));
+    }
+
+    #[test]
+    fn test_binding_then_bool_result_uses_select() {
+        // Multi-line: binding + boolean result expression
+        let shader = gen("r: x * x + y * y\nr < 1");
+        assert!(shader.contains("select(0.0, 1.0, _result)"));
+    }
+
+    #[test]
+    fn test_binding_then_numeric_result_uses_clamp() {
+        let shader = gen("r: x * x + y * y\nsin(r)");
+        assert!(shader.contains("clamp(_result, 0.0, 1.0)"));
     }
 }
