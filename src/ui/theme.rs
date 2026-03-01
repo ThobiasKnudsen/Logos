@@ -98,6 +98,8 @@ pub struct Theme {
     pub graph_bg: Rgba,
     pub graph_grid: Rgba,
     pub graph_axis: Rgba,
+    pub axis_zone_bg: Rgba,
+    pub axis_label: Rgba,
 
     // Toolbar
     pub toolbar_bg: Rgba,
@@ -179,6 +181,8 @@ pub const THEME_CATPPUCCIN: Theme = Theme {
     graph_bg:             Rgba::rgb(8, 8, 14),
     graph_grid:           Rgba::new(30, 30, 46, 80),
     graph_axis:           Rgba::hex(0xa6adc8),
+    axis_zone_bg:         Rgba::new(14, 14, 22, 210),
+    axis_label:           Rgba::hex(0x7f849c),
     toolbar_bg:           Rgba::rgb(16, 16, 26),
     toolbar_button:       Rgba::rgb(28, 28, 42),
     toolbar_button_hover: Rgba::rgb(42, 42, 58),
@@ -239,6 +243,8 @@ pub const THEME_ONE_DARK: Theme = Theme {
     graph_bg:             Rgba::rgb(9, 11, 15),
     graph_grid:           Rgba::new(35, 40, 52, 80),
     graph_axis:           Rgba::hex(0x8891a5),
+    axis_zone_bg:         Rgba::new(15, 17, 22, 210),
+    axis_label:           Rgba::hex(0x6b7280),
     toolbar_bg:           Rgba::rgb(17, 19, 25),
     toolbar_button:       Rgba::rgb(30, 33, 40),
     toolbar_button_hover: Rgba::rgb(44, 48, 58),
@@ -299,6 +305,8 @@ pub const THEME_MONOKAI: Theme = Theme {
     graph_bg:             Rgba::rgb(9, 10, 6),
     graph_grid:           Rgba::new(36, 36, 28, 80),
     graph_axis:           Rgba::hex(0xb0ae9e),
+    axis_zone_bg:         Rgba::new(16, 17, 12, 210),
+    axis_label:           Rgba::hex(0x75736a),
     toolbar_bg:           Rgba::rgb(18, 18, 13),
     toolbar_button:       Rgba::rgb(32, 32, 24),
     toolbar_button_hover: Rgba::rgb(46, 46, 36),
@@ -359,6 +367,8 @@ pub const THEME_DRACULA: Theme = Theme {
     graph_bg:             Rgba::rgb(8, 9, 14),
     graph_grid:           Rgba::new(34, 36, 50, 80),
     graph_axis:           Rgba::hex(0xb0b2c0),
+    axis_zone_bg:         Rgba::new(14, 15, 22, 210),
+    axis_label:           Rgba::hex(0x6272a4),
     toolbar_bg:           Rgba::rgb(16, 17, 24),
     toolbar_button:       Rgba::rgb(30, 31, 42),
     toolbar_button_hover: Rgba::rgb(44, 46, 60),
@@ -419,6 +429,8 @@ pub const THEME_GRUVBOX: Theme = Theme {
     graph_bg:             Rgba::rgb(9, 9, 7),
     graph_grid:           Rgba::new(36, 33, 30, 80),
     graph_axis:           Rgba::hex(0xbdae93),
+    axis_zone_bg:         Rgba::new(16, 15, 14, 210),
+    axis_label:           Rgba::hex(0x7c6f64),
     toolbar_bg:           Rgba::rgb(18, 17, 15),
     toolbar_button:       Rgba::rgb(32, 29, 26),
     toolbar_button_hover: Rgba::rgb(46, 42, 38),
@@ -479,6 +491,8 @@ pub const THEME_NORD: Theme = Theme {
     graph_bg:             Rgba::rgb(8, 11, 16),
     graph_grid:           Rgba::new(32, 38, 50, 80),
     graph_axis:           Rgba::hex(0xb0b8c8),
+    axis_zone_bg:         Rgba::new(14, 18, 24, 210),
+    axis_label:           Rgba::hex(0x616e88),
     toolbar_bg:           Rgba::rgb(16, 20, 28),
     toolbar_button:       Rgba::rgb(28, 34, 44),
     toolbar_button_hover: Rgba::rgb(42, 50, 62),
@@ -539,6 +553,8 @@ pub const THEME_SOLARIZED: Theme = Theme {
     graph_bg:             Rgba::rgb(0, 9, 13),
     graph_grid:           Rgba::new(4, 32, 42, 80),
     graph_axis:           Rgba::hex(0x93a1a1),
+    axis_zone_bg:         Rgba::new(0, 16, 22, 210),
+    axis_label:           Rgba::hex(0x586e75),
     toolbar_bg:           Rgba::rgb(0, 18, 24),
     toolbar_button:       Rgba::rgb(3, 30, 38),
     toolbar_button_hover: Rgba::rgb(6, 42, 52),
@@ -660,6 +676,7 @@ pub mod spacing {
     pub const SCROLLBAR_THUMB_MIN_H: f32 = 30.0;
 
     pub const GUTTER_WIDTH: f32 = 48.0;
+    pub const AXIS_ZONE_SIZE: f32 = 40.0;
     pub const CELL_PADDING: f32 = 12.0;
     pub const CELL_SPACING: f32 = 8.0;
     pub const BUTTON_SIZE: f32 = 24.0;
@@ -673,6 +690,7 @@ pub mod spacing {
     pub fn split_handle_width() -> f32 { SPLIT_HANDLE_WIDTH * super::fonts::scale() }
     pub fn window_control_width() -> f32 { WINDOW_CONTROL_WIDTH * super::fonts::scale() }
     pub fn dropdown_item_height() -> f32 { DROPDOWN_ITEM_HEIGHT * super::fonts::scale() }
+    pub fn gutter_width() -> f32 { GUTTER_WIDTH * super::fonts::scale() }
 }
 
 // ---------------------------------------------------------------------------
