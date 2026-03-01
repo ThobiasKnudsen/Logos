@@ -17,7 +17,7 @@ use winit::window::Window;
 
 use crate::app::{self, HoverTarget, MenuItemDef, WindowControlRects};
 use crate::ui::layout::{LayoutResult, Rect};
-use crate::ui::theme::{colors, fonts, spacing, Rgba};
+use crate::ui::theme::{self, fonts, spacing, Rgba};
 use rects::{RectInstance, RectRenderer};
 use shader_pipeline::ShaderPipelineManager;
 
@@ -1079,6 +1079,7 @@ impl Renderer {
         let sh = self.surface_config.height as f32;
         let lp = layout.left_pane;
         let text_pad = spacing::SM;
+        let t = theme::theme();
 
         // Pane clip bounds
         let pane_left = lp.x as i32;
@@ -1092,8 +1093,8 @@ impl Renderer {
 
         // -- Background rects --
         let mut ui_rects = vec![
-            rect_from(layout.title_bar, colors::BG_SECONDARY),
-            rect_from(layout.tab_bar, colors::TAB_INACTIVE),
+            rect_from(layout.title_bar, t.bg_secondary),
+            rect_from(layout.tab_bar, t.tab_inactive),
         ];
 
         // Menu item hover backgrounds
@@ -1101,18 +1102,18 @@ impl Renderer {
             let is_open = open_menu == Some(idx);
             let is_hovered = hover == HoverTarget::MenuItem(idx);
             if is_open || is_hovered {
-                ui_rects.push(rect_from(*rect, colors::MENU_ITEM_HOVER));
+                ui_rects.push(rect_from(*rect, t.menu_item_hover));
             }
         }
 
         // Per-tab backgrounds (hover-aware)
         for (idx, (rect, is_active)) in self.tab_bg_rects.iter().enumerate() {
             let color = if *is_active {
-                colors::TAB_ACTIVE
+                t.tab_active
             } else if matches!(hover, HoverTarget::Tab(i) | HoverTarget::TabClose(i) if i == idx) {
-                colors::TAB_HOVER
+                t.tab_hover
             } else {
-                colors::TAB_INACTIVE
+                t.tab_inactive
             };
             ui_rects.push(rect_from(*rect, color));
         }
@@ -1120,30 +1121,30 @@ impl Renderer {
         // Tab close hover bg
         for (idx, close_rect) in self.tab_close_rects.iter().enumerate() {
             if hover == HoverTarget::TabClose(idx) {
-                ui_rects.push(rect_from(*close_rect, colors::BG_HOVER));
+                ui_rects.push(rect_from(*close_rect, t.bg_hover));
             }
         }
 
         // Plus button (tab bar)
         let plus_color = if hover == HoverTarget::PlusButton {
-            colors::TAB_HOVER
+            t.tab_hover
         } else {
-            colors::TAB_INACTIVE
+            t.tab_inactive
         };
         ui_rects.push(rect_from(self.plus_rect, plus_color));
 
         // Split handle
         let split_color = if is_dragging_split || hover == HoverTarget::SplitHandle {
-            colors::SPLIT_HANDLE_HOVER
+            t.split_handle_hover
         } else {
-            colors::SPLIT_HANDLE
+            t.split_handle
         };
         ui_rects.push(rect_from(layout.split_handle, split_color));
 
         // Main panes
-        ui_rects.push(rect_from(layout.left_pane, colors::EDITOR_BG));
-        ui_rects.push(rect_from(layout.right_pane, colors::GRAPH_BG));
-        ui_rects.push(rect_from(layout.status_bar, colors::BG_SECONDARY));
+        ui_rects.push(rect_from(layout.left_pane, t.editor_bg));
+        ui_rects.push(rect_from(layout.right_pane, t.graph_bg));
+        ui_rects.push(rect_from(layout.status_bar, t.bg_secondary));
 
         // --- Cell container rects ---
         for (i, cl) in self.cell_layouts.iter().enumerate() {
@@ -1154,9 +1155,9 @@ impl Renderer {
 
             // Cell border (1px larger rect behind the cell bg)
             let border_color = if i == self.active_cell_index {
-                colors::BORDER_FOCUS
+                t.border_focus
             } else {
-                colors::BORDER
+                t.border
             };
             let cell_radius = 12.0 * fonts::scale();
             ui_rects.push(rect_rounded(
@@ -1171,32 +1172,32 @@ impl Renderer {
             ));
 
             // Cell container background
-            ui_rects.push(rect_rounded(cl.container, colors::BG_ELEVATED, cell_radius));
+            ui_rects.push(rect_rounded(cl.container, t.bg_elevated, cell_radius));
 
             // Play/Stop button background
             {
                 let is_playing = i < self.cell_playing.len() && self.cell_playing[i];
                 let is_hovered = hover == HoverTarget::CellPlayButton(i);
                 let btn_color = if is_playing {
-                    if is_hovered { colors::STOP_BUTTON_HOVER } else { colors::STOP_BUTTON }
+                    if is_hovered { t.stop_button_hover } else { t.stop_button }
                 } else {
-                    if is_hovered { colors::PLAY_BUTTON_HOVER } else { colors::PLAY_BUTTON }
+                    if is_hovered { t.play_button_hover } else { t.play_button }
                 };
                 ui_rects.push(rect_rounded(cl.play_button, btn_color, 4.0 * fonts::scale()));
             }
 
             // Copy button hover
             if hover == HoverTarget::CellCopyButton(i) {
-                ui_rects.push(rect_from(cl.copy_button, colors::BG_HOVER));
+                ui_rects.push(rect_from(cl.copy_button, t.bg_hover));
             }
 
             // Delete button hover
             if hover == HoverTarget::CellDeleteButton(i) {
-                ui_rects.push(rect_from(cl.delete_button, colors::BG_HOVER));
+                ui_rects.push(rect_from(cl.delete_button, t.bg_hover));
             }
 
             // Separator line
-            ui_rects.push(rect_from(cl.separator, colors::BORDER));
+            ui_rects.push(rect_from(cl.separator, t.border));
         }
 
         // Selection highlight in active cell
@@ -1214,7 +1215,7 @@ impl Renderer {
                         y: screen_y,
                         w: sw,
                         h: sh,
-                        color: colors::EDITOR_SELECTION.to_f32_array(),
+                        color: t.editor_selection.to_f32_array(),
                         corner_radius: 2.0,
                         _padding: [0.0; 3],
                     });
@@ -1239,7 +1240,7 @@ impl Renderer {
                     y: cursor_screen_y,
                     w: fonts::CURSOR_WIDTH,
                     h: ch,
-                    color: colors::CURSOR.to_f32_array(),
+                    color: t.cursor.to_f32_array(),
                     corner_radius: 0.0,
                     _padding: [0.0; 3],
                 });
@@ -1251,75 +1252,75 @@ impl Renderer {
             && self.add_cell_rect.y < lp.y + lp.h
         {
             let add_color = if hover == HoverTarget::AddCellButton {
-                colors::BG_HOVER
+                t.bg_hover
             } else {
-                colors::BG_ELEVATED
+                t.bg_elevated
             };
             ui_rects.push(rect_rounded(self.add_cell_rect, add_color, self.add_cell_rect.w / 2.0));
         }
 
         // Scrollbars
         if let Some(track) = self.v_track_rect {
-            ui_rects.push(rect_from(track, colors::SCROLLBAR_TRACK));
+            ui_rects.push(rect_from(track, t.scrollbar_track));
         }
         if let Some(thumb) = self.v_thumb_rect {
             let color = if matches!(hover, HoverTarget::VScrollThumb) {
-                colors::SCROLLBAR_THUMB_HOVER
+                t.scrollbar_thumb_hover
             } else {
-                colors::SCROLLBAR_THUMB
+                t.scrollbar_thumb
             };
             ui_rects.push(rect_from(thumb, color));
         }
 
         // Window control hover
         if hover == HoverTarget::WinBtnMinimize {
-            ui_rects.push(rect_from(win_controls.minimize, colors::BG_HOVER));
+            ui_rects.push(rect_from(win_controls.minimize, t.bg_hover));
         }
         if hover == HoverTarget::WinBtnMaximize {
-            ui_rects.push(rect_from(win_controls.maximize, colors::BG_HOVER));
+            ui_rects.push(rect_from(win_controls.maximize, t.bg_hover));
         }
         if hover == HoverTarget::WinBtnClose {
-            ui_rects.push(rect_from(win_controls.close, colors::CLOSE_BUTTON_HOVER));
+            ui_rects.push(rect_from(win_controls.close, t.close_button_hover));
         }
 
         // Dropdown background + item hovers (drawn last so they overlay tab bar)
         if self.dropdown_active {
-            ui_rects.push(rect_from(self.dropdown_bg, colors::DROPDOWN_BG));
+            ui_rects.push(rect_from(self.dropdown_bg, t.dropdown_bg));
             let db = self.dropdown_bg;
             ui_rects.push(RectInstance {
                 x: db.x, y: db.y, w: db.w, h: 1.0,
-                color: colors::DROPDOWN_SEPARATOR.to_f32_array(),
+                color: t.dropdown_separator.to_f32_array(),
                 corner_radius: 0.0, _padding: [0.0; 3],
             });
             ui_rects.push(RectInstance {
                 x: db.x, y: db.y + db.h - 1.0, w: db.w, h: 1.0,
-                color: colors::DROPDOWN_SEPARATOR.to_f32_array(),
+                color: t.dropdown_separator.to_f32_array(),
                 corner_radius: 0.0, _padding: [0.0; 3],
             });
             ui_rects.push(RectInstance {
                 x: db.x, y: db.y, w: 1.0, h: db.h,
-                color: colors::DROPDOWN_SEPARATOR.to_f32_array(),
+                color: t.dropdown_separator.to_f32_array(),
                 corner_radius: 0.0, _padding: [0.0; 3],
             });
             ui_rects.push(RectInstance {
                 x: db.x + db.w - 1.0, y: db.y, w: 1.0, h: db.h,
-                color: colors::DROPDOWN_SEPARATOR.to_f32_array(),
+                color: t.dropdown_separator.to_f32_array(),
                 corner_radius: 0.0, _padding: [0.0; 3],
             });
 
             for (idx, rect) in self.dropdown_item_rects.iter().enumerate() {
                 if hover == HoverTarget::DropdownItem(idx) {
-                    ui_rects.push(rect_from(*rect, colors::DROPDOWN_HOVER));
+                    ui_rects.push(rect_from(*rect, t.dropdown_hover));
                 } else if self.dropdown_active_item == Some(idx) {
                     // Subtle highlight for the currently active item (e.g. selected theme)
-                    ui_rects.push(rect_from(*rect, colors::BG_ELEVATED));
+                    ui_rects.push(rect_from(*rect, t.bg_elevated));
                 }
             }
         }
 
         // -- Text areas --
         let mut text_areas: Vec<TextArea> = Vec::new();
-        let editor_color = colors::TEXT_PRIMARY.to_glyphon();
+        let editor_color = t.text_primary.to_glyphon();
 
         // Dropdown rect for clipping pane content around it
         let dd_clip = if self.dropdown_active {
@@ -1399,7 +1400,7 @@ impl Renderer {
                         top: cy,
                         scale: 1.0,
                         bounds,
-                        default_color: colors::TEXT_PRIMARY.to_glyphon(),
+                        default_color: t.text_primary.to_glyphon(),
                         custom_glyphs: &[],
                     });
                 }
@@ -1432,7 +1433,7 @@ impl Renderer {
                             top: cy,
                             scale: 1.0,
                             bounds,
-                            default_color: colors::TEXT_MUTED.to_glyphon(),
+                            default_color: t.text_muted.to_glyphon(),
                             custom_glyphs: &[],
                         });
                     }
@@ -1465,7 +1466,7 @@ impl Renderer {
                         top: cy,
                         scale: 1.0,
                         bounds,
-                        default_color: colors::TEXT_MUTED.to_glyphon(),
+                        default_color: t.text_muted.to_glyphon(),
                         custom_glyphs: &[],
                     });
                 }
@@ -1487,10 +1488,10 @@ impl Renderer {
             // Tooltip background + border
             ui_rects.push(rect_rounded(
                 Rect { x: tip_rect.x - 1.0, y: tip_rect.y - 1.0, w: tip_rect.w + 2.0, h: tip_rect.h + 2.0 },
-                colors::TOOLTIP_BORDER,
+                t.tooltip_border,
                 4.0 * fonts::scale(),
             ));
-            ui_rects.push(rect_rounded(tip_rect, colors::TOOLTIP_BG, 4.0 * fonts::scale()));
+            ui_rects.push(rect_rounded(tip_rect, t.tooltip_bg, 4.0 * fonts::scale()));
 
             // Tooltip text
             text_areas.push(TextArea {
@@ -1504,7 +1505,7 @@ impl Renderer {
                     right: (tip_rect.x + tip_rect.w) as i32,
                     bottom: (tip_rect.y + tip_rect.h) as i32,
                 },
-                default_color: colors::TEXT_PRIMARY.to_glyphon(),
+                default_color: t.text_primary.to_glyphon(),
                 custom_glyphs: &[],
             });
         }
@@ -1536,7 +1537,7 @@ impl Renderer {
                     top: cy,
                     scale: 1.0,
                     bounds,
-                    default_color: colors::TEXT_MUTED.to_glyphon(),
+                    default_color: t.text_muted.to_glyphon(),
                     custom_glyphs: &[],
                 });
             }
@@ -1560,7 +1561,7 @@ impl Renderer {
                     right: menu_right as i32,
                     bottom: (rect.y + rect.h) as i32,
                 },
-                default_color: colors::TEXT_PRIMARY.to_glyphon(),
+                default_color: t.text_primary.to_glyphon(),
                 custom_glyphs: &[],
             });
         }
@@ -1586,7 +1587,7 @@ impl Renderer {
                     right: (rect.x + rect.w) as i32,
                     bottom: (rect.y + rect.h) as i32,
                 },
-                default_color: colors::TEXT_PRIMARY.to_glyphon(),
+                default_color: t.text_primary.to_glyphon(),
                 custom_glyphs: &[],
             });
         }
@@ -1617,7 +1618,7 @@ impl Renderer {
                 top: tab_rect.y + spacing::SM,
                 scale: 1.0,
                 bounds,
-                default_color: colors::TEXT_PRIMARY.to_glyphon(),
+                default_color: t.text_primary.to_glyphon(),
                 custom_glyphs: &[],
             });
         }
@@ -1639,7 +1640,7 @@ impl Renderer {
                     top: dot_y,
                     scale: 1.0,
                     bounds,
-                    default_color: colors::TEXT_PRIMARY.to_glyphon(),
+                    default_color: t.text_primary.to_glyphon(),
                     custom_glyphs: &[],
                 });
             }
@@ -1669,7 +1670,7 @@ impl Renderer {
                 top: cy,
                 scale: 1.0,
                 bounds,
-                default_color: colors::TEXT_MUTED.to_glyphon(),
+                default_color: t.text_muted.to_glyphon(),
                 custom_glyphs: &[],
             });
         }
@@ -1682,7 +1683,7 @@ impl Renderer {
                 top: self.plus_rect.y + spacing::SM,
                 scale: 1.0,
                 bounds,
-                default_color: colors::TEXT_MUTED.to_glyphon(),
+                default_color: t.text_muted.to_glyphon(),
                 custom_glyphs: &[],
             });
         }
@@ -1711,7 +1712,7 @@ impl Renderer {
                         right: (rect.x + rect.w) as i32,
                         bottom: (rect.y + rect.h) as i32,
                     },
-                    default_color: colors::TEXT_PRIMARY.to_glyphon(),
+                    default_color: t.text_primary.to_glyphon(),
                     custom_glyphs: &[],
                 });
                 // Shortcut label (right-aligned)
@@ -1727,7 +1728,7 @@ impl Renderer {
                         right: (rect.x + rect.w) as i32,
                         bottom: (rect.y + rect.h) as i32,
                     },
-                    default_color: colors::TEXT_MUTED.to_glyphon(),
+                    default_color: t.text_muted.to_glyphon(),
                     custom_glyphs: &[],
                 });
             }
@@ -1745,7 +1746,7 @@ impl Renderer {
                 right: (layout.status_bar.x + layout.status_bar.w) as i32,
                 bottom: (layout.status_bar.y + layout.status_bar.h) as i32,
             },
-            default_color: colors::TEXT_SECONDARY.to_glyphon(),
+            default_color: t.text_secondary.to_glyphon(),
             custom_glyphs: &[],
         });
 
@@ -1762,7 +1763,7 @@ impl Renderer {
                     right: (layout.right_pane.x + layout.right_pane.w) as i32,
                     bottom: (layout.right_pane.y + layout.right_pane.h) as i32,
                 },
-                default_color: colors::TEXT_MUTED.to_glyphon(),
+                default_color: t.text_muted.to_glyphon(),
                 custom_glyphs: &[],
             });
         }
@@ -1795,7 +1796,7 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: Operations {
-                        load: LoadOp::Clear(colors::BG_PRIMARY.to_wgpu()),
+                        load: LoadOp::Clear(t.bg_primary.to_wgpu()),
                         store: StoreOp::Store,
                     },
                 })],

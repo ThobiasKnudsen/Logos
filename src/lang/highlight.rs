@@ -1,6 +1,6 @@
 use crate::lang::lexer::Lexer;
 use crate::lang::token::TokenType;
-use crate::ui::theme::{active_syntax_theme, Rgba};
+use crate::ui::theme::{self, Rgba};
 
 /// A colored span of source text for syntax highlighting.
 #[derive(Debug, Clone)]
@@ -14,7 +14,7 @@ pub struct HighlightSpan {
 
 /// Map a token type to a color using the given syntax theme.
 fn token_color(ty: &TokenType) -> Rgba {
-    let theme = active_syntax_theme();
+    let theme = theme::theme();
     match ty {
         // Keywords
         TokenType::If
@@ -99,12 +99,12 @@ pub fn highlight(source: &str) -> Vec<HighlightSpan> {
             return vec![HighlightSpan {
                 start: 0,
                 end: source.len(),
-                color: crate::ui::theme::colors::TEXT_PRIMARY,
+                color: crate::ui::theme::theme().text_primary,
             }];
         }
     };
 
-    let theme = active_syntax_theme();
+    let theme = theme::theme();
     let mut spans = Vec::with_capacity(tokens.len() * 2);
     let mut cursor = 0;
 
