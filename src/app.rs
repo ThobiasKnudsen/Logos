@@ -14,7 +14,7 @@ use crate::render::{CellInfo, CellLayout, Renderer, TabHitRect, TabInfo};
 use crate::session::TabManager;
 use crate::ui::layout::{LayoutResult, Rect, UiLayout};
 use crate::render::RenderAreaParams;
-use crate::ui::theme::{fonts, spacing, split};
+use crate::ui::theme::{self, fonts, spacing, split};
 
 // ---------------------------------------------------------------------------
 // Menu definitions
@@ -25,7 +25,7 @@ pub(crate) struct MenuItemDef {
     pub shortcut: &'static str,
 }
 
-pub(crate) const MENU_NAMES: &[&str] = &["File", "Edit", "View", "Help"];
+pub(crate) const MENU_NAMES: &[&str] = &["File", "Edit", "View", "Theme", "Help"];
 
 const MENU_FILE_ITEMS: &[MenuItemDef] = &[
     MenuItemDef { label: "New Tab", shortcut: "Ctrl+N" },
@@ -49,13 +49,32 @@ const MENU_VIEW_ITEMS: &[MenuItemDef] = &[
     MenuItemDef { label: "Reset Zoom", shortcut: "Ctrl+0" },
 ];
 
+const MENU_THEME_ITEMS: &[MenuItemDef] = &[
+    MenuItemDef { label: "Catppuccin", shortcut: "" },
+    MenuItemDef { label: "One Dark", shortcut: "" },
+    MenuItemDef { label: "Monokai", shortcut: "" },
+    MenuItemDef { label: "Dracula", shortcut: "" },
+    MenuItemDef { label: "Gruvbox", shortcut: "" },
+    MenuItemDef { label: "Nord", shortcut: "" },
+    MenuItemDef { label: "Solarized", shortcut: "" },
+];
+
 pub(crate) fn menu_items(index: usize) -> &'static [MenuItemDef] {
     match index {
         0 => MENU_FILE_ITEMS,
         1 => MENU_EDIT_ITEMS,
         2 => MENU_VIEW_ITEMS,
+        3 => MENU_THEME_ITEMS,
         _ => &[],
     }
+}
+
+/// Returns the index of the currently active theme (for highlighting in the Theme menu).
+pub(crate) fn active_theme_index() -> usize {
+    theme::BUILTIN_THEMES
+        .iter()
+        .position(|(name, _)| *name == theme::active_theme_name())
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +97,7 @@ pub(crate) enum HoverTarget {
     VScrollThumb,
     CellEditor(usize),
     CellPlayButton(usize),
+    CellCopyButton(usize),
     CellDeleteButton(usize),
     AddCellButton,
     RenderArea,
@@ -226,11 +246,13 @@ impl AppState {
             })
             .collect();
 
-        let (hit_rects, plus_rect) = self
+        if let Some((hit_rects, plus_rect)) = self
             .renderer
-            .update_tab_bar(&tab_infos, self.cached_layout.tab_bar);
-        self.tab_hit_rects = hit_rects;
-        self.plus_button_rect = plus_rect;
+            .update_tab_bar(&tab_infos, self.cached_layout.tab_bar)
+        {
+            self.tab_hit_rects = hit_rects;
+            self.plus_button_rect = plus_rect;
+        }
 
         // Compute window control rects from title bar
         self.win_control_rects = compute_win_control_rects(&self.cached_layout.title_bar);
@@ -253,12 +275,13 @@ impl AppState {
             .unwrap_or_else(|| tab.name.clone());
         let modified = if tab.is_modified { " [modified]" } else { "" };
         self.renderer.update_status(&format!(
-            "{}{} \u{2502} {} lines \u{2502} Ln {}, Col {}",
+            "{}{} \u{2502} {} lines \u{2502} Ln {}, Col {} \u{2502} {}",
             name,
             modified,
             line_count,
             line + 1,
             col + 1,
+            theme::active_theme_name(),
         ));
 
         self.window.request_redraw();
@@ -361,10 +384,14 @@ impl AppState {
                 return;
             }
 
-            // Check cells (play button, then delete button, then editor area)
+            // Check cells (play button, copy button, delete button, then editor area)
             for cl in &self.cell_layouts {
                 if point_in_rect(mx, my, &cl.play_button) {
                     self.set_hover(HoverTarget::CellPlayButton(cl.cell_index));
+                    return;
+                }
+                if point_in_rect(mx, my, &cl.copy_button) {
+                    self.set_hover(HoverTarget::CellCopyButton(cl.cell_index));
                     return;
                 }
                 if point_in_rect(mx, my, &cl.delete_button) {
@@ -398,7 +425,7 @@ impl AppState {
             self.hover_target = target;
             let icon = match target {
                 HoverTarget::SplitHandle => CursorIcon::ColResize,
-                HoverTarget::CellPlayButton(_) => CursorIcon::Pointer,
+                HoverTarget::CellPlayButton(_) | HoverTarget::CellCopyButton(_) => CursorIcon::Pointer,
                 HoverTarget::RenderArea => match self.render_area.mouse_zone {
                     MouseZone::Center => {
                         if self.render_area.is_dragging {
@@ -423,7 +450,13 @@ impl AppState {
             return;
         }
         let menu_rect = self.menu_item_rects[index];
-        self.dropdown_item_rects = self.renderer.open_dropdown(index, menu_rect);
+        // Theme menu (index 3) highlights the currently active theme
+        let active_item = if index == 3 {
+            Some(active_theme_index())
+        } else {
+            None
+        };
+        self.dropdown_item_rects = self.renderer.open_dropdown(index, menu_rect, active_item);
         self.open_menu = Some(index);
         self.window.request_redraw();
     }
@@ -504,6 +537,8 @@ impl AppState {
             (2, 0) => { self.do_zoom(|_| fonts::zoom_in()); }
             (2, 1) => { self.do_zoom(|_| fonts::zoom_out()); }
             (2, 2) => { self.do_zoom(|_| fonts::reset_zoom()); }
+            // Theme menu — each item selects a theme by index
+            (3, i) => { self.select_theme(i); }
             _ => {}
         }
     }
@@ -514,6 +549,20 @@ impl AppState {
         self.layout.apply_scale();
         let size = self.window.inner_size();
         self.cached_layout = self.layout.compute(size.width as f32, size.height as f32);
+        self.sync_active_tab();
+    }
+
+    fn cycle_theme(&mut self) {
+        let name = theme::cycle_theme();
+        log::info!("Switched theme to: {}", name);
+        self.renderer.invalidate_cell_texts();
+        self.sync_active_tab();
+    }
+
+    fn select_theme(&mut self, index: usize) {
+        theme::set_theme(index);
+        log::info!("Selected theme: {}", theme::active_theme_name());
+        self.renderer.invalidate_cell_texts();
         self.sync_active_tab();
     }
 
@@ -640,6 +689,24 @@ impl AppState {
             Key::Character(c) if c.as_str() == "0" => {
                 self.close_menu();
                 self.do_zoom(|_| fonts::reset_zoom());
+                true
+            }
+            // Cycle syntax theme
+            Key::Character(c) if c.as_str() == "t" => {
+                self.close_menu();
+                self.cycle_theme();
+                true
+            }
+            // Run/Stop active cell
+            Key::Named(NamedKey::Enter) => {
+                self.close_menu();
+                let active = self.tab_manager.active_tab().active_cell_index;
+                let is_playing = self.tab_manager.active_tab().cells[active].is_playing;
+                if is_playing {
+                    self.trigger_cell_stop(active);
+                } else {
+                    self.trigger_cell_play(active);
+                }
                 true
             }
             _ => false,
@@ -1071,6 +1138,12 @@ impl ApplicationHandler for App {
                     HoverTarget::CellEditor(i) => {
                         state.tab_manager.active_tab_mut().set_active_cell(i);
                         state.sync_active_tab();
+                    }
+                    HoverTarget::CellCopyButton(i) => {
+                        let text = state.tab_manager.active_tab().cells[i].buffer.text().to_string();
+                        if let Some(cb) = state.clipboard.as_mut() {
+                            let _ = cb.set_text(&text);
+                        }
                     }
                     HoverTarget::CellDeleteButton(i) => {
                         // Stop shader if playing before removing

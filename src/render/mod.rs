@@ -4,8 +4,8 @@ pub mod shader_pipeline;
 use std::sync::Arc;
 
 use glyphon::{
-    Attrs, Buffer as TextBuffer, Cache, Family, FontSystem, Metrics, Resolution, Shaping,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Attrs, Buffer as TextBuffer, Cache, Color as GlyphonColor, Family, FontSystem, Metrics,
+    Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use wgpu::{
     CommandEncoderDescriptor, DeviceDescriptor, Instance, InstanceDescriptor, LoadOp,
@@ -17,7 +17,7 @@ use winit::window::Window;
 
 use crate::app::{self, HoverTarget, MenuItemDef, WindowControlRects};
 use crate::ui::layout::{LayoutResult, Rect};
-use crate::ui::theme::{colors, fonts, spacing, Rgba};
+use crate::ui::theme::{self, fonts, spacing, Rgba};
 use rects::{RectInstance, RectRenderer};
 use shader_pipeline::ShaderPipelineManager;
 
@@ -42,6 +42,7 @@ pub struct CellLayout {
     pub container: Rect,
     pub header: Rect,
     pub play_button: Rect,
+    pub copy_button: Rect,
     pub delete_button: Rect,
     pub separator: Rect,
     pub editor: Rect,
@@ -67,16 +68,15 @@ pub struct RenderAreaParams {
 
 const MAX_AXIS_LABELS: usize = 12;
 
-/// Compute "nice" tick positions for an axis range using the 1-2-5 rule.
-fn compute_nice_ticks(axis_min: f32, axis_max: f32, max_ticks: usize) -> (Vec<f32>, f32) {
-    let range = axis_max - axis_min;
+/// Compute a "nice" tick step for a given range and max ticks using the 1-2-5 rule.
+fn compute_nice_step(range: f32, max_ticks: usize) -> f32 {
     if range <= f32::EPSILON || max_ticks < 2 {
-        return (vec![], 1.0);
+        return 1.0;
     }
     let rough_step = range / max_ticks as f32;
     let mag = 10.0_f32.powf(rough_step.log10().floor());
     let normalized = rough_step / mag;
-    let nice_step = if normalized <= 1.5 {
+    if normalized <= 1.5 {
         mag
     } else if normalized <= 3.5 {
         2.0 * mag
@@ -84,15 +84,22 @@ fn compute_nice_ticks(axis_min: f32, axis_max: f32, max_ticks: usize) -> (Vec<f3
         5.0 * mag
     } else {
         10.0 * mag
-    };
-    let first = (axis_min / nice_step).ceil() * nice_step;
+    }
+}
+
+/// Generate tick positions for an axis given a fixed step.
+fn generate_ticks(axis_min: f32, axis_max: f32, step: f32) -> Vec<f32> {
+    if step <= f32::EPSILON {
+        return vec![];
+    }
+    let first = (axis_min / step).ceil() * step;
     let mut ticks = Vec::new();
     let mut v = first;
-    while v <= axis_max + nice_step * 0.001 {
+    while v <= axis_max + step * 0.001 {
         ticks.push(v);
-        v += nice_step;
+        v += step;
     }
-    (ticks, nice_step)
+    ticks
 }
 
 /// Format a tick value for axis labels.
@@ -132,6 +139,8 @@ pub struct Renderer {
 
     // Multi-cell editor buffers (one glyphon buffer per cell)
     cell_buffers: Vec<TextBuffer>,
+    /// Cached cell text for dirty-checking (skip reshaping unchanged cells).
+    cell_texts: Vec<String>,
     /// Computed cell layouts for hit-testing and rendering.
     cell_layouts: Vec<CellLayout>,
     /// Which cell is currently active (receives keyboard input).
@@ -151,10 +160,14 @@ pub struct Renderer {
     add_cell_rect: Rect,
     /// Delete button label for cells.
     cell_delete_label: TextBuffer,
+    /// Copy button label for cells.
+    cell_copy_label: TextBuffer,
     /// Play button label (▶).
     cell_play_label: TextBuffer,
     /// Stop button label (■).
     cell_stop_label: TextBuffer,
+    /// Tooltip label for play/stop button.
+    tooltip_label: TextBuffer,
     /// Which cells are currently playing (indexed by cell position in current view).
     cell_playing: Vec<bool>,
 
@@ -164,7 +177,8 @@ pub struct Renderer {
 
     // UI label buffers
     status_label: TextBuffer,
-    graph_label: TextBuffer,
+    /// Cached status bar text for dirty-checking.
+    cached_status_text: String,
 
     // Individual menu item labels
     menu_item_labels: Vec<TextBuffer>,
@@ -176,8 +190,10 @@ pub struct Renderer {
     dropdown_bg: Rect,
     dropdown_item_rects: Vec<Rect>,
     dropdown_active: bool,
+    dropdown_active_item: Option<usize>,
 
-    // Dynamic tab bar
+    // Dynamic tab bar (cached to avoid rebuilding on every sync)
+    cached_tab_info: Vec<(String, bool, bool)>, // (name, is_active, is_modified)
     tab_labels: Vec<TextBuffer>,
     tab_close_labels: Vec<TextBuffer>,
     tab_modified: Vec<bool>,
@@ -264,7 +280,6 @@ impl Renderer {
             fonts::status_size(),
             "Ready \u{2502} Ln 1, Col 1",
         );
-        let graph_label = Self::create_label(&mut font_system, fonts::ui_size(), "Graph");
         let plus_label = Self::create_label(&mut font_system, fonts::ui_size(), "+");
         let dot_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25CF}");
 
@@ -285,10 +300,12 @@ impl Renderer {
             .map(|_| Self::create_label(&mut font_system, fonts::small_size(), "0"))
             .collect();
 
-        let add_cell_label = Self::create_label(&mut font_system, fonts::ui_size(), "+ Add Cell");
+        let add_cell_label = Self::create_label(&mut font_system, fonts::ui_size(), "+");
         let cell_delete_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{2715}");
+        let cell_copy_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{2398}");
         let cell_play_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25B6}");
         let cell_stop_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25A0}");
+        let tooltip_label = Self::create_label(&mut font_system, fonts::small_size(), "Ctrl+Enter");
 
         let zero_rect = Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
 
@@ -303,6 +320,7 @@ impl Renderer {
             atlas,
             text_renderer,
             cell_buffers: Vec::new(),
+            cell_texts: Vec::new(),
             cell_layouts: Vec::new(),
             active_cell_index: 0,
             cursor_content_pos: (0.0, 0.0, fonts::editor_line_height()),
@@ -313,13 +331,15 @@ impl Renderer {
             add_cell_label,
             add_cell_rect: zero_rect,
             cell_delete_label,
+            cell_copy_label,
             cell_play_label,
             cell_stop_label,
+            tooltip_label,
             cell_playing: Vec::new(),
             v_track_rect: None,
             v_thumb_rect: None,
             status_label,
-            graph_label,
+            cached_status_text: String::new(),
             menu_item_labels,
             menu_item_rects: Vec::new(),
             dropdown_item_labels: Vec::new(),
@@ -327,6 +347,8 @@ impl Renderer {
             dropdown_bg: zero_rect,
             dropdown_item_rects: Vec::new(),
             dropdown_active: false,
+            dropdown_active_item: None,
+            cached_tab_info: Vec::new(),
             tab_labels: Vec::new(),
             tab_close_labels: Vec::new(),
             tab_modified: Vec::new(),
@@ -386,7 +408,6 @@ impl Renderer {
             .map(|name| Self::create_label(&mut self.font_system, fonts::menu_size(), name))
             .collect();
         self.status_label = Self::create_label(&mut self.font_system, fonts::status_size(), "");
-        self.graph_label = Self::create_label(&mut self.font_system, fonts::ui_size(), "Graph");
         self.plus_label = Self::create_label(&mut self.font_system, fonts::ui_size(), "+");
         self.dot_label = Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{25CF}");
         self.win_min_label =
@@ -406,16 +427,26 @@ impl Renderer {
         }
 
         self.add_cell_label =
-            Self::create_label(&mut self.font_system, fonts::ui_size(), "+ Add Cell");
+            Self::create_label(&mut self.font_system, fonts::ui_size(), "+");
         self.cell_delete_label =
             Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{2715}");
+        self.cell_copy_label =
+            Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{2398}");
         self.cell_play_label =
             Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{25B6}");
         self.cell_stop_label =
             Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{25A0}");
+        self.tooltip_label =
+            Self::create_label(&mut self.font_system, fonts::small_size(), "Ctrl+Enter");
 
         // Close any open dropdown since label sizes changed
         self.close_dropdown();
+    }
+
+    /// Invalidate cached cell texts so the next sync forces re-highlighting.
+    /// Used when the syntax theme changes without the text itself changing.
+    pub fn invalidate_cell_texts(&mut self) {
+        self.cell_texts.clear();
     }
 
     pub fn set_maximized_icon(&mut self, is_maximized: bool) {
@@ -452,8 +483,14 @@ impl Renderer {
         rects
     }
 
-    /// Open a dropdown menu. Returns item rects for hit testing.
-    pub fn open_dropdown(&mut self, menu_index: usize, menu_rect: Rect) -> Vec<Rect> {
+    /// Open a dropdown menu. `active_item` highlights one item (e.g. current theme).
+    /// Returns item rects for hit testing.
+    pub fn open_dropdown(
+        &mut self,
+        menu_index: usize,
+        menu_rect: Rect,
+        active_item: Option<usize>,
+    ) -> Vec<Rect> {
         let items: &[MenuItemDef] = app::menu_items(menu_index);
         if items.is_empty() {
             self.dropdown_active = false;
@@ -466,11 +503,19 @@ impl Renderer {
         // Create labels and measure widths
         self.dropdown_item_labels.clear();
         self.dropdown_shortcut_labels.clear();
+        self.dropdown_active_item = active_item;
         let mut max_label_w = 0.0_f32;
         let mut max_shortcut_w = 0.0_f32;
 
-        for item in items {
-            let label = Self::create_label(&mut self.font_system, fonts::menu_size(), item.label);
+        for (i, item) in items.iter().enumerate() {
+            // Prefix active item with a checkmark
+            let label_text = if active_item == Some(i) {
+                format!("\u{2713} {}", item.label)
+            } else {
+                format!("   {}", item.label)
+            };
+            let label =
+                Self::create_label(&mut self.font_system, fonts::menu_size(), &label_text);
             let shortcut =
                 Self::create_label(&mut self.font_system, fonts::small_size(), item.shortcut);
             max_label_w = max_label_w.max(Self::measure_label_width(&label));
@@ -652,6 +697,7 @@ impl Renderer {
             self.cell_buffers.push(buf);
         }
         self.cell_buffers.truncate(cells.len());
+        self.cell_texts.truncate(cells.len());
 
         // Set text + shape each buffer, measure heights
         let cell_pad = spacing::CELL_PADDING;
@@ -673,19 +719,47 @@ impl Renderer {
         let mut y_offset = cell_pad; // accumulates from top of cell container
 
         for (i, cell_info) in cells.iter().enumerate() {
-            // Set text
-            self.cell_buffers[i].set_size(&mut self.font_system, None, None);
-            self.cell_buffers[i].set_text(
-                &mut self.font_system,
-                &cell_info.text,
-                Attrs::new().family(Family::Monospace),
-                Shaping::Advanced,
-            );
-            self.cell_buffers[i].shape_until_scroll(&mut self.font_system, false);
+            // Only reshape if text actually changed (cosmic-text shaping is expensive)
+            let text_changed = self.cell_texts.get(i).map_or(true, |prev| *prev != cell_info.text);
+            if text_changed {
+                self.cell_buffers[i].set_size(&mut self.font_system, None, None);
+
+                // Syntax-highlighted rich text
+                let spans = crate::lang::highlight::highlight(&cell_info.text);
+                let default_attrs = Attrs::new().family(Family::Monospace);
+                let rich_spans: Vec<(&str, Attrs)> = spans
+                    .iter()
+                    .map(|s| {
+                        let text_slice = &cell_info.text[s.start..s.end];
+                        let attrs = default_attrs.color(GlyphonColor::rgba(
+                            s.color.r, s.color.g, s.color.b, s.color.a,
+                        ));
+                        (text_slice, attrs)
+                    })
+                    .collect();
+                self.cell_buffers[i].set_rich_text(
+                    &mut self.font_system,
+                    rich_spans,
+                    default_attrs,
+                    Shaping::Advanced,
+                );
+
+                self.cell_buffers[i].shape_until_scroll(&mut self.font_system, false);
+                // Update cached text
+                if i < self.cell_texts.len() {
+                    self.cell_texts[i].clone_from(&cell_info.text);
+                } else {
+                    self.cell_texts.push(cell_info.text.clone());
+                }
+            }
 
             // Measure content height
-            let content_h = Self::measure_content_height(&self.cell_buffers[i])
+            let mut content_h = Self::measure_content_height(&self.cell_buffers[i])
                 .max(fonts::editor_line_height());
+            // Trailing newline creates an empty line that layout_runs() doesn't report
+            if cell_info.text.ends_with('\n') {
+                content_h += fonts::editor_line_height();
+            }
             let editor_h = content_h + text_pad * 2.0;
 
             let container_h = container_pad + header_h + sep_h + editor_h + container_pad;
@@ -704,22 +778,31 @@ impl Renderer {
                 w: effective_width - container_pad * 2.0,
                 h: header_h,
             };
+            // Center buttons between cell top edge and separator line
+            let btn_y = container.y + (container_pad + header_h - CELL_DELETE_SIZE) / 2.0;
             let play_button = Rect {
                 x: header.x,
-                y: header.y + (header_h - CELL_DELETE_SIZE) / 2.0,
+                y: btn_y,
                 w: CELL_DELETE_SIZE,
                 h: CELL_DELETE_SIZE,
             };
             let delete_button = Rect {
                 x: header.x + header.w - CELL_DELETE_SIZE,
-                y: header.y + (header_h - CELL_DELETE_SIZE) / 2.0,
+                y: btn_y,
                 w: CELL_DELETE_SIZE,
                 h: CELL_DELETE_SIZE,
             };
+            let copy_button = Rect {
+                x: header.x + header.w - CELL_DELETE_SIZE * 2.0 - spacing::XS,
+                y: btn_y,
+                w: CELL_DELETE_SIZE,
+                h: CELL_DELETE_SIZE,
+            };
+            // Separator spans full cell width
             let separator = Rect {
-                x: container.x + container_pad,
+                x: container.x,
                 y: header.y + header_h,
-                w: effective_width - container_pad * 2.0,
+                w: container.w,
                 h: sep_h,
             };
             let editor = Rect {
@@ -734,6 +817,7 @@ impl Renderer {
                 container,
                 header,
                 play_button,
+                copy_button,
                 delete_button,
                 separator,
                 editor,
@@ -742,19 +826,18 @@ impl Renderer {
             y_offset += container_h + cell_spacing;
         }
 
-        // Add cell button
-        let add_btn_h = CELL_HEADER_HEIGHT;
-        let add_btn_w = Self::measure_label_width(&self.add_cell_label) + spacing::MD * 2.0;
-        let add_btn_x = pane.x + cell_pad;
+        // Add cell button (round, centered)
+        let add_btn_size = 28.0 * fonts::scale();
+        let add_btn_x = pane.x + cell_pad + effective_width / 2.0 - add_btn_size / 2.0;
         let add_btn_y = pane.y + y_offset - self.cell_scroll_y;
         self.add_cell_rect = Rect {
             x: add_btn_x,
             y: add_btn_y,
-            w: add_btn_w,
-            h: add_btn_h,
+            w: add_btn_size,
+            h: add_btn_size,
         };
 
-        y_offset += add_btn_h + cell_pad;
+        y_offset += add_btn_size + cell_pad;
         self.cells_total_height = y_offset;
 
         // Compute cursor position for active cell
@@ -978,6 +1061,10 @@ impl Renderer {
     }
 
     pub fn update_status(&mut self, text: &str) {
+        if self.cached_status_text == text {
+            return;
+        }
+        self.cached_status_text = text.to_string();
         self.status_label.set_text(
             &mut self.font_system,
             text,
@@ -992,7 +1079,17 @@ impl Renderer {
         &mut self,
         tabs: &[TabInfo],
         tab_bar_rect: Rect,
-    ) -> (Vec<TabHitRect>, Rect) {
+    ) -> Option<(Vec<TabHitRect>, Rect)> {
+        // Check if tab info has changed; skip expensive label recreation if not
+        let new_info: Vec<(String, bool, bool)> = tabs
+            .iter()
+            .map(|t| (t.name.clone(), t.is_active, t.is_modified))
+            .collect();
+        if new_info == self.cached_tab_info {
+            return None;
+        }
+        self.cached_tab_info = new_info;
+
         self.tab_labels.clear();
         self.tab_close_labels.clear();
         self.tab_modified.clear();
@@ -1033,7 +1130,7 @@ impl Renderer {
 
         let plus_w = TAB_PAD_H * 2.0 + 10.0;
         self.plus_rect = Rect { x, y, w: plus_w, h: tab_h };
-        (hit_rects, self.plus_rect)
+        Some((hit_rects, self.plus_rect))
     }
 
     pub fn render(
@@ -1057,6 +1154,7 @@ impl Renderer {
         let sh = self.surface_config.height as f32;
         let lp = layout.left_pane;
         let text_pad = spacing::SM;
+        let t = theme::theme();
 
         // Pane clip bounds
         let pane_left = lp.x as i32;
@@ -1070,8 +1168,8 @@ impl Renderer {
 
         // -- Background rects --
         let mut ui_rects = vec![
-            rect_from(layout.title_bar, colors::BG_SECONDARY),
-            rect_from(layout.tab_bar, colors::TAB_INACTIVE),
+            rect_from(layout.title_bar, t.bg_secondary),
+            rect_from(layout.tab_bar, t.tab_inactive),
         ];
 
         // Menu item hover backgrounds
@@ -1079,18 +1177,18 @@ impl Renderer {
             let is_open = open_menu == Some(idx);
             let is_hovered = hover == HoverTarget::MenuItem(idx);
             if is_open || is_hovered {
-                ui_rects.push(rect_from(*rect, colors::MENU_ITEM_HOVER));
+                ui_rects.push(rect_from(*rect, t.menu_item_hover));
             }
         }
 
         // Per-tab backgrounds (hover-aware)
         for (idx, (rect, is_active)) in self.tab_bg_rects.iter().enumerate() {
             let color = if *is_active {
-                colors::TAB_ACTIVE
+                t.tab_active
             } else if matches!(hover, HoverTarget::Tab(i) | HoverTarget::TabClose(i) if i == idx) {
-                colors::TAB_HOVER
+                t.tab_hover
             } else {
-                colors::TAB_INACTIVE
+                t.tab_inactive
             };
             ui_rects.push(rect_from(*rect, color));
         }
@@ -1098,30 +1196,30 @@ impl Renderer {
         // Tab close hover bg
         for (idx, close_rect) in self.tab_close_rects.iter().enumerate() {
             if hover == HoverTarget::TabClose(idx) {
-                ui_rects.push(rect_from(*close_rect, colors::BG_HOVER));
+                ui_rects.push(rect_from(*close_rect, t.bg_hover));
             }
         }
 
         // Plus button (tab bar)
         let plus_color = if hover == HoverTarget::PlusButton {
-            colors::TAB_HOVER
+            t.tab_hover
         } else {
-            colors::TAB_INACTIVE
+            t.tab_inactive
         };
         ui_rects.push(rect_from(self.plus_rect, plus_color));
 
         // Split handle
         let split_color = if is_dragging_split || hover == HoverTarget::SplitHandle {
-            colors::SPLIT_HANDLE_HOVER
+            t.split_handle_hover
         } else {
-            colors::SPLIT_HANDLE
+            t.split_handle
         };
         ui_rects.push(rect_from(layout.split_handle, split_color));
 
         // Main panes
-        ui_rects.push(rect_from(layout.left_pane, colors::EDITOR_BG));
-        ui_rects.push(rect_from(layout.right_pane, colors::GRAPH_BG));
-        ui_rects.push(rect_from(layout.status_bar, colors::BG_SECONDARY));
+        ui_rects.push(rect_from(layout.left_pane, t.editor_bg));
+        ui_rects.push(rect_from(layout.right_pane, t.graph_bg));
+        ui_rects.push(rect_from(layout.status_bar, t.bg_secondary));
 
         // --- Cell container rects ---
         for (i, cl) in self.cell_layouts.iter().enumerate() {
@@ -1132,9 +1230,9 @@ impl Renderer {
 
             // Cell border (1px larger rect behind the cell bg)
             let border_color = if i == self.active_cell_index {
-                colors::BORDER_FOCUS
+                t.border_focus
             } else {
-                colors::BORDER
+                t.border
             };
             let cell_radius = 12.0 * fonts::scale();
             ui_rects.push(rect_rounded(
@@ -1149,32 +1247,32 @@ impl Renderer {
             ));
 
             // Cell container background
-            ui_rects.push(rect_rounded(cl.container, colors::BG_ELEVATED, cell_radius));
-
-            // Header background (slightly different shade for active)
-            if i == self.active_cell_index {
-                ui_rects.push(rect_from(cl.header, colors::BG_SECONDARY));
-            }
+            ui_rects.push(rect_rounded(cl.container, t.bg_elevated, cell_radius));
 
             // Play/Stop button background
             {
                 let is_playing = i < self.cell_playing.len() && self.cell_playing[i];
                 let is_hovered = hover == HoverTarget::CellPlayButton(i);
                 let btn_color = if is_playing {
-                    if is_hovered { colors::STOP_BUTTON_HOVER } else { colors::STOP_BUTTON }
+                    if is_hovered { t.stop_button_hover } else { t.stop_button }
                 } else {
-                    if is_hovered { colors::PLAY_BUTTON_HOVER } else { colors::PLAY_BUTTON }
+                    if is_hovered { t.play_button_hover } else { t.play_button }
                 };
                 ui_rects.push(rect_rounded(cl.play_button, btn_color, 4.0 * fonts::scale()));
             }
 
+            // Copy button hover
+            if hover == HoverTarget::CellCopyButton(i) {
+                ui_rects.push(rect_from(cl.copy_button, t.bg_hover));
+            }
+
             // Delete button hover
             if hover == HoverTarget::CellDeleteButton(i) {
-                ui_rects.push(rect_from(cl.delete_button, colors::BG_HOVER));
+                ui_rects.push(rect_from(cl.delete_button, t.bg_hover));
             }
 
             // Separator line
-            ui_rects.push(rect_from(cl.separator, colors::BORDER));
+            ui_rects.push(rect_from(cl.separator, t.border));
         }
 
         // Selection highlight in active cell
@@ -1192,7 +1290,7 @@ impl Renderer {
                         y: screen_y,
                         w: sw,
                         h: sh,
-                        color: colors::EDITOR_SELECTION.to_f32_array(),
+                        color: t.editor_selection.to_f32_array(),
                         corner_radius: 2.0,
                         _padding: [0.0; 3],
                     });
@@ -1217,86 +1315,96 @@ impl Renderer {
                     y: cursor_screen_y,
                     w: fonts::CURSOR_WIDTH,
                     h: ch,
-                    color: colors::CURSOR.to_f32_array(),
+                    color: t.cursor.to_f32_array(),
                     corner_radius: 0.0,
                     _padding: [0.0; 3],
                 });
             }
         }
 
-        // Add cell button
+        // Add cell button (round)
         if self.add_cell_rect.y + self.add_cell_rect.h > lp.y
             && self.add_cell_rect.y < lp.y + lp.h
         {
             let add_color = if hover == HoverTarget::AddCellButton {
-                colors::BG_HOVER
+                t.bg_hover
             } else {
-                colors::BG_ELEVATED
+                t.bg_elevated
             };
-            ui_rects.push(rect_rounded(self.add_cell_rect, add_color, 6.0 * fonts::scale()));
+            ui_rects.push(rect_rounded(self.add_cell_rect, add_color, self.add_cell_rect.w / 2.0));
         }
 
         // Scrollbars
         if let Some(track) = self.v_track_rect {
-            ui_rects.push(rect_from(track, colors::SCROLLBAR_TRACK));
+            ui_rects.push(rect_from(track, t.scrollbar_track));
         }
         if let Some(thumb) = self.v_thumb_rect {
             let color = if matches!(hover, HoverTarget::VScrollThumb) {
-                colors::SCROLLBAR_THUMB_HOVER
+                t.scrollbar_thumb_hover
             } else {
-                colors::SCROLLBAR_THUMB
+                t.scrollbar_thumb
             };
             ui_rects.push(rect_from(thumb, color));
         }
 
         // Window control hover
         if hover == HoverTarget::WinBtnMinimize {
-            ui_rects.push(rect_from(win_controls.minimize, colors::BG_HOVER));
+            ui_rects.push(rect_from(win_controls.minimize, t.bg_hover));
         }
         if hover == HoverTarget::WinBtnMaximize {
-            ui_rects.push(rect_from(win_controls.maximize, colors::BG_HOVER));
+            ui_rects.push(rect_from(win_controls.maximize, t.bg_hover));
         }
         if hover == HoverTarget::WinBtnClose {
-            ui_rects.push(rect_from(win_controls.close, colors::CLOSE_BUTTON_HOVER));
+            ui_rects.push(rect_from(win_controls.close, t.close_button_hover));
         }
 
         // Dropdown background + item hovers (drawn last so they overlay tab bar)
         if self.dropdown_active {
-            ui_rects.push(rect_from(self.dropdown_bg, colors::DROPDOWN_BG));
+            ui_rects.push(rect_from(self.dropdown_bg, t.dropdown_bg));
             let db = self.dropdown_bg;
             ui_rects.push(RectInstance {
                 x: db.x, y: db.y, w: db.w, h: 1.0,
-                color: colors::DROPDOWN_SEPARATOR.to_f32_array(),
+                color: t.dropdown_separator.to_f32_array(),
                 corner_radius: 0.0, _padding: [0.0; 3],
             });
             ui_rects.push(RectInstance {
                 x: db.x, y: db.y + db.h - 1.0, w: db.w, h: 1.0,
-                color: colors::DROPDOWN_SEPARATOR.to_f32_array(),
+                color: t.dropdown_separator.to_f32_array(),
                 corner_radius: 0.0, _padding: [0.0; 3],
             });
             ui_rects.push(RectInstance {
                 x: db.x, y: db.y, w: 1.0, h: db.h,
-                color: colors::DROPDOWN_SEPARATOR.to_f32_array(),
+                color: t.dropdown_separator.to_f32_array(),
                 corner_radius: 0.0, _padding: [0.0; 3],
             });
             ui_rects.push(RectInstance {
                 x: db.x + db.w - 1.0, y: db.y, w: 1.0, h: db.h,
-                color: colors::DROPDOWN_SEPARATOR.to_f32_array(),
+                color: t.dropdown_separator.to_f32_array(),
                 corner_radius: 0.0, _padding: [0.0; 3],
             });
 
             for (idx, rect) in self.dropdown_item_rects.iter().enumerate() {
                 if hover == HoverTarget::DropdownItem(idx) {
-                    ui_rects.push(rect_from(*rect, colors::DROPDOWN_HOVER));
+                    ui_rects.push(rect_from(*rect, t.dropdown_hover));
+                } else if self.dropdown_active_item == Some(idx) {
+                    // Subtle highlight for the currently active item (e.g. selected theme)
+                    ui_rects.push(rect_from(*rect, t.bg_elevated));
                 }
             }
         }
 
         // -- Text areas --
         let mut text_areas: Vec<TextArea> = Vec::new();
-        let editor_color = colors::TEXT_PRIMARY.to_glyphon();
+        let editor_color = t.text_primary.to_glyphon();
 
-        // Cell editor text + delete button labels
+        // Dropdown rect for clipping pane content around it
+        let dd_clip = if self.dropdown_active {
+            Some(self.dropdown_bg)
+        } else {
+            None
+        };
+
+        // Cell editor text + button labels
         for (i, cl) in self.cell_layouts.iter().enumerate() {
             // Skip cells fully outside the visible pane
             if cl.container.y + cl.container.h < lp.y || cl.container.y > lp.y + lp.h {
@@ -1310,21 +1418,32 @@ impl Renderer {
                 let clip_right = ((cl.editor.x + cl.editor.w) as i32).min(pane_right);
                 let clip_bottom = ((cl.editor.y + cl.editor.h) as i32).min(pane_bottom);
 
-                if clip_left < clip_right && clip_top < clip_bottom {
-                    text_areas.push(TextArea {
-                        buffer: &self.cell_buffers[i],
-                        left: cl.editor.x + text_pad,
-                        top: cl.editor.y + text_pad,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: clip_left,
-                            top: clip_top,
-                            right: clip_right,
-                            bottom: clip_bottom,
-                        },
-                        default_color: editor_color,
-                        custom_glyphs: &[],
-                    });
+                let bounds = TextBounds {
+                    left: clip_left,
+                    top: clip_top,
+                    right: clip_right,
+                    bottom: clip_bottom,
+                };
+
+                // Multi-region clipping: split text around dropdown instead of hiding it
+                let regions = if let Some(dd) = &dd_clip {
+                    clip_bounds_around_dropdown(&bounds, dd)
+                } else {
+                    vec![bounds]
+                };
+
+                for region in regions {
+                    if region.left < region.right && region.top < region.bottom {
+                        text_areas.push(TextArea {
+                            buffer: &self.cell_buffers[i],
+                            left: cl.editor.x + text_pad,
+                            top: cl.editor.y + text_pad,
+                            scale: 1.0,
+                            bounds: region,
+                            default_color: editor_color,
+                            custom_glyphs: &[],
+                        });
+                    }
                 }
             }
 
@@ -1333,26 +1452,67 @@ impl Renderer {
             let play_clip_top = (play.y as i32).max(pane_top);
             let play_clip_bottom = ((play.y + play.h) as i32).min(pane_bottom);
             if play_clip_top < play_clip_bottom {
-                let is_playing = i < self.cell_playing.len() && self.cell_playing[i];
-                let play_buf = if is_playing { &self.cell_stop_label } else { &self.cell_play_label };
-                let label_w = Self::measure_label_width(play_buf);
-                let line_h = fonts::ui_size() * 1.4;
-                let cx = play.x + (play.w - label_w) / 2.0;
-                let cy = play.y + (play.h - line_h) / 2.0;
-                text_areas.push(TextArea {
-                    buffer: play_buf,
-                    left: cx,
-                    top: cy,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: play.x as i32,
-                        top: play_clip_top,
-                        right: (play.x + play.w) as i32,
-                        bottom: play_clip_bottom,
-                    },
-                    default_color: colors::TEXT_PRIMARY.to_glyphon(),
-                    custom_glyphs: &[],
-                });
+                let mut bounds = TextBounds {
+                    left: play.x as i32,
+                    top: play_clip_top,
+                    right: (play.x + play.w) as i32,
+                    bottom: play_clip_bottom,
+                };
+                let visible = dd_clip
+                    .as_ref()
+                    .map_or(true, |dd| clip_bounds_under_dropdown(&mut bounds, dd));
+
+                if visible {
+                    let is_playing = i < self.cell_playing.len() && self.cell_playing[i];
+                    let play_buf = if is_playing { &self.cell_stop_label } else { &self.cell_play_label };
+                    let label_w = Self::measure_label_width(play_buf);
+                    let line_h = fonts::ui_size() * 1.4;
+                    let cx = play.x + (play.w - label_w) / 2.0;
+                    let cy = play.y + (play.h - line_h) / 2.0;
+                    text_areas.push(TextArea {
+                        buffer: play_buf,
+                        left: cx,
+                        top: cy,
+                        scale: 1.0,
+                        bounds,
+                        default_color: t.text_primary.to_glyphon(),
+                        custom_glyphs: &[],
+                    });
+                }
+            }
+
+            // Copy button label (⎘)
+            {
+                let cb = &cl.copy_button;
+                let cb_clip_top = (cb.y as i32).max(pane_top);
+                let cb_clip_bottom = ((cb.y + cb.h) as i32).min(pane_bottom);
+                if cb_clip_top < cb_clip_bottom {
+                    let mut bounds = TextBounds {
+                        left: cb.x as i32,
+                        top: cb_clip_top,
+                        right: (cb.x + cb.w) as i32,
+                        bottom: cb_clip_bottom,
+                    };
+                    let visible = dd_clip
+                        .as_ref()
+                        .map_or(true, |dd| clip_bounds_under_dropdown(&mut bounds, dd));
+
+                    if visible {
+                        let label_w = Self::measure_label_width(&self.cell_copy_label);
+                        let line_h = fonts::ui_size() * 1.4;
+                        let cx = cb.x + (cb.w - label_w) / 2.0;
+                        let cy = cb.y + (cb.h - line_h) / 2.0;
+                        text_areas.push(TextArea {
+                            buffer: &self.cell_copy_label,
+                            left: cx,
+                            top: cy,
+                            scale: 1.0,
+                            bounds,
+                            default_color: t.text_muted.to_glyphon(),
+                            custom_glyphs: &[],
+                        });
+                    }
+                }
             }
 
             // Delete button label (×)
@@ -1360,46 +1520,99 @@ impl Renderer {
             let del_clip_top = (del.y as i32).max(pane_top);
             let del_clip_bottom = ((del.y + del.h) as i32).min(pane_bottom);
             if del_clip_top < del_clip_bottom {
-                let label_w = Self::measure_label_width(&self.cell_delete_label);
-                let line_h = fonts::ui_size() * 1.4;
-                let cx = del.x + (del.w - label_w) / 2.0;
-                let cy = del.y + (del.h - line_h) / 2.0;
-                text_areas.push(TextArea {
-                    buffer: &self.cell_delete_label,
-                    left: cx,
-                    top: cy,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: del.x as i32,
-                        top: del_clip_top,
-                        right: (del.x + del.w) as i32,
-                        bottom: del_clip_bottom,
-                    },
-                    default_color: colors::TEXT_MUTED.to_glyphon(),
-                    custom_glyphs: &[],
-                });
+                let mut bounds = TextBounds {
+                    left: del.x as i32,
+                    top: del_clip_top,
+                    right: (del.x + del.w) as i32,
+                    bottom: del_clip_bottom,
+                };
+                let visible = dd_clip
+                    .as_ref()
+                    .map_or(true, |dd| clip_bounds_under_dropdown(&mut bounds, dd));
+
+                if visible {
+                    let label_w = Self::measure_label_width(&self.cell_delete_label);
+                    let line_h = fonts::ui_size() * 1.4;
+                    let cx = del.x + (del.w - label_w) / 2.0;
+                    let cy = del.y + (del.h - line_h) / 2.0;
+                    text_areas.push(TextArea {
+                        buffer: &self.cell_delete_label,
+                        left: cx,
+                        top: cy,
+                        scale: 1.0,
+                        bounds,
+                        default_color: t.text_muted.to_glyphon(),
+                        custom_glyphs: &[],
+                    });
+                }
             }
         }
 
-        // Add cell button label
+        // Tooltip for play/stop button hover
+        for (i, cl) in self.cell_layouts.iter().enumerate() {
+            if !matches!(hover, HoverTarget::CellPlayButton(idx) if idx == i) {
+                continue;
+            }
+            // Position tooltip below the play button
+            let tip_w = Self::measure_label_width(&self.tooltip_label) + spacing::SM * 2.0;
+            let tip_h = fonts::small_size() * 1.4 + spacing::XS * 2.0;
+            let tip_x = cl.play_button.x + cl.play_button.w / 2.0 - tip_w / 2.0;
+            let tip_y = cl.play_button.y + cl.play_button.h + spacing::XS;
+            let tip_rect = Rect { x: tip_x, y: tip_y, w: tip_w, h: tip_h };
+
+            // Tooltip background + border
+            ui_rects.push(rect_rounded(
+                Rect { x: tip_rect.x - 1.0, y: tip_rect.y - 1.0, w: tip_rect.w + 2.0, h: tip_rect.h + 2.0 },
+                t.tooltip_border,
+                4.0 * fonts::scale(),
+            ));
+            ui_rects.push(rect_rounded(tip_rect, t.tooltip_bg, 4.0 * fonts::scale()));
+
+            // Tooltip text
+            text_areas.push(TextArea {
+                buffer: &self.tooltip_label,
+                left: tip_rect.x + spacing::SM,
+                top: tip_rect.y + spacing::XS,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: tip_rect.x as i32,
+                    top: tip_rect.y as i32,
+                    right: (tip_rect.x + tip_rect.w) as i32,
+                    bottom: (tip_rect.y + tip_rect.h) as i32,
+                },
+                default_color: t.text_primary.to_glyphon(),
+                custom_glyphs: &[],
+            });
+        }
+
+        // Add cell button label (centered "+" icon)
         if self.add_cell_rect.y + self.add_cell_rect.h > lp.y
             && self.add_cell_rect.y < lp.y + lp.h
         {
             let clip_top = (self.add_cell_rect.y as i32).max(pane_top);
             let clip_bottom = ((self.add_cell_rect.y + self.add_cell_rect.h) as i32).min(pane_bottom);
-            if clip_top < clip_bottom {
+            let mut bounds = TextBounds {
+                left: self.add_cell_rect.x as i32,
+                top: clip_top,
+                right: (self.add_cell_rect.x + self.add_cell_rect.w) as i32,
+                bottom: clip_bottom,
+            };
+            let visible = dd_clip
+                .as_ref()
+                .map_or(true, |dd| clip_bounds_under_dropdown(&mut bounds, dd));
+
+            if visible && bounds.top < bounds.bottom {
+                let label_w = Self::measure_label_width(&self.add_cell_label);
+                let line_h = fonts::ui_size() * 1.4;
+                let cx = self.add_cell_rect.x + (self.add_cell_rect.w - label_w) / 2.0;
+                let cy = self.add_cell_rect.y + (self.add_cell_rect.h - line_h) / 2.0;
                 text_areas.push(TextArea {
                     buffer: &self.add_cell_label,
-                    left: self.add_cell_rect.x + spacing::MD,
-                    top: self.add_cell_rect.y + spacing::XS,
+                    left: cx,
+                    top: cy,
                     scale: 1.0,
-                    bounds: TextBounds {
-                        left: self.add_cell_rect.x as i32,
-                        top: clip_top,
-                        right: (self.add_cell_rect.x + self.add_cell_rect.w) as i32,
-                        bottom: clip_bottom,
-                    },
-                    default_color: colors::TEXT_MUTED.to_glyphon(),
+                    bounds,
+                    default_color: t.text_muted.to_glyphon(),
                     custom_glyphs: &[],
                 });
             }
@@ -1423,7 +1636,7 @@ impl Renderer {
                     right: menu_right as i32,
                     bottom: (rect.y + rect.h) as i32,
                 },
-                default_color: colors::TEXT_PRIMARY.to_glyphon(),
+                default_color: t.text_primary.to_glyphon(),
                 custom_glyphs: &[],
             });
         }
@@ -1449,7 +1662,7 @@ impl Renderer {
                     right: (rect.x + rect.w) as i32,
                     bottom: (rect.y + rect.h) as i32,
                 },
-                default_color: colors::TEXT_PRIMARY.to_glyphon(),
+                default_color: t.text_primary.to_glyphon(),
                 custom_glyphs: &[],
             });
         }
@@ -1480,7 +1693,7 @@ impl Renderer {
                 top: tab_rect.y + spacing::SM,
                 scale: 1.0,
                 bounds,
-                default_color: colors::TEXT_PRIMARY.to_glyphon(),
+                default_color: t.text_primary.to_glyphon(),
                 custom_glyphs: &[],
             });
         }
@@ -1502,7 +1715,7 @@ impl Renderer {
                     top: dot_y,
                     scale: 1.0,
                     bounds,
-                    default_color: colors::TEXT_PRIMARY.to_glyphon(),
+                    default_color: t.text_primary.to_glyphon(),
                     custom_glyphs: &[],
                 });
             }
@@ -1532,7 +1745,7 @@ impl Renderer {
                 top: cy,
                 scale: 1.0,
                 bounds,
-                default_color: colors::TEXT_MUTED.to_glyphon(),
+                default_color: t.text_muted.to_glyphon(),
                 custom_glyphs: &[],
             });
         }
@@ -1545,7 +1758,7 @@ impl Renderer {
                 top: self.plus_rect.y + spacing::SM,
                 scale: 1.0,
                 bounds,
-                default_color: colors::TEXT_MUTED.to_glyphon(),
+                default_color: t.text_muted.to_glyphon(),
                 custom_glyphs: &[],
             });
         }
@@ -1574,7 +1787,7 @@ impl Renderer {
                         right: (rect.x + rect.w) as i32,
                         bottom: (rect.y + rect.h) as i32,
                     },
-                    default_color: colors::TEXT_PRIMARY.to_glyphon(),
+                    default_color: t.text_primary.to_glyphon(),
                     custom_glyphs: &[],
                 });
                 // Shortcut label (right-aligned)
@@ -1590,7 +1803,7 @@ impl Renderer {
                         right: (rect.x + rect.w) as i32,
                         bottom: (rect.y + rect.h) as i32,
                     },
-                    default_color: colors::TEXT_MUTED.to_glyphon(),
+                    default_color: t.text_muted.to_glyphon(),
                     custom_glyphs: &[],
                 });
             }
@@ -1608,27 +1821,11 @@ impl Renderer {
                 right: (layout.status_bar.x + layout.status_bar.w) as i32,
                 bottom: (layout.status_bar.y + layout.status_bar.h) as i32,
             },
-            default_color: colors::TEXT_SECONDARY.to_glyphon(),
+            default_color: t.text_secondary.to_glyphon(),
             custom_glyphs: &[],
         });
 
-        // Graph placeholder (only show when no shaders are active)
-        if !self.shader_pipeline.has_active() {
-            text_areas.push(TextArea {
-                buffer: &self.graph_label,
-                left: layout.right_pane.x + layout.right_pane.w / 2.0 - 20.0,
-                top: layout.right_pane.y + layout.right_pane.h / 2.0 - 10.0,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: layout.right_pane.x as i32,
-                    top: layout.right_pane.y as i32,
-                    right: (layout.right_pane.x + layout.right_pane.w) as i32,
-                    bottom: (layout.right_pane.y + layout.right_pane.h) as i32,
-                },
-                default_color: colors::TEXT_MUTED.to_glyphon(),
-                custom_glyphs: &[],
-            });
-        }
+        // (render area placeholder removed — empty pane is intentional)
 
         // -- Axis overlay computation --
         // Labels are drawn directly on the plot (no reserved margin).
@@ -1637,64 +1834,90 @@ impl Renderer {
 
         let x_range = render_area.axis_x_max - render_area.axis_x_min;
         let y_range = render_area.axis_y_max - render_area.axis_y_min;
-        let (x_ticks, x_step) =
-            compute_nice_ticks(render_area.axis_x_min, render_area.axis_x_max, 8);
-        let (y_ticks, y_step) =
-            compute_nice_ticks(render_area.axis_y_min, render_area.axis_y_max, 6);
 
-        let x_count = x_ticks.len().min(MAX_AXIS_LABELS);
-        let y_count = y_ticks.len().min(MAX_AXIS_LABELS);
+        // Compute max ticks per axis based on pixel density (target ~80px between lines)
+        let min_px_spacing = 80.0_f32;
+        let max_ticks_x = (rp.w / min_px_spacing).max(2.0) as usize;
+        let max_ticks_y = (rp.h / min_px_spacing).max(2.0) as usize;
+
+        // Compute nice step independently, then take the larger so both axes
+        // use the same world-space interval (uniform grid).
+        let x_step = compute_nice_step(x_range, max_ticks_x);
+        let y_step = compute_nice_step(y_range, max_ticks_y);
+        let shared_step = x_step.max(y_step);
+
+        let x_ticks = generate_ticks(render_area.axis_x_min, render_area.axis_x_max, shared_step);
+        let y_ticks = generate_ticks(render_area.axis_y_min, render_area.axis_y_max, shared_step);
+
+        // Subsample ticks evenly when there are more than MAX_AXIS_LABELS,
+        // so labels span the full axis range instead of clustering at one end.
+        let x_label_count = x_ticks.len().min(MAX_AXIS_LABELS);
+        let y_label_count = y_ticks.len().min(MAX_AXIS_LABELS);
+
+        let x_label_indices: Vec<usize> = if x_ticks.len() <= MAX_AXIS_LABELS {
+            (0..x_ticks.len()).collect()
+        } else {
+            (0..x_label_count)
+                .map(|i| i * (x_ticks.len() - 1) / (x_label_count - 1).max(1))
+                .collect()
+        };
+        let y_label_indices: Vec<usize> = if y_ticks.len() <= MAX_AXIS_LABELS {
+            (0..y_ticks.len()).collect()
+        } else {
+            (0..y_label_count)
+                .map(|i| i * (y_ticks.len() - 1) / (y_label_count - 1).max(1))
+                .collect()
+        };
 
         // Update axis label buffer text
-        for i in 0..x_count {
-            let text = format_tick(x_ticks[i], x_step);
-            self.axis_label_buffers[i].set_text(
+        for (buf_i, &tick_i) in x_label_indices.iter().enumerate() {
+            let text = format_tick(x_ticks[tick_i], shared_step);
+            self.axis_label_buffers[buf_i].set_text(
                 &mut self.font_system,
                 &text,
                 Attrs::new().family(Family::Monospace),
                 Shaping::Advanced,
             );
-            self.axis_label_buffers[i].shape_until_scroll(&mut self.font_system, false);
+            self.axis_label_buffers[buf_i].shape_until_scroll(&mut self.font_system, false);
         }
-        for i in 0..y_count {
-            let text = format_tick(y_ticks[i], y_step);
-            self.axis_label_buffers[MAX_AXIS_LABELS + i].set_text(
+        for (buf_i, &tick_i) in y_label_indices.iter().enumerate() {
+            let text = format_tick(y_ticks[tick_i], shared_step);
+            self.axis_label_buffers[MAX_AXIS_LABELS + buf_i].set_text(
                 &mut self.font_system,
                 &text,
                 Attrs::new().family(Family::Monospace),
                 Shaping::Advanced,
             );
-            self.axis_label_buffers[MAX_AXIS_LABELS + i]
+            self.axis_label_buffers[MAX_AXIS_LABELS + buf_i]
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
         // Build axis overlay rects (grid lines + label backing rects)
         let mut axis_rects: Vec<RectInstance> = Vec::new();
         let label_h = fonts::small_size() * 1.4;
-        let label_bg = [0.06, 0.07, 0.09, 0.75_f32]; // semi-transparent dark
 
-        // Grid lines spanning full plot
+        // Grid lines spanning full plot (not limited by MAX_AXIS_LABELS)
         if x_range > f32::EPSILON {
-            for &tick in &x_ticks[..x_count] {
+            for &tick in &x_ticks {
                 let t = (tick - render_area.axis_x_min) / x_range;
                 let sx = rp.x + t * rp.w;
                 if sx >= rp.x && sx <= rp.x + rp.w {
                     axis_rects.push(RectInstance {
                         x: sx, y: rp.y, w: 1.0, h: rp.h,
-                        color: colors::GRAPH_GRID.to_f32_array(),
+                        color: theme::theme().graph_grid.to_f32_array(),
                         corner_radius: 0.0, _padding: [0.0; 3],
                     });
                 }
             }
         }
         if y_range > f32::EPSILON {
-            for &tick in &y_ticks[..y_count] {
+            for &tick in &y_ticks {
                 let t = (tick - render_area.axis_y_min) / y_range;
                 let sy = rp.y + rp.h - t * rp.h;
                 if sy >= rp.y && sy <= rp.y + rp.h {
                     axis_rects.push(RectInstance {
                         x: rp.x, y: sy, w: rp.w, h: 1.0,
-                        color: colors::GRAPH_GRID.to_f32_array(),
+                        color: theme::theme().graph_grid.to_f32_array(),
                         corner_radius: 0.0, _padding: [0.0; 3],
                     });
                 }
@@ -1703,7 +1926,7 @@ impl Renderer {
 
         // Label backing rects + text areas (on-plot, with semi-transparent bg)
         let mut axis_text_areas: Vec<TextArea> = Vec::new();
-        let label_color = colors::AXIS_LABEL.to_glyphon();
+        let label_color = t.axis_label.to_glyphon();
         let rp_bounds = TextBounds {
             left: rp.x as i32,
             top: rp.y as i32,
@@ -1713,21 +1936,14 @@ impl Renderer {
 
         // X axis labels (along bottom edge)
         if x_range > f32::EPSILON {
-            for i in 0..x_count {
-                let t = (x_ticks[i] - render_area.axis_x_min) / x_range;
+            for (buf_i, &tick_i) in x_label_indices.iter().enumerate() {
+                let t = (x_ticks[tick_i] - render_area.axis_x_min) / x_range;
                 let sx = rp.x + t * rp.w;
-                let lw = Self::measure_label_width(&self.axis_label_buffers[i]);
+                let lw = Self::measure_label_width(&self.axis_label_buffers[buf_i]);
                 let lx = (sx - lw / 2.0).max(rp.x + label_pad);
                 let ly = rp.y + rp.h - label_h - label_pad;
-                // Backing rect
-                axis_rects.push(RectInstance {
-                    x: lx - 2.0, y: ly - 1.0,
-                    w: lw + 4.0, h: label_h + 2.0,
-                    color: label_bg,
-                    corner_radius: 2.0, _padding: [0.0; 3],
-                });
                 axis_text_areas.push(TextArea {
-                    buffer: &self.axis_label_buffers[i],
+                    buffer: &self.axis_label_buffers[buf_i],
                     left: lx, top: ly, scale: 1.0,
                     bounds: rp_bounds,
                     default_color: label_color,
@@ -1738,22 +1954,13 @@ impl Renderer {
 
         // Y axis labels (along left edge)
         if y_range > f32::EPSILON {
-            for i in 0..y_count {
-                let t = (y_ticks[i] - render_area.axis_y_min) / y_range;
+            for (buf_i, &tick_i) in y_label_indices.iter().enumerate() {
+                let t = (y_ticks[tick_i] - render_area.axis_y_min) / y_range;
                 let sy = rp.y + rp.h - t * rp.h;
-                let lw =
-                    Self::measure_label_width(&self.axis_label_buffers[MAX_AXIS_LABELS + i]);
                 let lx = rp.x + label_pad;
                 let ly = (sy - label_h / 2.0).max(rp.y + label_pad);
-                // Backing rect
-                axis_rects.push(RectInstance {
-                    x: lx - 2.0, y: ly - 1.0,
-                    w: lw + 4.0, h: label_h + 2.0,
-                    color: label_bg,
-                    corner_radius: 2.0, _padding: [0.0; 3],
-                });
                 axis_text_areas.push(TextArea {
-                    buffer: &self.axis_label_buffers[MAX_AXIS_LABELS + i],
+                    buffer: &self.axis_label_buffers[MAX_AXIS_LABELS + buf_i],
                     left: lx, top: ly, scale: 1.0,
                     bounds: rp_bounds,
                     default_color: label_color,
@@ -1803,7 +2010,7 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: Operations {
-                        load: LoadOp::Clear(colors::BG_PRIMARY.to_wgpu()),
+                        load: LoadOp::Clear(t.bg_primary.to_wgpu()),
                         store: StoreOp::Store,
                     },
                 })],
@@ -1894,6 +2101,97 @@ fn rect_rounded(r: Rect, color: Rgba, radius: f32) -> RectInstance {
 
 fn rects_overlap(a: &Rect, b: &Rect) -> bool {
     a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+}
+
+/// Clip TextBounds so they don't overlap a dropdown that hangs from above.
+/// Returns false if the bounds become empty (fully occluded).
+fn clip_bounds_under_dropdown(bounds: &mut TextBounds, dropdown: &Rect) -> bool {
+    let dd_left = dropdown.x as i32;
+    let dd_right = (dropdown.x + dropdown.w) as i32;
+    let dd_bottom = (dropdown.y + dropdown.h) as i32;
+
+    // No vertical overlap → no clipping needed
+    if bounds.top >= dd_bottom || bounds.bottom <= dropdown.y as i32 {
+        return true;
+    }
+    // No horizontal overlap → no clipping needed
+    if bounds.left >= dd_right || bounds.right <= dd_left {
+        return true;
+    }
+    // There's overlap. Push top below the dropdown.
+    bounds.top = bounds.top.max(dd_bottom);
+    bounds.top < bounds.bottom
+}
+
+/// Split TextBounds into multiple visible regions around a dropdown overlay.
+/// Returns up to 4 regions (above, left-of, right-of, below) so that text
+/// remains visible everywhere except directly behind the dropdown.
+fn clip_bounds_around_dropdown(bounds: &TextBounds, dropdown: &Rect) -> Vec<TextBounds> {
+    let dd_left = dropdown.x as i32;
+    let dd_right = (dropdown.x + dropdown.w) as i32;
+    let dd_top = dropdown.y as i32;
+    let dd_bottom = (dropdown.y + dropdown.h) as i32;
+
+    // No vertical overlap → no clipping needed
+    if bounds.top >= dd_bottom || bounds.bottom <= dd_top {
+        return vec![*bounds];
+    }
+    // No horizontal overlap → no clipping needed
+    if bounds.left >= dd_right || bounds.right <= dd_left {
+        return vec![*bounds];
+    }
+
+    let mut result = Vec::with_capacity(4);
+
+    // Part above dropdown (full width)
+    if bounds.top < dd_top {
+        result.push(TextBounds {
+            left: bounds.left,
+            top: bounds.top,
+            right: bounds.right,
+            bottom: dd_top,
+        });
+    }
+
+    // Part to the left of dropdown (within dropdown's vertical range)
+    if bounds.left < dd_left {
+        let clip_top = bounds.top.max(dd_top);
+        let clip_bottom = bounds.bottom.min(dd_bottom);
+        if clip_top < clip_bottom {
+            result.push(TextBounds {
+                left: bounds.left,
+                top: clip_top,
+                right: dd_left,
+                bottom: clip_bottom,
+            });
+        }
+    }
+
+    // Part to the right of dropdown (within dropdown's vertical range)
+    if bounds.right > dd_right {
+        let clip_top = bounds.top.max(dd_top);
+        let clip_bottom = bounds.bottom.min(dd_bottom);
+        if clip_top < clip_bottom {
+            result.push(TextBounds {
+                left: dd_right,
+                top: clip_top,
+                right: bounds.right,
+                bottom: clip_bottom,
+            });
+        }
+    }
+
+    // Part below dropdown (full width)
+    if bounds.bottom > dd_bottom {
+        result.push(TextBounds {
+            left: bounds.left,
+            top: dd_bottom,
+            right: bounds.right,
+            bottom: bounds.bottom,
+        });
+    }
+
+    result
 }
 
 /// Compute clipped TextBounds for an element in the tab bar, excluding the dropdown area.
