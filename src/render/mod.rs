@@ -612,8 +612,12 @@ impl Renderer {
             self.cell_buffers[i].shape_until_scroll(&mut self.font_system, false);
 
             // Measure content height
-            let content_h = Self::measure_content_height(&self.cell_buffers[i])
+            let mut content_h = Self::measure_content_height(&self.cell_buffers[i])
                 .max(fonts::editor_line_height());
+            // Trailing newline creates an empty line that layout_runs() doesn't report
+            if cell_info.text.ends_with('\n') {
+                content_h += fonts::editor_line_height();
+            }
             let editor_h = content_h + text_pad * 2.0;
 
             let container_h = container_pad + header_h + sep_h + editor_h + container_pad;
@@ -632,22 +636,25 @@ impl Renderer {
                 w: effective_width - container_pad * 2.0,
                 h: header_h,
             };
+            // Center buttons between cell top edge and separator line
+            let btn_y = container.y + (container_pad + header_h - CELL_DELETE_SIZE) / 2.0;
             let play_button = Rect {
                 x: header.x,
-                y: header.y + (header_h - CELL_DELETE_SIZE) / 2.0,
+                y: btn_y,
                 w: CELL_DELETE_SIZE,
                 h: CELL_DELETE_SIZE,
             };
             let delete_button = Rect {
                 x: header.x + header.w - CELL_DELETE_SIZE,
-                y: header.y + (header_h - CELL_DELETE_SIZE) / 2.0,
+                y: btn_y,
                 w: CELL_DELETE_SIZE,
                 h: CELL_DELETE_SIZE,
             };
+            // Separator spans full cell width
             let separator = Rect {
-                x: container.x + container_pad,
+                x: container.x,
                 y: header.y + header_h,
-                w: effective_width - container_pad * 2.0,
+                w: container.w,
                 h: sep_h,
             };
             let editor = Rect {
@@ -1077,11 +1084,6 @@ impl Renderer {
 
             // Cell container background
             ui_rects.push(rect_rounded(cl.container, colors::BG_ELEVATED, cell_radius));
-
-            // Header background (slightly different shade for active)
-            if i == self.active_cell_index {
-                ui_rects.push(rect_from(cl.header, colors::BG_SECONDARY));
-            }
 
             // Play/Stop button background
             {
