@@ -23,11 +23,12 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
     let expr = find_result_expr(ast)?;
 
     let is_bool = returns_bool(expr);
+    let is_vec = ctx.result_is_vec(expr);
 
-    // Check for top-level for loops
+    // Check for top-level loops (for or while)
     let top_has_loops = match ast {
-        AstNode::Block(stmts) => stmts.iter().any(|s| matches!(s, AstNode::ForLoop { .. })),
-        AstNode::ForLoop { .. } => true,
+        AstNode::Block(stmts) => stmts.iter().any(|s| matches!(s, AstNode::ForLoop { .. } | AstNode::WhileLoop { .. })),
+        AstNode::ForLoop { .. } | AstNode::WhileLoop { .. } => true,
         _ => false,
     };
 
@@ -37,6 +38,22 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
     // Uniform struct
     shader.push_str(UNIFORM_STRUCT);
     shader.push('\n');
+
+    // Emit constant bindings at module level (accessible from user functions).
+    // Non-constant bindings stay in fs_main.
+    let mut module_binding_names: HashSet<String> = HashSet::new();
+    let mut fs_main_bindings = Vec::new();
+    for binding in &ctx.bindings {
+        if is_constant_expr(&binding.expr) {
+            shader.push_str(&format!("const {} = {};\n", binding.name, binding.expr));
+            module_binding_names.insert(binding.name.clone());
+        } else {
+            fs_main_bindings.push(binding);
+        }
+    }
+    if !module_binding_names.is_empty() {
+        shader.push('\n');
+    }
 
     // Emit user-defined helper functions
     for func in &ctx.functions {
@@ -50,7 +67,7 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
     shader.push_str("    let world = mix(u.axis_min, u.axis_max, uv);\n");
     shader.push_str("    let x = world.x;\n");
     shader.push_str("    let y = world.y;\n");
-    shader.push_str("    let time = u.time;\n");
+    // Note: time is accessed via u.time directly (works in both fs_main and user functions)
 
     if top_has_loops {
         // Imperative emission for top-level code with loops
@@ -61,17 +78,25 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
         let mut declared: HashSet<String> = HashSet::new();
         declared.insert("x".to_string());
         declared.insert("y".to_string());
-        declared.insert("time".to_string());
+        // Module-level consts are already in scope
+        for name in &module_binding_names {
+            declared.insert(name.clone());
+        }
         let imperative_code = ctx.emit_imperative_stmts(top_stmts, "    ", &mut declared)?;
         shader.push_str(&imperative_code);
     } else {
-        // Emit bindings as immutable let
-        for binding in &ctx.bindings {
+        // Emit non-constant bindings as immutable let inside fs_main
+        for binding in &fs_main_bindings {
             shader.push_str(&format!("    let {} = {};\n", binding.name, binding.expr));
         }
     }
 
-    if is_bool {
+    if is_vec {
+        // Vec4 color output: use the result directly as RGBA color
+        let expr_code = ctx.emit_expr(expr)?;
+        shader.push_str(&format!("    let _result = {};\n", expr_code));
+        shader.push_str("    return _result;\n");
+    } else if is_bool {
         // Boolean expressions: use corner-checking for pixel-perfect curve rendering.
         // Compute pixel size in world coordinates, then evaluate at 4 corners.
         shader.push_str("    let pixel_size = (u.axis_max - u.axis_min) / u.resolution;\n");
@@ -85,15 +110,14 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
         let corner_code = ctx.emit_bool_with_corners(expr)?;
         shader.push_str(&format!("    let _result = {};\n", corner_code));
         shader.push_str("    let c = select(0.0, 1.0, _result);\n");
+        shader.push_str("    return vec4<f32>(u.primary_color.rgb * c, c);\n");
     } else {
         // Numeric expressions: clamp to [0, 1] grayscale
         let expr_code = ctx.emit_expr(expr)?;
         shader.push_str(&format!("    let _result = {};\n", expr_code));
         shader.push_str("    let c = clamp(_result, 0.0, 1.0);\n");
+        shader.push_str("    return vec4<f32>(u.primary_color.rgb * c, c);\n");
     }
-    // Output primary_color where drawn (c>0), transparent black where not.
-    // Uses premultiplied alpha so multiple cells overlay correctly.
-    shader.push_str("    return vec4<f32>(u.primary_color.rgb * c, c);\n");
     shader.push_str("}\n");
 
     Ok(shader)
@@ -135,6 +159,10 @@ struct EmittedFunction {
 struct GenContext {
     functions: Vec<EmittedFunction>,
     bindings: Vec<EmittedBinding>,
+    /// Names of user-defined functions that return vec types (not f32).
+    vec_functions: HashSet<String>,
+    /// For hoisted nested functions: maps function name → extra captured variables to pass.
+    captured_vars: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// Optional x/y substitution for corner-checking.
@@ -146,39 +174,98 @@ impl GenContext {
         Self {
             functions: Vec::new(),
             bindings: Vec::new(),
+            vec_functions: HashSet::new(),
+            captured_vars: std::collections::HashMap::new(),
         }
     }
 
     /// Walk the AST to collect function definitions and bindings.
     fn collect_functions(&mut self, ast: &AstNode) {
+        self.collect_functions_with_scope(ast, &[]);
+    }
+
+    /// Collect functions with the enclosing scope's binding names.
+    /// `scope_bindings` are variable names available from the enclosing scope
+    /// (used to detect captured variables for nested function hoisting).
+    fn collect_functions_with_scope(&mut self, ast: &AstNode, scope_bindings: &[String]) {
         match ast {
             AstNode::Block(stmts) => {
                 for stmt in stmts {
-                    self.collect_functions(stmt);
+                    self.collect_functions_with_scope(stmt, scope_bindings);
                 }
             }
             AstNode::FunctionDef { name, params, body } => {
-                let param_list: Vec<String> = params
+                // Collect nested function defs from the body first
+                // Build the scope for nested functions: parent scope + this function's params + body bindings
+                let mut inner_scope: Vec<String> = scope_bindings.to_vec();
+                inner_scope.extend(params.iter().cloned());
+                if let AstNode::Block(stmts) = body.as_ref() {
+                    // Add binding names from the body to the inner scope
+                    for stmt in stmts {
+                        match stmt {
+                            AstNode::Binding { name, .. } => inner_scope.push(name.clone()),
+                            AstNode::TupleBinding { names, .. } => inner_scope.extend(names.iter().cloned()),
+                            _ => {}
+                        }
+                    }
+                    // Recurse to collect nested function definitions
+                    for stmt in stmts {
+                        if let AstNode::FunctionDef { .. } = stmt {
+                            self.collect_functions_with_scope(stmt, &inner_scope);
+                        }
+                    }
+                }
+
+                // Determine captured variables (scope bindings referenced in body, not in params)
+                let mut captured = Vec::new();
+                if !scope_bindings.is_empty() {
+                    let param_set: HashSet<&str> = params.iter().map(|s| s.as_str()).collect();
+                    let referenced = find_referenced_identifiers(body);
+                    for var in scope_bindings {
+                        if referenced.contains(var.as_str()) && !param_set.contains(var.as_str()) {
+                            captured.push(var.clone());
+                        }
+                    }
+                }
+
+                // Build parameter list including captured variables
+                let mut all_params: Vec<String> = params
                     .iter()
                     .map(|p| format!("{}: f32", p))
                     .collect();
+                for cap in &captured {
+                    all_params.push(format!("{}: f32", cap));
+                }
+
+                if !captured.is_empty() {
+                    self.captured_vars.insert(name.clone(), captured);
+                }
+
+                // Check if function body returns a tuple/vec (for vec4 color output)
+                let returns_vec = body_returns_tuple(body);
 
                 // Check if the body is a block with bindings or loops
-                // (needs imperative emission instead of single-expression return)
                 let needs_imperative = match body.as_ref() {
                     AstNode::Block(stmts) => stmts.iter().any(|s| {
-                        matches!(s, AstNode::Binding { .. } | AstNode::ForLoop { .. })
+                        matches!(s, AstNode::Binding { .. } | AstNode::ForLoop { .. }
+                            | AstNode::WhileLoop { .. } | AstNode::TupleBinding { .. })
                     }),
                     _ => false,
                 };
+
+                let ret_type = if returns_vec { "vec4<f32>" } else { "f32" };
+                if returns_vec {
+                    self.vec_functions.insert(name.clone());
+                }
 
                 if needs_imperative {
                     if let AstNode::Block(stmts) = body.as_ref() {
                         if let Ok(body_wgsl) = self.emit_function_body(stmts) {
                             let wgsl_code = format!(
-                                "fn {}({}) -> f32 {{\n{}}}\n",
+                                "fn {}({}) -> {} {{\n{}}}\n",
                                 name,
-                                param_list.join(", "),
+                                all_params.join(", "),
+                                ret_type,
                                 body_wgsl,
                             );
                             self.functions.push(EmittedFunction {
@@ -189,9 +276,10 @@ impl GenContext {
                     }
                 } else if let Ok(body_code) = self.emit_expr(body) {
                     let wgsl_code = format!(
-                        "fn {}({}) -> f32 {{\n    return {};\n}}\n",
+                        "fn {}({}) -> {} {{\n    return {};\n}}\n",
                         name,
-                        param_list.join(", "),
+                        all_params.join(", "),
+                        ret_type,
                         body_code,
                     );
                     self.functions.push(EmittedFunction {
@@ -208,14 +296,29 @@ impl GenContext {
                     });
                 }
             }
+            AstNode::TupleBinding { names, value } => {
+                // For tuple bindings at top level, emit individual bindings
+                if let AstNode::Tuple(items) = value.as_ref() {
+                    for (i, name) in names.iter().enumerate() {
+                        if let Some(item) = items.get(i) {
+                            if let Ok(expr_code) = self.emit_expr(item) {
+                                self.bindings.push(EmittedBinding {
+                                    name: name.clone(),
+                                    expr: expr_code,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
 
-    /// Emit a function body that contains bindings and/or for loops.
+    /// Emit a function body that contains bindings and/or loops.
     /// Returns the WGSL body code including the final `return` statement.
     fn emit_function_body(&self, stmts: &[AstNode]) -> Result<String, String> {
-        let has_loops = stmts.iter().any(|s| matches!(s, AstNode::ForLoop { .. }));
+        let has_loops = stmts.iter().any(|s| matches!(s, AstNode::ForLoop { .. } | AstNode::WhileLoop { .. }));
         let var_keyword = if has_loops { "var" } else { "let" };
         let mut code = String::new();
         let mut declared: HashSet<String> = HashSet::new();
@@ -231,6 +334,9 @@ impl GenContext {
                         code += &format!("    {} {} = {};\n", var_keyword, name, val);
                         declared.insert(name.clone());
                     }
+                }
+                AstNode::TupleBinding { names, value } => {
+                    self.emit_tuple_binding(&mut code, names, value, "    ", var_keyword, &mut declared)?;
                 }
                 AstNode::ForLoop { init, condition, update, body } => {
                     // Emit init binding
@@ -259,6 +365,22 @@ impl GenContext {
                     }
                     code += "    }\n";
                 }
+                AstNode::WhileLoop { condition, body } => {
+                    // Extract inline bindings from the condition (e.g. sq: expr inside block)
+                    self.emit_while_condition_bindings(&mut code, condition, "    ", &mut declared)?;
+                    // Emit loop with iteration guard
+                    let cond = self.emit_expr(condition)?;
+                    code += &format!(
+                        "    for (var _loop_guard: u32 = 0u; _loop_guard < {}u; _loop_guard = _loop_guard + 1u) {{\n",
+                        MAX_LOOP_ITERATIONS
+                    );
+                    // Re-emit condition bindings at the top of each iteration
+                    self.emit_while_condition_bindings_inner(&mut code, condition, "        ", &mut declared)?;
+                    code += &format!("        if (!({cond})) {{ break; }}\n");
+                    // Emit body
+                    self.emit_loop_body_stmts(&mut code, body, &mut declared)?;
+                    code += "    }\n";
+                }
                 AstNode::FunctionDef { .. } => {} // Skip nested function defs
                 _ => {
                     result_expr = self.emit_expr(stmt)?;
@@ -270,7 +392,7 @@ impl GenContext {
         Ok(code)
     }
 
-    /// Emit statements inside a for loop body.
+    /// Emit statements inside a loop body.
     fn emit_loop_body_stmts(
         &self,
         code: &mut String,
@@ -290,6 +412,9 @@ impl GenContext {
                                 declared.insert(name.clone());
                             }
                         }
+                        AstNode::TupleBinding { names, value } => {
+                            self.emit_tuple_binding(code, names, value, "        ", "var", declared)?;
+                        }
                         _ => {} // Non-binding expressions in loop body (side-effect free, skip)
                     }
                 }
@@ -308,7 +433,113 @@ impl GenContext {
         Ok(())
     }
 
-    /// Emit top-level statements imperatively (for blocks with for loops).
+    /// Check if an expression produces a vec type (for shader output detection).
+    fn result_is_vec(&self, node: &AstNode) -> bool {
+        match node {
+            AstNode::Tuple(items) => items.len() >= 2,
+            AstNode::Apply { name, .. } => self.vec_functions.contains(name),
+            AstNode::IfExpr { then_branch, else_branch, .. } => {
+                self.result_is_vec(then_branch)
+                    || else_branch.as_ref().map_or(false, |e| self.result_is_vec(e))
+            }
+            AstNode::Block(stmts) => {
+                stmts.last().map_or(false, |s| self.result_is_vec(s))
+            }
+            _ => false,
+        }
+    }
+
+    /// Emit a tuple destructuring binding as individual var/let declarations.
+    fn emit_tuple_binding(
+        &self,
+        code: &mut String,
+        names: &[String],
+        value: &AstNode,
+        indent: &str,
+        var_keyword: &str,
+        declared: &mut HashSet<String>,
+    ) -> Result<(), String> {
+        if let AstNode::Tuple(items) = value {
+            for (i, name) in names.iter().enumerate() {
+                if let Some(item) = items.get(i) {
+                    let val = self.emit_expr(item)?;
+                    if declared.contains(name.as_str()) {
+                        *code += &format!("{}{} = {};\n", indent, name, val);
+                    } else {
+                        *code += &format!("{}{} {} = {};\n", indent, var_keyword, name, val);
+                        declared.insert(name.clone());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Walk a while-loop condition to find Block nodes with bindings.
+    /// Declare those variables with `var` before the loop starts (initial values).
+    fn emit_while_condition_bindings(
+        &self,
+        code: &mut String,
+        condition: &AstNode,
+        indent: &str,
+        declared: &mut HashSet<String>,
+    ) -> Result<(), String> {
+        match condition {
+            AstNode::Block(stmts) => {
+                for stmt in stmts {
+                    if let AstNode::Binding { name, value } = stmt {
+                        let val = self.emit_expr(value)?;
+                        if !declared.contains(name.as_str()) {
+                            *code += &format!("{}var {} = {};\n", indent, name, val);
+                            declared.insert(name.clone());
+                        }
+                    }
+                }
+            }
+            AstNode::Apply { args, .. } => {
+                for arg in args {
+                    self.emit_while_condition_bindings(code, arg, indent, declared)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Emit bindings found inside a while condition at the top of each loop iteration.
+    /// These update the mutable variables each time the condition is re-evaluated.
+    fn emit_while_condition_bindings_inner(
+        &self,
+        code: &mut String,
+        condition: &AstNode,
+        indent: &str,
+        declared: &mut HashSet<String>,
+    ) -> Result<(), String> {
+        match condition {
+            AstNode::Block(stmts) => {
+                for stmt in stmts {
+                    if let AstNode::Binding { name, value } = stmt {
+                        let val = self.emit_expr(value)?;
+                        if declared.contains(name.as_str()) {
+                            *code += &format!("{}{} = {};\n", indent, name, val);
+                        } else {
+                            *code += &format!("{}var {} = {};\n", indent, name, val);
+                            declared.insert(name.clone());
+                        }
+                    }
+                }
+            }
+            AstNode::Apply { args, .. } => {
+                for arg in args {
+                    self.emit_while_condition_bindings_inner(code, arg, indent, declared)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Emit top-level statements imperatively (for blocks with loops).
     /// Only emits bindings and loops; skips FunctionDefs and result expressions.
     fn emit_imperative_stmts(
         &self,
@@ -328,6 +559,9 @@ impl GenContext {
                         code += &format!("{}var {} = {};\n", indent, name, val);
                         declared.insert(name.clone());
                     }
+                }
+                AstNode::TupleBinding { names, value } => {
+                    self.emit_tuple_binding(&mut code, names, value, indent, "var", declared)?;
                 }
                 AstNode::ForLoop { init, condition, update, body } => {
                     if let AstNode::Binding { name, value } = init.as_ref() {
@@ -350,6 +584,20 @@ impl GenContext {
                         let val = self.emit_expr(value)?;
                         code += &format!("{}    {} = {};\n", indent, name, val);
                     }
+                    code += &format!("{}}}\n", indent);
+                }
+                AstNode::WhileLoop { condition, body } => {
+                    // Pre-declare condition bindings
+                    self.emit_while_condition_bindings(&mut code, condition, indent, declared)?;
+                    let cond = self.emit_expr(condition)?;
+                    code += &format!(
+                        "{}for (var _loop_guard: u32 = 0u; _loop_guard < {}u; _loop_guard = _loop_guard + 1u) {{\n",
+                        indent, MAX_LOOP_ITERATIONS
+                    );
+                    let inner_indent = format!("{}    ", indent);
+                    self.emit_while_condition_bindings_inner(&mut code, condition, &inner_indent, declared)?;
+                    code += &format!("{}    if (!({cond})) {{ break; }}\n", indent);
+                    self.emit_loop_body_stmts(&mut code, body, declared)?;
                     code += &format!("{}}}\n", indent);
                 }
                 AstNode::FunctionDef { .. } => {} // Already collected
@@ -390,6 +638,10 @@ impl GenContext {
                         return Ok(y_var.to_string());
                     }
                 }
+                // Map time/time_s → u.time (accessible in user functions too)
+                if name == "time_s" || name == "time" {
+                    return Ok("u.time".to_string());
+                }
                 Ok(name.clone())
             }
             AstNode::Apply { name, args } => self.emit_apply_internal(name, args, subst),
@@ -424,6 +676,24 @@ impl GenContext {
             }
             AstNode::FunctionDef { .. } => Ok("0.0".to_string()),
             AstNode::ForLoop { .. } => Ok("0.0".to_string()), // Loops emitted imperatively, not as expressions
+            AstNode::WhileLoop { .. } => Ok("0.0".to_string()), // Loops emitted imperatively
+            AstNode::PropertyAccess { object, property } => {
+                // Map x.min → u.axis_min.x, x.max → u.axis_max.x, etc.
+                if let AstNode::Identifier(ref base) = **object {
+                    match (base.as_str(), property.as_str()) {
+                        ("x", "min") => return Ok("u.axis_min.x".to_string()),
+                        ("x", "max") => return Ok("u.axis_max.x".to_string()),
+                        ("x", "res") => return Ok("u.resolution.x".to_string()),
+                        ("y", "min") => return Ok("u.axis_min.y".to_string()),
+                        ("y", "max") => return Ok("u.axis_max.y".to_string()),
+                        ("y", "res") => return Ok("u.resolution.y".to_string()),
+                        _ => {}
+                    }
+                }
+                let obj = self.emit_expr_internal(object, subst)?;
+                Ok(format!("{}.{}", obj, property))
+            }
+            AstNode::TupleBinding { .. } => Ok("0.0".to_string()), // Emitted imperatively
         }
     }
 
@@ -519,8 +789,16 @@ impl GenContext {
             ("vec3", n) if n >= 1 => Ok(format!("vec3<f32>({})", emitted.join(", "))),
             ("vec4", n) if n >= 1 => Ok(format!("vec4<f32>({})", emitted.join(", "))),
 
-            // User-defined functions: emit as regular call
-            _ => Ok(format!("{}({})", name, emitted.join(", "))),
+            // User-defined functions: emit as regular call, appending captured vars if any
+            _ => {
+                let mut all_args = emitted;
+                if let Some(captured) = self.captured_vars.get(name) {
+                    for cap in captured {
+                        all_args.push(cap.clone());
+                    }
+                }
+                Ok(format!("{}({})", name, all_args.join(", ")))
+            }
         }
     }
 
@@ -631,6 +909,80 @@ impl GenContext {
     }
 }
 
+/// Find all identifiers referenced in an AST node (for captured variable analysis).
+fn find_referenced_identifiers(node: &AstNode) -> HashSet<String> {
+    let mut result = HashSet::new();
+    collect_identifiers(node, &mut result);
+    result
+}
+
+fn collect_identifiers(node: &AstNode, result: &mut HashSet<String>) {
+    match node {
+        AstNode::Identifier(name) => { result.insert(name.clone()); }
+        AstNode::Apply { args, .. } => {
+            for arg in args { collect_identifiers(arg, result); }
+        }
+        AstNode::Block(stmts) => {
+            for s in stmts { collect_identifiers(s, result); }
+        }
+        AstNode::Binding { value, .. } => { collect_identifiers(value, result); }
+        AstNode::TupleBinding { value, .. } => { collect_identifiers(value, result); }
+        AstNode::Tuple(items) => {
+            for item in items { collect_identifiers(item, result); }
+        }
+        AstNode::IfExpr { condition, then_branch, else_branch } => {
+            collect_identifiers(condition, result);
+            collect_identifiers(then_branch, result);
+            if let Some(eb) = else_branch { collect_identifiers(eb, result); }
+        }
+        AstNode::ForLoop { init, condition, update, body } => {
+            collect_identifiers(init, result);
+            collect_identifiers(condition, result);
+            collect_identifiers(update, result);
+            collect_identifiers(body, result);
+        }
+        AstNode::WhileLoop { condition, body } => {
+            collect_identifiers(condition, result);
+            collect_identifiers(body, result);
+        }
+        AstNode::FunctionDef { body, .. } => { collect_identifiers(body, result); }
+        AstNode::PropertyAccess { object, .. } => { collect_identifiers(object, result); }
+        AstNode::Number(_) | AstNode::BoolLit(_) => {}
+    }
+}
+
+/// Check if a WGSL expression string is a simple constant (can be used with `const`).
+fn is_constant_expr(expr: &str) -> bool {
+    // A constant expr is a simple float literal like "128.0", "4.0", "0.2"
+    expr.parse::<f64>().is_ok()
+}
+
+/// Check if a function body's result expression is a tuple (for vec return type).
+/// This is a conservative check — it only detects direct tuple literals and
+/// if/else branches that contain tuple literals.
+fn body_returns_tuple(body: &AstNode) -> bool {
+    match body {
+        AstNode::Tuple(items) => items.len() >= 2,
+        AstNode::Block(stmts) => {
+            // Check the last non-binding statement
+            for stmt in stmts.iter().rev() {
+                match stmt {
+                    AstNode::Binding { .. } | AstNode::FunctionDef { .. }
+                    | AstNode::ForLoop { .. } | AstNode::WhileLoop { .. }
+                    | AstNode::TupleBinding { .. } => continue,
+                    other => return body_returns_tuple(other),
+                }
+            }
+            false
+        }
+        AstNode::IfExpr { then_branch, else_branch, .. } => {
+            body_returns_tuple(then_branch)
+                || else_branch.as_ref().map_or(false, |e| body_returns_tuple(e))
+        }
+        _ => false,
+    }
+}
+
 /// Check if an AST node produces a boolean value in WGSL.
 ///
 /// Comparisons, logical ops, and boolean literals produce `bool` in WGSL,
@@ -647,13 +999,15 @@ fn returns_bool(node: &AstNode) -> bool {
     }
 }
 
-/// Find the result expression in the AST (last non-binding, non-function-def, non-for-loop node).
+/// Find the result expression in the AST (last non-binding, non-function-def, non-loop node).
 fn find_result_expr(ast: &AstNode) -> Result<&AstNode, String> {
     match ast {
         AstNode::Block(stmts) => {
             for stmt in stmts.iter().rev() {
                 match stmt {
-                    AstNode::Binding { .. } | AstNode::FunctionDef { .. } | AstNode::ForLoop { .. } => continue,
+                    AstNode::Binding { .. } | AstNode::FunctionDef { .. }
+                    | AstNode::ForLoop { .. } | AstNode::WhileLoop { .. }
+                    | AstNode::TupleBinding { .. } => continue,
                     other => return Ok(other),
                 }
             }
@@ -959,5 +1313,114 @@ mod tests {
         assert!(shader.contains("fn F(x: f32) -> f32"), "should define F");
         assert!(shader.contains("_loop_guard"), "should have loop guard in F");
         assert!(shader.contains("x_m"), "result should use corner checking");
+    }
+
+    // --- New feature tests for Mandelbrot support ---
+
+    #[test]
+    fn test_top_level_comma_separators() {
+        let shader = gen("a: 1, b: 2, a + b");
+        // Simple number constants are emitted at module level
+        assert!(shader.contains("const a = 1.0"));
+        assert!(shader.contains("const b = 2.0"));
+        assert!(shader.contains("(a + b)"));
+    }
+
+    #[test]
+    fn test_while_loop_in_function() {
+        let input = "f(n): (i: 0, s: 0, while (i < n) (s: s + i, i: i + 1), s)\nf(x)";
+        let shader = gen(input);
+        assert!(shader.contains("fn f(n: f32) -> f32"), "should define function");
+        assert!(shader.contains("_loop_guard"), "should have loop guard");
+        assert!(shader.contains("return s"), "should return accumulator");
+    }
+
+    #[test]
+    fn test_tuple_destructuring_binding() {
+        let input = "f(a, b): (r: a + b, r * 2)\n(p, q): (1, 2)\nf(p, q)";
+        let result = crate::lang::compile(input);
+        assert!(result.is_ok(), "tuple destructuring should compile: {:?}", result);
+    }
+
+    #[test]
+    fn test_property_access_axis_bounds() {
+        let shader = gen("x.max - x.min");
+        assert!(shader.contains("u.axis_max.x"), "x.max should map to u.axis_max.x");
+        assert!(shader.contains("u.axis_min.x"), "x.min should map to u.axis_min.x");
+    }
+
+    #[test]
+    fn test_property_access_y_axis() {
+        let shader = gen("y.max - y.min");
+        assert!(shader.contains("u.axis_max.y"), "y.max should map to u.axis_max.y");
+        assert!(shader.contains("u.axis_min.y"), "y.min should map to u.axis_min.y");
+    }
+
+    #[test]
+    fn test_time_s_mapped_to_time() {
+        let shader = gen("sin(time_s)");
+        assert!(shader.contains("sin(u.time)"), "time_s should map to u.time");
+        assert!(!shader.contains("time_s"), "time_s should not appear in output");
+    }
+
+    #[test]
+    fn test_function_returning_vec4() {
+        let input = "f(a): (1.0, a, 0.0, 1.0)\nf(x)";
+        let shader = gen(input);
+        assert!(shader.contains("fn f(a: f32) -> vec4<f32>"), "function returning tuple should have vec4 return type");
+    }
+
+    #[test]
+    fn test_mandelbrot_full_program() {
+        let input = r#"BASE_ITER: 128,
+BAILOUT: 4.0,
+MAX_ITER_CAP: 512,
+INITIAL_ZOOM: 0.2,
+ROOT_SAMPLES: 3,
+
+mandelbrot_color(iter, sq): (
+    mu: f32(iter) + 1.0 - log(0.5 * log(sq) / log(2.0)) / log(2.0),
+    base_mod: 0.05 * mu + 0.3 * time_s,
+    hue_mod: 0.1 * mu + time_s,
+    color_base: 0.9 + 0.1 * cos(0.05 * mu + 0.5 * time_s),
+    fade: 0.8 + 0.2 * sin(hue_mod),
+    triwave_channel(offset): (
+        color_base * ((1.0 - fade) + fade * clamp(
+            abs(fract(fract(base_mod) + offset) * 6.0 - 3.0) - 1.0,
+            0.0,
+            1.0
+        ))
+    ),
+    (triwave_channel(0.5), triwave_channel(1.0/3.0), triwave_channel(0.25), 1.0)
+),
+mandelbrot(x, y): (
+    (width_x, width_y): (x.max - x.min, y.max - y.min),
+    effective_zoom: 1.0 / width_y,
+    (c_x, c_y): (x.min + x * width_x, y.min + y * width_y),
+    (z_x, z_y): (0.0, 0.0),
+    sq: 0.0,
+    max_iter: min(BASE_ITER + (40.0 * log(effective_zoom / INITIAL_ZOOM + 1.0)), MAX_ITER_CAP),
+    iter: 0,
+    while (iter < max_iter and (sq: z_x * z_x + z_y * z_y, sq) < BAILOUT) (
+        zy2: z_y * z_y,
+        z_y: 2.0 * z_x * z_y + c_y,
+        z_x: z_x * z_x - zy2 + c_x,
+        iter: iter + 1
+    ),
+    if (iter < max_iter) (
+        mandelbrot_color(iter, sq)
+    ) else (
+        (0.0, 0.0, 0.0, 1.0)
+    )
+),
+
+mandelbrot(x, y)"#;
+        let result = crate::lang::compile(input);
+        assert!(result.is_ok(), "Mandelbrot should compile, got: {:?}", result);
+        let shader = result.unwrap();
+        assert!(shader.contains("fn mandelbrot_color("), "should define mandelbrot_color");
+        assert!(shader.contains("fn mandelbrot("), "should define mandelbrot");
+        assert!(shader.contains("u.axis_min"), "should reference axis bounds");
+        assert!(shader.contains("_loop_guard"), "should have loop guard for while");
     }
 }

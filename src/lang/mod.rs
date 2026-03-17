@@ -79,8 +79,7 @@ mod integration_tests {
     #[test]
     fn test_time_animation() {
         let shader = compile("sin(x + time)").unwrap();
-        assert!(shader.contains("let time = u.time"));
-        assert!(shader.contains("sin((x + time))"));
+        assert!(shader.contains("sin((x + u.time))"));
     }
 
     #[test]
