@@ -161,8 +161,6 @@ struct EmittedBinding {
 }
 
 struct EmittedFunction {
-    #[allow(dead_code)]
-    name: String,
     wgsl_code: String,
 }
 
@@ -279,7 +277,6 @@ impl GenContext {
                                 body_wgsl,
                             );
                             self.functions.push(EmittedFunction {
-                                name: name.clone(),
                                 wgsl_code,
                             });
                         }
@@ -293,7 +290,6 @@ impl GenContext {
                         body_code,
                     );
                     self.functions.push(EmittedFunction {
-                        name: name.clone(),
                         wgsl_code,
                     });
                 }
@@ -705,11 +701,6 @@ impl GenContext {
             }
             AstNode::TupleBinding { .. } => Ok("0.0".to_string()), // Emitted imperatively
         }
-    }
-
-    #[allow(dead_code)]
-    fn emit_apply(&self, name: &str, args: &[AstNode]) -> Result<String, String> {
-        self.emit_apply_internal(name, args, None)
     }
 
     fn emit_apply_internal(

@@ -242,7 +242,6 @@ pub struct Renderer {
 impl Renderer {
     pub async fn new(window: Arc<Window>) -> Self {
         let physical_size = window.inner_size();
-        let scale_factor = window.scale_factor();
 
         let instance = Instance::new(InstanceDescriptor::default());
         let adapter = instance
@@ -284,8 +283,6 @@ impl Renderer {
         let mut atlas = TextAtlas::new(&device, &queue, &cache, swapchain_format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
-
-        let _ = (physical_size.height as f64 * scale_factor) as f32;
 
         // Menu item labels
         let menu_item_labels: Vec<TextBuffer> = app::MENU_NAMES
@@ -643,16 +640,7 @@ impl Renderer {
 
         let delta = self.cell_scroll_y - old_scroll;
         if delta.abs() > 0.001 {
-            // Shift all cell layouts and add-cell button by the scroll delta
-            for cl in &mut self.cell_layouts {
-                cl.container.y -= delta;
-                cl.header.y -= delta;
-                cl.play_button.y -= delta;
-                cl.delete_button.y -= delta;
-                cl.separator.y -= delta;
-                cl.editor.y -= delta;
-            }
-            self.add_cell_rect.y -= delta;
+            shift_cell_layouts(&mut self.cell_layouts, &mut self.add_cell_rect, delta);
         }
 
         self.update_scrollbar_rects(pane);
@@ -674,12 +662,6 @@ impl Renderer {
 
             self.update_scrollbar_rects(pane);
         }
-    }
-
-    /// Returns the cell layouts for hit-testing.
-    #[allow(dead_code)]
-    pub fn cell_layouts(&self) -> &[CellLayout] {
-        &self.cell_layouts
     }
 
     /// Returns the add-cell button rect for hit-testing.
@@ -975,16 +957,7 @@ impl Renderer {
                 // If scroll changed, shift all layouts by the delta
                 let scroll_delta = self.cell_scroll_y - old_scroll;
                 if scroll_delta.abs() > 0.001 {
-                    for layout in layouts.iter_mut() {
-                        layout.container.y -= scroll_delta;
-                        layout.header.y -= scroll_delta;
-                        layout.play_button.y -= scroll_delta;
-                        layout.delete_button.y -= scroll_delta;
-                        layout.separator.y -= scroll_delta;
-                        layout.editor.y -= scroll_delta;
-                        layout.output.y -= scroll_delta;
-                    }
-                    self.add_cell_rect.y -= scroll_delta;
+                    shift_cell_layouts(&mut layouts, &mut self.add_cell_rect, scroll_delta);
                 }
             }
         }
@@ -1135,17 +1108,6 @@ impl Renderer {
         }
 
         rects
-    }
-
-    #[allow(dead_code)]
-    fn measure_content_width(buf: &TextBuffer) -> f32 {
-        let mut max_w = 0.0_f32;
-        for run in buf.layout_runs() {
-            if let Some(last) = run.glyphs.last() {
-                max_w = max_w.max(last.x + last.w);
-            }
-        }
-        max_w
     }
 
     fn measure_content_height(buf: &TextBuffer) -> f32 {
@@ -2007,30 +1969,26 @@ impl Renderer {
             y_step *= 2.0;
         };
 
-        // Every tick gets a label — uniform spacing guaranteed.
-        let x_label_indices: Vec<usize> = (0..x_ticks.len()).collect();
-        let y_label_indices: Vec<usize> = (0..y_ticks.len()).collect();
-
         // Update axis label buffer text
-        for (buf_i, &tick_i) in x_label_indices.iter().enumerate() {
-            let text = format_tick(x_ticks[tick_i], x_step);
-            self.axis_label_buffers[buf_i].set_text(
+        for (i, tick) in x_ticks.iter().enumerate() {
+            let text = format_tick(*tick, x_step);
+            self.axis_label_buffers[i].set_text(
                 &mut self.font_system,
                 &text,
                 Attrs::new().family(Family::Monospace),
                 Shaping::Advanced,
             );
-            self.axis_label_buffers[buf_i].shape_until_scroll(&mut self.font_system, false);
+            self.axis_label_buffers[i].shape_until_scroll(&mut self.font_system, false);
         }
-        for (buf_i, &tick_i) in y_label_indices.iter().enumerate() {
-            let text = format_tick(y_ticks[tick_i], y_step);
-            self.axis_label_buffers[MAX_AXIS_LABELS + buf_i].set_text(
+        for (i, tick) in y_ticks.iter().enumerate() {
+            let text = format_tick(*tick, y_step);
+            self.axis_label_buffers[MAX_AXIS_LABELS + i].set_text(
                 &mut self.font_system,
                 &text,
                 Attrs::new().family(Family::Monospace),
                 Shaping::Advanced,
             );
-            self.axis_label_buffers[MAX_AXIS_LABELS + buf_i]
+            self.axis_label_buffers[MAX_AXIS_LABELS + i]
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
@@ -2038,10 +1996,10 @@ impl Renderer {
         let mut axis_rects: Vec<RectInstance> = Vec::new();
         let label_h = fonts::small_size() * 1.4;
 
-        // Grid lines only at labeled tick positions (every line gets a number)
+        // Grid lines at every tick position
         if x_range > f32::EPSILON {
-            for &tick_i in &x_label_indices {
-                let t = (x_ticks[tick_i] - render_area.axis_x_min) / x_range;
+            for tick in &x_ticks {
+                let t = (tick - render_area.axis_x_min) / x_range;
                 let sx = rp.x + t * rp.w;
                 if sx >= rp.x && sx <= rp.x + rp.w {
                     axis_rects.push(RectInstance {
@@ -2053,8 +2011,8 @@ impl Renderer {
             }
         }
         if y_range > f32::EPSILON {
-            for &tick_i in &y_label_indices {
-                let t = (y_ticks[tick_i] - render_area.axis_y_min) / y_range;
+            for tick in &y_ticks {
+                let t = (tick - render_area.axis_y_min) / y_range;
                 let sy = rp.y + rp.h - t * rp.h;
                 if sy >= rp.y && sy <= rp.y + rp.h {
                     axis_rects.push(RectInstance {
@@ -2078,14 +2036,14 @@ impl Renderer {
 
         // X axis labels (along bottom edge)
         if x_range > f32::EPSILON {
-            for (buf_i, &tick_i) in x_label_indices.iter().enumerate() {
-                let t = (x_ticks[tick_i] - render_area.axis_x_min) / x_range;
+            for (i, tick) in x_ticks.iter().enumerate() {
+                let t = (tick - render_area.axis_x_min) / x_range;
                 let sx = rp.x + t * rp.w;
-                let lw = Self::measure_label_width(&self.axis_label_buffers[buf_i]);
+                let lw = Self::measure_label_width(&self.axis_label_buffers[i]);
                 let lx = (sx - lw / 2.0).max(rp.x + label_pad);
                 let ly = rp.y + rp.h - label_h - label_pad;
                 axis_text_areas.push(TextArea {
-                    buffer: &self.axis_label_buffers[buf_i],
+                    buffer: &self.axis_label_buffers[i],
                     left: lx, top: ly, scale: 1.0,
                     bounds: rp_bounds,
                     default_color: label_color,
@@ -2096,13 +2054,13 @@ impl Renderer {
 
         // Y axis labels (along left edge)
         if y_range > f32::EPSILON {
-            for (buf_i, &tick_i) in y_label_indices.iter().enumerate() {
-                let t = (y_ticks[tick_i] - render_area.axis_y_min) / y_range;
+            for (i, tick) in y_ticks.iter().enumerate() {
+                let t = (tick - render_area.axis_y_min) / y_range;
                 let sy = rp.y + rp.h - t * rp.h;
                 let lx = rp.x + label_pad;
                 let ly = (sy - label_h / 2.0).max(rp.y + label_pad);
                 axis_text_areas.push(TextArea {
-                    buffer: &self.axis_label_buffers[MAX_AXIS_LABELS + buf_i],
+                    buffer: &self.axis_label_buffers[MAX_AXIS_LABELS + i],
                     left: lx, top: ly, scale: 1.0,
                     bounds: rp_bounds,
                     default_color: label_color,
@@ -2227,6 +2185,21 @@ fn rect_from(r: Rect, color: Rgba) -> RectInstance {
         corner_radius: 0.0,
         _padding: [0.0; 3],
     }
+}
+
+/// Shift all cell layout rects and the add-cell button by a scroll delta.
+fn shift_cell_layouts(layouts: &mut [CellLayout], add_cell_rect: &mut Rect, delta: f32) {
+    for cl in layouts.iter_mut() {
+        cl.container.y -= delta;
+        cl.header.y -= delta;
+        cl.play_button.y -= delta;
+        cl.copy_button.y -= delta;
+        cl.delete_button.y -= delta;
+        cl.separator.y -= delta;
+        cl.editor.y -= delta;
+        cl.output.y -= delta;
+    }
+    add_cell_rect.y -= delta;
 }
 
 fn rect_rounded(r: Rect, color: Rgba, radius: f32) -> RectInstance {

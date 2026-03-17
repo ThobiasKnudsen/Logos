@@ -10,10 +10,10 @@ use std::os::raw::c_int;
 
 use super::ffi;
 
-/// Thread-local buffers for CSL I/O callbacks.
-/// CSL communicates via character-at-a-time callbacks. We use thread-local
-/// storage so that the static `extern "C"` callback functions can access
-/// the input/output buffers without any synchronization.
+// Thread-local buffers for CSL I/O callbacks.
+// CSL communicates via character-at-a-time callbacks. We use thread-local
+// storage so that the static `extern "C"` callback functions can access
+// the input/output buffers without any synchronization.
 thread_local! {
     static INPUT_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::new());
     static INPUT_POS: RefCell<usize> = RefCell::new(0);
@@ -144,18 +144,6 @@ impl ReduceSession {
         self.eval(&stmt)
     }
 
-    /// Set a REDUCE switch (e.g., "expandlogs", "factor").
-    pub fn set_switch(&self, name: &str, on: bool) -> Result<(), String> {
-        let c_name = CString::new(name)
-            .map_err(|e| format!("Invalid switch name: {}", e))?;
-        let val = if on { 1 } else { 0 };
-        let rc = unsafe { ffi::PROC_set_switch(c_name.as_ptr(), val) };
-        if rc != 0 {
-            Err(format!("Failed to set switch '{}': {}", name, rc))
-        } else {
-            Ok(())
-        }
-    }
 }
 
 impl Drop for ReduceSession {

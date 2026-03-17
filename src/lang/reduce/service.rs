@@ -150,10 +150,6 @@ impl ReduceService {
         self.latest_request.clear();
     }
 
-    /// Whether the worker is alive and accepting requests.
-    pub fn is_alive(&self) -> bool {
-        self.worker_alive
-    }
 }
 
 /// Worker thread main loop.

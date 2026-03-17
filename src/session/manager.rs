@@ -62,13 +62,6 @@ impl TabManager {
             self.active_index = self.tabs.len() - 1;
         } else if self.active_index > index {
             self.active_index -= 1;
-        } else if self.active_index == index && self.active_index >= self.tabs.len() {
-            self.active_index = self.tabs.len() - 1;
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn tab_count(&self) -> usize {
-        self.tabs.len()
+            }
     }
 }
