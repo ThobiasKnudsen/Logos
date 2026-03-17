@@ -1,0 +1,5 @@
+{
+  "cells": [
+    { "code": "sin(x * 3 + time) * cos(y * 3 + time)", "color": "#88ff88" }
+  ]
+}

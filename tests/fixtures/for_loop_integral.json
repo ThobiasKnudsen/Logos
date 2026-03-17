@@ -1,0 +1,7 @@
+{
+  "cells": [
+    { "code": "f(x): x²", "color": "#ff0000" },
+    { "code": "F(x): (sum:0, delta:0.01, for(i:0, i<x, i:i+delta) (sum:sum+f(i)*delta), sum)", "color": "#00ff00" },
+    { "code": "y = F(x)", "color": "#0000ff" }
+  ]
+}

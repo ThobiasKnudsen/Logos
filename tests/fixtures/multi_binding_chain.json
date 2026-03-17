@@ -1,0 +1,5 @@
+{
+  "cells": [
+    { "code": "a: x * 2\nb: y * 3\nc: a + b\nsin(c)", "color": "#aabbcc" }
+  ]
+}

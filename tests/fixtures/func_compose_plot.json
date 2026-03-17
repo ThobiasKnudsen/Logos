@@ -1,0 +1,7 @@
+{
+  "cells": [
+    { "code": "f(x): x²", "color": "#ff0000" },
+    { "code": "F(x): f(x) + 1", "color": "#00ff00" },
+    { "code": "y = F(x)", "color": "#0000ff" }
+  ]
+}

@@ -39,16 +39,38 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
     shader.push_str(UNIFORM_STRUCT);
     shader.push('\n');
 
-    // Emit constant bindings at module level (accessible from user functions).
-    // Non-constant bindings stay in fs_main.
+    // Partition bindings: constant expressions go to module scope (so helper
+    // functions can reference them), runtime-dependent ones stay in fs_main.
+    let mut const_names: HashSet<String> = HashSet::new();
     let mut module_binding_names: HashSet<String> = HashSet::new();
     let mut fs_main_bindings = Vec::new();
-    for binding in &ctx.bindings {
-        if is_constant_expr(&binding.expr) {
-            shader.push_str(&format!("const {} = {};\n", binding.name, binding.expr));
-            module_binding_names.insert(binding.name.clone());
-        } else {
-            fs_main_bindings.push(binding);
+    {
+        let binding_asts: Vec<(&str, &AstNode)> = match ast {
+            AstNode::Block(stmts) => stmts
+                .iter()
+                .filter_map(|s| {
+                    if let AstNode::Binding { name, value } = s {
+                        Some((name.as_str(), value.as_ref()))
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+            AstNode::Binding { name, value } => vec![(name.as_str(), value.as_ref())],
+            _ => Vec::new(),
+        };
+        for binding in &ctx.bindings {
+            let is_const = binding_asts
+                .iter()
+                .find(|(n, _)| *n == binding.name.as_str())
+                .map_or(false, |(_, val)| is_const_expr(val, &const_names));
+            if is_const {
+                const_names.insert(binding.name.clone());
+                shader.push_str(&format!("const {} = {};\n", binding.name, binding.expr));
+                module_binding_names.insert(binding.name.clone());
+            } else {
+                fs_main_bindings.push(binding);
+            }
         }
     }
     if !module_binding_names.is_empty() {
@@ -102,10 +124,14 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
     }
 
     if is_vec {
-        // Vec4 color output: use the result directly as RGBA color
+        // Vec color output: use the result directly as RGBA color
         let expr_code = ctx.emit_expr(expr)?;
         shader.push_str(&format!("    let _result = {};\n", expr_code));
-        shader.push_str("    return _result;\n");
+        match ctx.result_tuple_size(expr) {
+            Some(3) => shader.push_str("    return vec4<f32>(_result, 1.0);\n"),
+            Some(2) => shader.push_str("    return vec4<f32>(_result, 0.0, 1.0);\n"),
+            _ => shader.push_str("    return _result;\n"), // vec4 or function call
+        }
     } else if is_bool {
         // Boolean expressions: use corner-checking for pixel-perfect curve rendering.
         // Compute pixel size in world coordinates, then evaluate at 4 corners.
@@ -119,14 +145,14 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
 
         let corner_code = ctx.emit_bool_with_corners(expr)?;
         shader.push_str(&format!("    let _result = {};\n", corner_code));
-        shader.push_str("    let c = select(0.0, 1.0, _result);\n");
-        shader.push_str("    return vec4<f32>(u.primary_color.rgb * c, c);\n");
+        shader.push_str("    let _shade = select(0.0, 1.0, _result);\n");
+        shader.push_str("    return vec4<f32>(u.primary_color.rgb * _shade, _shade);\n");
     } else {
         // Numeric expressions: clamp to [0, 1] grayscale
         let expr_code = ctx.emit_expr(expr)?;
         shader.push_str(&format!("    let _result = {};\n", expr_code));
-        shader.push_str("    let c = clamp(_result, 0.0, 1.0);\n");
-        shader.push_str("    return vec4<f32>(u.primary_color.rgb * c, c);\n");
+        shader.push_str("    let _shade = clamp(_result, 0.0, 1.0);\n");
+        shader.push_str("    return vec4<f32>(u.primary_color.rgb * _shade, _shade);\n");
     }
     shader.push_str("}\n");
 
@@ -456,6 +482,15 @@ impl GenContext {
                 stmts.last().map_or(false, |s| self.result_is_vec(s))
             }
             _ => false,
+        }
+    }
+
+    /// Return the tuple size of the result expression, if it's a direct tuple literal.
+    fn result_tuple_size(&self, node: &AstNode) -> Option<usize> {
+        match node {
+            AstNode::Tuple(items) => Some(items.len()),
+            AstNode::Block(stmts) => stmts.last().and_then(|s| self.result_tuple_size(s)),
+            _ => None,
         }
     }
 
@@ -961,10 +996,28 @@ fn collect_identifiers(node: &AstNode, result: &mut HashSet<String>) {
     }
 }
 
-/// Check if a WGSL expression string is a simple constant (can be used with `const`).
-fn is_constant_expr(expr: &str) -> bool {
-    // A constant expr is a simple float literal like "128.0", "4.0", "0.2"
-    expr.parse::<f64>().is_ok()
+/// Check if an AST node is a constant expression (no x, y, z, time references).
+/// `const_names` tracks bindings already known to be constant.
+fn is_const_expr(node: &AstNode, const_names: &HashSet<String>) -> bool {
+    match node {
+        AstNode::Number(_) | AstNode::BoolLit(_) => true,
+        AstNode::Identifier(name) => {
+            if matches!(name.as_str(), "x" | "y" | "z" | "time") {
+                return false;
+            }
+            const_names.contains(name)
+        }
+        AstNode::Apply { args, .. } => args.iter().all(|a| is_const_expr(a, const_names)),
+        AstNode::Tuple(items) => items.iter().all(|i| is_const_expr(i, const_names)),
+        AstNode::Block(stmts) => stmts.iter().all(|s| is_const_expr(s, const_names)),
+        AstNode::IfExpr { condition, then_branch, else_branch } => {
+            is_const_expr(condition, const_names)
+                && is_const_expr(then_branch, const_names)
+                && else_branch.as_ref().map_or(true, |e| is_const_expr(e, const_names))
+        }
+        AstNode::Binding { value, .. } => is_const_expr(value, const_names),
+        _ => false,
+    }
 }
 
 /// Check if a function body's result expression is a tuple (for vec return type).

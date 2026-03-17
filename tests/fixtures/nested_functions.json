@@ -1,0 +1,7 @@
+{
+  "cells": [
+    { "code": "square(a): a * a", "color": "#ff0000" },
+    { "code": "dist(a, b): sqrt(square(a) + square(b))", "color": "#00ff00" },
+    { "code": "dist(x, y)", "color": "#0000ff" }
+  ]
+}

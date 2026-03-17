@@ -1,0 +1,6 @@
+{
+  "cells": [
+    { "code": "y = sin(x)", "color": "#ff0000" },
+    { "code": "y = cos(x)", "color": "#0000ff" }
+  ]
+}

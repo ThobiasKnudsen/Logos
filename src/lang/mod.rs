@@ -17,6 +17,9 @@ pub fn compile(source: &str) -> Result<String, String> {
 }
 
 #[cfg(test)]
+mod notebook_tests;
+
+#[cfg(test)]
 mod integration_tests {
     use super::*;
 
