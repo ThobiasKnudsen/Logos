@@ -520,37 +520,10 @@ impl AppState {
             }
             (0, 5) => { event_loop.exit(); }
             // Edit menu: Cut, Copy, Paste, Select All
-            (1, 0) => {
-                // Cut
-                if let Some(text) = self.tab_manager.active_tab().active_cell().buffer.selected_text() {
-                    let owned = text.to_string();
-                    if let Some(cb) = self.clipboard.as_mut() { let _ = cb.set_text(&owned); }
-                    self.tab_manager.active_tab_mut().active_cell_mut().buffer.backspace();
-                    self.tab_manager.active_tab_mut().mark_modified();
-                    self.sync_active_tab();
-                }
-            }
-            (1, 1) => {
-                // Copy
-                if let Some(text) = self.tab_manager.active_tab().active_cell().buffer.selected_text() {
-                    if let Some(cb) = self.clipboard.as_mut() { let _ = cb.set_text(text); }
-                }
-            }
-            (1, 2) => {
-                // Paste
-                if let Some(cb) = self.clipboard.as_mut() {
-                    if let Ok(text) = cb.get_text() {
-                        self.tab_manager.active_tab_mut().active_cell_mut().buffer.insert_text(&text);
-                        self.tab_manager.active_tab_mut().mark_modified();
-                        self.sync_active_tab();
-                    }
-                }
-            }
-            (1, 3) => {
-                // Select All
-                self.tab_manager.active_tab_mut().active_cell_mut().buffer.select_all();
-                self.sync_active_tab();
-            }
+            (1, 0) => { self.do_cut(); }
+            (1, 1) => { self.do_copy(); }
+            (1, 2) => { self.do_paste(); }
+            (1, 3) => { self.do_select_all(); }
             // View menu
             (2, 0) => { self.do_zoom(|_| fonts::zoom_in()); }
             (2, 1) => { self.do_zoom(|_| fonts::zoom_out()); }
@@ -559,6 +532,37 @@ impl AppState {
             (3, i) => { self.select_theme(i); }
             _ => {}
         }
+    }
+
+    fn do_cut(&mut self) {
+        if let Some(text) = self.tab_manager.active_tab().active_cell().buffer.selected_text() {
+            let owned = text.to_string();
+            if let Some(cb) = self.clipboard.as_mut() { let _ = cb.set_text(&owned); }
+            self.tab_manager.active_tab_mut().active_cell_mut().buffer.backspace();
+            self.tab_manager.active_tab_mut().mark_modified();
+            self.sync_active_tab();
+        }
+    }
+
+    fn do_copy(&mut self) {
+        if let Some(text) = self.tab_manager.active_tab().active_cell().buffer.selected_text() {
+            if let Some(cb) = self.clipboard.as_mut() { let _ = cb.set_text(text); }
+        }
+    }
+
+    fn do_paste(&mut self) {
+        if let Some(cb) = self.clipboard.as_mut() {
+            if let Ok(text) = cb.get_text() {
+                self.tab_manager.active_tab_mut().active_cell_mut().buffer.insert_text(&text);
+                self.tab_manager.active_tab_mut().mark_modified();
+                self.sync_active_tab();
+            }
+        }
+    }
+
+    fn do_select_all(&mut self) {
+        self.tab_manager.active_tab_mut().active_cell_mut().buffer.select_all();
+        self.sync_active_tab();
     }
 
     fn do_zoom(&mut self, f: impl FnOnce(&mut Self)) {
@@ -636,61 +640,22 @@ impl AppState {
             // Select all
             Key::Character(c) if c.as_str() == "a" => {
                 self.close_menu();
-                self.tab_manager.active_tab_mut().active_cell_mut().buffer.select_all();
-                self.sync_active_tab();
+                self.do_select_all();
                 true
             }
             // Copy
             Key::Character(c) if c.as_str() == "c" => {
-                if let Some(text) = self
-                    .tab_manager
-                    .active_tab()
-                    .active_cell()
-                    .buffer
-                    .selected_text()
-                {
-                    if let Some(cb) = self.clipboard.as_mut() {
-                        let _ = cb.set_text(text);
-                    }
-                }
+                self.do_copy();
                 true
             }
             // Cut
             Key::Character(c) if c.as_str() == "x" => {
-                if let Some(text) = self
-                    .tab_manager
-                    .active_tab()
-                    .active_cell()
-                    .buffer
-                    .selected_text()
-                {
-                    let owned = text.to_string();
-                    if let Some(cb) = self.clipboard.as_mut() {
-                        let _ = cb.set_text(&owned);
-                    }
-                    self.tab_manager
-                        .active_tab_mut()
-                        .active_cell_mut()
-                        .buffer
-                        .backspace(); // deletes selection
-                    self.tab_manager.active_tab_mut().mark_modified();
-                    self.sync_active_tab();
-                }
+                self.do_cut();
                 true
             }
             // Paste
             Key::Character(c) if c.as_str() == "v" => {
-                if let Some(cb) = self.clipboard.as_mut() {
-                    if let Ok(text) = cb.get_text() {
-                        self.tab_manager
-                            .active_tab_mut()
-                            .active_cell_mut()
-                            .buffer
-                            .insert_text(&text);
-                        self.tab_manager.active_tab_mut().mark_modified();
-                        self.sync_active_tab();
-                    }
-                }
+                self.do_paste();
                 true
             }
             // Zoom

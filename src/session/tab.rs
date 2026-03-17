@@ -72,9 +72,7 @@ impl Tab {
             self.active_cell_index = self.cells.len() - 1;
         } else if self.active_cell_index > index {
             self.active_cell_index -= 1;
-        } else if self.active_cell_index == index && self.active_cell_index >= self.cells.len() {
-            self.active_cell_index = self.cells.len() - 1;
-        }
+            }
         self.is_modified = true;
     }
 
@@ -88,12 +86,9 @@ impl Tab {
     pub fn save(&mut self) -> io::Result<()> {
         let path = self
             .file_path
-            .as_ref()
+            .clone()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No file path set"))?;
-        let content = self.concatenated_text();
-        fs::write(path, content)?;
-        self.is_modified = false;
-        Ok(())
+        self.save_as(&path)
     }
 
     pub fn save_as(&mut self, path: &Path) -> io::Result<()> {
