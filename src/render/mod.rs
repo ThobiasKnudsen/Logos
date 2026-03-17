@@ -1239,46 +1239,11 @@ impl Renderer {
         let pane_bottom = (lp.y + lp.h) as i32;
 
         // -- Background rects --
+        // Pane backgrounds first (cells render on top of these)
         let mut ui_rects = vec![
-            rect_from(layout.title_bar, t.bg_secondary),
-            rect_from(layout.tab_bar, t.tab_inactive),
+            rect_from(layout.left_pane, t.editor_bg),
+            rect_from(layout.right_pane, t.graph_bg),
         ];
-
-        // Menu item hover backgrounds
-        for (idx, rect) in self.menu_item_rects.iter().enumerate() {
-            let is_open = open_menu == Some(idx);
-            let is_hovered = hover == HoverTarget::MenuItem(idx);
-            if is_open || is_hovered {
-                ui_rects.push(rect_from(*rect, t.menu_item_hover));
-            }
-        }
-
-        // Per-tab backgrounds (hover-aware)
-        for (idx, (rect, is_active)) in self.tab_bg_rects.iter().enumerate() {
-            let color = if *is_active {
-                t.tab_active
-            } else if matches!(hover, HoverTarget::Tab(i) | HoverTarget::TabClose(i) if i == idx) {
-                t.tab_hover
-            } else {
-                t.tab_inactive
-            };
-            ui_rects.push(rect_from(*rect, color));
-        }
-
-        // Tab close hover bg
-        for (idx, close_rect) in self.tab_close_rects.iter().enumerate() {
-            if hover == HoverTarget::TabClose(idx) {
-                ui_rects.push(rect_from(*close_rect, t.bg_hover));
-            }
-        }
-
-        // Plus button (tab bar)
-        let plus_color = if hover == HoverTarget::PlusButton {
-            t.tab_hover
-        } else {
-            t.tab_inactive
-        };
-        ui_rects.push(rect_from(self.plus_rect, plus_color));
 
         // Split handle
         let split_color = if is_dragging_split || hover == HoverTarget::SplitHandle {
@@ -1287,11 +1252,6 @@ impl Renderer {
             t.split_handle
         };
         ui_rects.push(rect_from(layout.split_handle, split_color));
-
-        // Main panes
-        ui_rects.push(rect_from(layout.left_pane, t.editor_bg));
-        ui_rects.push(rect_from(layout.right_pane, t.graph_bg));
-        ui_rects.push(rect_from(layout.status_bar, t.bg_secondary));
 
         // --- Cell container rects ---
         for (i, cl) in self.cell_layouts.iter().enumerate() {
@@ -1361,21 +1321,30 @@ impl Renderer {
             }
         }
 
-        // Selection highlight in active cell
+        // Selection highlight in active cell (clipped to editor bounds)
         if let Some(cl) = self.cell_layouts.get(self.active_cell_index) {
+            let editor_right = cl.editor.x + cl.editor.w;
+            let editor_bottom = cl.editor.y + cl.editor.h;
             for &(sx, sy, sw, sh) in &self.selection_content_rects {
                 let screen_x = cl.editor.x + text_pad + sx;
                 let screen_y = cl.editor.y + text_pad + sy;
-                if screen_x + sw >= lp.x
-                    && screen_x < pane_right as f32
-                    && screen_y + sh > lp.y
-                    && screen_y < pane_bottom as f32
+                // Clip selection rect to cell editor bounds
+                let clipped_x = screen_x.max(cl.editor.x);
+                let clipped_y = screen_y.max(cl.editor.y);
+                let clipped_w = (screen_x + sw).min(editor_right) - clipped_x;
+                let clipped_h = (screen_y + sh).min(editor_bottom) - clipped_y;
+                if clipped_w > 0.0
+                    && clipped_h > 0.0
+                    && clipped_x + clipped_w >= lp.x
+                    && clipped_x < pane_right as f32
+                    && clipped_y + clipped_h > lp.y
+                    && clipped_y < pane_bottom as f32
                 {
                     ui_rects.push(RectInstance {
-                        x: screen_x,
-                        y: screen_y,
-                        w: sw,
-                        h: sh,
+                        x: clipped_x,
+                        y: clipped_y,
+                        w: clipped_w,
+                        h: clipped_h,
                         color: t.editor_selection.to_f32_array(),
                         corner_radius: 2.0,
                         _padding: [0.0; 3],
@@ -1432,6 +1401,48 @@ impl Renderer {
             };
             ui_rects.push(rect_from(thumb, color));
         }
+
+        // --- Title bar, tab bar, status bar overlays ---
+        // Drawn AFTER cells so cell content cannot overlap the UI chrome
+        ui_rects.push(rect_from(layout.title_bar, t.bg_secondary));
+        ui_rects.push(rect_from(layout.tab_bar, t.tab_inactive));
+        ui_rects.push(rect_from(layout.status_bar, t.bg_secondary));
+
+        // Menu item hover backgrounds
+        for (idx, rect) in self.menu_item_rects.iter().enumerate() {
+            let is_open = open_menu == Some(idx);
+            let is_hovered = hover == HoverTarget::MenuItem(idx);
+            if is_open || is_hovered {
+                ui_rects.push(rect_from(*rect, t.menu_item_hover));
+            }
+        }
+
+        // Per-tab backgrounds (hover-aware)
+        for (idx, (rect, is_active)) in self.tab_bg_rects.iter().enumerate() {
+            let color = if *is_active {
+                t.tab_active
+            } else if matches!(hover, HoverTarget::Tab(i) | HoverTarget::TabClose(i) if i == idx) {
+                t.tab_hover
+            } else {
+                t.tab_inactive
+            };
+            ui_rects.push(rect_from(*rect, color));
+        }
+
+        // Tab close hover bg
+        for (idx, close_rect) in self.tab_close_rects.iter().enumerate() {
+            if hover == HoverTarget::TabClose(idx) {
+                ui_rects.push(rect_from(*close_rect, t.bg_hover));
+            }
+        }
+
+        // Plus button (tab bar)
+        let plus_color = if hover == HoverTarget::PlusButton {
+            t.tab_hover
+        } else {
+            t.tab_inactive
+        };
+        ui_rects.push(rect_from(self.plus_rect, plus_color));
 
         // Window control hover
         if hover == HoverTarget::WinBtnMinimize {
