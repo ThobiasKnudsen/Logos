@@ -56,4 +56,22 @@ pub enum AstNode {
         update: Box<AstNode>,
         body: Box<AstNode>,
     },
+
+    /// While loop: `while (condition) body`
+    WhileLoop {
+        condition: Box<AstNode>,
+        body: Box<AstNode>,
+    },
+
+    /// Property access: `x.min`, `x.max`, etc.
+    PropertyAccess {
+        object: Box<AstNode>,
+        property: String,
+    },
+
+    /// Tuple destructuring binding: `(a, b): expr`
+    TupleBinding {
+        names: Vec<String>,
+        value: Box<AstNode>,
+    },
 }

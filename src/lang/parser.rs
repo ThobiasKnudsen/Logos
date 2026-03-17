@@ -43,6 +43,11 @@ impl Parser {
                 break;
             }
             stmts.push(self.parse_statement()?);
+            // Skip optional comma separator between top-level statements
+            self.skip_newlines();
+            if self.peek().ty == TokenType::Comma {
+                self.advance();
+            }
             self.skip_newlines();
         }
 
@@ -56,6 +61,11 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Result<AstNode, String> {
+        // Check for tuple destructuring binding: (a, b): expr
+        if let Some(tb) = self.try_parse_tuple_binding()? {
+            return Ok(tb);
+        }
+
         // Check for function definition: name(params): body
         if let Some(func) = self.try_parse_function_def()? {
             return Ok(func);
@@ -136,6 +146,57 @@ impl Parser {
         let value = self.parse_expr()?;
         Ok(Some(AstNode::Binding {
             name,
+            value: Box::new(value),
+        }))
+    }
+
+    /// Try to parse a tuple destructuring binding: `(a, b): expr`
+    fn try_parse_tuple_binding(&mut self) -> Result<Option<AstNode>, String> {
+        if self.peek().ty != TokenType::LParen {
+            return Ok(None);
+        }
+
+        let save = self.pos;
+        self.advance(); // consume '('
+
+        let mut names = Vec::new();
+        // First name
+        match &self.peek().ty {
+            TokenType::Identifier(n) | TokenType::AxisVar(n) => {
+                names.push(n.clone());
+                self.advance();
+            }
+            _ => { self.pos = save; return Ok(None); }
+        }
+
+        // More names separated by commas
+        while self.peek().ty == TokenType::Comma {
+            self.advance(); // consume ','
+            match &self.peek().ty {
+                TokenType::Identifier(n) | TokenType::AxisVar(n) => {
+                    names.push(n.clone());
+                    self.advance();
+                }
+                _ => { self.pos = save; return Ok(None); }
+            }
+        }
+
+        if self.peek().ty != TokenType::RParen {
+            self.pos = save;
+            return Ok(None);
+        }
+        self.advance(); // consume ')'
+
+        // Must be followed by ':'
+        if self.peek().ty != TokenType::Colon {
+            self.pos = save;
+            return Ok(None);
+        }
+        self.advance(); // consume ':'
+
+        let value = self.parse_expr()?;
+        Ok(Some(AstNode::TupleBinding {
+            names,
             value: Box::new(value),
         }))
     }
@@ -289,6 +350,23 @@ impl Parser {
                     let _index = self.parse_expr()?;
                     self.expect(TokenType::RBracket)?;
                 }
+                // Property access: expr.prop
+                TokenType::Dot => {
+                    self.advance(); // consume '.'
+                    match self.peek().ty.clone() {
+                        TokenType::Identifier(prop) | TokenType::AxisVar(prop) | TokenType::Builtin(prop) => {
+                            self.advance();
+                            expr = AstNode::PropertyAccess {
+                                object: Box::new(expr),
+                                property: prop,
+                            };
+                        }
+                        _ => return Err(format!(
+                            "Expected property name after '.', found {:?} at position {}",
+                            self.peek().ty, self.peek().span.0
+                        )),
+                    }
+                }
                 // Unicode superscript square
                 TokenType::Builtin(ref s) if s == "square" => {
                     self.advance();
@@ -365,9 +443,13 @@ impl Parser {
                     // Single parenthesized expression
                     Ok(items.pop().unwrap())
                 } else {
-                    // If any item is a Binding, FunctionDef, or ForLoop, it's a block
+                    // If any item is a Binding, FunctionDef, ForLoop, WhileLoop, or TupleBinding, it's a block
                     let has_block_items = items.iter().any(|item| {
-                        matches!(item, AstNode::Binding { .. } | AstNode::FunctionDef { .. } | AstNode::ForLoop { .. })
+                        matches!(item,
+                            AstNode::Binding { .. } | AstNode::FunctionDef { .. }
+                            | AstNode::ForLoop { .. } | AstNode::WhileLoop { .. }
+                            | AstNode::TupleBinding { .. }
+                        )
                     });
                     if has_block_items {
                         Ok(AstNode::Block(items))
@@ -399,6 +481,19 @@ impl Parser {
                     condition: Box::new(condition),
                     then_branch: Box::new(then_branch),
                     else_branch,
+                })
+            }
+            // While loop: while(condition) body
+            TokenType::While => {
+                self.advance(); // consume 'while'
+                self.expect(TokenType::LParen)?;
+                let condition = self.parse_expr()?;
+                self.expect(TokenType::RParen)?;
+                self.skip_newlines();
+                let body = self.parse_expr()?;
+                Ok(AstNode::WhileLoop {
+                    condition: Box::new(condition),
+                    body: Box::new(body),
                 })
             }
             // For loop: for(init, condition, update) body
@@ -451,6 +546,10 @@ impl Parser {
 
     /// Parse an item inside a parenthesized block (handles binding with colon).
     fn parse_block_item(&mut self) -> Result<AstNode, String> {
+        // Try tuple destructuring binding: (a, b): expr
+        if let Some(tb) = self.try_parse_tuple_binding()? {
+            return Ok(tb);
+        }
         // Try function def first
         if let Some(func) = self.try_parse_function_def()? {
             return Ok(func);
@@ -464,13 +563,17 @@ impl Parser {
 
     fn parse_arg_list(&mut self) -> Result<Vec<AstNode>, String> {
         let mut args = Vec::new();
+        self.skip_newlines();
         if self.peek().ty == TokenType::RParen {
             return Ok(args);
         }
         args.push(self.parse_expr()?);
+        self.skip_newlines();
         while self.peek().ty == TokenType::Comma {
             self.advance();
+            self.skip_newlines();
             args.push(self.parse_expr()?);
+            self.skip_newlines();
         }
         Ok(args)
     }
