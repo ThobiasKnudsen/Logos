@@ -1946,43 +1946,38 @@ impl Renderer {
         let x_range = render_area.axis_x_max - render_area.axis_x_min;
         let y_range = render_area.axis_y_max - render_area.axis_y_min;
 
-        // Compute max ticks per axis based on pixel density (target ~80px between lines)
+        // Compute max ticks per axis based on pixel density (target ~80px between lines),
+        // capped at MAX_AXIS_LABELS so every grid line gets a label with uniform spacing.
         let min_px_spacing = 80.0_f32;
         let max_ticks_x = (rp.w / min_px_spacing).max(2.0) as usize;
         let max_ticks_y = (rp.h / min_px_spacing).max(2.0) as usize;
+        let max_ticks_x = max_ticks_x.min(MAX_AXIS_LABELS);
+        let max_ticks_y = max_ticks_y.min(MAX_AXIS_LABELS);
 
-        // Compute nice step independently, then take the larger so both axes
-        // use the same world-space interval (uniform grid).
-        let x_step = compute_nice_step(x_range, max_ticks_x);
-        let y_step = compute_nice_step(y_range, max_ticks_y);
-        let shared_step = x_step.max(y_step);
+        // Compute nice step independently per axis so zooming one axis
+        // doesn't reduce line count on the other.
+        let mut x_step = compute_nice_step(x_range, max_ticks_x);
+        let mut y_step = compute_nice_step(y_range, max_ticks_y);
 
-        let x_ticks = generate_ticks(render_area.axis_x_min, render_area.axis_x_max, shared_step);
-        let y_ticks = generate_ticks(render_area.axis_y_min, render_area.axis_y_max, shared_step);
-
-        // Subsample ticks evenly when there are more than MAX_AXIS_LABELS,
-        // so labels span the full axis range instead of clustering at one end.
-        let x_label_count = x_ticks.len().min(MAX_AXIS_LABELS);
-        let y_label_count = y_ticks.len().min(MAX_AXIS_LABELS);
-
-        let x_label_indices: Vec<usize> = if x_ticks.len() <= MAX_AXIS_LABELS {
-            (0..x_ticks.len()).collect()
-        } else {
-            (0..x_label_count)
-                .map(|i| i * (x_ticks.len() - 1) / (x_label_count - 1).max(1))
-                .collect()
+        // Bump step if generate_ticks overshoots MAX_AXIS_LABELS due to boundary rounding.
+        let x_ticks = loop {
+            let xt = generate_ticks(render_area.axis_x_min, render_area.axis_x_max, x_step);
+            if xt.len() <= MAX_AXIS_LABELS { break xt; }
+            x_step *= 2.0;
         };
-        let y_label_indices: Vec<usize> = if y_ticks.len() <= MAX_AXIS_LABELS {
-            (0..y_ticks.len()).collect()
-        } else {
-            (0..y_label_count)
-                .map(|i| i * (y_ticks.len() - 1) / (y_label_count - 1).max(1))
-                .collect()
+        let y_ticks = loop {
+            let yt = generate_ticks(render_area.axis_y_min, render_area.axis_y_max, y_step);
+            if yt.len() <= MAX_AXIS_LABELS { break yt; }
+            y_step *= 2.0;
         };
+
+        // Every tick gets a label — uniform spacing guaranteed.
+        let x_label_indices: Vec<usize> = (0..x_ticks.len()).collect();
+        let y_label_indices: Vec<usize> = (0..y_ticks.len()).collect();
 
         // Update axis label buffer text
         for (buf_i, &tick_i) in x_label_indices.iter().enumerate() {
-            let text = format_tick(x_ticks[tick_i], shared_step);
+            let text = format_tick(x_ticks[tick_i], x_step);
             self.axis_label_buffers[buf_i].set_text(
                 &mut self.font_system,
                 &text,
@@ -1992,7 +1987,7 @@ impl Renderer {
             self.axis_label_buffers[buf_i].shape_until_scroll(&mut self.font_system, false);
         }
         for (buf_i, &tick_i) in y_label_indices.iter().enumerate() {
-            let text = format_tick(y_ticks[tick_i], shared_step);
+            let text = format_tick(y_ticks[tick_i], y_step);
             self.axis_label_buffers[MAX_AXIS_LABELS + buf_i].set_text(
                 &mut self.font_system,
                 &text,
@@ -2007,10 +2002,10 @@ impl Renderer {
         let mut axis_rects: Vec<RectInstance> = Vec::new();
         let label_h = fonts::small_size() * 1.4;
 
-        // Grid lines spanning full plot (not limited by MAX_AXIS_LABELS)
+        // Grid lines only at labeled tick positions (every line gets a number)
         if x_range > f32::EPSILON {
-            for &tick in &x_ticks {
-                let t = (tick - render_area.axis_x_min) / x_range;
+            for &tick_i in &x_label_indices {
+                let t = (x_ticks[tick_i] - render_area.axis_x_min) / x_range;
                 let sx = rp.x + t * rp.w;
                 if sx >= rp.x && sx <= rp.x + rp.w {
                     axis_rects.push(RectInstance {
@@ -2022,8 +2017,8 @@ impl Renderer {
             }
         }
         if y_range > f32::EPSILON {
-            for &tick in &y_ticks {
-                let t = (tick - render_area.axis_y_min) / y_range;
+            for &tick_i in &y_label_indices {
+                let t = (y_ticks[tick_i] - render_area.axis_y_min) / y_range;
                 let sy = rp.y + rp.h - t * rp.h;
                 if sy >= rp.y && sy <= rp.y + rp.h {
                     axis_rects.push(RectInstance {
