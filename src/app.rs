@@ -186,6 +186,8 @@ struct AppState {
 
     // Hover
     hover_target: HoverTarget,
+    /// Hover target captured at mouse-press time, used for click resolution.
+    mouse_press_target: HoverTarget,
 
     // Split dragging
     split_left_width: f32,
@@ -826,6 +828,7 @@ impl ApplicationHandler for App {
             plus_button_rect: Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
             cell_layouts: Vec::new(),
             hover_target: HoverTarget::None,
+            mouse_press_target: HoverTarget::None,
             split_left_width: split::DEFAULT_LEFT_WIDTH,
             is_dragging_split: false,
             is_dragging_v_scroll: false,
@@ -882,6 +885,7 @@ impl ApplicationHandler for App {
                         state.cursor_position.1,
                         state.scroll_drag_offset,
                     );
+                    state.sync_active_tab();
                     state.window.request_redraw();
                 } else if state.is_dragging_split {
                     let content_x = state.cached_layout.left_pane.x;
@@ -994,6 +998,8 @@ impl ApplicationHandler for App {
                     let lp = state.cached_layout.left_pane;
                     if point_in_rect(mx, my, &lp) {
                         state.renderer.scroll_by(0.0, -dy);
+                        state.cell_layouts = state.renderer.cell_layouts().to_vec();
+                        state.recompute_hover();
                         state.window.request_redraw();
                     }
                 }
@@ -1005,6 +1011,10 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                // Capture hover target at press time so that small trackpad
+                // scroll events between press and release can't steal the click.
+                state.mouse_press_target = state.hover_target;
+
                 match state.hover_target {
                     HoverTarget::SplitHandle => {
                         state.close_menu();
@@ -1076,11 +1086,16 @@ impl ApplicationHandler for App {
                 // End any drag operation
                 if state.is_any_drag_active() {
                     let was_split = state.is_dragging_split;
+                    let was_v_scroll = state.is_dragging_v_scroll;
                     state.is_dragging_split = false;
                     state.is_dragging_v_scroll = false;
                     state.render_area.is_dragging = false;
                     if state.pending_dialog.is_none() {
                         event_loop.set_control_flow(ControlFlow::Wait);
+                    }
+                    if was_v_scroll {
+                        // Rebuild cell layouts with updated scroll position
+                        state.sync_active_tab();
                     }
                     state.recompute_hover();
                     if was_split {
@@ -1139,8 +1154,18 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                // Cell interactions
-                match state.hover_target {
+                // Cell interactions — use the press-time target so that small
+                // trackpad scroll events between press and release don't steal
+                // button clicks (the scroll shifts layout rects, changing
+                // hover_target before release arrives).
+                let click_target = match state.mouse_press_target {
+                    HoverTarget::CellPlayButton(_)
+                    | HoverTarget::CellCopyButton(_)
+                    | HoverTarget::CellDeleteButton(_)
+                    | HoverTarget::AddCellButton => state.mouse_press_target,
+                    _ => state.hover_target,
+                };
+                match click_target {
                     HoverTarget::CellPlayButton(i) => {
                         let is_playing = state.tab_manager.active_tab().cells[i].is_playing;
                         if is_playing {
@@ -1150,6 +1175,12 @@ impl ApplicationHandler for App {
                         }
                     }
                     HoverTarget::CellEditor(i) => {
+                        let (mx, my) = state.cursor_position;
+                        if let Some(byte_offset) = state.renderer.hit_test_cell(i, mx, my) {
+                            state.tab_manager.active_tab_mut().cells[i]
+                                .buffer
+                                .set_cursor_byte(byte_offset);
+                        }
                         state.tab_manager.active_tab_mut().set_active_cell(i);
                         state.sync_active_tab();
                     }

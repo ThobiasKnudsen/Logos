@@ -290,4 +290,14 @@ impl Buffer {
             .nth(target_line)
             .unwrap_or("")
     }
+
+    /// Set cursor to a specific byte offset, clamping to text length and
+    /// snapping to a valid char boundary. Clears any selection.
+    pub fn set_cursor_byte(&mut self, byte: usize) {
+        self.cursor = byte.min(self.text.len());
+        while self.cursor > 0 && !self.text.is_char_boundary(self.cursor) {
+            self.cursor -= 1;
+        }
+        self.selection_anchor = None;
+    }
 }
