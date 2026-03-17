@@ -64,10 +64,20 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
     // Fragment entry point
     shader.push_str("@fragment\n");
     shader.push_str("fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {\n");
-    shader.push_str("    let world = mix(u.axis_min, u.axis_max, uv);\n");
-    shader.push_str("    let x = world.x;\n");
-    shader.push_str("    let y = world.y;\n");
-    // Note: time is accessed via u.time directly (works in both fs_main and user functions)
+
+    if is_vec {
+        // Vec4 output (e.g. Mandelbrot): x/y are UV [0,1] coordinates.
+        // User code handles its own UV→world mapping via x.min/x.max properties.
+        // This matches the Zig version's convention.
+        shader.push_str("    let x = uv.x;\n");
+        shader.push_str("    let y = uv.y;\n");
+    } else {
+        // Scalar/boolean output: x/y are world coordinates.
+        // Simple expressions like sin(x) work directly in the visible viewport.
+        shader.push_str("    let world = mix(u.axis_min, u.axis_max, uv);\n");
+        shader.push_str("    let x = world.x;\n");
+        shader.push_str("    let y = world.y;\n");
+    }
 
     if top_has_loops {
         // Imperative emission for top-level code with loops
