@@ -1429,9 +1429,9 @@ fn point_in_rect(x: f32, y: f32, r: &Rect) -> bool {
 fn detect_mouse_zone(mx: f32, my: f32, pane: &Rect) -> MouseZone {
     let rel_y = my - pane.y;
     let rel_x = mx - pane.x;
-    if rel_y > pane.h - spacing::AXIS_ZONE_SIZE {
+    if rel_y > pane.h - spacing::axis_zone_size() {
         MouseZone::XAxisEdge
-    } else if rel_x < spacing::AXIS_ZONE_SIZE {
+    } else if rel_x < spacing::axis_zone_size() {
         MouseZone::YAxisEdge
     } else {
         MouseZone::Center

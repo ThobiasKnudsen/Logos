@@ -119,14 +119,24 @@ fn format_tick(v: f32, step: f32) -> String {
     format!("{:.prec$}", v, prec = decimals)
 }
 
-const TAB_PAD_H: f32 = 12.0;
-const TAB_CLOSE_SIZE: f32 = 20.0;
-const TAB_CLOSE_PAD: f32 = 6.0;
-const TAB_GAP: f32 = 2.0;
-const TAB_DOT_PAD: f32 = 6.0; // horizontal margin around the modified dot
-const MENU_ITEM_PAD: f32 = 10.0;
-const CELL_HEADER_HEIGHT: f32 = 28.0;
-const CELL_DELETE_SIZE: f32 = 22.0;
+// Base values — multiply by fonts::scale() at use-sites via helper fns below.
+const BASE_TAB_PAD_H: f32 = 12.0;
+const BASE_TAB_CLOSE_SIZE: f32 = 20.0;
+const BASE_TAB_CLOSE_PAD: f32 = 6.0;
+const BASE_TAB_GAP: f32 = 2.0;
+const BASE_TAB_DOT_PAD: f32 = 6.0;
+const BASE_MENU_ITEM_PAD: f32 = 10.0;
+const BASE_CELL_HEADER_HEIGHT: f32 = 28.0;
+const BASE_CELL_DELETE_SIZE: f32 = 22.0;
+
+fn tab_pad_h() -> f32 { BASE_TAB_PAD_H * fonts::scale() }
+fn tab_close_size() -> f32 { BASE_TAB_CLOSE_SIZE * fonts::scale() }
+fn tab_close_pad() -> f32 { BASE_TAB_CLOSE_PAD * fonts::scale() }
+fn tab_gap() -> f32 { BASE_TAB_GAP * fonts::scale() }
+fn tab_dot_pad() -> f32 { BASE_TAB_DOT_PAD * fonts::scale() }
+fn menu_item_pad() -> f32 { BASE_MENU_ITEM_PAD * fonts::scale() }
+fn cell_header_height() -> f32 { BASE_CELL_HEADER_HEIGHT * fonts::scale() }
+fn cell_delete_size() -> f32 { BASE_CELL_DELETE_SIZE * fonts::scale() }
 
 /// Handles all GPU rendering: wgpu setup, text via glyphon, rects via instanced draw.
 pub struct Renderer {
@@ -456,6 +466,20 @@ impl Renderer {
         self.tooltip_label =
             Self::create_label(&mut self.font_system, fonts::small_size(), "Ctrl+Enter");
 
+        // Update axis label buffer metrics + size constraint so tick numbers scale with zoom
+        let axis_size = fonts::small_size();
+        let axis_metrics = Metrics::new(axis_size, axis_size * 1.4);
+        for buf in &mut self.axis_label_buffers {
+            buf.set_metrics(&mut self.font_system, axis_metrics);
+            buf.set_size(&mut self.font_system, Some(2000.0), Some(axis_size * 2.0));
+            buf.shape_until_scroll(&mut self.font_system, false);
+        }
+
+        // Invalidate caches so tab bar and cells get re-laid-out at new scale
+        self.cached_tab_info.clear();
+        self.cell_texts.clear();
+        self.cell_output_texts.clear();
+
         // Close any open dropdown since label sizes changed
         self.close_dropdown();
     }
@@ -481,13 +505,13 @@ impl Renderer {
     /// Update menu item positions from title bar rect. Returns hit rects.
     pub fn update_menu_items(&mut self, title_bar: Rect, win_ctrl_start_x: f32) -> Vec<Rect> {
         let mut rects = Vec::with_capacity(app::MENU_NAMES.len());
-        let mut x = title_bar.x + spacing::SM;
+        let mut x = title_bar.x + spacing::sm();
         let y = title_bar.y;
         let h = title_bar.h;
 
         for label in &self.menu_item_labels {
             let text_w = Self::measure_label_width(label);
-            let item_w = MENU_ITEM_PAD * 2.0 + text_w;
+            let item_w = menu_item_pad() * 2.0 + text_w;
             // Don't extend past window controls
             if x + item_w > win_ctrl_start_x {
                 break;
@@ -515,7 +539,7 @@ impl Renderer {
         }
 
         let item_h = spacing::dropdown_item_height();
-        let pad = spacing::DROPDOWN_PADDING;
+        let pad = spacing::dropdown_padding();
 
         // Create labels and measure widths
         self.dropdown_item_labels.clear();
@@ -541,8 +565,8 @@ impl Renderer {
             self.dropdown_shortcut_labels.push(shortcut);
         }
 
-        let dropdown_w = (max_label_w + max_shortcut_w + MENU_ITEM_PAD * 4.0)
-            .max(spacing::DROPDOWN_MIN_WIDTH);
+        let dropdown_w = (max_label_w + max_shortcut_w + menu_item_pad() * 4.0)
+            .max(spacing::dropdown_min_width());
         let dropdown_h = items.len() as f32 * item_h + pad * 2.0;
 
         let x = menu_rect.x;
@@ -671,13 +695,13 @@ impl Renderer {
         let need_v = self.cells_total_height > visible_h;
 
         if need_v && visible_h > 0.0 && self.cells_total_height > 0.0 {
-            let sb_w = spacing::SCROLLBAR_WIDTH;
+            let sb_w = spacing::scrollbar_width();
             let track_h = pane.h;
             let sb_x = pane.x + pane.w - sb_w;
             self.v_track_rect = Some(Rect { x: sb_x, y: pane.y, w: sb_w, h: track_h });
 
             let ratio = visible_h / self.cells_total_height;
-            let thumb_h = (track_h * ratio).max(spacing::SCROLLBAR_THUMB_MIN_H);
+            let thumb_h = (track_h * ratio).max(spacing::scrollbar_thumb_min_h());
             let max_scroll = (self.cells_total_height - visible_h).max(0.0);
             let thumb_y = if max_scroll > 0.0 {
                 pane.y + (self.cell_scroll_y / max_scroll) * (track_h - thumb_h)
@@ -728,17 +752,17 @@ impl Renderer {
         self.cell_output_texts.truncate(cells.len());
 
         // Set text + shape each buffer, measure heights
-        let cell_pad = spacing::CELL_PADDING;
-        let cell_spacing = spacing::CELL_SPACING;
-        let header_h = CELL_HEADER_HEIGHT;
+        let cell_pad = spacing::cell_padding();
+        let cell_spacing = spacing::cell_spacing();
+        let header_h = cell_header_height();
         let sep_h = 1.0;
-        let text_pad = spacing::SM;
-        let container_pad = spacing::SM; // internal padding within cell container
+        let text_pad = spacing::sm();
+        let container_pad = spacing::sm(); // internal padding within cell container
 
         let cell_area_width = pane.w - cell_pad * 2.0;
         // Account for scrollbar width
         let effective_width = if self.v_track_rect.is_some() {
-            cell_area_width - spacing::SCROLLBAR_WIDTH
+            cell_area_width - spacing::scrollbar_width()
         } else {
             cell_area_width
         };
@@ -843,24 +867,24 @@ impl Renderer {
                 h: header_h,
             };
             // Center buttons between cell top edge and separator line
-            let btn_y = container.y + (container_pad + header_h - CELL_DELETE_SIZE) / 2.0;
+            let btn_y = container.y + (container_pad + header_h - cell_delete_size()) / 2.0;
             let play_button = Rect {
                 x: header.x,
                 y: btn_y,
-                w: CELL_DELETE_SIZE,
-                h: CELL_DELETE_SIZE,
+                w: cell_delete_size(),
+                h: cell_delete_size(),
             };
             let delete_button = Rect {
-                x: header.x + header.w - CELL_DELETE_SIZE,
+                x: header.x + header.w - cell_delete_size(),
                 y: btn_y,
-                w: CELL_DELETE_SIZE,
-                h: CELL_DELETE_SIZE,
+                w: cell_delete_size(),
+                h: cell_delete_size(),
             };
             let copy_button = Rect {
-                x: header.x + header.w - CELL_DELETE_SIZE * 2.0 - spacing::XS,
+                x: header.x + header.w - cell_delete_size() * 2.0 - spacing::xs(),
                 y: btn_y,
-                w: CELL_DELETE_SIZE,
-                h: CELL_DELETE_SIZE,
+                w: cell_delete_size(),
+                h: cell_delete_size(),
             };
             // Separator spans full cell width
             let separator = Rect {
@@ -1169,26 +1193,26 @@ impl Renderer {
         self.tab_close_rects.clear();
 
         let tab_h = tab_bar_rect.h;
-        let mut x = tab_bar_rect.x + TAB_GAP;
+        let mut x = tab_bar_rect.x + tab_gap();
         let y = tab_bar_rect.y;
         let mut hit_rects = Vec::with_capacity(tabs.len());
 
         let dot_w = Self::measure_label_width(&self.dot_label);
-        let dot_area = TAB_DOT_PAD + dot_w + TAB_DOT_PAD;
+        let dot_area = tab_dot_pad() + dot_w + tab_dot_pad();
 
         for tab in tabs {
             let label = Self::create_label(&mut self.font_system, fonts::ui_size(), &tab.name);
             let text_w = Self::measure_label_width(&label);
             let close_label =
                 Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{2715}");
-            let left_pad = if tab.is_modified { dot_area } else { TAB_PAD_H };
-            let tab_w = left_pad + text_w + TAB_CLOSE_PAD + TAB_CLOSE_SIZE + TAB_PAD_H;
+            let left_pad = if tab.is_modified { dot_area } else { tab_pad_h() };
+            let tab_w = left_pad + text_w + tab_close_pad() + tab_close_size() + tab_pad_h();
             let tab_rect = Rect { x, y, w: tab_w, h: tab_h };
             let close_rect = Rect {
-                x: x + tab_w - TAB_PAD_H - TAB_CLOSE_SIZE,
-                y: y + (tab_h - TAB_CLOSE_SIZE) / 2.0,
-                w: TAB_CLOSE_SIZE,
-                h: TAB_CLOSE_SIZE,
+                x: x + tab_w - tab_pad_h() - tab_close_size(),
+                y: y + (tab_h - tab_close_size()) / 2.0,
+                w: tab_close_size(),
+                h: tab_close_size(),
             };
 
             self.tab_bg_rects.push((tab_rect, tab.is_active));
@@ -1197,10 +1221,10 @@ impl Renderer {
             self.tab_close_labels.push(close_label);
             self.tab_modified.push(tab.is_modified);
             hit_rects.push(TabHitRect { full: tab_rect, close: close_rect });
-            x += tab_w + TAB_GAP;
+            x += tab_w + tab_gap();
         }
 
-        let plus_w = TAB_PAD_H * 2.0 + 10.0;
+        let plus_w = tab_pad_h() * 2.0 + Self::measure_label_width(&self.plus_label);
         self.plus_rect = Rect { x, y, w: plus_w, h: tab_h };
         Some((hit_rects, self.plus_rect))
     }
@@ -1225,14 +1249,14 @@ impl Renderer {
         let sw = self.surface_config.width as f32;
         let sh = self.surface_config.height as f32;
         let lp = layout.left_pane;
-        let text_pad = spacing::SM;
+        let text_pad = spacing::sm();
         let t = theme::theme();
 
         // Pane clip bounds
         let pane_left = lp.x as i32;
         let pane_top = lp.y as i32;
         let pane_right = if self.v_track_rect.is_some() {
-            (lp.x + lp.w - spacing::SCROLLBAR_WIDTH) as i32
+            (lp.x + lp.w - spacing::scrollbar_width()) as i32
         } else {
             (lp.x + lp.w) as i32
         };
@@ -1665,10 +1689,10 @@ impl Renderer {
                 continue;
             }
             // Position tooltip below the play button
-            let tip_w = Self::measure_label_width(&self.tooltip_label) + spacing::SM * 2.0;
-            let tip_h = fonts::small_size() * 1.4 + spacing::XS * 2.0;
+            let tip_w = Self::measure_label_width(&self.tooltip_label) + spacing::sm() * 2.0;
+            let tip_h = fonts::small_size() * 1.4 + spacing::xs() * 2.0;
             let tip_x = cl.play_button.x + cl.play_button.w / 2.0 - tip_w / 2.0;
-            let tip_y = cl.play_button.y + cl.play_button.h + spacing::XS;
+            let tip_y = cl.play_button.y + cl.play_button.h + spacing::xs();
             let tip_rect = Rect { x: tip_x, y: tip_y, w: tip_w, h: tip_h };
 
             // Tooltip background + border
@@ -1682,8 +1706,8 @@ impl Renderer {
             // Tooltip text
             text_areas.push(TextArea {
                 buffer: &self.tooltip_label,
-                left: tip_rect.x + spacing::SM,
-                top: tip_rect.y + spacing::XS,
+                left: tip_rect.x + spacing::sm(),
+                top: tip_rect.y + spacing::xs(),
                 scale: 1.0,
                 bounds: TextBounds {
                     left: tip_rect.x as i32,
@@ -1738,8 +1762,8 @@ impl Renderer {
             let rect = &self.menu_item_rects[i];
             text_areas.push(TextArea {
                 buffer: label,
-                left: rect.x + MENU_ITEM_PAD,
-                top: rect.y + spacing::XS,
+                left: rect.x + menu_item_pad(),
+                top: rect.y + spacing::xs(),
                 scale: 1.0,
                 bounds: TextBounds {
                     left: rect.x as i32,
@@ -1761,7 +1785,7 @@ impl Renderer {
         for (label, rect) in &win_ctrl_pairs {
             let label_w = Self::measure_label_width(label);
             let cx = rect.x + (rect.w - label_w) / 2.0;
-            let cy = rect.y + spacing::XS;
+            let cy = rect.y + spacing::xs();
             text_areas.push(TextArea {
                 buffer: label,
                 left: cx,
@@ -1794,14 +1818,14 @@ impl Renderer {
 
             let is_modified = i < self.tab_modified.len() && self.tab_modified[i];
             let text_left = if is_modified {
-                tab_rect.x + TAB_DOT_PAD + Self::measure_label_width(&self.dot_label) + TAB_DOT_PAD
+                tab_rect.x + tab_dot_pad() + Self::measure_label_width(&self.dot_label) + tab_dot_pad()
             } else {
-                tab_rect.x + TAB_PAD_H
+                tab_rect.x + tab_pad_h()
             };
             text_areas.push(TextArea {
                 buffer: label,
                 left: text_left,
-                top: tab_rect.y + spacing::SM,
+                top: tab_rect.y + spacing::sm(),
                 scale: 1.0,
                 bounds,
                 default_color: t.text_primary.to_glyphon(),
@@ -1816,10 +1840,10 @@ impl Renderer {
                     continue;
                 };
 
-                let dot_x = tab_rect.x + TAB_DOT_PAD;
+                let dot_x = tab_rect.x + tab_dot_pad();
                 // Same baseline as tab text, nudged up slightly because ● sits
                 // lower than regular text glyphs in the line box
-                let dot_y = tab_rect.y + spacing::SM - 1.0;
+                let dot_y = tab_rect.y + spacing::sm() - 1.0;
                 text_areas.push(TextArea {
                     buffer: &self.dot_label,
                     left: dot_x,
@@ -1865,8 +1889,8 @@ impl Renderer {
         if let Some(bounds) = clip_bounds_for_dropdown(&self.plus_rect, &tab_bar, dropdown_clip.as_ref()) {
             text_areas.push(TextArea {
                 buffer: &self.plus_label,
-                left: self.plus_rect.x + TAB_PAD_H,
-                top: self.plus_rect.y + spacing::SM,
+                left: self.plus_rect.x + tab_pad_h(),
+                top: self.plus_rect.y + spacing::sm(),
                 scale: 1.0,
                 bounds,
                 default_color: t.text_muted.to_glyphon(),
@@ -1889,8 +1913,8 @@ impl Renderer {
                 // Item label (left-aligned)
                 text_areas.push(TextArea {
                     buffer: label,
-                    left: rect.x + MENU_ITEM_PAD,
-                    top: rect.y + spacing::XS,
+                    left: rect.x + menu_item_pad(),
+                    top: rect.y + spacing::xs(),
                     scale: 1.0,
                     bounds: TextBounds {
                         left: rect.x as i32,
@@ -1905,8 +1929,8 @@ impl Renderer {
                 let shortcut_w = Self::measure_label_width(shortcut);
                 text_areas.push(TextArea {
                     buffer: shortcut,
-                    left: rect.x + rect.w - MENU_ITEM_PAD - shortcut_w,
-                    top: rect.y + spacing::XS,
+                    left: rect.x + rect.w - menu_item_pad() - shortcut_w,
+                    top: rect.y + spacing::xs(),
                     scale: 1.0,
                     bounds: TextBounds {
                         left: rect.x as i32,
@@ -1923,8 +1947,8 @@ impl Renderer {
         // Status label
         text_areas.push(TextArea {
             buffer: &self.status_label,
-            left: layout.status_bar.x + spacing::MD,
-            top: layout.status_bar.y + spacing::XS,
+            left: layout.status_bar.x + spacing::md(),
+            top: layout.status_bar.y + spacing::xs(),
             scale: 1.0,
             bounds: TextBounds {
                 left: layout.status_bar.x as i32,
@@ -1941,13 +1965,14 @@ impl Renderer {
         // -- Axis overlay computation --
         // Labels are drawn directly on the plot (no reserved margin).
         let rp = layout.right_pane;
-        let label_pad = 4.0_f32; // padding from edges
+        let scale = fonts::scale();
+        let label_pad = 4.0_f32 * scale;
 
         let x_range = render_area.axis_x_max - render_area.axis_x_min;
         let y_range = render_area.axis_y_max - render_area.axis_y_min;
 
-        // Compute max ticks per axis based on pixel density (target ~80px between lines)
-        let min_px_spacing = 80.0_f32;
+        // Compute max ticks per axis based on pixel density, scaled with zoom
+        let min_px_spacing = 80.0_f32 * scale;
         let max_ticks_x = (rp.w / min_px_spacing).max(2.0) as usize;
         let max_ticks_y = (rp.h / min_px_spacing).max(2.0) as usize;
 

@@ -684,13 +684,31 @@ pub mod spacing {
     pub const TEXT_PADDING: f32 = 24.0;
 
     // Scaled versions — multiply by current zoom factor.
-    pub fn menu_height() -> f32 { MENU_HEIGHT * super::fonts::scale() }
-    pub fn tab_height() -> f32 { TAB_HEIGHT * super::fonts::scale() }
-    pub fn status_height() -> f32 { STATUS_HEIGHT * super::fonts::scale() }
-    pub fn split_handle_width() -> f32 { SPLIT_HANDLE_WIDTH * super::fonts::scale() }
-    pub fn window_control_width() -> f32 { WINDOW_CONTROL_WIDTH * super::fonts::scale() }
-    pub fn dropdown_item_height() -> f32 { DROPDOWN_ITEM_HEIGHT * super::fonts::scale() }
-    pub fn gutter_width() -> f32 { GUTTER_WIDTH * super::fonts::scale() }
+    pub fn scale() -> f32 { super::fonts::scale() }
+    pub fn xs() -> f32 { XS * scale() }
+    pub fn sm() -> f32 { SM * scale() }
+    pub fn md() -> f32 { MD * scale() }
+    pub fn lg() -> f32 { LG * scale() }
+    pub fn xl() -> f32 { XL * scale() }
+    pub fn menu_height() -> f32 { MENU_HEIGHT * scale() }
+    pub fn tab_height() -> f32 { TAB_HEIGHT * scale() }
+    pub fn status_height() -> f32 { STATUS_HEIGHT * scale() }
+    pub fn split_handle_width() -> f32 { SPLIT_HANDLE_WIDTH * scale() }
+    pub fn window_control_width() -> f32 { WINDOW_CONTROL_WIDTH * scale() }
+    pub fn dropdown_item_height() -> f32 { DROPDOWN_ITEM_HEIGHT * scale() }
+    pub fn dropdown_padding() -> f32 { DROPDOWN_PADDING * scale() }
+    pub fn dropdown_min_width() -> f32 { DROPDOWN_MIN_WIDTH * scale() }
+    pub fn scrollbar_height() -> f32 { SCROLLBAR_HEIGHT * scale() }
+    pub fn scrollbar_width() -> f32 { SCROLLBAR_WIDTH * scale() }
+    pub fn scrollbar_thumb_min_w() -> f32 { SCROLLBAR_THUMB_MIN_W * scale() }
+    pub fn scrollbar_thumb_min_h() -> f32 { SCROLLBAR_THUMB_MIN_H * scale() }
+    pub fn gutter_width() -> f32 { GUTTER_WIDTH * scale() }
+    pub fn axis_zone_size() -> f32 { AXIS_ZONE_SIZE * scale() }
+    pub fn cell_padding() -> f32 { CELL_PADDING * scale() }
+    pub fn cell_spacing() -> f32 { CELL_SPACING * scale() }
+    pub fn button_size() -> f32 { BUTTON_SIZE * scale() }
+    pub fn header_height() -> f32 { HEADER_HEIGHT * scale() }
+    pub fn text_padding() -> f32 { TEXT_PADDING * scale() }
 }
 
 // ---------------------------------------------------------------------------
