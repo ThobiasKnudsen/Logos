@@ -188,6 +188,9 @@ pub struct Renderer {
     tooltip_label: TextBuffer,
     /// Which cells are currently playing (indexed by cell position in current view).
     cell_playing: Vec<bool>,
+    /// Previous active cell + cursor byte, to detect when auto-scroll is needed.
+    prev_active_cell: usize,
+    prev_cursor_byte: usize,
 
     // Scrollbar geometry for hit-testing (vertical only for cell container)
     v_track_rect: Option<Rect>,
@@ -353,6 +356,8 @@ impl Renderer {
             cell_stop_label,
             tooltip_label,
             cell_playing: Vec::new(),
+            prev_active_cell: usize::MAX,
+            prev_cursor_byte: usize::MAX,
             v_track_rect: None,
             v_thumb_rect: None,
             status_label,
@@ -664,6 +669,101 @@ impl Renderer {
         }
     }
 
+    /// Returns the cell layouts for hit-testing.
+    pub fn cell_layouts(&self) -> &[CellLayout] {
+        &self.cell_layouts
+    }
+
+    /// Hit-test a screen position against a cell's text buffer, returning the
+    /// byte offset into the cell's text. Returns `None` if the cell index is
+    /// out of range or has no layout.
+    pub fn hit_test_cell(&self, cell_index: usize, screen_x: f32, screen_y: f32) -> Option<usize> {
+        let cl = self.cell_layouts.iter().find(|c| c.cell_index == cell_index)?;
+        if cell_index >= self.cell_buffers.len() {
+            return None;
+        }
+        let buf = &self.cell_buffers[cell_index];
+        let text_pad = crate::ui::theme::spacing::sm();
+
+        // Convert screen coords to content-relative coords
+        let cx = screen_x - cl.editor.x - text_pad;
+        let cy = screen_y - cl.editor.y - text_pad;
+
+        // Collect layout runs to find the target line
+        let mut best_run = None;
+        let mut last_run_line_top = 0.0_f32;
+        let mut last_run_line_height = crate::ui::theme::fonts::editor_line_height();
+
+        for run in buf.layout_runs() {
+            last_run_line_top = run.line_top;
+            last_run_line_height = run.line_height;
+
+            if cy >= run.line_top && cy < run.line_top + run.line_height {
+                best_run = Some((run.line_i, run.glyphs.to_vec()));
+                break;
+            }
+            // Track the closest run above cursor
+            if run.line_top + run.line_height <= cy {
+                best_run = Some((run.line_i, run.glyphs.to_vec()));
+            }
+        }
+
+        // If click is below all runs, snap to end of last line
+        if cy > last_run_line_top + last_run_line_height {
+            let text = if cell_index < self.cell_texts.len() {
+                &self.cell_texts[cell_index]
+            } else {
+                return Some(0);
+            };
+            return Some(text.len());
+        }
+
+        // If click is above all runs (cy < 0), return offset 0
+        if cy < 0.0 {
+            return Some(0);
+        }
+
+        let (line_i, glyphs) = best_run?;
+
+        let text = if cell_index < self.cell_texts.len() {
+            &self.cell_texts[cell_index]
+        } else {
+            return Some(0);
+        };
+
+        // Compute the byte offset of the start of this line
+        let line_start_byte: usize = text
+            .split('\n')
+            .take(line_i)
+            .map(|l| l.len() + 1) // +1 for the '\n'
+            .sum();
+
+        if glyphs.is_empty() {
+            return Some(line_start_byte);
+        }
+
+        // If click is to the left of the first glyph, snap to line start
+        if cx <= glyphs[0].x {
+            return Some(line_start_byte);
+        }
+
+        // Find the glyph whose midpoint is closest to cx
+        for glyph in &glyphs {
+            let mid = glyph.x + glyph.w / 2.0;
+            if cx < mid {
+                return Some(line_start_byte + glyph.start);
+            }
+        }
+
+        // Past the last glyph — snap to end of line
+        if let Some(last) = glyphs.last() {
+            Some(line_start_byte + last.end)
+        } else {
+            Some(line_start_byte)
+        }
+    }
+
+
     /// Returns the add-cell button rect for hit-testing.
     pub fn add_cell_button_rect(&self) -> Rect {
         self.add_cell_rect
@@ -940,24 +1040,36 @@ impl Renderer {
                 Vec::new()
             };
 
-            // Auto-scroll to keep active cell cursor visible
-            if let Some(active_layout) = layouts.get(active_cell_index) {
-                let cursor_screen_y = active_layout.editor.y + text_pad + cy;
-                let cursor_bottom = cursor_screen_y + ch;
+            // Auto-scroll to keep active cell cursor visible, but only when
+            // the cursor or active cell actually changed (e.g. typing,
+            // keyboard navigation, switching cells). Without this guard,
+            // every sync_active_tab() call (play button, copy, etc.) would
+            // force-scroll to the cursor at the bottom of a long cell.
+            let cursor_byte = cells[active_cell_index].cursor_byte;
+            let cursor_moved = active_cell_index != self.prev_active_cell
+                || cursor_byte != self.prev_cursor_byte;
+            self.prev_active_cell = active_cell_index;
+            self.prev_cursor_byte = cursor_byte;
 
-                let old_scroll = self.cell_scroll_y;
-                if cursor_screen_y < pane.y {
-                    self.cell_scroll_y += cursor_screen_y - pane.y;
-                } else if cursor_bottom > pane.y + pane.h {
-                    self.cell_scroll_y += cursor_bottom - (pane.y + pane.h);
-                }
-                let max_sy = (self.cells_total_height - pane.h).max(0.0);
-                self.cell_scroll_y = self.cell_scroll_y.clamp(0.0, max_sy);
+            if cursor_moved {
+                if let Some(active_layout) = layouts.get(active_cell_index) {
+                    let cursor_screen_y = active_layout.editor.y + text_pad + cy;
+                    let cursor_bottom = cursor_screen_y + ch;
 
-                // If scroll changed, shift all layouts by the delta
-                let scroll_delta = self.cell_scroll_y - old_scroll;
-                if scroll_delta.abs() > 0.001 {
-                    shift_cell_layouts(&mut layouts, &mut self.add_cell_rect, scroll_delta);
+                    let old_scroll = self.cell_scroll_y;
+                    if cursor_screen_y < pane.y {
+                        self.cell_scroll_y += cursor_screen_y - pane.y;
+                    } else if cursor_bottom > pane.y + pane.h {
+                        self.cell_scroll_y += cursor_bottom - (pane.y + pane.h);
+                    }
+                    let max_sy = (self.cells_total_height - pane.h).max(0.0);
+                    self.cell_scroll_y = self.cell_scroll_y.clamp(0.0, max_sy);
+
+                    // If scroll changed, shift all layouts by the delta
+                    let scroll_delta = self.cell_scroll_y - old_scroll;
+                    if scroll_delta.abs() > 0.001 {
+                        shift_cell_layouts(&mut layouts, &mut self.add_cell_rect, scroll_delta);
+                    }
                 }
             }
         }
