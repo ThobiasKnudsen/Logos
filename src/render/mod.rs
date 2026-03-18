@@ -49,8 +49,14 @@ pub struct CellLayout {
     pub editor: Rect,
     /// Output area below the editor (for REDUCE results). Zero-sized if no output.
     pub output: Rect,
-    /// Copy button in the output section (top-right). Zero-sized if no output.
+    /// Full-width separator line between editor and output row. Zero-sized if no output.
+    pub output_separator: Rect,
+    /// Chevron toggle button (collapse/expand output). Zero-sized if no output.
+    pub output_toggle: Rect,
+    /// Copy button in the output toolbar row. Zero-sized if no output.
     pub output_copy_button: Rect,
+    /// The full output toolbar row rect (toggle + label + copy). For clipping.
+    pub output_toolbar: Rect,
 }
 
 /// Info about a single cell, passed from AppState to the renderer.
@@ -62,6 +68,8 @@ pub struct CellInfo {
     pub selection: Option<(usize, usize)>,
     /// Output text to display below the cell (simplified result, error, etc.)
     pub output_text: Option<String>,
+    /// Whether the output area is collapsed (hidden).
+    pub output_collapsed: bool,
 }
 
 /// Parameters for the render area (right pane) passed from AppState.
@@ -131,6 +139,7 @@ const BASE_TAB_DOT_PAD: f32 = 6.0;
 const BASE_MENU_ITEM_PAD: f32 = 10.0;
 const BASE_CELL_HEADER_HEIGHT: f32 = 28.0;
 const BASE_CELL_DELETE_SIZE: f32 = 22.0;
+const BASE_OUTPUT_TOGGLE_HEIGHT: f32 = 20.0;
 
 fn tab_pad_h() -> f32 { BASE_TAB_PAD_H * fonts::scale() }
 fn tab_close_size() -> f32 { BASE_TAB_CLOSE_SIZE * fonts::scale() }
@@ -140,6 +149,7 @@ fn tab_dot_pad() -> f32 { BASE_TAB_DOT_PAD * fonts::scale() }
 fn menu_item_pad() -> f32 { BASE_MENU_ITEM_PAD * fonts::scale() }
 fn cell_header_height() -> f32 { BASE_CELL_HEADER_HEIGHT * fonts::scale() }
 fn cell_delete_size() -> f32 { BASE_CELL_DELETE_SIZE * fonts::scale() }
+fn output_toggle_height() -> f32 { BASE_OUTPUT_TOGGLE_HEIGHT * fonts::scale() }
 
 /// Handles all GPU rendering: wgpu setup, text via glyphon, rects via instanced draw.
 pub struct Renderer {
@@ -191,6 +201,14 @@ pub struct Renderer {
     tooltip_label: TextBuffer,
     /// Which cells are currently playing (indexed by cell position in current view).
     cell_playing: Vec<bool>,
+    /// Per-cell horizontal scroll offset for output text.
+    cell_output_scroll_x: Vec<f32>,
+    /// Chevron label for collapsed output (▶).
+    cell_chevron_right: TextBuffer,
+    /// Chevron label for expanded output (▼).
+    cell_chevron_down: TextBuffer,
+    /// "Output" label for the output toolbar row.
+    output_label: TextBuffer,
     /// Previous active cell + cursor byte, to detect when auto-scroll is needed.
     prev_active_cell: usize,
     prev_cursor_byte: usize,
@@ -334,6 +352,9 @@ impl Renderer {
         let cell_copy_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{2398}");
         let cell_play_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25B6}");
         let cell_stop_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25A0}");
+        let cell_chevron_right = Self::create_label(&mut font_system, fonts::small_size(), "\u{25B6}");
+        let cell_chevron_down = Self::create_label(&mut font_system, fonts::small_size(), "\u{25BC}");
+        let output_label = Self::create_label(&mut font_system, fonts::small_size(), "Output");
         let tooltip_label = Self::create_label(&mut font_system, fonts::small_size(), "Ctrl+Enter");
 
         let zero_rect = Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
@@ -365,8 +386,12 @@ impl Renderer {
             cell_copy_label,
             cell_play_label,
             cell_stop_label,
+            cell_chevron_right,
+            cell_chevron_down,
+            output_label,
             tooltip_label,
             cell_playing: Vec::new(),
+            cell_output_scroll_x: Vec::new(),
             prev_active_cell: usize::MAX,
             prev_cursor_byte: usize::MAX,
             v_track_rect: None,
@@ -482,6 +507,12 @@ impl Renderer {
             Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{25B6}");
         self.cell_stop_label =
             Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{25A0}");
+        self.cell_chevron_right =
+            Self::create_label(&mut self.font_system, fonts::small_size(), "\u{25B6}");
+        self.cell_chevron_down =
+            Self::create_label(&mut self.font_system, fonts::small_size(), "\u{25BC}");
+        self.output_label =
+            Self::create_label(&mut self.font_system, fonts::small_size(), "Output");
         self.tooltip_label =
             Self::create_label(&mut self.font_system, fonts::small_size(), "Ctrl+Enter");
 
@@ -770,6 +801,34 @@ impl Renderer {
         self.update_scrollbar_rects(pane);
     }
 
+    /// Scroll a cell's output text horizontally.
+    pub fn scroll_output_x(&mut self, cell_index: usize, delta: f32) {
+        if cell_index >= self.cell_output_scroll_x.len() {
+            return;
+        }
+        let content_w = Self::measure_output_content_width(&self.cell_output_buffers[cell_index]);
+        let visible_w = self
+            .cell_layouts
+            .iter()
+            .find(|cl| cl.cell_index == cell_index)
+            .map(|cl| cl.output.w - spacing::sm() * 2.0)
+            .unwrap_or(0.0);
+        let max_scroll = (content_w - visible_w).max(0.0);
+        self.cell_output_scroll_x[cell_index] =
+            (self.cell_output_scroll_x[cell_index] + delta).clamp(0.0, max_scroll);
+    }
+
+    /// Measure the total content width of an output text buffer.
+    fn measure_output_content_width(buf: &TextBuffer) -> f32 {
+        let mut max_right = 0.0_f32;
+        for run in buf.layout_runs() {
+            for glyph in run.glyphs.iter() {
+                max_right = max_right.max(glyph.x + glyph.w);
+            }
+        }
+        max_right
+    }
+
     /// Set vertical scroll position from scrollbar thumb drag.
     pub fn set_v_scroll_from_drag(&mut self, mouse_y: f32, drag_offset: f32) {
         if let (Some(track), Some(thumb)) = (self.v_track_rect, self.v_thumb_rect) {
@@ -952,6 +1011,12 @@ impl Renderer {
         self.cell_output_buffers.truncate(cells.len());
         self.cell_output_texts.truncate(cells.len());
 
+        // Sync output scroll offsets
+        while self.cell_output_scroll_x.len() < cells.len() {
+            self.cell_output_scroll_x.push(0.0);
+        }
+        self.cell_output_scroll_x.truncate(cells.len());
+
         // Set text + shape each buffer, measure heights
         let cell_pad = spacing::cell_padding();
         let cell_spacing = spacing::cell_spacing();
@@ -1024,8 +1089,8 @@ impl Renderer {
                 .map_or(true, |prev| prev != output_text_ref);
             if output_changed {
                 if has_output {
-                    let output_width = effective_width - container_pad * 2.0 - text_pad * 2.0;
-                    self.cell_output_buffers[i].set_size(&mut self.font_system, Some(output_width), None);
+                    // No width constraint — single line, no wrapping
+                    self.cell_output_buffers[i].set_size(&mut self.font_system, None, None);
                     self.cell_output_buffers[i].set_text(
                         &mut self.font_system,
                         output_text_ref,
@@ -1040,19 +1105,31 @@ impl Renderer {
                 } else {
                     self.cell_output_texts.push(output_text_ref.to_string());
                 }
+                // Reset horizontal scroll when output text changes
+                if i < self.cell_output_scroll_x.len() {
+                    self.cell_output_scroll_x[i] = 0.0;
+                }
             }
 
-            // Measure output height
-            let output_h = if has_output {
-                let out_content_h = Self::measure_content_height(&self.cell_output_buffers[i])
-                    .max(fonts::editor_line_height());
-                out_content_h + text_pad * 2.0
+            // Output toolbar row height (visible when output exists)
+            let output_toggle_h = if has_output { output_toggle_height() } else { 0.0 };
+
+            // Output height: fixed single line when expanded, 0 when collapsed
+            let output_h = if has_output && !cell_info.output_collapsed {
+                fonts::editor_line_height() + text_pad * 2.0
+            } else {
+                0.0
+            };
+
+            // When has_output: sep_h (separator) + xs (margin) + toggle_h (toolbar row) + output_h
+            let output_section_h = if has_output {
+                sep_h + spacing::xs() + output_toggle_h + output_h
             } else {
                 0.0
             };
 
             let container_h =
-                container_pad + header_h + sep_h + editor_h + output_h + container_pad;
+                container_pad + header_h + sep_h + editor_h + output_section_h + container_pad;
 
             let screen_y = pane.y + y_offset - self.cell_scroll_y;
 
@@ -1101,23 +1178,61 @@ impl Renderer {
                 w: effective_width - container_pad * 2.0,
                 h: editor_h,
             };
-            let output = Rect {
-                x: container.x + container_pad,
-                y: editor.y + editor_h,
-                w: effective_width - container_pad * 2.0,
-                h: output_h,
-            };
-            let btn_size = cell_delete_size();
-            let output_copy_button = if output_h > 0.0 {
-                Rect {
-                    x: output.x + output.w - btn_size - spacing::xs(),
-                    y: output.y + spacing::xs(),
-                    w: btn_size,
-                    h: btn_size,
-                }
-            } else {
-                Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }
-            };
+            let inner_w = effective_width - container_pad * 2.0;
+            let zero_rect = Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+
+            // Output toolbar: separator line + margin + [chevron] [Output] ... [copy btn]
+            let (output_separator, output_toggle, output_copy_button, output_toolbar, output) =
+                if has_output {
+                    let osep_y = editor.y + editor_h;
+                    let output_sep = Rect {
+                        x: container.x,
+                        y: osep_y,
+                        w: container.w,
+                        h: sep_h,
+                    };
+                    let margin = spacing::xs();
+                    let row_y = osep_y + sep_h + margin;
+                    let row_h = output_toggle_h;
+                    let inner_x = container.x + container_pad;
+
+                    // Chevron toggle button — small square
+                    let toggle_btn = Rect {
+                        x: inner_x,
+                        y: row_y,
+                        w: row_h,
+                        h: row_h,
+                    };
+
+                    // Copy button — right-aligned in the row
+                    let ob_btn_size = cell_delete_size();
+                    let copy_btn = Rect {
+                        x: inner_x + inner_w - ob_btn_size,
+                        y: row_y + (row_h - ob_btn_size) / 2.0,
+                        w: ob_btn_size,
+                        h: ob_btn_size,
+                    };
+
+                    // Full toolbar row rect (for clipping)
+                    let toolbar = Rect {
+                        x: inner_x,
+                        y: row_y,
+                        w: inner_w,
+                        h: row_h,
+                    };
+
+                    let out_y = row_y + row_h;
+                    let out = Rect {
+                        x: inner_x,
+                        y: out_y,
+                        w: inner_w,
+                        h: output_h,
+                    };
+
+                    (output_sep, toggle_btn, copy_btn, toolbar, out)
+                } else {
+                    (zero_rect, zero_rect, zero_rect, zero_rect, zero_rect)
+                };
 
             layouts.push(CellLayout {
                 cell_index: i,
@@ -1129,7 +1244,10 @@ impl Renderer {
                 separator,
                 editor,
                 output,
+                output_separator,
+                output_toggle,
                 output_copy_button,
+                output_toolbar,
             });
 
             y_offset += container_h + cell_spacing;
@@ -1536,20 +1654,17 @@ impl Renderer {
             // Separator line
             ui_rects.push(rect_from(cl.separator, t.border));
 
-            // Output separator + subtle background when output is visible
-            if cl.output.h > 0.0 {
-                // Thin separator between editor and output
-                ui_rects.push(rect_from(
-                    Rect {
-                        x: cl.output.x,
-                        y: cl.output.y,
-                        w: cl.output.w,
-                        h: 1.0,
-                    },
-                    t.border,
-                ));
+            // Output toolbar (shown when output exists, even if collapsed)
+            if cl.output_toolbar.h > 0.0 {
+                // Full-width separator line between editor and output
+                ui_rects.push(rect_from(cl.output_separator, t.border));
 
-                // Output copy button hover
+                // Chevron toggle button hover
+                if hover == HoverTarget::CellOutputToggle(i) {
+                    ui_rects.push(rect_from(cl.output_toggle, t.bg_hover));
+                }
+
+                // Copy button hover
                 if hover == HoverTarget::CellOutputCopyButton(i) {
                     ui_rects.push(rect_from(cl.output_copy_button, t.bg_hover));
                 }
@@ -1806,8 +1921,107 @@ impl Renderer {
                 }
             }
 
-            // Output text (REDUCE result) below the editor
+            // Output toolbar labels: chevron, "Output", copy button
+            if cl.output_toolbar.h > 0.0 {
+                let tb_clip_top = (cl.output_toolbar.y as i32).max(pane_top);
+                let tb_clip_bottom =
+                    ((cl.output_toolbar.y + cl.output_toolbar.h) as i32).min(pane_bottom);
+                if tb_clip_top < tb_clip_bottom {
+                    let is_collapsed = cl.output.h <= 0.0;
+                    let line_h = fonts::small_size() * 1.4;
+
+                    // Chevron (▶ or ▼) centered in toggle button
+                    let chevron_buf = if is_collapsed {
+                        &self.cell_chevron_right
+                    } else {
+                        &self.cell_chevron_down
+                    };
+                    let chev_w = Self::measure_label_width(chevron_buf);
+                    let chev_x = cl.output_toggle.x + (cl.output_toggle.w - chev_w) / 2.0;
+                    let chev_y = cl.output_toggle.y + (cl.output_toggle.h - line_h) / 2.0;
+                    let mut chev_bounds = TextBounds {
+                        left: (cl.output_toggle.x as i32).max(pane_left),
+                        top: tb_clip_top,
+                        right: ((cl.output_toggle.x + cl.output_toggle.w) as i32)
+                            .min(pane_right),
+                        bottom: tb_clip_bottom,
+                    };
+                    let chev_visible = dd_clip
+                        .as_ref()
+                        .map_or(true, |dd| clip_bounds_under_dropdown(&mut chev_bounds, dd));
+                    if chev_visible {
+                        text_areas.push(TextArea {
+                            buffer: chevron_buf,
+                            left: chev_x,
+                            top: chev_y,
+                            scale: 1.0,
+                            bounds: chev_bounds,
+                            default_color: t.text_muted.to_glyphon(),
+                            custom_glyphs: &[],
+                        });
+                    }
+
+                    // "Output" label to the right of the chevron
+                    let label_x = cl.output_toggle.x + cl.output_toggle.w + spacing::xs();
+                    let label_y = cl.output_toolbar.y + (cl.output_toolbar.h - line_h) / 2.0;
+                    let mut label_bounds = TextBounds {
+                        left: (label_x as i32).max(pane_left),
+                        top: tb_clip_top,
+                        right: ((cl.output_toolbar.x + cl.output_toolbar.w) as i32)
+                            .min(pane_right),
+                        bottom: tb_clip_bottom,
+                    };
+                    let label_visible = dd_clip
+                        .as_ref()
+                        .map_or(true, |dd| clip_bounds_under_dropdown(&mut label_bounds, dd));
+                    if label_visible {
+                        text_areas.push(TextArea {
+                            buffer: &self.output_label,
+                            left: label_x,
+                            top: label_y,
+                            scale: 1.0,
+                            bounds: label_bounds,
+                            default_color: t.text_muted.to_glyphon(),
+                            custom_glyphs: &[],
+                        });
+                    }
+
+                    // Copy button label (⎘) right-aligned in toolbar
+                    let ocb = &cl.output_copy_button;
+                    let mut ocb_bounds = TextBounds {
+                        left: (ocb.x as i32).max(pane_left),
+                        top: tb_clip_top,
+                        right: ((ocb.x + ocb.w) as i32).min(pane_right),
+                        bottom: tb_clip_bottom,
+                    };
+                    let ocb_visible = dd_clip
+                        .as_ref()
+                        .map_or(true, |dd| clip_bounds_under_dropdown(&mut ocb_bounds, dd));
+                    if ocb_visible {
+                        let copy_w = Self::measure_label_width(&self.cell_copy_label);
+                        let copy_line_h = fonts::ui_size() * 1.4;
+                        let cx = ocb.x + (ocb.w - copy_w) / 2.0;
+                        let cy = ocb.y + (ocb.h - copy_line_h) / 2.0;
+                        text_areas.push(TextArea {
+                            buffer: &self.cell_copy_label,
+                            left: cx,
+                            top: cy,
+                            scale: 1.0,
+                            bounds: ocb_bounds,
+                            default_color: t.text_muted.to_glyphon(),
+                            custom_glyphs: &[],
+                        });
+                    }
+                }
+            }
+
+            // Output text (REDUCE result) below the toolbar
             if cl.output.h > 0.0 && i < self.cell_output_buffers.len() {
+                let scroll_x = self
+                    .cell_output_scroll_x
+                    .get(i)
+                    .copied()
+                    .unwrap_or(0.0);
                 let clip_left = (cl.output.x as i32).max(pane_left);
                 let clip_top = (cl.output.y as i32).max(pane_top);
                 let clip_right = ((cl.output.x + cl.output.w) as i32).min(pane_right);
@@ -1816,7 +2030,7 @@ impl Renderer {
                 if clip_left < clip_right && clip_top < clip_bottom {
                     text_areas.push(TextArea {
                         buffer: &self.cell_output_buffers[i],
-                        left: cl.output.x + text_pad,
+                        left: cl.output.x + text_pad - scroll_x,
                         top: cl.output.y + text_pad,
                         scale: 1.0,
                         bounds: TextBounds {
@@ -1828,38 +2042,6 @@ impl Renderer {
                         default_color: t.text_muted.to_glyphon(),
                         custom_glyphs: &[],
                     });
-                }
-
-                // Output copy button label (⎘)
-                let ocb = &cl.output_copy_button;
-                let ocb_clip_top = (ocb.y as i32).max(pane_top);
-                let ocb_clip_bottom = ((ocb.y + ocb.h) as i32).min(pane_bottom);
-                if ocb_clip_top < ocb_clip_bottom {
-                    let mut bounds = TextBounds {
-                        left: ocb.x as i32,
-                        top: ocb_clip_top,
-                        right: (ocb.x + ocb.w) as i32,
-                        bottom: ocb_clip_bottom,
-                    };
-                    let visible = dd_clip
-                        .as_ref()
-                        .map_or(true, |dd| clip_bounds_under_dropdown(&mut bounds, dd));
-
-                    if visible {
-                        let label_w = Self::measure_label_width(&self.cell_copy_label);
-                        let line_h = fonts::ui_size() * 1.4;
-                        let cx = ocb.x + (ocb.w - label_w) / 2.0;
-                        let cy = ocb.y + (ocb.h - line_h) / 2.0;
-                        text_areas.push(TextArea {
-                            buffer: &self.cell_copy_label,
-                            left: cx,
-                            top: cy,
-                            scale: 1.0,
-                            bounds,
-                            default_color: t.text_muted.to_glyphon(),
-                            custom_glyphs: &[],
-                        });
-                    }
                 }
             }
 
@@ -2547,8 +2729,11 @@ fn shift_cell_layouts(layouts: &mut [CellLayout], add_cell_rect: &mut Rect, delt
         cl.delete_button.y -= delta;
         cl.separator.y -= delta;
         cl.editor.y -= delta;
-        cl.output.y -= delta;
+        cl.output_separator.y -= delta;
+        cl.output_toggle.y -= delta;
         cl.output_copy_button.y -= delta;
+        cl.output_toolbar.y -= delta;
+        cl.output.y -= delta;
     }
     add_cell_rect.y -= delta;
 }

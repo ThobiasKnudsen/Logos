@@ -223,6 +223,7 @@ pub(crate) enum HoverTarget {
     CellPlayButton(usize),
     CellCopyButton(usize),
     CellOutputCopyButton(usize),
+    CellOutputToggle(usize),
     CellDeleteButton(usize),
     AddCellButton,
     AutocompleteItem(usize),
@@ -369,6 +370,7 @@ impl AppState {
                     CellOutput::Error(e) => Some(format!("Error: {}", e)),
                     CellOutput::None => None,
                 },
+                output_collapsed: c.output_collapsed,
             })
             .collect();
         self.cell_layouts = self.renderer.update_cells(
@@ -562,8 +564,12 @@ impl AppState {
                     self.set_hover(HoverTarget::CellEditor(cl.cell_index));
                     return;
                 }
-                if cl.output.h > 0.0 && point_in_rect(mx, my, &cl.output_copy_button) {
+                if cl.output_toolbar.h > 0.0 && point_in_rect(mx, my, &cl.output_copy_button) {
                     self.set_hover(HoverTarget::CellOutputCopyButton(cl.cell_index));
+                    return;
+                }
+                if cl.output_toggle.h > 0.0 && point_in_rect(mx, my, &cl.output_toggle) {
+                    self.set_hover(HoverTarget::CellOutputToggle(cl.cell_index));
                     return;
                 }
             }
@@ -592,6 +598,7 @@ impl AppState {
                 HoverTarget::CellEditor(_) => CursorIcon::Text,
                 HoverTarget::CellPlayButton(_) | HoverTarget::CellCopyButton(_)
                 | HoverTarget::CellOutputCopyButton(_)
+                | HoverTarget::CellOutputToggle(_)
                 | HoverTarget::AutocompleteItem(_) => CursorIcon::Pointer,
                 HoverTarget::RenderArea => match self.render_area.mouse_zone {
                     MouseZone::Center => {
@@ -988,15 +995,17 @@ impl AppState {
                         }
                         Err(e) => {
                             log::error!("Shader compilation failed: {}", e);
-                            self.tab_manager.active_tab_mut().cells[cell_index].output =
-                                CellOutput::Error(format!("Shader: {}", e));
+                            let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+                            cell.output = CellOutput::Error(format!("Shader: {}", e));
+                            cell.output_collapsed = false;
                         }
                     }
                 }
                 Err(e) => {
                     log::error!("Language pipeline error: {}", e);
-                    self.tab_manager.active_tab_mut().cells[cell_index].output =
-                        CellOutput::Error(format!("Compile: {}", e));
+                    let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+                    cell.output = CellOutput::Error(format!("Compile: {}", e));
+                    cell.output_collapsed = false;
                 }
             }
         }
@@ -1173,7 +1182,7 @@ impl ApplicationHandler for App {
 
             // --- Mouse Wheel ---
             WindowEvent::MouseWheel { delta, .. } => {
-                let (_dx, dy) = match delta {
+                let (dx, dy) = match delta {
                     winit::event::MouseScrollDelta::LineDelta(x, y) => {
                         (x * SCROLL_LINE_PIXELS, y * SCROLL_LINE_PIXELS)
                     }
@@ -1233,12 +1242,25 @@ impl ApplicationHandler for App {
                 else {
                     let lp = state.cached_layout.left_pane;
                     if point_in_rect(mx, my, &lp) {
-                        state.renderer.scroll_by(0.0, -dy);
-                        state.cell_layouts = state.renderer.cell_layouts().to_vec();
-                        // Dismiss autocomplete — cell positions shifted by scroll
-                        state.dismiss_autocomplete();
-                        state.recompute_hover();
-                        state.window.request_redraw();
+                        // Check if cursor is over a cell's output area — horizontal scroll
+                        let mut handled_h_scroll = false;
+                        for cl in &state.cell_layouts {
+                            if cl.output.h > 0.0 && point_in_rect(mx, my, &cl.output) {
+                                let h_delta = if dx.abs() > 0.001 { dx } else { -dy };
+                                state.renderer.scroll_output_x(cl.cell_index, -h_delta);
+                                handled_h_scroll = true;
+                                state.window.request_redraw();
+                                break;
+                            }
+                        }
+                        if !handled_h_scroll {
+                            state.renderer.scroll_by(0.0, -dy);
+                            state.cell_layouts = state.renderer.cell_layouts().to_vec();
+                            // Dismiss autocomplete — cell positions shifted by scroll
+                            state.dismiss_autocomplete();
+                            state.recompute_hover();
+                            state.window.request_redraw();
+                        }
                     }
                 }
             }
@@ -1328,6 +1350,11 @@ impl ApplicationHandler for App {
                         state.editor_drag_cell = Some(i);
                         event_loop.set_control_flow(ControlFlow::Poll);
                         state.sync_active_tab();
+                    }
+                    HoverTarget::CellOutputToggle(_) => {
+                        state.close_menu();
+                        state.dismiss_autocomplete();
+                        // Handled on release via press-target
                     }
                     HoverTarget::CellOutputCopyButton(i) => {
                         state.close_menu();
@@ -1447,6 +1474,7 @@ impl ApplicationHandler for App {
                     HoverTarget::CellPlayButton(_)
                     | HoverTarget::CellCopyButton(_)
                     | HoverTarget::CellOutputCopyButton(_)
+                    | HoverTarget::CellOutputToggle(_)
                     | HoverTarget::CellDeleteButton(_)
                     | HoverTarget::AddCellButton => state.mouse_press_target,
                     _ => state.hover_target,
@@ -1478,6 +1506,11 @@ impl ApplicationHandler for App {
                         if let Some(cb) = state.clipboard.as_mut() {
                             let _ = cb.set_text(&output_text);
                         }
+                    }
+                    HoverTarget::CellOutputToggle(i) => {
+                        let cell = &mut state.tab_manager.active_tab_mut().cells[i];
+                        cell.output_collapsed = !cell.output_collapsed;
+                        state.sync_active_tab();
                     }
                     HoverTarget::CellDeleteButton(i) => {
                         // Stop shader if playing before removing
@@ -1659,11 +1692,7 @@ impl ApplicationHandler for App {
             let tab = state.tab_manager.active_tab_mut();
             if let Some(cell_idx) = tab.cells.iter().position(|c| c.id == resp.cell_id) {
                 let simplified = match resp.result {
-                    Ok(text) if !text.is_empty() => {
-                        let s = translate::from_reduce(&text);
-                        tab.cells[cell_idx].output = CellOutput::Simplified(s.clone());
-                        Some(s)
-                    }
+                    Ok(text) if !text.is_empty() => Some(translate::from_reduce(&text)),
                     Ok(_) => {
                         tab.cells[cell_idx].output = CellOutput::None;
                         None
@@ -1671,17 +1700,20 @@ impl ApplicationHandler for App {
                     Err(e) => {
                         log::error!("REDUCE error for cell {}: {}", resp.cell_id, e);
                         tab.cells[cell_idx].output = CellOutput::Error(e);
+                        tab.cells[cell_idx].output_collapsed = false;
                         None
                     }
                 };
 
-                // Compile shader from the REDUCE-simplified result.
-                // The simplified expression has CAS ops (int, solve, df)
-                // replaced with their concrete results that WGSL can handle.
+                // Substitute the REDUCE result back into the original expression
+                // and display the full simplified form (with context preserved).
                 if let Some(result) = simplified {
                     let cell_text = tab.cells[cell_idx].buffer.text().to_string();
                     let (_, embedded) = extract_reduce_expr(&cell_text);
                     let substituted = substitute_reduce_result(&cell_text, &result, embedded);
+                    tab.cells[cell_idx].output =
+                        CellOutput::Simplified(substituted.clone());
+                    tab.cells[cell_idx].output_collapsed = false;
                     let mut source = String::new();
                     for (i, cell) in tab.cells.iter().enumerate() {
                         if i > cell_idx { break; }
@@ -1703,6 +1735,7 @@ impl ApplicationHandler for App {
                                     log::error!("Shader compilation failed: {}", e);
                                     tab.cells[cell_idx].output =
                                         CellOutput::Error(format!("Shader: {}", e));
+                                    tab.cells[cell_idx].output_collapsed = false;
                                 }
                             }
                         }
@@ -1710,6 +1743,7 @@ impl ApplicationHandler for App {
                             log::error!("Language pipeline error: {}", e);
                             tab.cells[cell_idx].output =
                                 CellOutput::Error(format!("Compile: {}", e));
+                            tab.cells[cell_idx].output_collapsed = false;
                         }
                     }
                 }

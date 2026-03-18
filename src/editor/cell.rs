@@ -12,6 +12,7 @@ pub struct CodeCell {
     pub buffer: Buffer,
     pub is_playing: bool,
     pub output: CellOutput,
+    pub output_collapsed: bool,
 }
 
 impl CodeCell {
@@ -21,6 +22,7 @@ impl CodeCell {
             buffer: Buffer::new(),
             is_playing: false,
             output: CellOutput::None,
+            output_collapsed: false,
         }
     }
 }
