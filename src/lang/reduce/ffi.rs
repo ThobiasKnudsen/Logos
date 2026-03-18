@@ -1,5 +1,8 @@
 //! Raw extern "C" declarations for the CSL / REDUCE procedural interface.
 //!
+//! All functions go through try/catch wrappers in reduce_ffi.cpp to prevent
+//! C++ exceptions from propagating into Rust (which would be a fatal abort).
+//!
 //! Safety: These functions are NOT thread-safe. They must only be called
 //! from a single thread (the REDUCE worker thread).
 
@@ -12,7 +15,7 @@ pub type CharacterReader = Option<extern "C" fn() -> c_int>;
 pub type CharacterWriter = Option<extern "C" fn(c_int) -> c_int>;
 
 extern "C" {
-    // --- Wrapped C++ functions (from reduce_ffi.cpp) ---
+    // --- All calls go through try/catch wrappers in reduce_ffi.cpp ---
 
     pub fn reduce_ffi_cslstart(
         argc: c_int,
@@ -30,22 +33,20 @@ extern "C" {
         w: CharacterWriter,
     ) -> c_int;
 
-    // --- PROC_* functions (already extern "C" in proc.h) ---
+    pub fn reduce_ffi_process_statement(stmt: *const c_char) -> c_int;
 
-    pub fn PROC_set_callbacks(
+    pub fn reduce_ffi_set_switch(name: *const c_char, val: c_int) -> c_int;
+
+    pub fn reduce_ffi_gc_messages(n: c_int) -> c_int;
+
+    pub fn reduce_ffi_prepare_for_top_level_loop() -> c_int;
+
+    pub fn reduce_ffi_set_callbacks(
         r: CharacterReader,
         w: CharacterWriter,
     ) -> c_int;
 
-    pub fn PROC_prepare_for_top_level_loop() -> c_int;
-
-    pub fn PROC_prepare_for_web_top_level() -> c_int;
-
-    pub fn PROC_process_one_reduce_statement(stmt: *const c_char) -> c_int;
-
-    pub fn PROC_set_switch(name: *const c_char, val: c_int) -> c_int;
-
-    pub fn PROC_gc_messages(n: c_int) -> c_int;
+    // --- PROC_* functions kept for stack-based API (already extern "C") ---
 
     pub fn PROC_clear_stack() -> c_int;
     pub fn PROC_push_symbol(name: *const c_char) -> c_int;
