@@ -39,6 +39,8 @@ extern "C" {
 
     pub fn PROC_prepare_for_top_level_loop() -> c_int;
 
+    pub fn PROC_prepare_for_web_top_level() -> c_int;
+
     pub fn PROC_process_one_reduce_statement(stmt: *const c_char) -> c_int;
 
     pub fn PROC_set_switch(name: *const c_char, val: c_int) -> c_int;
