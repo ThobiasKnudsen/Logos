@@ -20,7 +20,7 @@ use crate::render::RenderAreaParams;
 use crate::ui::theme::{self, fonts, spacing, split};
 
 /// CAS function names that REDUCE handles but WGSL doesn't.
-const CAS_FUNCTIONS: &[&str] = &["int(", "solve(", "df(", "integral(", "derivative("];
+const CAS_FUNCTIONS: &[&str] = &["\u{222B}(", "\u{2202}(", "solve(", "integral(", "derivative("];
 
 /// Find the first CAS function call in `text` and return its byte range.
 ///

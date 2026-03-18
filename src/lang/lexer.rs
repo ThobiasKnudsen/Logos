@@ -185,6 +185,10 @@ impl<'a> Lexer<'a> {
             self.advance();
             return Ok(Token { ty: TokenType::Identifier("sum".to_string()), span: (start, self.pos) });
         }
+        if ch == '\u{212F}' { // ℯ (Euler's number)
+            self.advance();
+            return Ok(Token { ty: TokenType::Number(std::f64::consts::E), span: (start, self.pos) });
+        }
         if ch == '\u{220F}' { // ∏ (product) — CAS-only, not a WGSL builtin
             self.advance();
             return Ok(Token { ty: TokenType::Identifier("prod".to_string()), span: (start, self.pos) });
@@ -346,6 +350,7 @@ fn is_unicode_math_symbol(c: char) -> bool {
         | '\u{2207}' // ∇ nabla
         | '\u{221A}' // √ sqrt
         | '\u{221E}' // ∞ infinity
+        | '\u{212F}' // ℯ Euler's number
         | '\u{2211}' // ∑ sum
         | '\u{220F}' // ∏ product
         | '\u{2264}' // ≤

@@ -35,6 +35,7 @@ pub fn to_reduce(input: &str) -> String {
             '\u{03C0}' => output.push_str("pi"),
             '\u{03C3}' => output.push_str("sigma"),
             '\u{03C6}' => output.push_str("phi"),
+            '\u{03C4}' => output.push_str("tau"),     // τ
             '\u{03C9}' => output.push_str("omega"),
 
             // Superscript digits → **N (REDUCE exponentiation)
@@ -51,6 +52,9 @@ pub fn to_reduce(input: &str) -> String {
 
             // Caret → REDUCE exponentiation
             '^' => output.push_str("**"),
+
+            // Euler's number
+            '\u{212F}' => output.push('e'),   // ℯ
 
             // Math operators
             '\u{00D7}' => output.push('*'),   // ×
@@ -158,10 +162,12 @@ fn replace_word(input: &str, word: &str, replacement: &str) -> String {
 pub fn from_reduce(input: &str) -> String {
     let mut output = input.to_string();
 
-    // Word-boundary-safe replacements
+    // Word-boundary-safe replacements (longest words first to avoid partial matches)
     output = replace_word(&output, "infinity", "\u{221E}");
     output = replace_word(&output, "sqrt", "\u{221A}");
+    output = replace_word(&output, "tau", "\u{03C4}");
     output = replace_word(&output, "pi", "\u{03C0}");
+    output = replace_word(&output, "e", "\u{212F}");
 
     // ** → ^ (REDUCE exponentiation → Logos caret)
     output = output.replace("**", "^");
