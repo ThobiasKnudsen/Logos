@@ -346,9 +346,7 @@ impl Parser {
                 }
                 // Indexing: expr[index]
                 TokenType::LBracket => {
-                    self.advance();
-                    let _index = self.parse_expr()?;
-                    self.expect(TokenType::RBracket)?;
+                    return Err("Array indexing is not yet supported".to_string());
                 }
                 // Property access: expr.prop
                 TokenType::Dot => {

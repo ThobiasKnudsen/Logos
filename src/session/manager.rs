@@ -62,6 +62,6 @@ impl TabManager {
             self.active_index = self.tabs.len() - 1;
         } else if self.active_index > index {
             self.active_index -= 1;
-            }
+        }
     }
 }

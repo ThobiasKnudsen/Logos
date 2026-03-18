@@ -57,24 +57,80 @@ pub fn to_reduce(input: &str) -> String {
     output
 }
 
+/// Check whether the character at the given position is an ASCII alphanumeric
+/// or underscore — i.e. part of an identifier.
+fn is_word_char(s: &str, byte_pos: usize) -> bool {
+    s.as_bytes()
+        .get(byte_pos)
+        .map_or(false, |&b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Replace `word` with `replacement` only at word boundaries (not inside
+/// longer identifiers like "spin" when replacing "pi").
+fn replace_word(input: &str, word: &str, replacement: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut start = 0;
+    while let Some(idx) = input[start..].find(word) {
+        let abs = start + idx;
+        let before_ok = abs == 0 || !is_word_char(input, abs - 1);
+        let after_ok = !is_word_char(input, abs + word.len());
+        if before_ok && after_ok {
+            result.push_str(&input[start..abs]);
+            result.push_str(replacement);
+        } else {
+            result.push_str(&input[start..abs + word.len()]);
+        }
+        start = abs + word.len();
+    }
+    result.push_str(&input[start..]);
+    result
+}
+
+/// Replace `**N` with a superscript, but only when the character after the
+/// digit is NOT another ASCII digit (so `**29` stays as `**29`, not `²9`).
+fn replace_exponent(input: &str, digit: char, superscript: &str) -> String {
+    let pattern: String = format!("**{}", digit);
+    let mut result = String::with_capacity(input.len());
+    let mut start = 0;
+    while let Some(idx) = input[start..].find(&pattern) {
+        let abs = start + idx;
+        let after_pos = abs + pattern.len();
+        let after_is_digit = input
+            .as_bytes()
+            .get(after_pos)
+            .map_or(false, |&b| b.is_ascii_digit());
+        if after_is_digit {
+            // Part of a larger exponent like **29 — don't replace
+            result.push_str(&input[start..abs + pattern.len()]);
+        } else {
+            result.push_str(&input[start..abs]);
+            result.push_str(superscript);
+        }
+        start = abs + pattern.len();
+    }
+    result.push_str(&input[start..]);
+    result
+}
+
 /// Convert REDUCE ASCII output back to Unicode math notation.
 pub fn from_reduce(input: &str) -> String {
     let mut output = input.to_string();
 
-    // Simple word-boundary replacements
-    output = output.replace("pi", "\u{03C0}");
-    output = output.replace("infinity", "\u{221E}");
-    output = output.replace("sqrt", "\u{221A}");
+    // Word-boundary-safe replacements (longest first to avoid "pi" matching
+    // inside "infinity" — though word-boundary checks handle it anyway).
+    output = replace_word(&output, "infinity", "\u{221E}");
+    output = replace_word(&output, "sqrt", "\u{221A}");
+    output = replace_word(&output, "pi", "\u{03C0}");
 
-    // **N → superscript (common cases)
-    output = output.replace("**2", "\u{00B2}");
-    output = output.replace("**3", "\u{00B3}");
-    output = output.replace("**4", "\u{2074}");
-    output = output.replace("**5", "\u{2075}");
-    output = output.replace("**6", "\u{2076}");
-    output = output.replace("**7", "\u{2077}");
-    output = output.replace("**8", "\u{2078}");
-    output = output.replace("**9", "\u{2079}");
+    // **N → superscript (only when NOT followed by another digit)
+    output = replace_exponent(&output, '2', "\u{00B2}");
+    output = replace_exponent(&output, '3', "\u{00B3}");
+    output = replace_exponent(&output, '4', "\u{2074}");
+    output = replace_exponent(&output, '5', "\u{2075}");
+    output = replace_exponent(&output, '6', "\u{2076}");
+    output = replace_exponent(&output, '7', "\u{2077}");
+    output = replace_exponent(&output, '8', "\u{2078}");
+    output = replace_exponent(&output, '9', "\u{2079}");
 
     output
 }
@@ -230,5 +286,33 @@ mod tests {
     fn test_empty_input() {
         assert_eq!(to_reduce(""), "");
         assert_eq!(from_reduce(""), "");
+    }
+
+    // ── from_reduce: Word boundary safety ─────────────────────────
+
+    #[test]
+    fn test_from_reduce_word_boundaries() {
+        // "pi" inside "spin" must NOT be replaced
+        assert_eq!(from_reduce("spin"), "spin");
+        // "pi" inside "pineapple" must NOT be replaced
+        assert_eq!(from_reduce("pineapple"), "pineapple");
+        // "pi" inside "api" must NOT be replaced
+        assert_eq!(from_reduce("api"), "api");
+        // standalone "pi" should be replaced
+        assert_eq!(from_reduce("2*pi"), "2*\u{03C0}");
+        // "sqrt" inside "isqrt" must NOT be replaced
+        assert_eq!(from_reduce("isqrt"), "isqrt");
+    }
+
+    #[test]
+    fn test_from_reduce_exponent_boundaries() {
+        // **29 must NOT become ²9
+        assert_eq!(from_reduce("x**29"), "x**29");
+        // **2 at end of string should be replaced
+        assert_eq!(from_reduce("x**2"), "x\u{00B2}");
+        // **2 followed by non-digit should be replaced
+        assert_eq!(from_reduce("x**2 + 1"), "x\u{00B2} + 1");
+        // **20 must NOT be replaced
+        assert_eq!(from_reduce("x**20"), "x**20");
     }
 }

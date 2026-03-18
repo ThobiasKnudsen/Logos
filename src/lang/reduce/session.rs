@@ -227,6 +227,18 @@ impl ReduceSession {
         Ok(cleaned)
     }
 
+    /// Set a REDUCE switch on or off (e.g. "factor", "exp").
+    pub fn set_switch(&self, name: &str, on: bool) -> Result<(), String> {
+        let c_name = CString::new(name).map_err(|e| format!("Invalid switch name: {}", e))?;
+        let val = if on { 1 } else { 0 };
+        let rc = unsafe { ffi::PROC_set_switch(c_name.as_ptr(), val) };
+        if rc != 0 {
+            Err(format!("PROC_set_switch({}, {}) failed: {}", name, on, rc))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Convenience: wrap an expression in `ws "expr";` to simplify it.
     /// Returns the simplified expression as a string.
     pub fn simplify(&self, expr: &str) -> Result<String, String> {

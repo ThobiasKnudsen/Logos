@@ -254,13 +254,8 @@ impl<'a> Lexer<'a> {
         self.input[self.pos..].chars().next()
     }
 
-    fn peek_at(&self, offset: usize) -> Option<char> {
-        let pos = self.pos + offset;
-        if pos < self.input.len() {
-            self.input[pos..].chars().next()
-        } else {
-            None
-        }
+    fn peek_at(&self, char_offset: usize) -> Option<char> {
+        self.input[self.pos..].chars().nth(char_offset)
     }
 
     fn advance(&mut self) {
