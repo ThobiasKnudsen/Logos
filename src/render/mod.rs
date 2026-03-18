@@ -16,6 +16,7 @@ use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 use crate::app::{self, HoverTarget, MenuItemDef, WindowControlRects};
+use crate::editor::autocomplete::CandidateKind;
 use crate::ui::layout::{LayoutResult, Rect};
 use crate::ui::theme::{self, fonts, spacing, Rgba};
 use rects::{RectInstance, RectRenderer};
@@ -229,6 +230,14 @@ pub struct Renderer {
     win_max_label: TextBuffer,
     win_close_label: TextBuffer,
 
+    // Autocomplete popup
+    ac_active: bool,
+    ac_bg: Rect,
+    ac_item_rects: Vec<Rect>,
+    ac_item_labels: Vec<TextBuffer>,
+    ac_kind_labels: Vec<TextBuffer>,
+    ac_selected_index: usize,
+
     // Batched rect renderer
     rect_renderer: RectRenderer,
 
@@ -382,6 +391,12 @@ impl Renderer {
             win_min_label,
             win_max_label,
             win_close_label,
+            ac_active: false,
+            ac_bg: zero_rect,
+            ac_item_rects: Vec::new(),
+            ac_item_labels: Vec::new(),
+            ac_kind_labels: Vec::new(),
+            ac_selected_index: 0,
             rect_renderer,
             shader_pipeline,
             overlay_rect_renderer,
@@ -482,8 +497,9 @@ impl Renderer {
         self.cell_texts.clear();
         self.cell_output_texts.clear();
 
-        // Close any open dropdown since label sizes changed
+        // Close any open dropdown/autocomplete since label sizes changed
         self.close_dropdown();
+        self.close_autocomplete();
     }
 
     /// Invalidate cached cell texts so the next sync forces re-highlighting.
@@ -601,6 +617,107 @@ impl Renderer {
         self.dropdown_item_labels.clear();
         self.dropdown_shortcut_labels.clear();
         self.dropdown_item_rects.clear();
+    }
+
+    // ----- Autocomplete popup public API -----
+
+    /// Open the autocomplete popup at the given position with candidates.
+    /// Returns item rects for hit-testing.
+    pub fn open_autocomplete(
+        &mut self,
+        x: f32,
+        y: f32,
+        candidates: &[(String, CandidateKind)],
+        selected_index: usize,
+        pane: Rect,
+    ) -> Vec<Rect> {
+        self.ac_item_labels.clear();
+        self.ac_kind_labels.clear();
+        self.ac_item_rects.clear();
+
+        if candidates.is_empty() {
+            self.ac_active = false;
+            return Vec::new();
+        }
+
+        let item_h = spacing::dropdown_item_height();
+        let pad = spacing::dropdown_padding();
+
+        let mut max_label_w = 0.0_f32;
+        let mut max_kind_w = 0.0_f32;
+
+        for (label, kind) in candidates {
+            let lbl = Self::create_label(&mut self.font_system, fonts::editor_size(), label);
+            let badge = Self::create_label(&mut self.font_system, fonts::small_size(), kind.badge());
+            max_label_w = max_label_w.max(Self::measure_label_width(&lbl));
+            max_kind_w = max_kind_w.max(Self::measure_label_width(&badge));
+            self.ac_item_labels.push(lbl);
+            self.ac_kind_labels.push(badge);
+        }
+
+        let popup_w = (max_kind_w + spacing::sm() + max_label_w + menu_item_pad() * 2.0)
+            .max(120.0 * fonts::scale());
+        let popup_h = candidates.len() as f32 * item_h + pad * 2.0;
+
+        // Position below cursor; flip above if it would exceed pane bottom
+        let mut popup_x = x;
+        let mut popup_y = y;
+
+        if popup_y + popup_h > pane.y + pane.h {
+            // Flip above cursor (subtract one line height + popup height)
+            popup_y = y - fonts::editor_line_height() - popup_h;
+        }
+
+        // Clamp right edge
+        if popup_x + popup_w > pane.x + pane.w {
+            popup_x = (pane.x + pane.w - popup_w).max(pane.x);
+        }
+
+        self.ac_bg = Rect {
+            x: popup_x,
+            y: popup_y,
+            w: popup_w,
+            h: popup_h,
+        };
+
+        let mut item_rects = Vec::with_capacity(candidates.len());
+        for i in 0..candidates.len() {
+            item_rects.push(Rect {
+                x: popup_x,
+                y: popup_y + pad + i as f32 * item_h,
+                w: popup_w,
+                h: item_h,
+            });
+        }
+
+        self.ac_item_rects = item_rects.clone();
+        self.ac_selected_index = selected_index;
+        self.ac_active = true;
+        item_rects
+    }
+
+    pub fn close_autocomplete(&mut self) {
+        self.ac_active = false;
+        self.ac_item_labels.clear();
+        self.ac_kind_labels.clear();
+        self.ac_item_rects.clear();
+    }
+
+    pub fn update_autocomplete_selection(&mut self, index: usize) {
+        self.ac_selected_index = index;
+    }
+
+    pub fn autocomplete_bg_rect(&self) -> Option<Rect> {
+        if self.ac_active {
+            Some(self.ac_bg)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the cursor position (content-relative x, y, line_height) for the active cell.
+    pub fn cursor_content_pos(&self) -> (f32, f32, f32) {
+        self.cursor_content_pos
     }
 
     /// Returns the dropdown background rect if a dropdown is active.
@@ -1588,6 +1705,33 @@ impl Renderer {
             }
         }
 
+        // Autocomplete popup (drawn after dropdown, overlays cell content)
+        if self.ac_active {
+            let ac_radius = 6.0 * fonts::scale();
+            // Border
+            ui_rects.push(rect_rounded(
+                Rect {
+                    x: self.ac_bg.x - 1.0,
+                    y: self.ac_bg.y - 1.0,
+                    w: self.ac_bg.w + 2.0,
+                    h: self.ac_bg.h + 2.0,
+                },
+                t.dropdown_separator,
+                ac_radius + 1.0,
+            ));
+            // Background
+            ui_rects.push(rect_rounded(self.ac_bg, t.dropdown_bg, ac_radius));
+
+            // Item highlights
+            for (idx, rect) in self.ac_item_rects.iter().enumerate() {
+                if idx == self.ac_selected_index {
+                    ui_rects.push(rect_from(*rect, t.dropdown_hover));
+                } else if hover == HoverTarget::AutocompleteItem(idx) {
+                    ui_rects.push(rect_from(*rect, t.bg_elevated));
+                }
+            }
+        }
+
         // -- Text areas --
         let mut text_areas: Vec<TextArea> = Vec::new();
         let editor_color = t.text_primary.to_glyphon();
@@ -2024,6 +2168,48 @@ impl Renderer {
                         bottom: (rect.y + rect.h) as i32,
                     },
                     default_color: t.text_muted.to_glyphon(),
+                    custom_glyphs: &[],
+                });
+            }
+        }
+
+        // Autocomplete item labels
+        if self.ac_active {
+            for (i, (label, kind_label)) in self
+                .ac_item_labels
+                .iter()
+                .zip(self.ac_kind_labels.iter())
+                .enumerate()
+            {
+                if i >= self.ac_item_rects.len() {
+                    break;
+                }
+                let rect = &self.ac_item_rects[i];
+                let bounds = TextBounds {
+                    left: rect.x as i32,
+                    top: rect.y as i32,
+                    right: (rect.x + rect.w) as i32,
+                    bottom: (rect.y + rect.h) as i32,
+                };
+                // Kind badge (left-aligned)
+                text_areas.push(TextArea {
+                    buffer: kind_label,
+                    left: rect.x + spacing::sm(),
+                    top: rect.y + spacing::xs(),
+                    scale: 1.0,
+                    bounds,
+                    default_color: t.text_muted.to_glyphon(),
+                    custom_glyphs: &[],
+                });
+                // Label (after badge)
+                let badge_w = Self::measure_label_width(kind_label);
+                text_areas.push(TextArea {
+                    buffer: label,
+                    left: rect.x + spacing::sm() + badge_w + spacing::sm(),
+                    top: rect.y + spacing::xs(),
+                    scale: 1.0,
+                    bounds,
+                    default_color: t.text_primary.to_glyphon(),
                     custom_glyphs: &[],
                 });
             }

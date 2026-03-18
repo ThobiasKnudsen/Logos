@@ -7,6 +7,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
+use crate::editor::autocomplete::{self, AutocompleteState};
 use crate::editor::cell::CellOutput;
 use crate::file_dialog::{DialogKind, DialogResult, FileDialog};
 use crate::lang;
@@ -105,6 +106,7 @@ pub(crate) enum HoverTarget {
     CellCopyButton(usize),
     CellDeleteButton(usize),
     AddCellButton,
+    AutocompleteItem(usize),
     RenderArea,
 }
 
@@ -215,6 +217,10 @@ struct AppState {
     // Clipboard
     clipboard: Option<arboard::Clipboard>,
 
+    // Autocomplete
+    autocomplete: AutocompleteState,
+    autocomplete_item_rects: Vec<Rect>,
+
     // REDUCE CAS integration
     reduce_service: ReduceService,
     /// Last time the active cell was edited (for debounce).
@@ -311,6 +317,22 @@ impl AppState {
     fn recompute_hover(&mut self) {
         let (mx, my) = self.cursor_position;
         let wc = &self.win_control_rects;
+
+        // Autocomplete items (highest priority)
+        if self.autocomplete.active {
+            for (i, rect) in self.autocomplete_item_rects.iter().enumerate() {
+                if point_in_rect(mx, my, rect) {
+                    self.set_hover(HoverTarget::AutocompleteItem(i));
+                    return;
+                }
+            }
+            if let Some(bg) = self.renderer.autocomplete_bg_rect() {
+                if point_in_rect(mx, my, &bg) {
+                    self.set_hover(HoverTarget::None);
+                    return;
+                }
+            }
+        }
 
         // If a dropdown is open, check dropdown items first
         if self.open_menu.is_some() {
@@ -445,7 +467,8 @@ impl AppState {
             self.hover_target = target;
             let icon = match target {
                 HoverTarget::SplitHandle => CursorIcon::ColResize,
-                HoverTarget::CellPlayButton(_) | HoverTarget::CellCopyButton(_) => CursorIcon::Pointer,
+                HoverTarget::CellPlayButton(_) | HoverTarget::CellCopyButton(_)
+                | HoverTarget::AutocompleteItem(_) => CursorIcon::Pointer,
                 HoverTarget::RenderArea => match self.render_area.mouse_zone {
                     MouseZone::Center => {
                         if self.render_area.is_dragging {
@@ -465,6 +488,7 @@ impl AppState {
     }
 
     fn open_menu(&mut self, index: usize) {
+        self.dismiss_autocomplete();
         if self.open_menu == Some(index) {
             self.close_menu();
             return;
@@ -488,6 +512,80 @@ impl AppState {
             self.renderer.close_dropdown();
             self.window.request_redraw();
         }
+    }
+
+    fn dismiss_autocomplete(&mut self) {
+        if self.autocomplete.active {
+            self.autocomplete.dismiss();
+            self.autocomplete_item_rects.clear();
+            self.renderer.close_autocomplete();
+        }
+    }
+
+    fn update_autocomplete(&mut self) {
+        let tab = self.tab_manager.active_tab();
+        let cell = tab.active_cell();
+        let text = cell.buffer.text();
+        let cursor = cell.buffer.cursor_byte_offset();
+
+        if let Some((prefix, prefix_start)) = autocomplete::prefix_at_cursor(text, cursor) {
+            // Gather candidates
+            let mut all = autocomplete::static_candidates();
+
+            // Try to parse and extract user symbols (best-effort)
+            let mut lex = crate::lang::lexer::Lexer::new(text);
+            if let Ok(tokens) = lex.tokenize() {
+                let mut parser = crate::lang::parser::Parser::new(tokens);
+                if let Ok(ast) = parser.parse() {
+                    all.extend(autocomplete::extract_user_symbols(&ast));
+                }
+            }
+
+            self.autocomplete.update(prefix, prefix_start, &all);
+
+            if self.autocomplete.active {
+                // Position popup below cursor
+                let (cx, cy, ch) = self.renderer.cursor_content_pos();
+                let active_idx = tab.active_cell_index;
+                if let Some(cl) = self.cell_layouts.get(active_idx) {
+                    let text_pad = crate::ui::theme::spacing::sm();
+                    let popup_x = cl.editor.x + text_pad + cx;
+                    let popup_y = cl.editor.y + text_pad + cy + ch;
+                    let pane = self.cached_layout.left_pane;
+
+                    let candidates: Vec<(String, crate::editor::autocomplete::CandidateKind)> =
+                        self.autocomplete.candidates.iter()
+                            .map(|c| (c.label.clone(), c.kind))
+                            .collect();
+
+                    self.autocomplete_item_rects = self.renderer.open_autocomplete(
+                        popup_x,
+                        popup_y,
+                        &candidates,
+                        self.autocomplete.selected_index,
+                        pane,
+                    );
+                } else {
+                    self.dismiss_autocomplete();
+                }
+            } else {
+                self.dismiss_autocomplete();
+            }
+        } else {
+            self.dismiss_autocomplete();
+        }
+    }
+
+    fn accept_autocomplete(&mut self) {
+        if let Some((label, prefix_start)) = self.autocomplete.accept() {
+            let label = label.to_string();
+            let cursor = self.tab_manager.active_tab().active_cell().buffer.cursor_byte_offset();
+            self.tab_manager.active_tab_mut().active_cell_mut().buffer
+                .replace_range(prefix_start, cursor, &label);
+            self.tab_manager.active_tab_mut().mark_modified();
+        }
+        self.dismiss_autocomplete();
+        self.sync_active_tab();
     }
 
     fn handle_menu_action(&mut self, event_loop: &ActiveEventLoop, menu_idx: usize, item_idx: usize) {
@@ -806,6 +904,8 @@ impl ApplicationHandler for App {
             dropdown_item_rects: Vec::new(),
             render_area: RenderAreaState::default(),
             clipboard: arboard::Clipboard::new().ok(),
+            autocomplete: AutocompleteState::new(),
+            autocomplete_item_rects: Vec::new(),
             reduce_service: ReduceService::new(),
             last_edit_time: None,
             last_edited_cell: None,
@@ -1119,6 +1219,15 @@ impl ApplicationHandler for App {
                     return;
                 }
 
+                // Autocomplete click
+                if let HoverTarget::AutocompleteItem(i) = state.hover_target {
+                    state.autocomplete.selected_index = i;
+                    state.accept_autocomplete();
+                    return;
+                }
+                // Dismiss autocomplete on any other click
+                state.dismiss_autocomplete();
+
                 // Cell interactions — use the press-time target so that small
                 // trackpad scroll events between press and release don't steal
                 // button clicks (the scroll shifts layout rects, changing
@@ -1180,11 +1289,46 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                // Escape closes menu
+                // Escape closes menu or autocomplete
                 if key_event.logical_key == Key::Named(NamedKey::Escape) {
+                    if state.autocomplete.active {
+                        state.dismiss_autocomplete();
+                        state.window.request_redraw();
+                        return;
+                    }
                     if state.open_menu.is_some() {
                         state.close_menu();
                         return;
+                    }
+                }
+
+                // Autocomplete keyboard interception
+                if state.autocomplete.active {
+                    match &key_event.logical_key {
+                        Key::Named(NamedKey::ArrowUp) => {
+                            state.autocomplete.select_prev();
+                            state.renderer.update_autocomplete_selection(
+                                state.autocomplete.selected_index,
+                            );
+                            state.window.request_redraw();
+                            return;
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            state.autocomplete.select_next();
+                            state.renderer.update_autocomplete_selection(
+                                state.autocomplete.selected_index,
+                            );
+                            state.window.request_redraw();
+                            return;
+                        }
+                        Key::Named(NamedKey::Tab) | Key::Named(NamedKey::Enter) => {
+                            state.accept_autocomplete();
+                            return;
+                        }
+                        _ => {
+                            // Fall through to normal key handling;
+                            // autocomplete will be updated after the keystroke
+                        }
                     }
                 }
 
@@ -1246,6 +1390,12 @@ impl ApplicationHandler for App {
                     state.last_edited_cell =
                         Some(state.tab_manager.active_tab().active_cell_index);
                     state.sync_active_tab();
+                    state.update_autocomplete();
+                    state.window.request_redraw();
+                } else {
+                    // Cursor-only movement (arrows, home, end) — dismiss autocomplete
+                    state.dismiss_autocomplete();
+                    state.window.request_redraw();
                 }
             }
 
