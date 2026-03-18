@@ -1,11 +1,14 @@
 // Centralized visual theme — colors, spacing, fonts, syntax themes.
 //
-// Ported from the Zig `theme.zig`. Every visual constant lives here so the
-// rest of the codebase can `use crate::ui::theme::*` and stay DRY.
+// Themes are loaded from `themes.json` next to the binary. The JSON uses a
+// compact format (~20 fields per theme); all other UI colors are derived.
 #![allow(dead_code)]
 
+use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, OnceLock};
+
 // ---------------------------------------------------------------------------
-// Rgba
+// Rgba — with hex-string JSON serialization ("#rrggbb" / "#rrggbbaa")
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,12 +23,9 @@ impl Rgba {
     pub const fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self { r, g, b, a }
     }
-
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b, a: 255 }
     }
-
-    /// Construct from a 24-bit hex literal, e.g. `Rgba::hex(0xc678dd)`.
     pub const fn hex(rgb: u32) -> Self {
         Self {
             r: ((rgb >> 16) & 0xFF) as u8,
@@ -34,7 +34,6 @@ impl Rgba {
             a: 255,
         }
     }
-
     pub fn to_wgpu(self) -> wgpu::Color {
         wgpu::Color {
             r: self.r as f64 / 255.0,
@@ -43,7 +42,6 @@ impl Rgba {
             a: self.a as f64 / 255.0,
         }
     }
-
     pub fn to_f32_array(self) -> [f32; 4] {
         [
             self.r as f32 / 255.0,
@@ -52,93 +50,105 @@ impl Rgba {
             self.a as f32 / 255.0,
         ]
     }
-
     pub fn to_glyphon(self) -> glyphon::Color {
         glyphon::Color::rgba(self.r, self.g, self.b, self.a)
     }
 }
 
+impl Serialize for Rgba {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if self.a == 255 {
+            s.serialize_str(&format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b))
+        } else {
+            s.serialize_str(&format!("#{:02x}{:02x}{:02x}{:02x}", self.r, self.g, self.b, self.a))
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Rgba {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        let s = s.trim_start_matches('#');
+        let byte = |i: usize| u8::from_str_radix(&s[i..i + 2], 16).map_err(serde::de::Error::custom);
+        match s.len() {
+            6 => Ok(Rgba { r: byte(0)?, g: byte(2)?, b: byte(4)?, a: 255 }),
+            8 => Ok(Rgba { r: byte(0)?, g: byte(2)?, b: byte(4)?, a: byte(6)? }),
+            _ => Err(serde::de::Error::custom("expected #rrggbb or #rrggbbaa")),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Unified Theme — UI chrome + syntax highlighting in one struct
+// Color helpers
+// ---------------------------------------------------------------------------
+
+fn lighten(c: Rgba, n: u8) -> Rgba {
+    Rgba::rgb(c.r.saturating_add(n), c.g.saturating_add(n), c.b.saturating_add(n))
+}
+fn darken(c: Rgba, n: u8) -> Rgba {
+    Rgba::rgb(c.r.saturating_sub(n), c.g.saturating_sub(n), c.b.saturating_sub(n))
+}
+fn mid(a: Rgba, b: Rgba) -> Rgba {
+    Rgba::rgb(
+        ((a.r as u16 + b.r as u16) / 2) as u8,
+        ((a.g as u16 + b.g as u16) / 2) as u8,
+        ((a.b as u16 + b.b as u16) / 2) as u8,
+    )
+}
+fn alpha(c: Rgba, a: u8) -> Rgba {
+    Rgba::new(c.r, c.g, c.b, a)
+}
+
+// ---------------------------------------------------------------------------
+// Full Theme — used internally by the renderer (55 fields, not serialized)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
-    // UI chrome — backgrounds
     pub bg_primary: Rgba,
     pub bg_secondary: Rgba,
     pub bg_elevated: Rgba,
     pub bg_hover: Rgba,
-
-    // Borders & dividers
     pub border: Rgba,
     pub border_focus: Rgba,
-
-    // Text
     pub text_primary: Rgba,
     pub text_secondary: Rgba,
     pub text_muted: Rgba,
-
-    // Accents
     pub accent_primary: Rgba,
     pub accent_secondary: Rgba,
     pub accent_info: Rgba,
-
-    // Tab states
     pub tab_active: Rgba,
     pub tab_inactive: Rgba,
     pub tab_hover: Rgba,
-
-    // Editor
     pub editor_bg: Rgba,
     pub editor_gutter: Rgba,
     pub editor_selection: Rgba,
-
-    // Graph area
     pub graph_bg: Rgba,
     pub graph_grid: Rgba,
     pub graph_axis: Rgba,
     pub axis_zone_bg: Rgba,
     pub axis_label: Rgba,
-
-    // Toolbar
     pub toolbar_bg: Rgba,
     pub toolbar_button: Rgba,
     pub toolbar_button_hover: Rgba,
     pub toolbar_button_active: Rgba,
-
-    // Split handle
     pub split_handle: Rgba,
     pub split_handle_hover: Rgba,
-
-    // Window controls
     pub close_button_hover: Rgba,
-
-    // Menu / dropdown
     pub dropdown_bg: Rgba,
     pub dropdown_hover: Rgba,
     pub dropdown_separator: Rgba,
     pub menu_item_hover: Rgba,
-
-    // Scrollbar
     pub scrollbar_track: Rgba,
     pub scrollbar_thumb: Rgba,
     pub scrollbar_thumb_hover: Rgba,
-
-    // Cursor
     pub cursor: Rgba,
-
-    // Play/Stop button
     pub play_button: Rgba,
     pub play_button_hover: Rgba,
     pub stop_button: Rgba,
     pub stop_button_hover: Rgba,
-
-    // Tooltip
     pub tooltip_bg: Rgba,
     pub tooltip_border: Rgba,
-
-    // Syntax highlighting
     pub keyword: Rgba,
     pub identifier: Rgba,
     pub math_variable: Rgba,
@@ -155,499 +165,318 @@ pub struct Theme {
 }
 
 // ---------------------------------------------------------------------------
-// Built-in themes — 7 complete themes with cohesive UI + syntax palettes
+// JsonTheme — compact representation stored in themes.json
 // ---------------------------------------------------------------------------
 
-pub const THEME_CATPPUCCIN: Theme = Theme {
-    // UI chrome — deep purple-navy (Catppuccin Mocha, darkened)
-    bg_primary:           Rgba::rgb(14, 14, 22),
-    bg_secondary:         Rgba::rgb(19, 19, 30),
-    bg_elevated:          Rgba::rgb(28, 28, 42),
-    bg_hover:             Rgba::rgb(42, 42, 58),
-    border:               Rgba::rgb(38, 38, 54),
-    border_focus:         Rgba::hex(0x89b4fa),
-    text_primary:         Rgba::hex(0xcdd6f4),
-    text_secondary:       Rgba::hex(0xbac2de),
-    text_muted:           Rgba::hex(0xa6adc8),
-    accent_primary:       Rgba::hex(0xfab387),
-    accent_secondary:     Rgba::hex(0xa6e3a1),
-    accent_info:          Rgba::hex(0x89b4fa),
-    tab_active:           Rgba::rgb(28, 28, 42),
-    tab_inactive:         Rgba::rgb(14, 14, 22),
-    tab_hover:            Rgba::rgb(22, 22, 34),
-    editor_bg:            Rgba::rgb(11, 11, 18),
-    editor_gutter:        Rgba::rgb(16, 16, 26),
-    editor_selection:     Rgba::new(50, 50, 72, 110),
-    graph_bg:             Rgba::rgb(8, 8, 14),
-    graph_grid:           Rgba::new(30, 30, 46, 80),
-    graph_axis:           Rgba::hex(0xa6adc8),
-    axis_zone_bg:         Rgba::new(14, 14, 22, 210),
-    axis_label:           Rgba::hex(0x7f849c),
-    toolbar_bg:           Rgba::rgb(16, 16, 26),
-    toolbar_button:       Rgba::rgb(28, 28, 42),
-    toolbar_button_hover: Rgba::rgb(42, 42, 58),
-    toolbar_button_active: Rgba::rgb(75, 165, 95),
-    split_handle:         Rgba::rgb(24, 24, 36),
-    split_handle_hover:   Rgba::rgb(42, 42, 58),
-    close_button_hover:   Rgba::rgb(196, 43, 28),
-    dropdown_bg:          Rgba::rgb(19, 19, 30),
-    dropdown_hover:       Rgba::rgb(32, 32, 48),
-    dropdown_separator:   Rgba::rgb(28, 28, 42),
-    menu_item_hover:      Rgba::rgb(32, 32, 48),
-    scrollbar_track:      Rgba::new(19, 19, 30, 120),
-    scrollbar_thumb:      Rgba::new(70, 72, 90, 190),
-    scrollbar_thumb_hover: Rgba::new(100, 102, 125, 230),
-    cursor:               Rgba::hex(0xcdd6f4),
-    play_button:          Rgba::rgb(75, 165, 95),
-    play_button_hover:    Rgba::rgb(95, 195, 115),
-    stop_button:          Rgba::rgb(196, 60, 50),
-    stop_button_hover:    Rgba::rgb(220, 80, 70),
-    tooltip_bg:           Rgba::rgb(28, 28, 42),
-    tooltip_border:       Rgba::rgb(42, 42, 58),
-    // Syntax
-    keyword:       Rgba::hex(0xcba6f7),
-    identifier:    Rgba::hex(0xa6e3a1),
-    math_variable: Rgba::hex(0xf38ba8),
-    number:        Rgba::hex(0xfab387),
-    operator:      Rgba::hex(0x89dceb),
-    string:        Rgba::hex(0xa6e3a1),
-    comment:       Rgba::hex(0x6c7086),
-    punctuation:   Rgba::hex(0xbac2de),
-    whitespace:    Rgba::hex(0xbac2de),
-    builtin:       Rgba::hex(0x89b4fa),
-    axis:          Rgba::hex(0xf9e2af),
-    type_name:     Rgba::hex(0x94e2d5),
-    unknown:       Rgba::hex(0xf38ba8),
-};
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonTheme {
+    pub name: String,
+    // UI base (7 colors — everything else derived)
+    pub primary_bg: Rgba,
+    pub secondary_bg: Rgba,
+    pub tertiary_bg: Rgba,
+    pub primary_text: Rgba,
+    pub secondary_text: Rgba,
+    pub primary_border: Rgba,
+    pub secondary_border: Rgba,
+    // Functional (3 colors)
+    pub accent: Rgba,
+    pub red: Rgba,
+    pub green: Rgba,
+    // Syntax (10 colors)
+    pub keyword: Rgba,
+    pub identifier: Rgba,
+    pub math_variable: Rgba,
+    pub number: Rgba,
+    pub operator: Rgba,
+    pub string: Rgba,
+    pub comment: Rgba,
+    pub builtin: Rgba,
+    pub type_name: Rgba,
+    pub axis: Rgba,
+}
 
-pub const THEME_ONE_DARK: Theme = Theme {
-    // UI chrome — blue-gray, darkened
-    bg_primary:           Rgba::rgb(15, 17, 22),
-    bg_secondary:         Rgba::rgb(20, 23, 30),
-    bg_elevated:          Rgba::rgb(30, 33, 40),
-    bg_hover:             Rgba::rgb(44, 48, 58),
-    border:               Rgba::rgb(36, 40, 50),
-    border_focus:         Rgba::hex(0x61afef),
-    text_primary:         Rgba::hex(0xabb2bf),
-    text_secondary:       Rgba::hex(0x9da5b4),
-    text_muted:           Rgba::hex(0x8891a5),
-    accent_primary:       Rgba::hex(0xd19a66),
-    accent_secondary:     Rgba::hex(0x98c379),
-    accent_info:          Rgba::hex(0x61afef),
-    tab_active:           Rgba::rgb(30, 33, 40),
-    tab_inactive:         Rgba::rgb(15, 17, 22),
-    tab_hover:            Rgba::rgb(24, 27, 34),
-    editor_bg:            Rgba::rgb(12, 14, 18),
-    editor_gutter:        Rgba::rgb(17, 19, 25),
-    editor_selection:     Rgba::new(40, 55, 90, 110),
-    graph_bg:             Rgba::rgb(9, 11, 15),
-    graph_grid:           Rgba::new(35, 40, 52, 80),
-    graph_axis:           Rgba::hex(0x8891a5),
-    axis_zone_bg:         Rgba::new(15, 17, 22, 210),
-    axis_label:           Rgba::hex(0x6b7280),
-    toolbar_bg:           Rgba::rgb(17, 19, 25),
-    toolbar_button:       Rgba::rgb(30, 33, 40),
-    toolbar_button_hover: Rgba::rgb(44, 48, 58),
-    toolbar_button_active: Rgba::rgb(75, 165, 95),
-    split_handle:         Rgba::rgb(25, 28, 36),
-    split_handle_hover:   Rgba::rgb(44, 48, 58),
-    close_button_hover:   Rgba::rgb(196, 43, 28),
-    dropdown_bg:          Rgba::rgb(20, 23, 30),
-    dropdown_hover:       Rgba::rgb(34, 38, 48),
-    dropdown_separator:   Rgba::rgb(30, 33, 40),
-    menu_item_hover:      Rgba::rgb(34, 38, 48),
-    scrollbar_track:      Rgba::new(20, 23, 30, 120),
-    scrollbar_thumb:      Rgba::new(60, 66, 78, 190),
-    scrollbar_thumb_hover: Rgba::new(88, 95, 110, 230),
-    cursor:               Rgba::hex(0xabb2bf),
-    play_button:          Rgba::rgb(75, 165, 95),
-    play_button_hover:    Rgba::rgb(95, 195, 115),
-    stop_button:          Rgba::rgb(196, 60, 50),
-    stop_button_hover:    Rgba::rgb(220, 80, 70),
-    tooltip_bg:           Rgba::rgb(30, 33, 40),
-    tooltip_border:       Rgba::rgb(44, 48, 58),
-    // Syntax
-    keyword:       Rgba::hex(0xc678dd),
-    identifier:    Rgba::hex(0xe06c75),
-    math_variable: Rgba::hex(0xe5c07b),
-    number:        Rgba::hex(0xd19a66),
-    operator:      Rgba::hex(0x56b6c2),
-    string:        Rgba::hex(0x98c379),
-    comment:       Rgba::hex(0x5c6370),
-    punctuation:   Rgba::hex(0xabb2bf),
-    whitespace:    Rgba::hex(0xabb2bf),
-    builtin:       Rgba::hex(0x61afef),
-    axis:          Rgba::hex(0xd19a66),
-    type_name:     Rgba::hex(0xe5c07b),
-    unknown:       Rgba::hex(0xe06c75),
-};
+impl JsonTheme {
+    pub fn to_theme(&self) -> Theme {
+        let pb = self.primary_bg;
+        let sb = self.secondary_bg;
+        let tb = self.tertiary_bg;
+        let pt = self.primary_text;
+        let st = self.secondary_text;
+        let b1 = self.primary_border;
+        let b2 = self.secondary_border;
+        let ac = self.accent;
+        let rd = self.red;
+        let gn = self.green;
 
-pub const THEME_MONOKAI: Theme = Theme {
-    // UI chrome — warm charcoal, darkened
-    bg_primary:           Rgba::rgb(16, 17, 12),
-    bg_secondary:         Rgba::rgb(22, 22, 16),
-    bg_elevated:          Rgba::rgb(32, 32, 24),
-    bg_hover:             Rgba::rgb(46, 46, 36),
-    border:               Rgba::rgb(38, 39, 30),
-    border_focus:         Rgba::hex(0xa6e22e),
-    text_primary:         Rgba::hex(0xf8f8f2),
-    text_secondary:       Rgba::hex(0xd6d6ca),
-    text_muted:           Rgba::hex(0xb0ae9e),
-    accent_primary:       Rgba::hex(0xfd971f),
-    accent_secondary:     Rgba::hex(0xa6e22e),
-    accent_info:          Rgba::hex(0x66d9ef),
-    tab_active:           Rgba::rgb(32, 32, 24),
-    tab_inactive:         Rgba::rgb(16, 17, 12),
-    tab_hover:            Rgba::rgb(25, 25, 18),
-    editor_bg:            Rgba::rgb(13, 13, 9),
-    editor_gutter:        Rgba::rgb(18, 18, 13),
-    editor_selection:     Rgba::new(50, 50, 40, 120),
-    graph_bg:             Rgba::rgb(9, 10, 6),
-    graph_grid:           Rgba::new(36, 36, 28, 80),
-    graph_axis:           Rgba::hex(0xb0ae9e),
-    axis_zone_bg:         Rgba::new(16, 17, 12, 210),
-    axis_label:           Rgba::hex(0x75736a),
-    toolbar_bg:           Rgba::rgb(18, 18, 13),
-    toolbar_button:       Rgba::rgb(32, 32, 24),
-    toolbar_button_hover: Rgba::rgb(46, 46, 36),
-    toolbar_button_active: Rgba::rgb(75, 165, 95),
-    split_handle:         Rgba::rgb(26, 27, 20),
-    split_handle_hover:   Rgba::rgb(46, 46, 36),
-    close_button_hover:   Rgba::rgb(196, 43, 28),
-    dropdown_bg:          Rgba::rgb(22, 22, 16),
-    dropdown_hover:       Rgba::rgb(36, 36, 28),
-    dropdown_separator:   Rgba::rgb(32, 32, 24),
-    menu_item_hover:      Rgba::rgb(36, 36, 28),
-    scrollbar_track:      Rgba::new(22, 22, 16, 120),
-    scrollbar_thumb:      Rgba::new(68, 67, 58, 190),
-    scrollbar_thumb_hover: Rgba::new(95, 94, 84, 230),
-    cursor:               Rgba::hex(0xf8f8f2),
-    play_button:          Rgba::rgb(75, 165, 95),
-    play_button_hover:    Rgba::rgb(95, 195, 115),
-    stop_button:          Rgba::rgb(196, 60, 50),
-    stop_button_hover:    Rgba::rgb(220, 80, 70),
-    tooltip_bg:           Rgba::rgb(32, 32, 24),
-    tooltip_border:       Rgba::rgb(46, 46, 36),
-    // Syntax
-    keyword:       Rgba::hex(0xff6188),
-    identifier:    Rgba::hex(0xa9dc76),
-    math_variable: Rgba::hex(0xffd866),
-    number:        Rgba::hex(0xab9df2),
-    operator:      Rgba::hex(0xff6188),
-    string:        Rgba::hex(0xffd866),
-    comment:       Rgba::hex(0x727072),
-    punctuation:   Rgba::hex(0x939293),
-    whitespace:    Rgba::hex(0x939293),
-    builtin:       Rgba::hex(0x78dce8),
-    axis:          Rgba::hex(0xfc9867),
-    type_name:     Rgba::hex(0x78dce8),
-    unknown:       Rgba::hex(0xfc9867),
-};
-
-pub const THEME_DRACULA: Theme = Theme {
-    // UI chrome — purple-dark, darkened
-    bg_primary:           Rgba::rgb(14, 15, 22),
-    bg_secondary:         Rgba::rgb(20, 21, 30),
-    bg_elevated:          Rgba::rgb(30, 31, 42),
-    bg_hover:             Rgba::rgb(44, 46, 60),
-    border:               Rgba::rgb(36, 38, 50),
-    border_focus:         Rgba::hex(0xbd93f9),
-    text_primary:         Rgba::hex(0xf8f8f2),
-    text_secondary:       Rgba::hex(0xd8d8d0),
-    text_muted:           Rgba::hex(0xb0b2c0),
-    accent_primary:       Rgba::hex(0xffb86c),
-    accent_secondary:     Rgba::hex(0x50fa7b),
-    accent_info:          Rgba::hex(0x8be9fd),
-    tab_active:           Rgba::rgb(30, 31, 42),
-    tab_inactive:         Rgba::rgb(14, 15, 22),
-    tab_hover:            Rgba::rgb(23, 24, 34),
-    editor_bg:            Rgba::rgb(11, 12, 18),
-    editor_gutter:        Rgba::rgb(16, 17, 24),
-    editor_selection:     Rgba::new(48, 50, 68, 120),
-    graph_bg:             Rgba::rgb(8, 9, 14),
-    graph_grid:           Rgba::new(34, 36, 50, 80),
-    graph_axis:           Rgba::hex(0xb0b2c0),
-    axis_zone_bg:         Rgba::new(14, 15, 22, 210),
-    axis_label:           Rgba::hex(0x6272a4),
-    toolbar_bg:           Rgba::rgb(16, 17, 24),
-    toolbar_button:       Rgba::rgb(30, 31, 42),
-    toolbar_button_hover: Rgba::rgb(44, 46, 60),
-    toolbar_button_active: Rgba::rgb(75, 165, 95),
-    split_handle:         Rgba::rgb(24, 25, 36),
-    split_handle_hover:   Rgba::rgb(44, 46, 60),
-    close_button_hover:   Rgba::hex(0xff5555),
-    dropdown_bg:          Rgba::rgb(20, 21, 30),
-    dropdown_hover:       Rgba::rgb(34, 36, 48),
-    dropdown_separator:   Rgba::rgb(30, 31, 42),
-    menu_item_hover:      Rgba::rgb(34, 36, 48),
-    scrollbar_track:      Rgba::new(20, 21, 30, 120),
-    scrollbar_thumb:      Rgba::new(64, 66, 82, 190),
-    scrollbar_thumb_hover: Rgba::new(92, 95, 115, 230),
-    cursor:               Rgba::hex(0xf8f8f2),
-    play_button:          Rgba::rgb(75, 165, 95),
-    play_button_hover:    Rgba::rgb(95, 195, 115),
-    stop_button:          Rgba::hex(0xff5555),
-    stop_button_hover:    Rgba::hex(0xff6e6e),
-    tooltip_bg:           Rgba::rgb(30, 31, 42),
-    tooltip_border:       Rgba::rgb(44, 46, 60),
-    // Syntax
-    keyword:       Rgba::hex(0xff79c6),
-    identifier:    Rgba::hex(0x50fa7b),
-    math_variable: Rgba::hex(0xf8f8f2),
-    number:        Rgba::hex(0xbd93f9),
-    operator:      Rgba::hex(0xff79c6),
-    string:        Rgba::hex(0xf1fa8c),
-    comment:       Rgba::hex(0x6272a4),
-    punctuation:   Rgba::hex(0xf8f8f2),
-    whitespace:    Rgba::hex(0xf8f8f2),
-    builtin:       Rgba::hex(0x8be9fd),
-    axis:          Rgba::hex(0xffb86c),
-    type_name:     Rgba::hex(0x8be9fd),
-    unknown:       Rgba::hex(0xff5555),
-};
-
-pub const THEME_GRUVBOX: Theme = Theme {
-    // UI chrome — warm brown, darkened
-    bg_primary:           Rgba::rgb(16, 15, 14),
-    bg_secondary:         Rgba::rgb(22, 20, 18),
-    bg_elevated:          Rgba::rgb(32, 29, 26),
-    bg_hover:             Rgba::rgb(46, 42, 38),
-    border:               Rgba::rgb(38, 35, 32),
-    border_focus:         Rgba::hex(0xfe8019),
-    text_primary:         Rgba::hex(0xebdbb2),
-    text_secondary:       Rgba::hex(0xd5c4a1),
-    text_muted:           Rgba::hex(0xbdae93),
-    accent_primary:       Rgba::hex(0xfe8019),
-    accent_secondary:     Rgba::hex(0xb8bb26),
-    accent_info:          Rgba::hex(0x83a598),
-    tab_active:           Rgba::rgb(32, 29, 26),
-    tab_inactive:         Rgba::rgb(16, 15, 14),
-    tab_hover:            Rgba::rgb(25, 23, 20),
-    editor_bg:            Rgba::rgb(12, 12, 10),
-    editor_gutter:        Rgba::rgb(18, 17, 15),
-    editor_selection:     Rgba::new(55, 50, 45, 120),
-    graph_bg:             Rgba::rgb(9, 9, 7),
-    graph_grid:           Rgba::new(36, 33, 30, 80),
-    graph_axis:           Rgba::hex(0xbdae93),
-    axis_zone_bg:         Rgba::new(16, 15, 14, 210),
-    axis_label:           Rgba::hex(0x7c6f64),
-    toolbar_bg:           Rgba::rgb(18, 17, 15),
-    toolbar_button:       Rgba::rgb(32, 29, 26),
-    toolbar_button_hover: Rgba::rgb(46, 42, 38),
-    toolbar_button_active: Rgba::rgb(75, 165, 95),
-    split_handle:         Rgba::rgb(26, 24, 22),
-    split_handle_hover:   Rgba::rgb(46, 42, 38),
-    close_button_hover:   Rgba::hex(0xcc241d),
-    dropdown_bg:          Rgba::rgb(22, 20, 18),
-    dropdown_hover:       Rgba::rgb(36, 33, 30),
-    dropdown_separator:   Rgba::rgb(32, 29, 26),
-    menu_item_hover:      Rgba::rgb(36, 33, 30),
-    scrollbar_track:      Rgba::new(22, 20, 18, 120),
-    scrollbar_thumb:      Rgba::new(66, 60, 54, 190),
-    scrollbar_thumb_hover: Rgba::new(95, 86, 78, 230),
-    cursor:               Rgba::hex(0xebdbb2),
-    play_button:          Rgba::rgb(75, 165, 95),
-    play_button_hover:    Rgba::rgb(95, 195, 115),
-    stop_button:          Rgba::hex(0xcc241d),
-    stop_button_hover:    Rgba::hex(0xfb4934),
-    tooltip_bg:           Rgba::rgb(32, 29, 26),
-    tooltip_border:       Rgba::rgb(46, 42, 38),
-    // Syntax
-    keyword:       Rgba::hex(0xfb4934),
-    identifier:    Rgba::hex(0x83a598),
-    math_variable: Rgba::hex(0xfabd2f),
-    number:        Rgba::hex(0xd3869b),
-    operator:      Rgba::hex(0xfe8019),
-    string:        Rgba::hex(0xb8bb26),
-    comment:       Rgba::hex(0x928374),
-    punctuation:   Rgba::hex(0xa89984),
-    whitespace:    Rgba::hex(0xa89984),
-    builtin:       Rgba::hex(0x8ec07c),
-    axis:          Rgba::hex(0xfabd2f),
-    type_name:     Rgba::hex(0x83a598),
-    unknown:       Rgba::hex(0xfb4934),
-};
-
-pub const THEME_NORD: Theme = Theme {
-    // UI chrome — polar night, darkened
-    bg_primary:           Rgba::rgb(14, 18, 24),
-    bg_secondary:         Rgba::rgb(19, 24, 32),
-    bg_elevated:          Rgba::rgb(28, 34, 44),
-    bg_hover:             Rgba::rgb(42, 50, 62),
-    border:               Rgba::rgb(35, 42, 54),
-    border_focus:         Rgba::hex(0x88c0d0),
-    text_primary:         Rgba::hex(0xeceff4),
-    text_secondary:       Rgba::hex(0xd8dee9),
-    text_muted:           Rgba::hex(0xb0b8c8),
-    accent_primary:       Rgba::hex(0xebcb8b),
-    accent_secondary:     Rgba::hex(0xa3be8c),
-    accent_info:          Rgba::hex(0x88c0d0),
-    tab_active:           Rgba::rgb(28, 34, 44),
-    tab_inactive:         Rgba::rgb(14, 18, 24),
-    tab_hover:            Rgba::rgb(22, 28, 36),
-    editor_bg:            Rgba::rgb(11, 14, 20),
-    editor_gutter:        Rgba::rgb(16, 20, 28),
-    editor_selection:     Rgba::new(50, 58, 76, 110),
-    graph_bg:             Rgba::rgb(8, 11, 16),
-    graph_grid:           Rgba::new(32, 38, 50, 80),
-    graph_axis:           Rgba::hex(0xb0b8c8),
-    axis_zone_bg:         Rgba::new(14, 18, 24, 210),
-    axis_label:           Rgba::hex(0x616e88),
-    toolbar_bg:           Rgba::rgb(16, 20, 28),
-    toolbar_button:       Rgba::rgb(28, 34, 44),
-    toolbar_button_hover: Rgba::rgb(42, 50, 62),
-    toolbar_button_active: Rgba::rgb(75, 165, 95),
-    split_handle:         Rgba::rgb(23, 28, 38),
-    split_handle_hover:   Rgba::rgb(42, 50, 62),
-    close_button_hover:   Rgba::hex(0xbf616a),
-    dropdown_bg:          Rgba::rgb(19, 24, 32),
-    dropdown_hover:       Rgba::rgb(32, 38, 50),
-    dropdown_separator:   Rgba::rgb(28, 34, 44),
-    menu_item_hover:      Rgba::rgb(32, 38, 50),
-    scrollbar_track:      Rgba::new(19, 24, 32, 120),
-    scrollbar_thumb:      Rgba::new(62, 72, 90, 190),
-    scrollbar_thumb_hover: Rgba::new(90, 100, 122, 230),
-    cursor:               Rgba::hex(0xeceff4),
-    play_button:          Rgba::rgb(75, 165, 95),
-    play_button_hover:    Rgba::rgb(95, 195, 115),
-    stop_button:          Rgba::hex(0xbf616a),
-    stop_button_hover:    Rgba::hex(0xd08770),
-    tooltip_bg:           Rgba::rgb(28, 34, 44),
-    tooltip_border:       Rgba::rgb(42, 50, 62),
-    // Syntax
-    keyword:       Rgba::hex(0x81a1c1),
-    identifier:    Rgba::hex(0x88c0d0),
-    math_variable: Rgba::hex(0xd8dee9),
-    number:        Rgba::hex(0xb48ead),
-    operator:      Rgba::hex(0x81a1c1),
-    string:        Rgba::hex(0xa3be8c),
-    comment:       Rgba::hex(0x616e88),
-    punctuation:   Rgba::hex(0xd8dee9),
-    whitespace:    Rgba::hex(0xd8dee9),
-    builtin:       Rgba::hex(0x88c0d0),
-    axis:          Rgba::hex(0xebcb8b),
-    type_name:     Rgba::hex(0x8fbcbb),
-    unknown:       Rgba::hex(0xbf616a),
-};
-
-pub const THEME_SOLARIZED: Theme = Theme {
-    // UI chrome — dark teal, darkened
-    bg_primary:           Rgba::rgb(0, 16, 22),
-    bg_secondary:         Rgba::rgb(0, 22, 30),
-    bg_elevated:          Rgba::rgb(3, 30, 38),
-    bg_hover:             Rgba::rgb(6, 42, 52),
-    border:               Rgba::rgb(5, 36, 46),
-    border_focus:         Rgba::hex(0x268bd2),
-    text_primary:         Rgba::hex(0xfdf6e3),
-    text_secondary:       Rgba::hex(0xeee8d5),
-    text_muted:           Rgba::hex(0x93a1a1),
-    accent_primary:       Rgba::hex(0xcb4b16),
-    accent_secondary:     Rgba::hex(0x859900),
-    accent_info:          Rgba::hex(0x268bd2),
-    tab_active:           Rgba::rgb(3, 30, 38),
-    tab_inactive:         Rgba::rgb(0, 16, 22),
-    tab_hover:            Rgba::rgb(1, 24, 32),
-    editor_bg:            Rgba::rgb(0, 12, 17),
-    editor_gutter:        Rgba::rgb(0, 18, 24),
-    editor_selection:     Rgba::new(4, 38, 48, 130),
-    graph_bg:             Rgba::rgb(0, 9, 13),
-    graph_grid:           Rgba::new(4, 32, 42, 80),
-    graph_axis:           Rgba::hex(0x93a1a1),
-    axis_zone_bg:         Rgba::new(0, 16, 22, 210),
-    axis_label:           Rgba::hex(0x586e75),
-    toolbar_bg:           Rgba::rgb(0, 18, 24),
-    toolbar_button:       Rgba::rgb(3, 30, 38),
-    toolbar_button_hover: Rgba::rgb(6, 42, 52),
-    toolbar_button_active: Rgba::rgb(75, 165, 95),
-    split_handle:         Rgba::rgb(2, 26, 34),
-    split_handle_hover:   Rgba::rgb(6, 42, 52),
-    close_button_hover:   Rgba::hex(0xdc322f),
-    dropdown_bg:          Rgba::rgb(0, 22, 30),
-    dropdown_hover:       Rgba::rgb(4, 34, 44),
-    dropdown_separator:   Rgba::rgb(3, 30, 38),
-    menu_item_hover:      Rgba::rgb(4, 34, 44),
-    scrollbar_track:      Rgba::new(0, 22, 30, 120),
-    scrollbar_thumb:      Rgba::new(50, 72, 80, 190),
-    scrollbar_thumb_hover: Rgba::new(78, 100, 108, 230),
-    cursor:               Rgba::hex(0xfdf6e3),
-    play_button:          Rgba::rgb(75, 165, 95),
-    play_button_hover:    Rgba::rgb(95, 195, 115),
-    stop_button:          Rgba::hex(0xdc322f),
-    stop_button_hover:    Rgba::hex(0xef4f4c),
-    tooltip_bg:           Rgba::rgb(3, 30, 38),
-    tooltip_border:       Rgba::rgb(6, 42, 52),
-    // Syntax
-    keyword:       Rgba::hex(0x859900),
-    identifier:    Rgba::hex(0x268bd2),
-    math_variable: Rgba::hex(0xcb4b16),
-    number:        Rgba::hex(0xd33682),
-    operator:      Rgba::hex(0x93a1a1),
-    string:        Rgba::hex(0x2aa198),
-    comment:       Rgba::hex(0x586e75),
-    punctuation:   Rgba::hex(0x839496),
-    whitespace:    Rgba::hex(0x839496),
-    builtin:       Rgba::hex(0x268bd2),
-    axis:          Rgba::hex(0xb58900),
-    type_name:     Rgba::hex(0xcb4b16),
-    unknown:       Rgba::hex(0xdc322f),
-};
-
-pub const BUILTIN_THEMES: &[(&str, &Theme)] = &[
-    ("Catppuccin", &THEME_CATPPUCCIN),
-    ("One Dark",   &THEME_ONE_DARK),
-    ("Monokai",    &THEME_MONOKAI),
-    ("Dracula",    &THEME_DRACULA),
-    ("Gruvbox",    &THEME_GRUVBOX),
-    ("Nord",       &THEME_NORD),
-    ("Solarized",  &THEME_SOLARIZED),
-];
+        Theme {
+            bg_primary:            pb,
+            bg_secondary:          sb,
+            bg_elevated:           tb,
+            bg_hover:              lighten(tb, 12),
+            border:                b1,
+            border_focus:          ac,
+            text_primary:          pt,
+            text_secondary:        st,
+            text_muted:            darken(st, 20),
+            accent_primary:        ac,
+            accent_secondary:      gn,
+            accent_info:           ac,
+            tab_active:            tb,
+            tab_inactive:          pb,
+            tab_hover:             mid(pb, tb),
+            editor_bg:             pb,
+            editor_gutter:         sb,
+            editor_selection:      alpha(ac, 60),
+            graph_bg:              darken(pb, 4),
+            graph_grid:            alpha(b1, 80),
+            graph_axis:            st,
+            axis_zone_bg:          alpha(pb, 210),
+            axis_label:            st,
+            toolbar_bg:            sb,
+            toolbar_button:        tb,
+            toolbar_button_hover:  lighten(tb, 12),
+            toolbar_button_active: gn,
+            split_handle:          b1,
+            split_handle_hover:    b2,
+            close_button_hover:    rd,
+            dropdown_bg:           sb,
+            dropdown_hover:        tb,
+            dropdown_separator:    b1,
+            menu_item_hover:       tb,
+            scrollbar_track:       alpha(sb, 120),
+            scrollbar_thumb:       alpha(b2, 190),
+            scrollbar_thumb_hover: alpha(lighten(b2, 20), 230),
+            cursor:                pt,
+            play_button:           gn,
+            play_button_hover:     lighten(gn, 25),
+            stop_button:           rd,
+            stop_button_hover:     lighten(rd, 25),
+            tooltip_bg:            sb,
+            tooltip_border:        b1,
+            keyword:               self.keyword,
+            identifier:            self.identifier,
+            math_variable:         self.math_variable,
+            number:                self.number,
+            operator:              self.operator,
+            string:                self.string,
+            comment:               self.comment,
+            punctuation:           st,
+            whitespace:            st,
+            builtin:               self.builtin,
+            axis:                  self.axis,
+            type_name:             self.type_name,
+            unknown:               rd,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
-// Active theme selection — atomic index into BUILTIN_THEMES
+// Default themes (compiled-in, written to themes.json on first run)
+// ---------------------------------------------------------------------------
+
+fn default_themes() -> Vec<JsonTheme> {
+    vec![
+        JsonTheme {
+            name: "Catppuccin".into(),
+            primary_bg: Rgba::hex(0x0e0e16), secondary_bg: Rgba::hex(0x13131e),
+            tertiary_bg: Rgba::hex(0x1c1c2a), primary_text: Rgba::hex(0xcdd6f4),
+            secondary_text: Rgba::hex(0xa6adc8), primary_border: Rgba::hex(0x262636),
+            secondary_border: Rgba::hex(0x46485a), accent: Rgba::hex(0x89b4fa),
+            red: Rgba::hex(0xc43c32), green: Rgba::hex(0x4ba55f),
+            keyword: Rgba::hex(0xcba6f7), identifier: Rgba::hex(0xa6e3a1),
+            math_variable: Rgba::hex(0xf38ba8), number: Rgba::hex(0xfab387),
+            operator: Rgba::hex(0x89dceb), string: Rgba::hex(0xa6e3a1),
+            comment: Rgba::hex(0x6c7086), builtin: Rgba::hex(0x89b4fa),
+            type_name: Rgba::hex(0x94e2d5), axis: Rgba::hex(0xf9e2af),
+        },
+        JsonTheme {
+            name: "One Dark".into(),
+            primary_bg: Rgba::hex(0x0f1116), secondary_bg: Rgba::hex(0x14171e),
+            tertiary_bg: Rgba::hex(0x1e2128), primary_text: Rgba::hex(0xabb2bf),
+            secondary_text: Rgba::hex(0x8891a5), primary_border: Rgba::hex(0x242832),
+            secondary_border: Rgba::hex(0x3c424e), accent: Rgba::hex(0x61afef),
+            red: Rgba::hex(0xc43c32), green: Rgba::hex(0x4ba55f),
+            keyword: Rgba::hex(0xc678dd), identifier: Rgba::hex(0xe06c75),
+            math_variable: Rgba::hex(0xe5c07b), number: Rgba::hex(0xd19a66),
+            operator: Rgba::hex(0x56b6c2), string: Rgba::hex(0x98c379),
+            comment: Rgba::hex(0x5c6370), builtin: Rgba::hex(0x61afef),
+            type_name: Rgba::hex(0xe5c07b), axis: Rgba::hex(0xd19a66),
+        },
+        JsonTheme {
+            name: "Monokai".into(),
+            primary_bg: Rgba::hex(0x10110c), secondary_bg: Rgba::hex(0x161610),
+            tertiary_bg: Rgba::hex(0x202018), primary_text: Rgba::hex(0xf8f8f2),
+            secondary_text: Rgba::hex(0xb0ae9e), primary_border: Rgba::hex(0x26271e),
+            secondary_border: Rgba::hex(0x444436), accent: Rgba::hex(0xa6e22e),
+            red: Rgba::hex(0xc43c32), green: Rgba::hex(0x4ba55f),
+            keyword: Rgba::hex(0xff6188), identifier: Rgba::hex(0xa9dc76),
+            math_variable: Rgba::hex(0xffd866), number: Rgba::hex(0xab9df2),
+            operator: Rgba::hex(0xff6188), string: Rgba::hex(0xffd866),
+            comment: Rgba::hex(0x727072), builtin: Rgba::hex(0x78dce8),
+            type_name: Rgba::hex(0x78dce8), axis: Rgba::hex(0xfc9867),
+        },
+        JsonTheme {
+            name: "Dracula".into(),
+            primary_bg: Rgba::hex(0x0e0f16), secondary_bg: Rgba::hex(0x14151e),
+            tertiary_bg: Rgba::hex(0x1e1f2a), primary_text: Rgba::hex(0xf8f8f2),
+            secondary_text: Rgba::hex(0xb0b2c0), primary_border: Rgba::hex(0x242632),
+            secondary_border: Rgba::hex(0x44465c), accent: Rgba::hex(0xbd93f9),
+            red: Rgba::hex(0xff5555), green: Rgba::hex(0x50fa7b),
+            keyword: Rgba::hex(0xff79c6), identifier: Rgba::hex(0x50fa7b),
+            math_variable: Rgba::hex(0xf8f8f2), number: Rgba::hex(0xbd93f9),
+            operator: Rgba::hex(0xff79c6), string: Rgba::hex(0xf1fa8c),
+            comment: Rgba::hex(0x6272a4), builtin: Rgba::hex(0x8be9fd),
+            type_name: Rgba::hex(0x8be9fd), axis: Rgba::hex(0xffb86c),
+        },
+        JsonTheme {
+            name: "Gruvbox".into(),
+            primary_bg: Rgba::hex(0x100f0e), secondary_bg: Rgba::hex(0x161412),
+            tertiary_bg: Rgba::hex(0x201d1a), primary_text: Rgba::hex(0xebdbb2),
+            secondary_text: Rgba::hex(0xbdae93), primary_border: Rgba::hex(0x262320),
+            secondary_border: Rgba::hex(0x443e36), accent: Rgba::hex(0xfe8019),
+            red: Rgba::hex(0xcc241d), green: Rgba::hex(0x4ba55f),
+            keyword: Rgba::hex(0xfb4934), identifier: Rgba::hex(0x83a598),
+            math_variable: Rgba::hex(0xfabd2f), number: Rgba::hex(0xd3869b),
+            operator: Rgba::hex(0xfe8019), string: Rgba::hex(0xb8bb26),
+            comment: Rgba::hex(0x928374), builtin: Rgba::hex(0x8ec07c),
+            type_name: Rgba::hex(0x83a598), axis: Rgba::hex(0xfabd2f),
+        },
+        JsonTheme {
+            name: "Nord".into(),
+            primary_bg: Rgba::hex(0x0e1218), secondary_bg: Rgba::hex(0x131820),
+            tertiary_bg: Rgba::hex(0x1c222c), primary_text: Rgba::hex(0xeceff4),
+            secondary_text: Rgba::hex(0xb0b8c8), primary_border: Rgba::hex(0x232a36),
+            secondary_border: Rgba::hex(0x3e4856), accent: Rgba::hex(0x88c0d0),
+            red: Rgba::hex(0xbf616a), green: Rgba::hex(0x4ba55f),
+            keyword: Rgba::hex(0x81a1c1), identifier: Rgba::hex(0x88c0d0),
+            math_variable: Rgba::hex(0xd8dee9), number: Rgba::hex(0xb48ead),
+            operator: Rgba::hex(0x81a1c1), string: Rgba::hex(0xa3be8c),
+            comment: Rgba::hex(0x616e88), builtin: Rgba::hex(0x88c0d0),
+            type_name: Rgba::hex(0x8fbcbb), axis: Rgba::hex(0xebcb8b),
+        },
+        JsonTheme {
+            name: "Solarized".into(),
+            primary_bg: Rgba::hex(0x000c11), secondary_bg: Rgba::hex(0x00161e),
+            tertiary_bg: Rgba::hex(0x031e26), primary_text: Rgba::hex(0xfdf6e3),
+            secondary_text: Rgba::hex(0x93a1a1), primary_border: Rgba::hex(0x05242e),
+            secondary_border: Rgba::hex(0x0a3a48), accent: Rgba::hex(0x268bd2),
+            red: Rgba::hex(0xdc322f), green: Rgba::hex(0x4ba55f),
+            keyword: Rgba::hex(0x859900), identifier: Rgba::hex(0x268bd2),
+            math_variable: Rgba::hex(0xcb4b16), number: Rgba::hex(0xd33682),
+            operator: Rgba::hex(0x93a1a1), string: Rgba::hex(0x2aa198),
+            comment: Rgba::hex(0x586e75), builtin: Rgba::hex(0x268bd2),
+            type_name: Rgba::hex(0xcb4b16), axis: Rgba::hex(0xb58900),
+        },
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Runtime theme store
+// ---------------------------------------------------------------------------
+
+struct ThemeStore {
+    names: Vec<String>,
+    themes: Vec<Theme>,
+}
+
+static THEME_STORE: OnceLock<Mutex<ThemeStore>> = OnceLock::new();
+
+fn store() -> &'static Mutex<ThemeStore> {
+    THEME_STORE.get_or_init(|| {
+        let json_themes = load_or_create_themes_json();
+        let names = json_themes.iter().map(|t| t.name.clone()).collect();
+        let themes = json_themes.iter().map(|t| t.to_theme()).collect();
+        Mutex::new(ThemeStore { names, themes })
+    })
+}
+
+fn themes_json_path() -> std::path::PathBuf {
+    std::env::current_exe()
+        .unwrap_or_default()
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("themes.json")
+}
+
+fn load_or_create_themes_json() -> Vec<JsonTheme> {
+    let path = themes_json_path();
+    if path.exists() {
+        if let Ok(json) = std::fs::read_to_string(&path) {
+            match serde_json::from_str::<Vec<JsonTheme>>(&json) {
+                Ok(t) if !t.is_empty() => {
+                    log::info!("Loaded {} themes from {}", t.len(), path.display());
+                    return t;
+                }
+                Ok(_) => log::warn!("themes.json is empty, using defaults"),
+                Err(e) => log::warn!("Failed to parse themes.json: {e}, using defaults"),
+            }
+        }
+    }
+    let defaults = default_themes();
+    if let Ok(json) = serde_json::to_string_pretty(&defaults) {
+        if let Err(e) = std::fs::write(&path, &json) {
+            log::warn!("Failed to write themes.json: {e}");
+        } else {
+            log::info!("Created themes.json at {}", path.display());
+        }
+    }
+    defaults
+}
+
+// ---------------------------------------------------------------------------
+// Active theme selection + public API
 // ---------------------------------------------------------------------------
 
 mod theme_state {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    static CURRENT_THEME: AtomicUsize = AtomicUsize::new(0); // 0 = Catppuccin
-
-    pub fn index() -> usize {
-        CURRENT_THEME.load(Ordering::Relaxed)
-    }
-
-    pub fn set(idx: usize) {
-        CURRENT_THEME.store(idx, Ordering::Relaxed);
-    }
+    static CURRENT: AtomicUsize = AtomicUsize::new(0);
+    pub fn index() -> usize { CURRENT.load(Ordering::Relaxed) }
+    pub fn set(i: usize) { CURRENT.store(i, Ordering::Relaxed); }
 }
 
-/// Get the currently active theme (UI chrome + syntax).
 pub fn theme() -> &'static Theme {
-    let idx = theme_state::index().min(BUILTIN_THEMES.len() - 1);
-    BUILTIN_THEMES[idx].1
+    let s = store().lock().unwrap();
+    let idx = theme_state::index().min(s.themes.len() - 1);
+    unsafe { &*(&s.themes[idx] as *const Theme) }
 }
 
-/// Get the name of the currently active theme.
-pub fn active_theme_name() -> &'static str {
-    let idx = theme_state::index().min(BUILTIN_THEMES.len() - 1);
-    BUILTIN_THEMES[idx].0
+pub fn active_theme_name() -> String {
+    let s = store().lock().unwrap();
+    let idx = theme_state::index().min(s.names.len() - 1);
+    s.names[idx].clone()
 }
 
-/// Cycle to the next built-in theme. Returns the new theme name.
-pub fn cycle_theme() -> &'static str {
-    let next = (theme_state::index() + 1) % BUILTIN_THEMES.len();
+pub fn theme_names() -> Vec<String> {
+    store().lock().unwrap().names.clone()
+}
+
+pub fn cycle_theme() -> String {
+    let s = store().lock().unwrap();
+    let next = (theme_state::index() + 1) % s.themes.len();
     theme_state::set(next);
-    BUILTIN_THEMES[next].0
+    s.names[next].clone()
 }
 
-/// Set theme by index (0-based into BUILTIN_THEMES).
 pub fn set_theme(idx: usize) {
-    if idx < BUILTIN_THEMES.len() {
-        theme_state::set(idx);
-    }
+    let s = store().lock().unwrap();
+    if idx < s.themes.len() { theme_state::set(idx); }
 }
 
-/// Number of built-in themes available.
 pub fn theme_count() -> usize {
-    BUILTIN_THEMES.len()
+    store().lock().unwrap().themes.len()
+}
+
+pub fn reload_themes() -> usize {
+    let jt = load_or_create_themes_json();
+    let names: Vec<String> = jt.iter().map(|t| t.name.clone()).collect();
+    let count = names.len();
+    let themes = jt.iter().map(|t| t.to_theme()).collect();
+    let mut s = store().lock().unwrap();
+    s.names = names;
+    s.themes = themes;
+    if theme_state::index() >= count { theme_state::set(0); }
+    count
 }
 
 // ---------------------------------------------------------------------------
@@ -660,13 +489,11 @@ pub mod spacing {
     pub const MD: f32 = 12.0;
     pub const LG: f32 = 16.0;
     pub const XL: f32 = 24.0;
-
     pub const MENU_HEIGHT: f32 = 28.0;
     pub const TAB_HEIGHT: f32 = 36.0;
     pub const STATUS_HEIGHT: f32 = 24.0;
     pub const SPLIT_HANDLE_WIDTH: f32 = 6.0;
     pub const WINDOW_CONTROL_WIDTH: f32 = 46.0;
-
     pub const DROPDOWN_ITEM_HEIGHT: f32 = 28.0;
     pub const DROPDOWN_PADDING: f32 = 4.0;
     pub const DROPDOWN_MIN_WIDTH: f32 = 220.0;
@@ -674,7 +501,6 @@ pub mod spacing {
     pub const SCROLLBAR_WIDTH: f32 = 8.0;
     pub const SCROLLBAR_THUMB_MIN_W: f32 = 30.0;
     pub const SCROLLBAR_THUMB_MIN_H: f32 = 30.0;
-
     pub const GUTTER_WIDTH: f32 = 48.0;
     pub const AXIS_ZONE_SIZE: f32 = 40.0;
     pub const CELL_PADDING: f32 = 12.0;
@@ -683,7 +509,6 @@ pub mod spacing {
     pub const HEADER_HEIGHT: f32 = 32.0;
     pub const TEXT_PADDING: f32 = 24.0;
 
-    // Scaled versions — multiply by current zoom factor.
     pub fn scale() -> f32 { super::fonts::scale() }
     pub fn xs() -> f32 { XS * scale() }
     pub fn sm() -> f32 { SM * scale() }
@@ -712,68 +537,34 @@ pub mod spacing {
 }
 
 // ---------------------------------------------------------------------------
-// Fonts — base sizes + zoom
+// Fonts
 // ---------------------------------------------------------------------------
 
 pub mod fonts {
     use std::sync::atomic::{AtomicU32, Ordering};
-
     pub const BASE_EDITOR: f32 = 20.0;
     pub const BASE_UI: f32 = 14.0;
     pub const BASE_SMALL: f32 = 12.0;
     pub const BASE_TOOLTIP: f32 = 13.0;
     pub const BASE_STATUS: f32 = 13.0;
     pub const BASE_MENU: f32 = 14.0;
-
     pub const MIN_SCALE: f32 = 0.6;
     pub const MAX_SCALE: f32 = 2.0;
     pub const SCALE_STEP: f32 = 0.1;
-
     pub const LINE_HEIGHT_FACTOR: f32 = 1.4;
     pub const CURSOR_WIDTH: f32 = 2.0;
-
-    /// Zoom state stored as atomic bits (safe, no `unsafe` needed).
     static CURRENT_SCALE: AtomicU32 = AtomicU32::new(1.0_f32.to_bits());
-
-    pub fn scale() -> f32 {
-        f32::from_bits(CURRENT_SCALE.load(Ordering::Relaxed))
-    }
-
-    pub fn zoom_in() {
-        let new = (scale() + SCALE_STEP).min(MAX_SCALE);
-        CURRENT_SCALE.store(new.to_bits(), Ordering::Relaxed);
-    }
-
-    pub fn zoom_out() {
-        let new = (scale() - SCALE_STEP).max(MIN_SCALE);
-        CURRENT_SCALE.store(new.to_bits(), Ordering::Relaxed);
-    }
-
-    pub fn reset_zoom() {
-        CURRENT_SCALE.store(1.0_f32.to_bits(), Ordering::Relaxed);
-    }
-
-    pub fn editor_size() -> f32 {
-        BASE_EDITOR * scale()
-    }
-    pub fn editor_line_height() -> f32 {
-        editor_size() * LINE_HEIGHT_FACTOR
-    }
-    pub fn ui_size() -> f32 {
-        BASE_UI * scale()
-    }
-    pub fn small_size() -> f32 {
-        BASE_SMALL * scale()
-    }
-    pub fn tooltip_size() -> f32 {
-        BASE_TOOLTIP * scale()
-    }
-    pub fn status_size() -> f32 {
-        BASE_STATUS * scale()
-    }
-    pub fn menu_size() -> f32 {
-        BASE_MENU * scale()
-    }
+    pub fn scale() -> f32 { f32::from_bits(CURRENT_SCALE.load(Ordering::Relaxed)) }
+    pub fn zoom_in() { let n = (scale() + SCALE_STEP).min(MAX_SCALE); CURRENT_SCALE.store(n.to_bits(), Ordering::Relaxed); }
+    pub fn zoom_out() { let n = (scale() - SCALE_STEP).max(MIN_SCALE); CURRENT_SCALE.store(n.to_bits(), Ordering::Relaxed); }
+    pub fn reset_zoom() { CURRENT_SCALE.store(1.0_f32.to_bits(), Ordering::Relaxed); }
+    pub fn editor_size() -> f32 { BASE_EDITOR * scale() }
+    pub fn editor_line_height() -> f32 { editor_size() * LINE_HEIGHT_FACTOR }
+    pub fn ui_size() -> f32 { BASE_UI * scale() }
+    pub fn small_size() -> f32 { BASE_SMALL * scale() }
+    pub fn tooltip_size() -> f32 { BASE_TOOLTIP * scale() }
+    pub fn status_size() -> f32 { BASE_STATUS * scale() }
+    pub fn menu_size() -> f32 { BASE_MENU * scale() }
 }
 
 // ---------------------------------------------------------------------------
@@ -781,6 +572,6 @@ pub mod fonts {
 // ---------------------------------------------------------------------------
 
 pub mod split {
-    pub const DEFAULT_LEFT_WIDTH: f32 = 540.0; // initial left pane width in pixels
+    pub const DEFAULT_LEFT_WIDTH: f32 = 540.0;
     pub const MIN_PANE_SIZE: f32 = 200.0;
 }

@@ -55,32 +55,62 @@ const MENU_VIEW_ITEMS: &[MenuItemDef] = &[
     MenuItemDef { label: "Reset Zoom", shortcut: "Ctrl+0" },
 ];
 
-const MENU_THEME_ITEMS: &[MenuItemDef] = &[
-    MenuItemDef { label: "Catppuccin", shortcut: "" },
-    MenuItemDef { label: "One Dark", shortcut: "" },
-    MenuItemDef { label: "Monokai", shortcut: "" },
-    MenuItemDef { label: "Dracula", shortcut: "" },
-    MenuItemDef { label: "Gruvbox", shortcut: "" },
-    MenuItemDef { label: "Nord", shortcut: "" },
-    MenuItemDef { label: "Solarized", shortcut: "" },
-];
+/// Dynamic theme menu items built from themes.json at runtime.
+pub(crate) struct DynMenuItemDef {
+    pub label: String,
+    pub shortcut: &'static str,
+}
+
+static THEME_MENU_CACHE: std::sync::OnceLock<std::sync::Mutex<Vec<DynMenuItemDef>>> =
+    std::sync::OnceLock::new();
+
+fn theme_menu_items() -> &'static std::sync::Mutex<Vec<DynMenuItemDef>> {
+    THEME_MENU_CACHE.get_or_init(|| {
+        let names = theme::theme_names();
+        let items = names
+            .into_iter()
+            .map(|n| DynMenuItemDef { label: n, shortcut: "" })
+            .collect();
+        std::sync::Mutex::new(items)
+    })
+}
+
+/// Rebuild theme menu cache (call after reload_themes).
+pub(crate) fn rebuild_theme_menu() {
+    let names = theme::theme_names();
+    let items: Vec<DynMenuItemDef> = names
+        .into_iter()
+        .map(|n| DynMenuItemDef { label: n, shortcut: "" })
+        .collect();
+    *theme_menu_items().lock().unwrap() = items;
+}
 
 pub(crate) fn menu_items(index: usize) -> &'static [MenuItemDef] {
     match index {
         0 => MENU_FILE_ITEMS,
         1 => MENU_EDIT_ITEMS,
         2 => MENU_VIEW_ITEMS,
-        3 => MENU_THEME_ITEMS,
+        // Theme menu handled separately via theme_menu_count / theme_menu_label
         _ => &[],
     }
 }
 
+/// Number of items in the theme menu.
+pub(crate) fn theme_menu_count() -> usize {
+    theme_menu_items().lock().unwrap().len()
+}
+
+/// Get theme menu label by index.
+pub(crate) fn theme_menu_label(idx: usize) -> String {
+    let items = theme_menu_items().lock().unwrap();
+    items.get(idx).map(|i| i.label.clone()).unwrap_or_default()
+}
+
 /// Returns the index of the currently active theme (for highlighting in the Theme menu).
 pub(crate) fn active_theme_index() -> usize {
-    theme::BUILTIN_THEMES
-        .iter()
-        .position(|(name, _)| *name == theme::active_theme_name())
-        .unwrap_or(0)
+    let name = theme::active_theme_name();
+    let items = theme_menu_items().lock().unwrap();
+    items.iter().position(|i| i.label == name).unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------

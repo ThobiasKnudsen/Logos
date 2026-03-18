@@ -552,8 +552,15 @@ impl Renderer {
         menu_rect: Rect,
         active_item: Option<usize>,
     ) -> Vec<Rect> {
-        let items: &[MenuItemDef] = app::menu_items(menu_index);
-        if items.is_empty() {
+        // Build label/shortcut pairs — theme menu (index 3) is dynamic from JSON
+        let static_items: &[MenuItemDef] = app::menu_items(menu_index);
+        let is_theme_menu = menu_index == 3;
+        let item_count = if is_theme_menu {
+            app::theme_menu_count()
+        } else {
+            static_items.len()
+        };
+        if item_count == 0 {
             self.dropdown_active = false;
             return Vec::new();
         }
@@ -568,17 +575,22 @@ impl Renderer {
         let mut max_label_w = 0.0_f32;
         let mut max_shortcut_w = 0.0_f32;
 
-        for (i, item) in items.iter().enumerate() {
+        for i in 0..item_count {
+            let (item_label, item_shortcut) = if is_theme_menu {
+                (app::theme_menu_label(i), "")
+            } else {
+                (static_items[i].label.to_string(), static_items[i].shortcut)
+            };
             // Prefix active item with a checkmark
             let label_text = if active_item == Some(i) {
-                format!("\u{2713} {}", item.label)
+                format!("\u{2713} {}", item_label)
             } else {
-                format!("   {}", item.label)
+                format!("   {}", item_label)
             };
             let label =
                 Self::create_label(&mut self.font_system, fonts::menu_size(), &label_text);
             let shortcut =
-                Self::create_label(&mut self.font_system, fonts::small_size(), item.shortcut);
+                Self::create_label(&mut self.font_system, fonts::small_size(), item_shortcut);
             max_label_w = max_label_w.max(Self::measure_label_width(&label));
             max_shortcut_w = max_shortcut_w.max(Self::measure_label_width(&shortcut));
             self.dropdown_item_labels.push(label);
@@ -587,7 +599,7 @@ impl Renderer {
 
         let dropdown_w = (max_label_w + max_shortcut_w + menu_item_pad() * 4.0)
             .max(spacing::dropdown_min_width());
-        let dropdown_h = items.len() as f32 * item_h + pad * 2.0;
+        let dropdown_h = item_count as f32 * item_h + pad * 2.0;
 
         let x = menu_rect.x;
         let y = menu_rect.y + menu_rect.h;
@@ -599,8 +611,8 @@ impl Renderer {
             h: dropdown_h,
         };
 
-        let mut item_rects = Vec::with_capacity(items.len());
-        for i in 0..items.len() {
+        let mut item_rects = Vec::with_capacity(item_count);
+        for i in 0..item_count {
             item_rects.push(Rect {
                 x,
                 y: y + pad + i as f32 * item_h,
