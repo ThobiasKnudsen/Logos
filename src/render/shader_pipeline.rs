@@ -146,12 +146,18 @@ impl ShaderPipelineManager {
         // Remove any existing pipeline for this cell
         self.remove(cell_id);
 
-        // Validate by trying to create the shader module
-        // wgpu will panic or return an error for invalid WGSL
+        // Push an error scope so wgpu returns errors instead of panicking.
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+
         let fragment_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cell_fragment_shader"),
             source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
         });
+
+        // Check for shader compilation errors before proceeding.
+        if let Some(err) = pollster::block_on(device.pop_error_scope()) {
+            return Err(format!("{}", err));
+        }
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("shader_uniforms"),
@@ -168,6 +174,9 @@ impl ShaderPipelineManager {
                 resource: uniform_buffer.as_entire_binding(),
             }],
         });
+
+        // Push another scope for pipeline creation (catches entry point errors, etc.)
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("cell_shader_pipeline"),
@@ -197,6 +206,10 @@ impl ShaderPipelineManager {
             multiview: None,
             cache: None,
         });
+
+        if let Some(err) = pollster::block_on(device.pop_error_scope()) {
+            return Err(format!("{}", err));
+        }
 
         self.pipelines.push(CellPipeline {
             cell_id,
