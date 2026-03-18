@@ -308,4 +308,15 @@ impl Buffer {
         }
         self.selection_anchor = None;
     }
+
+    /// Set cursor to a specific byte offset while extending the selection.
+    /// If no selection anchor exists, the current cursor becomes the anchor
+    /// before moving (used for shift+click and drag-to-select).
+    pub fn set_cursor_byte_extend(&mut self, byte: usize) {
+        self.begin_selection();
+        self.cursor = byte.min(self.text.len());
+        while self.cursor > 0 && !self.text.is_char_boundary(self.cursor) {
+            self.cursor -= 1;
+        }
+    }
 }

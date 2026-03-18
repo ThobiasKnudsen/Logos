@@ -199,6 +199,10 @@ struct AppState {
     is_dragging_v_scroll: bool,
     scroll_drag_offset: f32,
 
+    // Editor text selection dragging
+    is_dragging_editor: bool,
+    editor_drag_cell: Option<usize>,
+
     // Window controls
     win_control_rects: WindowControlRects,
     is_maximized: bool,
@@ -467,6 +471,7 @@ impl AppState {
             self.hover_target = target;
             let icon = match target {
                 HoverTarget::SplitHandle => CursorIcon::ColResize,
+                HoverTarget::CellEditor(_) => CursorIcon::Text,
                 HoverTarget::CellPlayButton(_) | HoverTarget::CellCopyButton(_)
                 | HoverTarget::AutocompleteItem(_) => CursorIcon::Pointer,
                 HoverTarget::RenderArea => match self.render_area.mouse_zone {
@@ -804,7 +809,10 @@ impl AppState {
 
     /// Returns true if any drag operation is in progress.
     fn is_any_drag_active(&self) -> bool {
-        self.is_dragging_split || self.is_dragging_v_scroll || self.render_area.is_dragging
+        self.is_dragging_split
+            || self.is_dragging_v_scroll
+            || self.render_area.is_dragging
+            || self.is_dragging_editor
     }
 
     /// Compile and start playing a cell's shader.
@@ -896,6 +904,8 @@ impl ApplicationHandler for App {
             is_dragging_split: false,
             is_dragging_v_scroll: false,
             scroll_drag_offset: 0.0,
+            is_dragging_editor: false,
+            editor_drag_cell: None,
             win_control_rects: WindowControlRects::default(),
             is_maximized: false,
             last_title_click: None,
@@ -995,6 +1005,17 @@ impl ApplicationHandler for App {
 
                     state.render_area.last_drag_pos = (mx, my);
                     state.window.request_redraw();
+                } else if state.is_dragging_editor {
+                    // Drag-to-select: extend selection to current mouse position
+                    if let Some(cell_idx) = state.editor_drag_cell {
+                        let (mx, my) = state.cursor_position;
+                        if let Some(byte_offset) = state.renderer.hit_test_cell(cell_idx, mx, my) {
+                            state.tab_manager.active_tab_mut().cells[cell_idx]
+                                .buffer
+                                .set_cursor_byte_extend(byte_offset);
+                            state.sync_active_tab();
+                        }
+                    }
                 } else {
                     state.recompute_hover();
                 }
@@ -1133,6 +1154,29 @@ impl ApplicationHandler for App {
                         });
                         event_loop.set_control_flow(ControlFlow::Poll);
                     }
+                    HoverTarget::CellEditor(i) => {
+                        state.close_menu();
+                        state.dismiss_autocomplete();
+                        let (mx, my) = state.cursor_position;
+                        if let Some(byte_offset) = state.renderer.hit_test_cell(i, mx, my) {
+                            if state.modifiers.shift_key() {
+                                // Shift+click: extend selection to clicked position
+                                state.tab_manager.active_tab_mut().cells[i]
+                                    .buffer
+                                    .set_cursor_byte_extend(byte_offset);
+                            } else {
+                                // Normal click: position cursor, start potential drag
+                                state.tab_manager.active_tab_mut().cells[i]
+                                    .buffer
+                                    .set_cursor_byte(byte_offset);
+                            }
+                        }
+                        state.tab_manager.active_tab_mut().set_active_cell(i);
+                        state.is_dragging_editor = true;
+                        state.editor_drag_cell = Some(i);
+                        event_loop.set_control_flow(ControlFlow::Poll);
+                        state.sync_active_tab();
+                    }
                     _ => {
                         // Click outside menus closes dropdown
                         if state.open_menu.is_some() {
@@ -1152,9 +1196,12 @@ impl ApplicationHandler for App {
                 if state.is_any_drag_active() {
                     let was_split = state.is_dragging_split;
                     let was_v_scroll = state.is_dragging_v_scroll;
+                    let was_editor = state.is_dragging_editor;
                     state.is_dragging_split = false;
                     state.is_dragging_v_scroll = false;
                     state.render_area.is_dragging = false;
+                    state.is_dragging_editor = false;
+                    state.editor_drag_cell = None;
                     if state.pending_dialog.is_none() {
                         event_loop.set_control_flow(ControlFlow::Wait);
                     }
@@ -1163,8 +1210,8 @@ impl ApplicationHandler for App {
                         state.sync_active_tab();
                     }
                     state.recompute_hover();
-                    if was_split {
-                        // Split drag already synced during move
+                    if was_split || was_editor {
+                        // Split/editor drag already synced during move
                     }
                     return;
                 }
@@ -1248,15 +1295,8 @@ impl ApplicationHandler for App {
                             state.trigger_cell_play(i);
                         }
                     }
-                    HoverTarget::CellEditor(i) => {
-                        let (mx, my) = state.cursor_position;
-                        if let Some(byte_offset) = state.renderer.hit_test_cell(i, mx, my) {
-                            state.tab_manager.active_tab_mut().cells[i]
-                                .buffer
-                                .set_cursor_byte(byte_offset);
-                        }
-                        state.tab_manager.active_tab_mut().set_active_cell(i);
-                        state.sync_active_tab();
+                    HoverTarget::CellEditor(_) => {
+                        // Handled on press (drag-to-select); release is a no-op.
                     }
                     HoverTarget::CellCopyButton(i) => {
                         let text = state.tab_manager.active_tab().cells[i].buffer.text().to_string();
