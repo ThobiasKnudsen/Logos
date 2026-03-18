@@ -23,30 +23,55 @@ mod notebook_tests;
 mod integration_tests {
     use super::*;
 
+    /// Validate a WGSL shader string using naga — the same validation
+    /// wgpu performs before sending to the GPU.
+    fn validate_wgsl(wgsl: &str) -> Result<(), String> {
+        let module = naga::front::wgsl::parse_str(wgsl).map_err(|e| {
+            format!("naga WGSL parse error: {}\n\n--- Generated WGSL ---\n{}", e, wgsl)
+        })?;
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        validator.validate(&module).map_err(|e| {
+            format!("naga validation error: {}\n\n--- Generated WGSL ---\n{}", e, wgsl)
+        })?;
+        Ok(())
+    }
+
+    /// Full pipeline: lex → parse → WGSL gen → naga validate.
+    /// Matches what the real app does. Panics with diagnostics on failure.
+    fn compile_and_validate(source: &str) -> String {
+        let wgsl = compile(source).unwrap_or_else(|e| {
+            panic!("compile({:?}) failed: {}", source, e)
+        });
+        validate_wgsl(&wgsl).unwrap_or_else(|e| {
+            panic!("WGSL validation failed for {:?}:\n{}", source, e)
+        });
+        wgsl
+    }
+
     #[test]
     fn test_empty_input_compiles() {
-        let result = compile("");
-        assert!(result.is_ok());
-        let shader = result.unwrap();
+        let shader = compile_and_validate("");
         assert!(shader.contains("fn fs_main"));
     }
 
     #[test]
     fn test_single_var_compiles() {
-        let shader = compile("x").unwrap();
+        let shader = compile_and_validate("x");
         assert!(shader.contains("let _result = x;"));
     }
 
     #[test]
     fn test_simple_math_compiles() {
-        let shader = compile("x * x + y * y").unwrap();
+        let shader = compile_and_validate("x * x + y * y");
         assert!(shader.contains("((x * x) + (y * y))"));
     }
 
     #[test]
     fn test_paraboloid() {
-        // The "type x*x + y*y → see paraboloid" scenario from the plan
-        let shader = compile("x * x + y * y").unwrap();
+        let shader = compile_and_validate("x * x + y * y");
         assert!(shader.contains("@fragment"));
         assert!(shader.contains("let x = world.x"));
         assert!(shader.contains("let y = world.y"));
@@ -54,63 +79,60 @@ mod integration_tests {
 
     #[test]
     fn test_with_bindings_and_result() {
-        let shader = compile("r: sqrt(x*x + y*y)\nsin(r * 10) / r").unwrap();
+        let shader = compile_and_validate("r: sqrt(x*x + y*y)\nsin(r * 10) / r");
         assert!(shader.contains("let r = sqrt("));
         assert!(shader.contains("(sin((r * 10.0)) / r)"));
     }
 
     #[test]
     fn test_function_def_and_call() {
-        let shader = compile("dist(a, b): sqrt(a*a + b*b)\ndist(x, y)").unwrap();
+        let shader = compile_and_validate("dist(a, b): sqrt(a*a + b*b)\ndist(x, y)");
         assert!(shader.contains("fn dist(a: f32, b: f32) -> f32"));
         assert!(shader.contains("dist(x, y)"));
     }
 
     #[test]
     fn test_conditional_coloring() {
-        let shader = compile("if (x*x + y*y < 1) 1 else 0").unwrap();
+        let shader = compile_and_validate("if (x*x + y*y < 1) 1 else 0");
         assert!(shader.contains("select("));
     }
 
     #[test]
     fn test_trig_composition() {
-        let shader = compile("sin(x * 3) * cos(y * 3)").unwrap();
+        let shader = compile_and_validate("sin(x * 3) * cos(y * 3)");
         assert!(shader.contains("sin((x * 3.0))"));
         assert!(shader.contains("cos((y * 3.0))"));
     }
 
     #[test]
     fn test_time_animation() {
-        let shader = compile("sin(x + time)").unwrap();
+        let shader = compile_and_validate("sin(x + time)");
         assert!(shader.contains("sin((x + u.time))"));
     }
 
     #[test]
     fn test_nested_blocks() {
-        let shader = compile("f(a): (b: a * 2, b + 1)\nf(x)").unwrap();
+        let shader = compile_and_validate("f(a): (b: a * 2, b + 1)\nf(x)");
         assert!(shader.contains("fn f("));
     }
 
     #[test]
     fn test_equality_operator() {
-        // `=` in Logos means equality — uses corner-checking for visible curves
-        let shader = compile("x = 0").unwrap();
-        // Should have pixel corner variables and straddle check, not simple `==`
+        let shader = compile_and_validate("x = 0");
         assert!(shader.contains("x_m"), "equality should use corner checking");
         assert!(shader.contains("!("), "equality should negate all-same-sign");
     }
 
     #[test]
     fn test_complex_mandelbrot_style() {
-        let source = "r: x*x + y*y\nif (r < 4) (1 - r/4) else 0";
-        let shader = compile(source).unwrap();
+        let shader = compile_and_validate("r: x*x + y*y\nif (r < 4) (1 - r/4) else 0");
         assert!(shader.contains("let r ="));
         assert!(shader.contains("select("));
     }
 
     #[test]
     fn test_multiple_builtins() {
-        let shader = compile("clamp(abs(sin(x * 6) - 0.5), 0, 1)").unwrap();
+        let shader = compile_and_validate("clamp(abs(sin(x * 6) - 0.5), 0, 1)");
         assert!(shader.contains("clamp("));
         assert!(shader.contains("abs("));
         assert!(shader.contains("sin("));
@@ -118,11 +140,9 @@ mod integration_tests {
 
     #[test]
     fn test_whitespace_resilience() {
-        // Various whitespace should compile identically
-        let s1 = compile("x+y").unwrap();
-        let s2 = compile("x + y").unwrap();
-        let s3 = compile("  x  +  y  ").unwrap();
-        // They should all contain the same expression
+        let s1 = compile_and_validate("x+y");
+        let s2 = compile_and_validate("x + y");
+        let s3 = compile_and_validate("  x  +  y  ");
         assert!(s1.contains("(x + y)"));
         assert!(s2.contains("(x + y)"));
         assert!(s3.contains("(x + y)"));
@@ -130,9 +150,8 @@ mod integration_tests {
 
     #[test]
     fn test_unicode_superscript_square() {
-        // x² + y² = 9 — common circle equation with Unicode superscript
-        let shader = compile("x\u{00B2} + y\u{00B2} = 9").unwrap();
-        // ² should become pow(x, 2.0), not literal x²
+        // x² + y² = 9
+        let shader = compile_and_validate("x\u{00B2} + y\u{00B2} = 9");
         assert!(shader.contains("pow(x_m, 2.0)") || shader.contains("pow(x, 2.0)"),
             "Unicode ² should compile to pow(), got:\n{}", shader);
         assert!(!shader.contains("\u{00B2}"),
@@ -141,36 +160,57 @@ mod integration_tests {
 
     #[test]
     fn test_unicode_superscript_cube() {
-        // sin(x)³ should compile to pow(sin(x), 3.0)
-        let shader = compile("sin(x)\u{00B3}").unwrap();
+        // sin(x)³ → pow(sin(x), 3.0)
+        let shader = compile_and_validate("sin(x)\u{00B3}");
         assert!(shader.contains("pow(sin(x), 3.0)"),
             "Unicode ³ should compile to pow(sin(x), 3.0), got:\n{}", shader);
     }
 
     #[test]
     fn test_complex_unicode_expression_compiles() {
-        // x²*y²+sin(x)³-sin(y²)²=9  — full pipeline: lex → parse → WGSL gen
+        // x²*y²+sin(x)³-sin(y²)²=9  — full pipeline including naga validation
         let input = "x\u{00B2}*y\u{00B2}+sin(x)\u{00B3}-sin(y\u{00B2})\u{00B2}=9";
-        let shader = compile(input).unwrap();
+        let shader = compile_and_validate(input);
 
-        // Must contain pow() calls, not bare "square"/"cube" identifiers
         assert!(!shader.contains("square"), "bare 'square' must not appear in WGSL");
         assert!(!shader.contains("cube"), "bare 'cube' must not appear in WGSL");
-
-        // pow(x, 2.0) for x², pow(y, 2.0) for y²
         assert!(shader.contains("pow("),
             "should contain pow() calls, got:\n{}", shader);
-
-        // sin() calls must survive
         assert!(shader.contains("sin("),
             "should contain sin() calls, got:\n{}", shader);
-
-        // Must be a valid shader with fragment entry point
-        assert!(shader.contains("@fragment"),
-            "should be a complete WGSL shader");
-
-        // Equality → corner-checking (curve rendering)
         assert!(shader.contains("x_m") || shader.contains("x_p"),
             "=9 should trigger corner-checking, got:\n{}", shader);
+    }
+
+    #[test]
+    fn test_cas_symbols_no_panic() {
+        // CAS-only symbols (∫, ∂, ∑, ∏) have no WGSL equivalent.
+        // They should not panic — they may compile (if WGSL gen handles them)
+        // or fail with an error, but never crash.
+        for &(sym, name) in &[
+            ("\u{222B}", "∫"), ("\u{2202}", "∂"),
+            ("\u{2211}", "∑"), ("\u{220F}", "∏"),
+        ] {
+            let result = compile(sym);
+            // If compile succeeds, validate the WGSL too
+            if let Ok(ref wgsl) = result {
+                if let Err(e) = validate_wgsl(wgsl) {
+                    // Expected: naga rejects undeclared identifiers.
+                    // This is acceptable — the symbol has no shader meaning.
+                    eprintln!("{} produces invalid WGSL (expected): {}", name, e.lines().next().unwrap_or(""));
+                }
+            }
+            // The key assertion: no panic occurred
+        }
+    }
+
+    #[test]
+    fn test_integral_with_args_no_panic() {
+        // ∫(x) — must not panic. Will likely fail (no WGSL "integral" function).
+        let result = compile("\u{222B}(x)");
+        if let Ok(ref wgsl) = result {
+            let _ = validate_wgsl(wgsl); // may fail, that's fine
+        }
+        // No panic = success
     }
 }

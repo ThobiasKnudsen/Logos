@@ -160,13 +160,14 @@ impl<'a> Lexer<'a> {
             self.advance();
             return Ok(Token { ty: TokenType::Slash, span: (start, self.pos) });
         }
-        if ch == '\u{222B}' { // ∫ (integral)
+        if ch == '\u{222B}' { // ∫ (integral) — CAS-only, not a WGSL builtin
             self.advance();
-            return Ok(Token { ty: TokenType::Builtin("int".to_string()), span: (start, self.pos) });
+            // Use "integral" not "int" to avoid collision with WGSL's `int` keyword
+            return Ok(Token { ty: TokenType::Identifier("integral".to_string()), span: (start, self.pos) });
         }
-        if ch == '\u{2202}' { // ∂ (partial derivative)
+        if ch == '\u{2202}' { // ∂ (partial derivative) — CAS-only, not a WGSL builtin
             self.advance();
-            return Ok(Token { ty: TokenType::Builtin("df".to_string()), span: (start, self.pos) });
+            return Ok(Token { ty: TokenType::Identifier("partial".to_string()), span: (start, self.pos) });
         }
         if ch == '\u{2207}' { // ∇ (nabla/gradient)
             self.advance();
@@ -180,13 +181,13 @@ impl<'a> Lexer<'a> {
             self.advance();
             return Ok(Token { ty: TokenType::Identifier("infinity".to_string()), span: (start, self.pos) });
         }
-        if ch == '\u{2211}' { // ∑ (summation)
+        if ch == '\u{2211}' { // ∑ (summation) — CAS-only, not a WGSL builtin
             self.advance();
-            return Ok(Token { ty: TokenType::Builtin("sum".to_string()), span: (start, self.pos) });
+            return Ok(Token { ty: TokenType::Identifier("sum".to_string()), span: (start, self.pos) });
         }
-        if ch == '\u{220F}' { // ∏ (product)
+        if ch == '\u{220F}' { // ∏ (product) — CAS-only, not a WGSL builtin
             self.advance();
-            return Ok(Token { ty: TokenType::Builtin("prod".to_string()), span: (start, self.pos) });
+            return Ok(Token { ty: TokenType::Identifier("prod".to_string()), span: (start, self.pos) });
         }
         if ch == '\u{2264}' { // ≤
             self.advance();
