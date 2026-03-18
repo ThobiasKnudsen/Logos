@@ -115,7 +115,7 @@ impl ReduceSession {
                 "else if op eq 'quotient then ",
                 "<< logos_infix cadr u; prin2 \"/\"; logos_infix caddr u >> ",
                 "else if op eq 'expt then ",
-                "<< logos_infix cadr u; prin2 \"**\"; logos_infix caddr u >> ",
+                "<< logos_infix cadr u; prin2 \"^\"; logos_infix caddr u >> ",
                 "else << ",
                 "prin2 op; prin2 \"(\"; ",
                 "logos_infix cadr u; ",
@@ -140,6 +140,24 @@ impl ReduceSession {
                 ffi::PROC_process_one_reduce_statement(c.as_ptr());
             }
         }
+
+        // Load all compiled packages from the embedded image.
+        // These are baked into vendor/csl/image.cpp at build time.
+        let packages = ["int", "solve", "ezgcd", "factor", "matrix", "taylor"];
+        for pkg in &packages {
+            OUTPUT_BUF.with(|buf| buf.borrow_mut().clear());
+            let stmt = CString::new(format!("load_package({});", pkg)).unwrap();
+            let rc = unsafe { ffi::PROC_process_one_reduce_statement(stmt.as_ptr()) };
+            let output = OUTPUT_BUF.with(|buf| {
+                String::from_utf8_lossy(&buf.borrow()).to_string()
+            });
+            if rc != 0 || output.contains("not found") || output.contains("*****") {
+                log::error!("Failed to load REDUCE package '{}': {}", pkg, output.trim());
+            } else {
+                log::info!("REDUCE package '{}' loaded", pkg);
+            }
+        }
+        OUTPUT_BUF.with(|buf| buf.borrow_mut().clear());
 
         // Disable echo so output doesn't contain the input statement
         let echo = CString::new("echo").unwrap();
@@ -166,6 +184,7 @@ impl ReduceSession {
     /// The statement should end with `;` (print result) or `$` (suppress).
     /// Example: `"1+1;"` returns `"2"`.
     pub fn eval(&self, statement: &str) -> Result<String, String> {
+        log::trace!("REDUCE eval: {:?}", statement);
         // Clear output buffer
         OUTPUT_BUF.with(|buf| buf.borrow_mut().clear());
 
@@ -214,17 +233,44 @@ impl ReduceSession {
             }
         }
 
-        let cleaned = if start < end {
-            lines[start..end]
-                .iter()
-                .map(|l| l.trim())
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else {
-            String::new()
-        };
+        // Filter out REDUCE noise/error lines, keeping actual results
+        let mut result_lines = Vec::new();
+        let mut error_lines = Vec::new();
+        for &line in &lines[start..end] {
+            let trimmed = line.trim();
+            if trimmed.starts_with("*****")
+                || trimmed.contains("package not found")
+                || trimmed.starts_with("Failed to find")
+            {
+                error_lines.push(trimmed);
+            } else if !trimmed.is_empty() {
+                result_lines.push(trimmed);
+            }
+        }
 
-        Ok(cleaned)
+        if !result_lines.is_empty() {
+            // Got a result (possibly with warnings — ignore them)
+            Ok(result_lines.join("\n"))
+        } else if !error_lines.is_empty() {
+            // Only error lines, no result
+            Err(error_lines.join("\n"))
+        } else {
+            Ok(String::new())
+        }
+    }
+
+    /// Toggle a REDUCE switch (e.g. "factor", "exp", "gcd").
+    #[allow(dead_code)]
+    pub fn set_switch(&self, name: &str, on: bool) -> Result<(), String> {
+        let c_name = std::ffi::CString::new(name)
+            .map_err(|e| format!("invalid switch name: {}", e))?;
+        let val = if on { 1 } else { 0 };
+        let rc = unsafe { ffi::PROC_set_switch(c_name.as_ptr(), val) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(format!("PROC_set_switch({}, {}) returned {}", name, on, rc))
+        }
     }
 
     /// Convenience: wrap an expression in `ws "expr";` to simplify it.
@@ -352,7 +398,7 @@ mod tests {
         // ── Expansion ───────────────────────────────────────────
         {
             let r = session.simplify("(x+1)**2").unwrap();
-            assert!(r.contains("x**2") && r.contains("2*x") && r.contains("1"),
+            assert!(r.contains("x^2") && r.contains("2*x") && r.contains("1"),
                 "(x+1)**2 expansion: {}", r);
         }
 
@@ -364,8 +410,8 @@ mod tests {
         }
 
         // ── Power laws ──────────────────────────────────────────
-        assert_simplify_eq(&session, "x**2 * x**3", "x**5");
-        assert_simplify_eq(&session, "(x**2)**3", "x**6");
+        assert_simplify_eq(&session, "x**2 * x**3", "x^5");
+        assert_simplify_eq(&session, "(x**2)**3", "x^6");
 
         // ── Symbolic cancellation ───────────────────────────────
         assert_simplify_eq(&session, "x/x", "1");
@@ -378,7 +424,7 @@ mod tests {
         // ── No simplification when already simplified ───────────
         {
             let r = session.simplify("x**2 - 1").unwrap();
-            assert!(r.contains("x**2"), "x**2 - 1 stays: {}", r);
+            assert!(r.contains("x^2"), "x^2 - 1 stays: {}", r);
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -386,8 +432,8 @@ mod tests {
         // ═══════════════════════════════════════════════════════════
 
         // ── Power rule ──────────────────────────────────────────
-        assert_simplify_eq(&session, "df(x**3, x)", "3*x**2");
-        assert_simplify_eq(&session, "df(x**5, x)", "5*x**4");
+        assert_simplify_eq(&session, "df(x**3, x)", "3*x^2");
+        assert_simplify_eq(&session, "df(x**5, x)", "5*x^4");
 
         // ── Trig derivatives ────────────────────────────────────
         assert_simplify_eq(&session, "df(sin(x), x)", "cos(x)");
@@ -397,10 +443,10 @@ mod tests {
         assert_simplify_eq(&session, "df(log(x), x)", "1/x");
 
         // ── Higher-order derivatives ────────────────────────────
-        assert_simplify_eq(&session, "df(x**4, x, 2)", "12*x**2");
+        assert_simplify_eq(&session, "df(x**4, x, 2)", "12*x^2");
         assert_simplify_eq(&session, "df(x**3, x, 3)", "6");
         assert_simplify_eq(&session, "df(x**3, x, 4)", "0");
-        assert_simplify_eq(&session, "df(x**5, x, 2)", "20*x**3");
+        assert_simplify_eq(&session, "df(x**5, x, 2)", "20*x^3");
 
         // ── Polynomial differentiation ──────────────────────────
         {
@@ -412,8 +458,8 @@ mod tests {
         // ── Reciprocal: d/dx(1/x) = -1/x² ─────────────────────
         {
             let r = session.simplify("df(1/x, x)").unwrap();
-            assert!(r.contains("1/x**2"),
-                "df(1/x, x): expected -1/x**2, got: {}", r);
+            assert!(r.contains("1/x^2"),
+                "df(1/x, x): expected -1/x^2, got: {}", r);
         }
 
         // ── Product rule: d/dx(x·sin(x)) ───────────────────────
@@ -426,19 +472,19 @@ mod tests {
         // ── Chain rule: d/dx(sin(x²)) = 2x·cos(x²) ────────────
         {
             let r = session.simplify("df(sin(x**2), x)").unwrap();
-            assert!(r.contains("cos(x**2)") && r.contains("2"),
+            assert!(r.contains("cos(x^2)") && r.contains("2"),
                 "chain rule df(sin(x²),x): {}", r);
         }
 
         // ── Partial derivatives ─────────────────────────────────
         {
             let r = session.simplify("df(x**3 * y**2, x)").unwrap();
-            assert!(r.contains("3") && r.contains("x**2") && r.contains("y**2"),
+            assert!(r.contains("3") && r.contains("x^2") && r.contains("y^2"),
                 "∂/∂x(x³y²): {}", r);
         }
         {
             let r = session.simplify("df(x**3 * y**2, y)").unwrap();
-            assert!(r.contains("2") && r.contains("x**3") && r.contains("y"),
+            assert!(r.contains("2") && r.contains("x^3") && r.contains("y"),
                 "∂/∂y(x³y²): {}", r);
         }
 
@@ -452,7 +498,7 @@ mod tests {
         // ── 2nd derivative of log: d²/dx²(log(x)) = -1/x² ────
         {
             let r = session.simplify("df(log(x), x, 2)").unwrap();
-            assert!(r.contains("1/x**2"),
+            assert!(r.contains("1/x^2"),
                 "df(log(x),x,2): expected -1/x², got: {}", r);
         }
 
@@ -480,7 +526,7 @@ mod tests {
         assert_simplify_eq(&session, "a/b", "a/b");
 
         // ── Expt with symbolic exponent ─────────────────────────
-        assert_simplify_eq(&session, "x**n", "x**n");
+        assert_simplify_eq(&session, "x**n", "x^n");
 
         // ── Unary minus ─────────────────────────────────────────
         assert_simplify_eq(&session, "-x", "- x");
@@ -556,9 +602,9 @@ mod tests {
             let ascii = translate::to_reduce(input);
             assert_eq!(ascii, "x**2 + 1");
             let result = session.simplify(&ascii).unwrap();
-            assert!(result.contains("x**2"), "x²+1 eval: {}", result);
+            assert!(result.contains("x^2"), "x²+1 eval: {}", result);
             let output = translate::from_reduce(&result);
-            assert!(output.contains("x\u{00B2}"), "x² round-trip: {}", output);
+            assert!(output.contains("x^2"), "x^2 round-trip: {}", output);
         }
 
         // ── π constant ──────────────────────────────────────────
@@ -589,15 +635,15 @@ mod tests {
             assert_eq!(output, "\u{221A}(x)"); // √(x)
         }
 
-        // ── × operator: 3 × x² → 3*x**2 → 3*x² ───────────────
+        // ── × operator: 3 × x² → 3*x**2 → 3*x^2 ──────────────
         {
             let input = "3 \u{00D7} x\u{00B2}"; // 3 × x²
             let ascii = translate::to_reduce(input);
             assert_eq!(ascii, "3 * x**2");
             let result = session.simplify(&ascii).unwrap();
-            assert_eq!(result, "3*x**2");
+            assert_eq!(result, "3*x^2");
             let output = translate::from_reduce(&result);
-            assert_eq!(output, "3*x\u{00B2}"); // 3*x²
+            assert_eq!(output, "3*x^2");
         }
 
         // ── Simplification changes expression: x²+2x+1−x² → 2x+1
@@ -609,14 +655,14 @@ mod tests {
             assert_eq!(result, "2*x + 1");
         }
 
-        // ── Differentiation with superscripts: df(x³,x) → 3x² ─
+        // ── Differentiation with superscripts: df(x³,x) → 3x^2 ─
         {
             let ascii = translate::to_reduce("x\u{00B3}"); // x³
             assert_eq!(ascii, "x**3");
             let result = session.simplify(&format!("df({}, x)", ascii)).unwrap();
-            assert_eq!(result, "3*x**2");
+            assert_eq!(result, "3*x^2");
             let output = translate::from_reduce(&result);
-            assert_eq!(output, "3*x\u{00B2}"); // 3*x²
+            assert_eq!(output, "3*x^2");
         }
 
         // ── Greek letters: α+1 (from_reduce doesn't reverse α) ─
@@ -639,7 +685,7 @@ mod tests {
         assert_simplify_eq(&session, "sub(x=0, sin(x))", "0");
         {
             let r = session.simplify("sub(x=y+1, x**2)").unwrap();
-            assert!(r.contains("y**2") && r.contains("2*y") && r.contains("1"),
+            assert!(r.contains("y^2") && r.contains("2*y") && r.contains("1"),
                 "sub(x=y+1, x²): {}", r);
         }
 
@@ -729,26 +775,16 @@ mod tests {
         }
 
         // ═══════════════════════════════════════════════════════════
-        // 9. PACKAGE-DEPENDENT FEATURES (graceful degradation)
+        // 9. PACKAGE-DEPENDENT FEATURES (now guaranteed available)
         // ═══════════════════════════════════════════════════════════
 
-        // Helper closure: test if a function works or gracefully reports
-        // package unavailable. Returns true if the feature is available.
-        let try_feature = |expr: &str| -> Option<String> {
-            match session.eval(expr) {
-                Ok(s) if !s.contains("package not found") => Some(s),
-                _ => None,
-            }
-        };
-
-        // ── LCM (may need package) ──────────────────────────────
+        // ── LCM ─────────────────────────────────────────────────
         {
-            if let Some(s) = try_feature("lcm(12, 18);") {
-                assert!(s.contains("36"), "lcm(12,18): {}", s);
-            }
+            let s = session.eval("lcm(12, 18);").expect("lcm failed");
+            assert!(s.contains("36"), "lcm(12,18): {}", s);
         }
 
-        // ── Trig identities (may not simplify with minimal image)
+        // ── Trig identities ─────────────────────────────────────
         {
             let r = session.simplify("sin(x)**2 + cos(x)**2")
                 .expect("trig identity eval failed");
@@ -760,70 +796,48 @@ mod tests {
 
         // ── Integration ─────────────────────────────────────────
         {
-            if let Some(s) = try_feature("int(x**2, x);") {
-                if !s.contains("int(") {
-                    assert!(s.contains("x**3"), "int(x²,x): {}", s);
-                }
-            }
+            let r = session.simplify("int(x**2, x)")
+                .expect("int(x²,x) failed");
+            assert!(r.contains("x^3"), "int(x²,x): {}", r);
         }
         {
-            if let Some(s) = try_feature("int(sin(x), x);") {
-                if !s.contains("int(") {
-                    assert!(s.contains("cos"), "int(sin(x),x): {}", s);
-                }
-            }
+            let r = session.eval("int(sin(x), x);")
+                .expect("int(sin(x),x) failed");
+            assert!(r.contains("cos"), "int(sin(x),x): {}", r);
         }
         {
-            if let Some(s) = try_feature("int(1/x, x);") {
-                if !s.contains("int(") {
-                    assert!(s.contains("log"), "int(1/x,x): {}", s);
-                }
-            }
+            let r = session.eval("int(1/x, x);")
+                .expect("int(1/x,x) failed");
+            assert!(r.contains("log"), "int(1/x,x): {}", r);
         }
 
         // ── Solve ───────────────────────────────────────────────
         {
-            if let Some(s) = try_feature("solve(x**2 - 1, x);") {
-                if !s.contains("solve(") {
-                    assert!(s.contains("1"), "solve(x²-1,x): {}", s);
-                }
-            }
+            let r = session.eval("solve(x**2 - 1, x);")
+                .expect("solve(x²-1,x) failed");
+            assert!(r.contains("1"), "solve(x²-1,x): {}", r);
         }
 
-        // ── Taylor series (needs package) ───────────────────────
+        // ── Taylor series ───────────────────────────────────────
         {
-            if let Some(s) = try_feature("taylor(sin(x), x, 0, 5);") {
-                if !s.contains("taylor(") {
-                    assert!(s.contains("x"), "taylor(sin(x),x,0,5): {}", s);
-                }
-            }
-        }
-
-        // ── Limit (needs package) ───────────────────────────────
-        {
-            if let Some(s) = try_feature("limit(sin(x)/x, x, 0);") {
-                if !s.contains("limit(") {
-                    assert!(s.contains("1"), "limit(sin(x)/x,x,0): {}", s);
-                }
-            }
+            let r = session.eval("taylor(sin(x), x, 0, 5);")
+                .expect("taylor(sin(x),x,0,5) failed");
+            assert!(r.contains("x"), "taylor(sin(x),x,0,5): {}", r);
         }
 
         // ═══════════════════════════════════════════════════════════
-        // 10. SET_SWITCH BEHAVIOR
+        // 10. SET_SWITCH BEHAVIOR (factor mode guaranteed available)
         // ═══════════════════════════════════════════════════════════
 
         session.set_switch("factor", true).expect("factor on");
         {
-            let r = session.simplify("x**2 - 1").unwrap();
-            assert!(r.contains("x"),
-                "factor mode x²-1: {}", r);
-        }
-        session.set_switch("factor", false).expect("factor off");
-
-        // Verify normal mode restored
-        {
-            let r = session.simplify("x**2 - 1").unwrap();
-            assert!(r.contains("x**2"), "after factor off: {}", r);
+            let r = session.simplify("x**2 - 1")
+                .expect("factor mode x²-1 failed");
+            assert!(r.contains("x"), "factor mode x²-1: {}", r);
+            session.set_switch("factor", false).expect("factor off");
+            // Verify normal mode restored
+            let r2 = session.simplify("x**2 - 1").unwrap();
+            assert!(r2.contains("x^2"), "after factor off: {}", r2);
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -834,7 +848,7 @@ mod tests {
         {
             session.eval("myvar := x + 1;").expect("assignment failed");
             let r = session.simplify("myvar**2").unwrap();
-            assert!(r.contains("x**2") && r.contains("2*x") && r.contains("1"),
+            assert!(r.contains("x^2") && r.contains("2*x") && r.contains("1"),
                 "myvar**2 = (x+1)²: {}", r);
             // Clean up
             session.eval("clear myvar;").expect("clear failed");

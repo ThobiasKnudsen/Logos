@@ -3,10 +3,23 @@
 //! Logos uses Unicode symbols (π, ², √, etc.) while REDUCE uses ASCII
 //! (pi, **2, sqrt(), etc.). This module converts between the two.
 
+/// Word-level replacements: Logos keyword → REDUCE keyword.
+const WORD_REPLACEMENTS: &[(&str, &str)] = &[
+    ("integral", "int"),
+    ("derivative", "df"),
+];
+
 /// Convert Logos Unicode math notation to REDUCE-compatible ASCII.
 pub fn to_reduce(input: &str) -> String {
-    let mut output = String::with_capacity(input.len() * 2);
-    let mut chars = input.chars().peekable();
+    // First pass: word-level replacements
+    let mut working = input.to_string();
+    for &(from, to) in WORD_REPLACEMENTS {
+        working = replace_word(&working, from, to);
+    }
+
+    // Second pass: character-level Unicode → ASCII
+    let mut output = String::with_capacity(working.len() * 2);
+    let mut chars = working.chars().peekable();
 
     while let Some(ch) = chars.next() {
         match ch {
@@ -24,7 +37,7 @@ pub fn to_reduce(input: &str) -> String {
             '\u{03C6}' => output.push_str("phi"),
             '\u{03C9}' => output.push_str("omega"),
 
-            // Superscript digits → **N
+            // Superscript digits → **N (REDUCE exponentiation)
             '\u{00B2}' => output.push_str("**2"),
             '\u{00B3}' => output.push_str("**3"),
             '\u{2070}' => output.push_str("**0"),
@@ -35,6 +48,9 @@ pub fn to_reduce(input: &str) -> String {
             '\u{2077}' => output.push_str("**7"),
             '\u{2078}' => output.push_str("**8"),
             '\u{2079}' => output.push_str("**9"),
+
+            // Caret → REDUCE exponentiation
+            '^' => output.push_str("**"),
 
             // Math operators
             '\u{00D7}' => output.push('*'),   // ×
@@ -57,24 +73,49 @@ pub fn to_reduce(input: &str) -> String {
     output
 }
 
-/// Convert REDUCE ASCII output back to Unicode math notation.
+/// Replace whole words only (surrounded by non-alphanumeric or string boundaries).
+fn replace_word(input: &str, from: &str, to: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut remaining = input;
+    while let Some(pos) = remaining.find(from) {
+        let before_ok = pos == 0
+            || !remaining[..pos]
+                .chars()
+                .last()
+                .unwrap()
+                .is_alphanumeric();
+        let after = &remaining[pos + from.len()..];
+        let after_ok = after.is_empty()
+            || !after.chars().next().unwrap().is_alphanumeric();
+        if before_ok && after_ok {
+            result.push_str(&remaining[..pos]);
+            result.push_str(to);
+            remaining = after;
+        } else {
+            result.push_str(&remaining[..pos + from.len()]);
+            remaining = after;
+        }
+    }
+    result.push_str(remaining);
+    result
+}
+
+/// Convert REDUCE ASCII output back to Logos notation.
+///
+/// Converts `**` → `^` for exponentiation, and REDUCE keywords back to
+/// Unicode symbols where appropriate.
 pub fn from_reduce(input: &str) -> String {
     let mut output = input.to_string();
 
-    // Simple word-boundary replacements
-    output = output.replace("pi", "\u{03C0}");
-    output = output.replace("infinity", "\u{221E}");
-    output = output.replace("sqrt", "\u{221A}");
+    // Word-level replacements (whole words only to avoid mangling substrings)
+    output = replace_word(&output, "int", "integral");
+    output = replace_word(&output, "df", "derivative");
+    output = replace_word(&output, "pi", "\u{03C0}");
+    output = replace_word(&output, "infinity", "\u{221E}");
+    output = replace_word(&output, "sqrt", "\u{221A}");
 
-    // **N → superscript (common cases)
-    output = output.replace("**2", "\u{00B2}");
-    output = output.replace("**3", "\u{00B3}");
-    output = output.replace("**4", "\u{2074}");
-    output = output.replace("**5", "\u{2075}");
-    output = output.replace("**6", "\u{2076}");
-    output = output.replace("**7", "\u{2077}");
-    output = output.replace("**8", "\u{2078}");
-    output = output.replace("**9", "\u{2079}");
+    // ** → ^ (REDUCE exponentiation → Logos caret)
+    output = output.replace("**", "^");
 
     output
 }
@@ -142,7 +183,15 @@ mod tests {
     fn test_ascii_passthrough() {
         assert_eq!(to_reduce("x + y * 2"), "x + y * 2");
         assert_eq!(to_reduce("sin(x)"), "sin(x)");
-        assert_eq!(to_reduce("df(x**2, x)"), "df(x**2, x)");
+    }
+
+    // ── to_reduce: Caret → ** ───────────────────────────────────
+
+    #[test]
+    fn test_caret_to_reduce() {
+        assert_eq!(to_reduce("x^2"), "x**2");
+        assert_eq!(to_reduce("x^n"), "x**n");
+        assert_eq!(to_reduce("(a+b)^3"), "(a+b)**3");
     }
 
     // ── to_reduce: Combined expressions ──────────────────────────
@@ -166,18 +215,14 @@ mod tests {
         );
     }
 
-    // ── from_reduce: Exponents ───────────────────────────────────
+    // ── from_reduce: Exponents (** → ^) ────────────────────────
 
     #[test]
     fn test_from_reduce_exponents() {
-        assert_eq!(from_reduce("x**2"), "x\u{00B2}");
-        assert_eq!(from_reduce("x**3"), "x\u{00B3}");
-        assert_eq!(from_reduce("x**4"), "x\u{2074}");
-        assert_eq!(from_reduce("x**5"), "x\u{2075}");
-        assert_eq!(from_reduce("x**6"), "x\u{2076}");
-        assert_eq!(from_reduce("x**7"), "x\u{2077}");
-        assert_eq!(from_reduce("x**8"), "x\u{2078}");
-        assert_eq!(from_reduce("x**9"), "x\u{2079}");
+        assert_eq!(from_reduce("x**2"), "x^2");
+        assert_eq!(from_reduce("x**3"), "x^3");
+        assert_eq!(from_reduce("x**n"), "x^n");
+        assert_eq!(from_reduce("x**10"), "x^10");
     }
 
     // ── from_reduce: Symbols ─────────────────────────────────────
@@ -195,7 +240,7 @@ mod tests {
     fn test_from_reduce_combined() {
         assert_eq!(
             from_reduce("3*x**2 + pi"),
-            "3*x\u{00B2} + \u{03C0}"
+            "3*x^2 + \u{03C0}"
         );
     }
 
@@ -211,17 +256,20 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_exponents() {
-        for (uni, exp) in [
-            ("x\u{00B2}", "x**2"),
-            ("x\u{00B3}", "x**3"),
-            ("x\u{2074}", "x**4"),
-        ] {
-            let ascii = to_reduce(uni);
-            assert_eq!(ascii, exp);
-            let back = from_reduce(&ascii);
-            assert_eq!(back, uni);
-        }
+    fn test_roundtrip_caret() {
+        // x^2 → x**2 (to_reduce) → x^2 (from_reduce)
+        assert_eq!(to_reduce("x^2"), "x**2");
+        assert_eq!(from_reduce("x**2"), "x^2");
+    }
+
+    #[test]
+    fn test_roundtrip_superscript() {
+        // x² → x**2 (to_reduce) → x^2 (from_reduce)
+        // Note: superscripts convert to ** for REDUCE, and back to ^ (not ²)
+        let ascii = to_reduce("x\u{00B2}");
+        assert_eq!(ascii, "x**2");
+        let back = from_reduce(&ascii);
+        assert_eq!(back, "x^2");
     }
 
     // ── Edge cases ───────────────────────────────────────────────

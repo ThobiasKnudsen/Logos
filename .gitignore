@@ -7,6 +7,11 @@ build/.venv/
 .logos.theme.json
 
 
+# Build artifacts for standalone CSL (used by scripts/rebuild_reduce_image.py)
+/build/csl
+/build/seed.img
+/build/reduce.img
+
 # Added by cargo
 
 /target

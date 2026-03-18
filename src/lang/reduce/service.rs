@@ -122,13 +122,14 @@ impl ReduceService {
     /// Poll for a completed response. Returns `None` if nothing is ready.
     /// Automatically discards stale responses (where request_id doesn't
     /// match the latest request for that cell).
-    pub fn try_recv(&self) -> Option<ReduceResponse> {
+    pub fn try_recv(&mut self) -> Option<ReduceResponse> {
         loop {
             match self.response_rx.try_recv() {
                 Ok(resp) => {
                     // Check staleness
                     if let Some(&latest) = self.latest_request.get(&resp.cell_id) {
                         if resp.request_id == latest {
+                            self.latest_request.remove(&resp.cell_id);
                             return Some(resp);
                         }
                         // Stale — discard and try the next one
@@ -139,10 +140,20 @@ impl ReduceService {
                 }
                 Err(mpsc::TryRecvError::Empty) => return None,
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    // Worker died — clear all pending requests to stop
+                    // has_pending() from returning true forever.
+                    log::error!("REDUCE worker channel disconnected, clearing pending requests");
+                    self.latest_request.clear();
+                    self.worker_alive = false;
                     return None;
                 }
             }
         }
+    }
+
+    /// Returns true if there are pending requests awaiting responses.
+    pub fn has_pending(&self) -> bool {
+        !self.latest_request.is_empty()
     }
 
     /// Clear all pending requests (e.g. on tab switch).
@@ -170,7 +181,12 @@ fn worker_loop(
 
     // Process requests until the channel is closed
     while let Ok(req) = req_rx.recv() {
+        log::debug!("REDUCE worker: cell_id={} expr={:?}", req.cell_id, req.expression);
         let result = session.simplify(&req.expression);
+        match &result {
+            Ok(s) => log::debug!("REDUCE worker: result={:?}", s),
+            Err(e) => log::warn!("REDUCE worker: error={:?}", e),
+        }
 
         // Truncate overly long output
         let result = result.map(|s| {

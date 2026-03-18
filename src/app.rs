@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -19,8 +19,126 @@ use crate::ui::layout::{LayoutResult, Rect, UiLayout};
 use crate::render::RenderAreaParams;
 use crate::ui::theme::{self, fonts, spacing, split};
 
-/// Debounce interval before sending an expression to REDUCE.
-const REDUCE_DEBOUNCE: Duration = Duration::from_millis(300);
+/// CAS function names that REDUCE handles but WGSL doesn't.
+const CAS_FUNCTIONS: &[&str] = &["int(", "solve(", "df(", "integral(", "derivative("];
+
+/// Find the first CAS function call in `text` and return its byte range.
+///
+/// For `x > y*int(x^2, x)` returns `Some((6, 20))` spanning `int(x^2, x)`.
+/// Uses balanced-parenthesis matching. Respects word boundaries.
+fn find_cas_call(text: &str) -> Option<(usize, usize)> {
+    for func in CAS_FUNCTIONS {
+        let mut search_from = 0;
+        while let Some(pos) = text[search_from..].find(func) {
+            let start = search_from + pos;
+            // Check word boundary: char before must not be alphanumeric
+            if start > 0 {
+                let prev = text[..start].chars().last().unwrap();
+                if prev.is_alphanumeric() || prev == '_' {
+                    search_from = start + 1;
+                    continue;
+                }
+            }
+            let paren = start + func.len() - 1; // byte pos of '('
+            let mut depth = 1usize;
+            for (i, ch) in text[paren + 1..].char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some((start, paren + 1 + i + 1));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            break; // unbalanced parens, skip this match
+        }
+    }
+    None
+}
+
+/// Extract the expression to send to REDUCE from a cell's text.
+///
+/// Priority:
+/// 1. If there's a CAS call embedded in a larger expr, extract just that call.
+/// 2. If the whole expr is `y = <expr>`, strip the `y = ` prefix.
+/// 3. Otherwise return the whole text.
+///
+/// Returns `(reduce_input, is_embedded_cas)`.
+fn extract_reduce_expr(cell_text: &str) -> (&str, bool) {
+    let trimmed = cell_text.trim();
+
+    // Check for embedded CAS call in a larger expression
+    if let Some((start, end)) = find_cas_call(trimmed) {
+        let cas_call = &trimmed[start..end];
+        // If the CAS call IS the entire expression (possibly after y=), fall through
+        let stripped = strip_assignment_lhs(trimmed);
+        if stripped.trim() != cas_call {
+            // CAS call is embedded in something larger — extract just the call
+            return (cas_call, true);
+        }
+    }
+
+    // Simple case: strip `y = ` prefix
+    (strip_assignment_lhs(trimmed), false)
+}
+
+/// Strip `y = ` assignment prefix from cell text, returning just the RHS.
+fn strip_assignment_lhs(cell_text: &str) -> &str {
+    let trimmed = cell_text.trim();
+    if let Some(eq_pos) = trimmed.find('=') {
+        if eq_pos > 0
+            && trimmed.get(eq_pos + 1..eq_pos + 2) != Some("=")
+            && !trimmed[..eq_pos].ends_with('!')
+            && !trimmed[..eq_pos].ends_with('<')
+            && !trimmed[..eq_pos].ends_with('>')
+        {
+            let lhs = trimmed[..eq_pos].trim();
+            if !lhs.is_empty() && lhs.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                return trimmed[eq_pos + 1..].trim();
+            }
+        }
+    }
+    trimmed
+}
+
+/// Substitute a REDUCE result back into the original cell text.
+///
+/// If `embedded_cas` is true, replaces the CAS call in-place.
+/// Otherwise handles `y = <result>` reconstruction.
+fn substitute_reduce_result(cell_text: &str, reduce_result: &str, embedded_cas: bool) -> String {
+    let trimmed = cell_text.trim();
+
+    if embedded_cas {
+        if let Some((start, end)) = find_cas_call(trimmed) {
+            let mut out = String::with_capacity(trimmed.len());
+            out.push_str(&trimmed[..start]);
+            out.push('(');
+            out.push_str(reduce_result);
+            out.push(')');
+            out.push_str(&trimmed[end..]);
+            return out;
+        }
+    }
+
+    // Simple y = <result> substitution
+    if let Some(eq_pos) = trimmed.find('=') {
+        if eq_pos > 0
+            && trimmed.get(eq_pos + 1..eq_pos + 2) != Some("=")
+            && !trimmed[..eq_pos].ends_with('!')
+            && !trimmed[..eq_pos].ends_with('<')
+            && !trimmed[..eq_pos].ends_with('>')
+        {
+            let lhs = trimmed[..eq_pos].trim();
+            if !lhs.is_empty() && lhs.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                return format!("{} = {}", lhs, reduce_result);
+            }
+        }
+    }
+    reduce_result.to_string()
+}
 
 // ---------------------------------------------------------------------------
 // Menu definitions
@@ -106,6 +224,7 @@ pub(crate) enum HoverTarget {
     CellCopyButton(usize),
     CellDeleteButton(usize),
     AddCellButton,
+    CellOutputArea(usize),
     AutocompleteItem(usize),
     RenderArea,
 }
@@ -227,10 +346,6 @@ struct AppState {
 
     // REDUCE CAS integration
     reduce_service: ReduceService,
-    /// Last time the active cell was edited (for debounce).
-    last_edit_time: Option<Instant>,
-    /// Cell index that was last edited.
-    last_edited_cell: Option<usize>,
 }
 
 const DOUBLE_CLICK_MS: u128 = 400;
@@ -250,10 +365,9 @@ impl AppState {
                 is_playing: c.is_playing,
                 selection: c.buffer.selection_range(),
                 output_text: match &c.output {
-                    CellOutput::None => None,
-                    CellOutput::Error(e) => Some(format!("Error: {}", e)),
-                    CellOutput::Simplifying => Some("Simplifying...".to_string()),
                     CellOutput::Simplified(s) => Some(s.clone()),
+                    CellOutput::Error(e) => Some(format!("Error: {}", e)),
+                    CellOutput::None => None,
                 },
             })
             .collect();
@@ -448,6 +562,10 @@ impl AppState {
                     self.set_hover(HoverTarget::CellEditor(cl.cell_index));
                     return;
                 }
+                if cl.output.h > 0.0 && point_in_rect(mx, my, &cl.output) {
+                    self.set_hover(HoverTarget::CellOutputArea(cl.cell_index));
+                    return;
+                }
             }
         }
 
@@ -471,7 +589,7 @@ impl AppState {
             self.hover_target = target;
             let icon = match target {
                 HoverTarget::SplitHandle => CursorIcon::ColResize,
-                HoverTarget::CellEditor(_) => CursorIcon::Text,
+                HoverTarget::CellEditor(_) | HoverTarget::CellOutputArea(_) => CursorIcon::Text,
                 HoverTarget::CellPlayButton(_) | HoverTarget::CellCopyButton(_)
                 | HoverTarget::AutocompleteItem(_) => CursorIcon::Pointer,
                 HoverTarget::RenderArea => match self.render_area.mouse_zone {
@@ -816,44 +934,57 @@ impl AppState {
     }
 
     /// Compile and start playing a cell's shader.
+    ///
+    /// If the cell contains CAS functions (int, solve, df), submit to REDUCE
+    /// first — the shader will be compiled from the simplified result.
+    /// Otherwise compile WGSL immediately.
     fn trigger_cell_play(&mut self, cell_index: usize) {
         let tab = self.tab_manager.active_tab();
+        let cell_text = tab.cells[cell_index].buffer.text().trim().to_string();
 
-        // Concatenate all cell texts up to and including this cell
-        // (so earlier cells can define functions used by later ones)
-        let mut source = String::new();
-        for (i, cell) in tab.cells.iter().enumerate() {
-            if i > cell_index {
-                break;
-            }
-            if !source.is_empty() {
-                source.push('\n');
-            }
-            source.push_str(cell.buffer.text());
+        // Only submit to REDUCE if there are CAS functions to evaluate.
+        let has_cas = find_cas_call(&cell_text).is_some();
+        if has_cas && !cell_text.is_empty() {
+            let cell_id = tab.cells[cell_index].id;
+            let (reduce_input, _) = extract_reduce_expr(&cell_text);
+            let reduce_expr = translate::to_reduce(reduce_input);
+            self.reduce_service.submit(cell_id, reduce_expr);
         }
 
-        // Lex → Parse → Generate WGSL
-        match lang::compile(&source) {
-            Ok(wgsl) => {
-                let cell_id = tab.cells[cell_index].id;
-                match self.renderer.compile_cell_shader(cell_id, &wgsl) {
-                    Ok(()) => {
-                        self.tab_manager.active_tab_mut().cells[cell_index].is_playing = true;
-                        self.tab_manager.active_tab_mut().cells[cell_index].output = CellOutput::None;
-                    }
-                    Err(e) => {
-                        log::error!("Shader compilation failed: {}", e);
-                        self.tab_manager.active_tab_mut().cells[cell_index].output =
-                            CellOutput::Error(format!("GPU: {}", e));
+        // Compile WGSL immediately — but skip if CAS functions are present,
+        // since they'll fail and wgpu logs noisy errors we can't suppress.
+        // REDUCE will provide the compilable form asynchronously.
+        if !has_cas {
+            let mut source = String::new();
+            for (i, cell) in tab.cells.iter().enumerate() {
+                if i > cell_index { break; }
+                if !source.is_empty() { source.push('\n'); }
+                source.push_str(cell.buffer.text());
+            }
+            match lang::compile(&source) {
+                Ok(wgsl) => {
+                    let cell_id = tab.cells[cell_index].id;
+                    match self.renderer.compile_cell_shader(cell_id, &wgsl) {
+                        Ok(()) => {
+                            self.tab_manager.active_tab_mut().cells[cell_index].is_playing =
+                                true;
+                        }
+                        Err(e) => {
+                            log::error!("Shader compilation failed: {}", e);
+                            self.tab_manager.active_tab_mut().cells[cell_index].output =
+                                CellOutput::Error(format!("Shader: {}", e));
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                log::error!("Language pipeline error: {}", e);
-                self.tab_manager.active_tab_mut().cells[cell_index].output =
-                    CellOutput::Error(e);
+                Err(e) => {
+                    log::error!("Language pipeline error: {}", e);
+                    self.tab_manager.active_tab_mut().cells[cell_index].output =
+                        CellOutput::Error(format!("Compile: {}", e));
+                }
             }
         }
+        // Don't clear output — REDUCE response will arrive async,
+        // and shader errors were already set above.
         self.sync_active_tab();
     }
 
@@ -917,8 +1048,6 @@ impl ApplicationHandler for App {
             autocomplete: AutocompleteState::new(),
             autocomplete_item_rects: Vec::new(),
             reduce_service: ReduceService::new(),
-            last_edit_time: None,
-            last_edited_cell: None,
         };
 
         state.sync_active_tab();
@@ -1177,6 +1306,21 @@ impl ApplicationHandler for App {
                         event_loop.set_control_flow(ControlFlow::Poll);
                         state.sync_active_tab();
                     }
+                    HoverTarget::CellOutputArea(i) => {
+                        state.close_menu();
+                        state.dismiss_autocomplete();
+                        // Copy output text to clipboard
+                        let text_to_copy = match &state.tab_manager.active_tab().cells[i].output {
+                            CellOutput::Simplified(s) => Some(s.clone()),
+                            CellOutput::Error(e) => Some(e.clone()),
+                            CellOutput::None => None,
+                        };
+                        if let Some(text) = text_to_copy {
+                            if let Some(cb) = state.clipboard.as_mut() {
+                                let _ = cb.set_text(&text);
+                            }
+                        }
+                    }
                     _ => {
                         // Click outside menus closes dropdown
                         if state.open_menu.is_some() {
@@ -1251,10 +1395,7 @@ impl ApplicationHandler for App {
                 for (i, hit) in state.tab_hit_rects.iter().enumerate() {
                     if point_in_rect(mx, my, &hit.full) {
                         state.tab_manager.set_active(i);
-                        // Clear pending REDUCE requests — new tab has its own cells
                         state.reduce_service.clear_pending();
-                        state.last_edit_time = None;
-                        state.last_edited_cell = None;
                         state.sync_active_tab();
                         return;
                     }
@@ -1283,6 +1424,7 @@ impl ApplicationHandler for App {
                     HoverTarget::CellPlayButton(_)
                     | HoverTarget::CellCopyButton(_)
                     | HoverTarget::CellDeleteButton(_)
+                    | HoverTarget::CellOutputArea(_)
                     | HoverTarget::AddCellButton => state.mouse_press_target,
                     _ => state.hover_target,
                 };
@@ -1302,6 +1444,18 @@ impl ApplicationHandler for App {
                         let text = state.tab_manager.active_tab().cells[i].buffer.text().to_string();
                         if let Some(cb) = state.clipboard.as_mut() {
                             let _ = cb.set_text(&text);
+                        }
+                    }
+                    HoverTarget::CellOutputArea(i) => {
+                        let text_to_copy = match &state.tab_manager.active_tab().cells[i].output {
+                            CellOutput::Simplified(s) => Some(s.clone()),
+                            CellOutput::Error(e) => Some(e.clone()),
+                            CellOutput::None => None,
+                        };
+                        if let Some(text) = text_to_copy {
+                            if let Some(cb) = state.clipboard.as_mut() {
+                                let _ = cb.set_text(&text);
+                            }
                         }
                     }
                     HoverTarget::CellDeleteButton(i) => {
@@ -1425,10 +1579,6 @@ impl ApplicationHandler for App {
 
                 if changed {
                     state.tab_manager.active_tab_mut().mark_modified();
-                    // Record edit time for REDUCE debounce
-                    state.last_edit_time = Some(Instant::now());
-                    state.last_edited_cell =
-                        Some(state.tab_manager.active_tab().active_cell_index);
                     state.sync_active_tab();
                     state.update_autocomplete();
                     state.window.request_redraw();
@@ -1481,65 +1631,77 @@ impl ApplicationHandler for App {
 
         // --- REDUCE: poll for completed responses ---
         while let Some(resp) = state.reduce_service.try_recv() {
-            // Find the cell by id across all cells in the active tab
             let tab = state.tab_manager.active_tab_mut();
-            if let Some(cell) = tab.cells.iter_mut().find(|c| c.id == resp.cell_id) {
-                cell.output = match resp.result {
-                    Ok(text) => {
-                        if text.is_empty() {
-                            CellOutput::None
+            if let Some(cell_idx) = tab.cells.iter().position(|c| c.id == resp.cell_id) {
+                let simplified = match resp.result {
+                    Ok(text) if !text.is_empty() => {
+                        let s = translate::from_reduce(&text);
+                        tab.cells[cell_idx].output = CellOutput::Simplified(s.clone());
+                        Some(s)
+                    }
+                    Ok(_) => {
+                        tab.cells[cell_idx].output = CellOutput::None;
+                        None
+                    }
+                    Err(e) => {
+                        log::error!("REDUCE error for cell {}: {}", resp.cell_id, e);
+                        tab.cells[cell_idx].output = CellOutput::Error(e);
+                        None
+                    }
+                };
+
+                // Compile shader from the REDUCE-simplified result.
+                // The simplified expression has CAS ops (int, solve, df)
+                // replaced with their concrete results that WGSL can handle.
+                if let Some(result) = simplified {
+                    let cell_text = tab.cells[cell_idx].buffer.text().to_string();
+                    let (_, embedded) = extract_reduce_expr(&cell_text);
+                    let substituted = substitute_reduce_result(&cell_text, &result, embedded);
+                    let mut source = String::new();
+                    for (i, cell) in tab.cells.iter().enumerate() {
+                        if i > cell_idx { break; }
+                        if !source.is_empty() { source.push('\n'); }
+                        if i == cell_idx {
+                            source.push_str(&substituted);
                         } else {
-                            CellOutput::Simplified(translate::from_reduce(&text))
+                            source.push_str(cell.buffer.text());
                         }
                     }
-                    Err(e) => CellOutput::Error(e),
-                };
-            }
-            needs_redraw = true;
-        }
-
-        // --- REDUCE: check debounce timer and submit requests ---
-        if let (Some(edit_time), Some(cell_idx)) =
-            (state.last_edit_time, state.last_edited_cell)
-        {
-            if edit_time.elapsed() >= REDUCE_DEBOUNCE {
-                // Debounce expired — send the expression to REDUCE
-                state.last_edit_time = None;
-                state.last_edited_cell = None;
-
-                let tab = state.tab_manager.active_tab();
-                if cell_idx < tab.cells.len() {
-                    let cell = &tab.cells[cell_idx];
-                    let text = cell.buffer.text().trim().to_string();
-                    if !text.is_empty() {
-                        let cell_id = cell.id;
-                        let reduce_expr = translate::to_reduce(&text);
-                        state.reduce_service.submit(cell_id, reduce_expr);
-
-                        // Mark as simplifying
-                        let cell_mut =
-                            &mut state.tab_manager.active_tab_mut().cells[cell_idx];
-                        cell_mut.output = CellOutput::Simplifying;
-                        needs_redraw = true;
+                    match lang::compile(&source) {
+                        Ok(wgsl) => {
+                            let cell_id = tab.cells[cell_idx].id;
+                            match state.renderer.compile_cell_shader(cell_id, &wgsl) {
+                                Ok(()) => {
+                                    tab.cells[cell_idx].is_playing = true;
+                                }
+                                Err(e) => {
+                                    log::error!("Shader compilation failed: {}", e);
+                                    tab.cells[cell_idx].output =
+                                        CellOutput::Error(format!("Shader: {}", e));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("Language pipeline error: {}", e);
+                            tab.cells[cell_idx].output =
+                                CellOutput::Error(format!("Compile: {}", e));
+                        }
                     }
                 }
-            } else {
-                // Still debouncing — need to poll again soon
-                event_loop.set_control_flow(ControlFlow::Poll);
             }
+            needs_redraw = true;
         }
 
         if needs_redraw {
             state.sync_active_tab();
         }
 
-        // Continuous animation when shaders are active
-        if state.renderer.has_active_shaders() {
+        // Continuous animation when shaders are active, or polling for REDUCE
+        if state.renderer.has_active_shaders() || state.reduce_service.has_pending() {
             event_loop.set_control_flow(ControlFlow::Poll);
             state.window.request_redraw();
         } else if !state.is_any_drag_active()
             && state.pending_dialog.is_none()
-            && state.last_edit_time.is_none()
         {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
