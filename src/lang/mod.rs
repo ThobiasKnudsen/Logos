@@ -132,10 +132,45 @@ mod integration_tests {
     fn test_unicode_superscript_square() {
         // x² + y² = 9 — common circle equation with Unicode superscript
         let shader = compile("x\u{00B2} + y\u{00B2} = 9").unwrap();
-        // ² should become (x * x), not literal x²
-        assert!(shader.contains("(x_m * x_m)") || shader.contains("(x * x)"),
-            "Unicode ² should compile to multiplication, got:\n{}", shader);
+        // ² should become pow(x, 2.0), not literal x²
+        assert!(shader.contains("pow(x_m, 2.0)") || shader.contains("pow(x, 2.0)"),
+            "Unicode ² should compile to pow(), got:\n{}", shader);
         assert!(!shader.contains("\u{00B2}"),
             "Unicode ² should NOT appear in WGSL output");
+    }
+
+    #[test]
+    fn test_unicode_superscript_cube() {
+        // sin(x)³ should compile to pow(sin(x), 3.0)
+        let shader = compile("sin(x)\u{00B3}").unwrap();
+        assert!(shader.contains("pow(sin(x), 3.0)"),
+            "Unicode ³ should compile to pow(sin(x), 3.0), got:\n{}", shader);
+    }
+
+    #[test]
+    fn test_complex_unicode_expression_compiles() {
+        // x²*y²+sin(x)³-sin(y²)²=9  — full pipeline: lex → parse → WGSL gen
+        let input = "x\u{00B2}*y\u{00B2}+sin(x)\u{00B3}-sin(y\u{00B2})\u{00B2}=9";
+        let shader = compile(input).unwrap();
+
+        // Must contain pow() calls, not bare "square"/"cube" identifiers
+        assert!(!shader.contains("square"), "bare 'square' must not appear in WGSL");
+        assert!(!shader.contains("cube"), "bare 'cube' must not appear in WGSL");
+
+        // pow(x, 2.0) for x², pow(y, 2.0) for y²
+        assert!(shader.contains("pow("),
+            "should contain pow() calls, got:\n{}", shader);
+
+        // sin() calls must survive
+        assert!(shader.contains("sin("),
+            "should contain sin() calls, got:\n{}", shader);
+
+        // Must be a valid shader with fragment entry point
+        assert!(shader.contains("@fragment"),
+            "should be a complete WGSL shader");
+
+        // Equality → corner-checking (curve rendering)
+        assert!(shader.contains("x_m") || shader.contains("x_p"),
+            "=9 should trigger corner-checking, got:\n{}", shader);
     }
 }

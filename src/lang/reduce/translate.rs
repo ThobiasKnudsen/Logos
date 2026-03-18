@@ -42,6 +42,11 @@ pub fn to_reduce(input: &str) -> String {
             '\u{2212}' => output.push('-'),   // − (minus sign)
             '\u{221A}' => output.push_str("sqrt"), // √
 
+            // Math functions / operators
+            '\u{222B}' => output.push_str("int"),   // ∫ (integral)
+            '\u{2202}' => output.push_str("df"),    // ∂ (partial derivative)
+            '\u{2207}' => output.push_str("nabla"), // ∇ (nabla/gradient)
+
             // Summation / product (these need context, basic stubs)
             '\u{2211}' => output.push_str("sum"),  // ∑
             '\u{220F}' => output.push_str("prod"), // ∏
@@ -49,8 +54,52 @@ pub fn to_reduce(input: &str) -> String {
             // Infinity
             '\u{221E}' => output.push_str("infinity"),
 
-            // Everything else passes through
-            _ => output.push(ch),
+            // Additional Greek letters (uppercase)
+            '\u{0393}' => output.push_str("Gamma"),   // Γ
+            '\u{0394}' => output.push_str("Delta"),   // Δ
+            '\u{0398}' => output.push_str("Theta"),   // Θ
+            '\u{039B}' => output.push_str("Lambda"),  // Λ
+            '\u{039E}' => output.push_str("Xi"),      // Ξ
+            '\u{03A0}' => output.push_str("Pi"),      // Π (uppercase Pi)
+            '\u{03A3}' => output.push_str("Sigma"),   // Σ
+            '\u{03A6}' => output.push_str("Phi"),     // Φ
+            '\u{03A8}' => output.push_str("Psi"),     // Ψ
+            '\u{03A9}' => output.push_str("Omega"),   // Ω
+
+            // Additional lowercase Greek letters
+            '\u{03B6}' => output.push_str("zeta"),    // ζ
+            '\u{03B7}' => output.push_str("eta"),     // η
+            '\u{03B9}' => output.push_str("iota"),    // ι
+            '\u{03BA}' => output.push_str("kappa"),   // κ
+            '\u{03BD}' => output.push_str("nu"),      // ν
+            '\u{03BE}' => output.push_str("xi"),      // ξ
+            '\u{03C1}' => output.push_str("rho"),     // ρ
+            '\u{03C5}' => output.push_str("upsilon"), // υ
+            '\u{03C7}' => output.push_str("chi"),     // χ
+            '\u{03C8}' => output.push_str("psi"),     // ψ
+
+            // Relation symbols
+            '\u{2264}' => output.push_str("<="),  // ≤
+            '\u{2265}' => output.push_str(">="),  // ≥
+            '\u{2260}' => output.push_str("!="),  // ≠
+
+            // Arrows (pass as identifiers for now)
+            '\u{2192}' => output.push_str("arrow_right"), // →
+            '\u{2190}' => output.push_str("arrow_left"),  // ←
+
+            // Only pass through REDUCE-safe ASCII characters.
+            // Strip backslashes and unmapped non-ASCII to prevent C++ exceptions.
+            _ => {
+                if ch.is_ascii_alphanumeric()
+                    || matches!(ch,
+                        ' ' | '+' | '-' | '*' | '/' | '^' | '(' | ')' | ','
+                        | '.' | ';' | '$' | ':' | '=' | '<' | '>' | '!'
+                        | '_' | '\'' | '"' | '\n' | '\t')
+                {
+                    output.push(ch);
+                }
+                // else: silently drop (backslash, @, #, non-ASCII not in map, etc.)
+            }
         }
     }
 
@@ -314,5 +363,33 @@ mod tests {
         assert_eq!(from_reduce("x**2 + 1"), "x\u{00B2} + 1");
         // **20 must NOT be replaced
         assert_eq!(from_reduce("x**20"), "x**20");
+    }
+
+    // ── Complex expression: x²*y²+sin(x)³-sin(y²)²=9 ──────────
+
+    #[test]
+    fn test_complex_expression_to_reduce() {
+        // x²*y²+sin(x)³-sin(y²)²=9
+        let input = "x\u{00B2}*y\u{00B2}+sin(x)\u{00B3}-sin(y\u{00B2})\u{00B2}=9";
+        let ascii = to_reduce(input);
+        assert_eq!(ascii, "x**2*y**2+sin(x)**3-sin(y**2)**2=9");
+    }
+
+    #[test]
+    fn test_complex_expression_from_reduce() {
+        // REDUCE output → Unicode
+        let reduce_out = "x**2*y**2 + sin(x)**3 - sin(y**2)**2";
+        let unicode = from_reduce(reduce_out);
+        assert_eq!(unicode, "x\u{00B2}*y\u{00B2} + sin(x)\u{00B3} - sin(y\u{00B2})\u{00B2}");
+    }
+
+    #[test]
+    fn test_complex_expression_roundtrip() {
+        // x²*y²+sin(x)³-sin(y²)²
+        let input = "x\u{00B2}*y\u{00B2}+sin(x)\u{00B3}-sin(y\u{00B2})\u{00B2}";
+        let ascii = to_reduce(input);
+        assert_eq!(ascii, "x**2*y**2+sin(x)**3-sin(y**2)**2");
+        let back = from_reduce(&ascii);
+        assert_eq!(back, input, "round-trip failed: {} -> {} -> {}", input, ascii, back);
     }
 }

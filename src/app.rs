@@ -537,6 +537,11 @@ impl AppState {
             // Gather candidates
             let mut all = autocomplete::static_candidates();
 
+            // When prefix starts with `\`, include LaTeX symbol candidates
+            if prefix.starts_with('\\') {
+                all.extend(autocomplete::symbol_candidates());
+            }
+
             // Try to parse and extract user symbols (best-effort)
             let mut lex = crate::lang::lexer::Lexer::new(text);
             if let Ok(tokens) = lex.tokenize() {
@@ -560,7 +565,10 @@ impl AppState {
 
                     let candidates: Vec<(String, crate::editor::autocomplete::CandidateKind)> =
                         self.autocomplete.candidates.iter()
-                            .map(|c| (c.label.clone(), c.kind))
+                            .map(|c| {
+                                let text = c.display.as_deref().unwrap_or(&c.label);
+                                (text.to_string(), c.kind)
+                            })
                             .collect();
 
                     self.autocomplete_item_rects = self.renderer.open_autocomplete(
@@ -950,6 +958,7 @@ impl ApplicationHandler for App {
                 state.cached_layout = state.layout.compute(w, h);
                 state.recompute_hover();
                 state.sync_active_tab();
+                state.dismiss_autocomplete();
             }
 
             WindowEvent::CursorMoved { position, .. } => {
@@ -961,6 +970,7 @@ impl ApplicationHandler for App {
                         state.scroll_drag_offset,
                     );
                     state.sync_active_tab();
+                    state.dismiss_autocomplete();
                     state.window.request_redraw();
                 } else if state.is_dragging_split {
                     let content_x = state.cached_layout.left_pane.x;
@@ -972,6 +982,8 @@ impl ApplicationHandler for App {
                         state.layout.clamp_left_width(desired_width, w);
                     state.cached_layout = state.layout.compute(w, h);
                     state.sync_active_tab();
+                    // Dismiss autocomplete — pane layout changed
+                    state.dismiss_autocomplete();
                 } else if state.render_area.is_dragging {
                     // Pan the render area
                     let (mx, my) = state.cursor_position;
@@ -1085,6 +1097,8 @@ impl ApplicationHandler for App {
                     if point_in_rect(mx, my, &lp) {
                         state.renderer.scroll_by(0.0, -dy);
                         state.cell_layouts = state.renderer.cell_layouts().to_vec();
+                        // Dismiss autocomplete — cell positions shifted by scroll
+                        state.dismiss_autocomplete();
                         state.recompute_hover();
                         state.window.request_redraw();
                     }
@@ -1531,6 +1545,11 @@ impl ApplicationHandler for App {
 
         if needs_redraw {
             state.sync_active_tab();
+            // Re-position autocomplete popup since cell layouts may have shifted
+            // (e.g., REDUCE output changed cell height).
+            if state.autocomplete.active {
+                state.update_autocomplete();
+            }
         }
 
         // Continuous animation when shaders are active

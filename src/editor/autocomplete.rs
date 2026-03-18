@@ -9,6 +9,7 @@ pub enum CandidateKind {
     AxisVar,
     UserBinding,
     UserFunc,
+    Symbol,
 }
 
 impl CandidateKind {
@@ -20,6 +21,7 @@ impl CandidateKind {
             CandidateKind::AxisVar => "ax",
             CandidateKind::UserBinding => "var",
             CandidateKind::UserFunc => "fn",
+            CandidateKind::Symbol => "sym",
         }
     }
 }
@@ -28,6 +30,11 @@ impl CandidateKind {
 pub struct Candidate {
     pub label: String,
     pub kind: CandidateKind,
+    /// LaTeX command for prefix matching (e.g. `\pi`). If set, filtering
+    /// uses this instead of `label`.
+    pub filter_key: Option<String>,
+    /// Display text for popup (e.g. `\pi  π`). If set, shown instead of `label`.
+    pub display: Option<String>,
 }
 
 pub struct AutocompleteState {
@@ -57,14 +64,21 @@ impl AutocompleteState {
         self.candidates = all_candidates
             .iter()
             .filter(|c| {
-                let label_lower = c.label.to_lowercase();
-                label_lower.starts_with(&lower) && label_lower != lower
+                // Use filter_key for matching if available (LaTeX symbols),
+                // otherwise match on label.
+                let key = c.filter_key.as_deref().unwrap_or(&c.label);
+                let key_lower = key.to_lowercase();
+                key_lower.starts_with(&lower) && key_lower != lower
             })
             .cloned()
             .collect();
 
         // Sort: exact prefix-case match first, then alphabetical
-        self.candidates.sort_by(|a, b| a.label.cmp(&b.label));
+        self.candidates.sort_by(|a, b| {
+            let ka = a.filter_key.as_deref().unwrap_or(&a.label);
+            let kb = b.filter_key.as_deref().unwrap_or(&b.label);
+            ka.cmp(kb)
+        });
 
         self.candidates.truncate(10);
         self.active = !self.candidates.is_empty();
@@ -107,23 +121,150 @@ impl AutocompleteState {
 
 /// Walk backwards from cursor to extract an identifier prefix.
 /// Returns (prefix, start_byte_offset) or None if no prefix.
+///
+/// Handles LaTeX prefixes: walks back through alphanumeric/underscore chars,
+/// then optionally includes a leading `\` so that `\pi` is a single prefix.
 pub fn prefix_at_cursor(text: &str, cursor_byte: usize) -> Option<(&str, usize)> {
     if cursor_byte == 0 || cursor_byte > text.len() {
         return None;
     }
     let before = &text[..cursor_byte];
-    let start = before
+
+    // Walk back through alphanumeric / underscore characters
+    let ident_start = before
         .char_indices()
         .rev()
         .take_while(|&(_, c)| c.is_alphanumeric() || c == '_')
         .last()
-        .map(|(i, _)| i)?;
+        .map(|(i, _)| i);
+
+    let start = match ident_start {
+        Some(s) => {
+            // Check if there's a `\` immediately before the identifier
+            if s > 0 {
+                let prev = &text[..s];
+                if prev.ends_with('\\') {
+                    s - 1 // include the backslash
+                } else {
+                    s
+                }
+            } else {
+                s
+            }
+        }
+        None => {
+            // No alphanumeric chars — check if cursor is right after a lone `\`
+            if before.ends_with('\\') {
+                cursor_byte - 1
+            } else {
+                return None;
+            }
+        }
+    };
+
     let prefix = &text[start..cursor_byte];
     if prefix.is_empty() {
         None
     } else {
         Some((prefix, start))
     }
+}
+
+/// LaTeX command → Unicode symbol mapping.
+/// Each entry: (latex_command, unicode_symbol)
+pub const LATEX_SYMBOLS: &[(&str, &str)] = &[
+    // Lowercase Greek letters
+    ("\\alpha", "\u{03B1}"),   // α
+    ("\\beta", "\u{03B2}"),    // β
+    ("\\gamma", "\u{03B3}"),   // γ
+    ("\\delta", "\u{03B4}"),   // δ
+    ("\\epsilon", "\u{03B5}"), // ε
+    ("\\zeta", "\u{03B6}"),    // ζ
+    ("\\eta", "\u{03B7}"),     // η
+    ("\\theta", "\u{03B8}"),   // θ
+    ("\\iota", "\u{03B9}"),    // ι
+    ("\\kappa", "\u{03BA}"),   // κ
+    ("\\lambda", "\u{03BB}"),  // λ
+    ("\\mu", "\u{03BC}"),      // μ
+    ("\\nu", "\u{03BD}"),      // ν
+    ("\\xi", "\u{03BE}"),      // ξ
+    ("\\pi", "\u{03C0}"),      // π
+    ("\\rho", "\u{03C1}"),     // ρ
+    ("\\sigma", "\u{03C3}"),   // σ
+    ("\\tau", "\u{03C4}"),     // τ
+    ("\\upsilon", "\u{03C5}"), // υ
+    ("\\phi", "\u{03C6}"),     // φ
+    ("\\chi", "\u{03C7}"),     // χ
+    ("\\psi", "\u{03C8}"),     // ψ
+    ("\\omega", "\u{03C9}"),   // ω
+
+    // Uppercase Greek letters
+    ("\\Gamma", "\u{0393}"),   // Γ
+    ("\\Delta", "\u{0394}"),   // Δ
+    ("\\Theta", "\u{0398}"),   // Θ
+    ("\\Lambda", "\u{039B}"),  // Λ
+    ("\\Xi", "\u{039E}"),      // Ξ
+    ("\\Pi", "\u{03A0}"),      // Π
+    ("\\Sigma", "\u{03A3}"),   // Σ
+    ("\\Phi", "\u{03A6}"),     // Φ
+    ("\\Psi", "\u{03A8}"),     // Ψ
+    ("\\Omega", "\u{03A9}"),   // Ω
+
+    // Math operators
+    ("\\int", "\u{222B}"),        // ∫
+    ("\\sum", "\u{2211}"),        // ∑
+    ("\\prod", "\u{220F}"),       // ∏
+    ("\\partial", "\u{2202}"),    // ∂
+    ("\\nabla", "\u{2207}"),      // ∇
+    ("\\sqrt", "\u{221A}"),       // √
+    ("\\infty", "\u{221E}"),      // ∞
+    ("\\pm", "\u{00B1}"),         // ±
+    ("\\mp", "\u{2213}"),         // ∓
+    ("\\times", "\u{00D7}"),      // ×
+    ("\\div", "\u{00F7}"),        // ÷
+    ("\\cdot", "\u{22C5}"),       // ⋅
+
+    // Arrows
+    ("\\to", "\u{2192}"),         // →
+    ("\\leftarrow", "\u{2190}"),  // ←
+    ("\\rightarrow", "\u{2192}"), // →
+    ("\\Leftarrow", "\u{21D0}"),  // ⇐
+    ("\\Rightarrow", "\u{21D2}"), // ⇒
+    ("\\leftrightarrow", "\u{2194}"), // ↔
+    ("\\uparrow", "\u{2191}"),    // ↑
+    ("\\downarrow", "\u{2193}"),  // ↓
+
+    // Relations
+    ("\\leq", "\u{2264}"),     // ≤
+    ("\\geq", "\u{2265}"),     // ≥
+    ("\\neq", "\u{2260}"),     // ≠
+    ("\\approx", "\u{2248}"),  // ≈
+    ("\\equiv", "\u{2261}"),   // ≡
+    ("\\sim", "\u{223C}"),     // ∼
+    ("\\propto", "\u{221D}"),  // ∝
+    ("\\in", "\u{2208}"),      // ∈
+    ("\\notin", "\u{2209}"),   // ∉
+    ("\\subset", "\u{2282}"),  // ⊂
+    ("\\supset", "\u{2283}"),  // ⊃
+
+    // Misc
+    ("\\forall", "\u{2200}"),  // ∀
+    ("\\exists", "\u{2203}"),  // ∃
+    ("\\emptyset", "\u{2205}"),// ∅
+    ("\\degree", "\u{00B0}"),  // °
+];
+
+/// Build candidate list for LaTeX symbol completion.
+pub fn symbol_candidates() -> Vec<Candidate> {
+    LATEX_SYMBOLS
+        .iter()
+        .map(|&(cmd, sym)| Candidate {
+            label: sym.to_string(),
+            kind: CandidateKind::Symbol,
+            filter_key: Some(cmd.to_string()),
+            display: Some(format!("{}  {}", cmd, sym)),
+        })
+        .collect()
 }
 
 /// Build the static candidate list from lexer constants + keywords.
@@ -135,6 +276,8 @@ pub fn static_candidates() -> Vec<Candidate> {
         result.push(Candidate {
             label: kw.to_string(),
             kind: CandidateKind::Keyword,
+            filter_key: None,
+            display: None,
         });
     }
 
@@ -143,6 +286,8 @@ pub fn static_candidates() -> Vec<Candidate> {
         result.push(Candidate {
             label: name.to_string(),
             kind: CandidateKind::Builtin,
+            filter_key: None,
+            display: None,
         });
     }
 
@@ -151,6 +296,8 @@ pub fn static_candidates() -> Vec<Candidate> {
         result.push(Candidate {
             label: name.to_string(),
             kind: CandidateKind::Type,
+            filter_key: None,
+            display: None,
         });
     }
 
@@ -159,6 +306,8 @@ pub fn static_candidates() -> Vec<Candidate> {
         result.push(Candidate {
             label: name.to_string(),
             kind: CandidateKind::AxisVar,
+            filter_key: None,
+            display: None,
         });
     }
 
@@ -184,6 +333,16 @@ mod tests {
         assert_eq!(prefix_at_cursor("", 0), None);
         assert_eq!(prefix_at_cursor("a + s", 5), Some(("s", 4)));
         assert_eq!(prefix_at_cursor("(si", 3), Some(("si", 1)));
+        // LaTeX backslash prefixes
+        assert_eq!(prefix_at_cursor("\\pi", 3), Some(("\\pi", 0)));
+        assert_eq!(prefix_at_cursor("a + \\al", 7), Some(("\\al", 4)));
+        assert_eq!(prefix_at_cursor("\\", 1), Some(("\\", 0)));
+        // Backslash mid-text should NOT merge into previous identifier
+        assert_eq!(prefix_at_cursor("foo\\bar", 7), Some(("\\bar", 3)));
+        // Backslash after space
+        assert_eq!(prefix_at_cursor("a \\pi", 5), Some(("\\pi", 2)));
+        // No backslash — normal identifier
+        assert_eq!(prefix_at_cursor("abc", 3), Some(("abc", 0)));
     }
 
     #[test]
@@ -228,6 +387,24 @@ mod tests {
     }
 
     #[test]
+    fn test_symbol_candidates_latex() {
+        let syms = symbol_candidates();
+        assert!(!syms.is_empty());
+        assert!(syms.iter().any(|c| c.label == "\u{03C0}" && c.filter_key.as_deref() == Some("\\pi")));
+        assert!(syms.iter().any(|c| c.label == "\u{222B}" && c.filter_key.as_deref() == Some("\\int")));
+    }
+
+    #[test]
+    fn test_update_filters_symbol_by_latex_prefix() {
+        let mut state = AutocompleteState::new();
+        let syms = symbol_candidates();
+        state.update("\\p", 0, &syms);
+        assert!(state.active);
+        assert!(state.candidates.iter().any(|c| c.label == "\u{03C0}")); // π via \pi
+        assert!(!state.candidates.iter().any(|c| c.label == "\u{03B1}")); // α (\alpha) should not match
+    }
+
+    #[test]
     fn test_full_flow_with_buffer() {
         use crate::editor::Buffer;
 
@@ -264,6 +441,8 @@ fn walk_ast(node: &AstNode, result: &mut Vec<Candidate>) {
                 result.push(Candidate {
                     label: name.clone(),
                     kind: CandidateKind::UserBinding,
+                    filter_key: None,
+                    display: None,
                 });
             }
         }
@@ -272,6 +451,8 @@ fn walk_ast(node: &AstNode, result: &mut Vec<Candidate>) {
                 result.push(Candidate {
                     label: name.clone(),
                     kind: CandidateKind::UserFunc,
+                    filter_key: None,
+                    display: None,
                 });
             }
         }
@@ -281,6 +462,8 @@ fn walk_ast(node: &AstNode, result: &mut Vec<Candidate>) {
                     result.push(Candidate {
                         label: n.clone(),
                         kind: CandidateKind::UserBinding,
+                        filter_key: None,
+                        display: None,
                     });
                 }
             }
