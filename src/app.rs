@@ -1574,8 +1574,13 @@ impl ApplicationHandler for App {
                             return;
                         }
                         Key::Named(NamedKey::Enter) => {
-                            // Dismiss autocomplete and fall through to normal Enter handling
+                            state.accept_autocomplete();
+                            return;
+                        }
+                        Key::Named(NamedKey::Escape) => {
                             state.dismiss_autocomplete();
+                            state.window.request_redraw();
+                            return;
                         }
                         _ => {
                             // Fall through to normal key handling;
@@ -1641,8 +1646,20 @@ impl ApplicationHandler for App {
                     state.update_autocomplete();
                     state.window.request_redraw();
                 } else {
-                    // Cursor-only movement (arrows, home, end) — dismiss autocomplete
-                    state.dismiss_autocomplete();
+                    // Dismiss autocomplete only for explicit cursor navigation keys.
+                    // Other non-text events (dead keys, input method) should not
+                    // dismiss, since update_autocomplete() handles it on text changes.
+                    match &key_event.logical_key {
+                        Key::Named(NamedKey::ArrowLeft)
+                        | Key::Named(NamedKey::ArrowRight)
+                        | Key::Named(NamedKey::ArrowUp)
+                        | Key::Named(NamedKey::ArrowDown)
+                        | Key::Named(NamedKey::Home)
+                        | Key::Named(NamedKey::End) => {
+                            state.dismiss_autocomplete();
+                        }
+                        _ => {}
+                    }
                     state.window.request_redraw();
                 }
             }
