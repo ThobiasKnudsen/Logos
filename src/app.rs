@@ -104,6 +104,7 @@ pub(crate) enum HoverTarget {
     CellEditor(usize),
     CellPlayButton(usize),
     CellCopyButton(usize),
+    CellOutputCopyButton(usize),
     CellDeleteButton(usize),
     AddCellButton,
     AutocompleteItem(usize),
@@ -448,6 +449,10 @@ impl AppState {
                     self.set_hover(HoverTarget::CellEditor(cl.cell_index));
                     return;
                 }
+                if cl.output.h > 0.0 && point_in_rect(mx, my, &cl.output_copy_button) {
+                    self.set_hover(HoverTarget::CellOutputCopyButton(cl.cell_index));
+                    return;
+                }
             }
         }
 
@@ -473,6 +478,7 @@ impl AppState {
                 HoverTarget::SplitHandle => CursorIcon::ColResize,
                 HoverTarget::CellEditor(_) => CursorIcon::Text,
                 HoverTarget::CellPlayButton(_) | HoverTarget::CellCopyButton(_)
+                | HoverTarget::CellOutputCopyButton(_)
                 | HoverTarget::AutocompleteItem(_) => CursorIcon::Pointer,
                 HoverTarget::RenderArea => match self.render_area.mouse_zone {
                     MouseZone::Center => {
@@ -534,6 +540,14 @@ impl AppState {
         let cursor = cell.buffer.cursor_byte_offset();
 
         if let Some((prefix, prefix_start)) = autocomplete::prefix_at_cursor(text, cursor) {
+            // Require minimum prefix length: 2 chars for normal identifiers,
+            // but LaTeX prefixes starting with `\` trigger at length 1.
+            let min_len = if prefix.starts_with('\\') { 1 } else { 2 };
+            if prefix.len() < min_len {
+                self.dismiss_autocomplete();
+                return;
+            }
+
             // Gather candidates
             let mut all = autocomplete::static_candidates();
 
@@ -1296,6 +1310,7 @@ impl ApplicationHandler for App {
                 let click_target = match state.mouse_press_target {
                     HoverTarget::CellPlayButton(_)
                     | HoverTarget::CellCopyButton(_)
+                    | HoverTarget::CellOutputCopyButton(_)
                     | HoverTarget::CellDeleteButton(_)
                     | HoverTarget::AddCellButton => state.mouse_press_target,
                     _ => state.hover_target,
@@ -1316,6 +1331,17 @@ impl ApplicationHandler for App {
                         let text = state.tab_manager.active_tab().cells[i].buffer.text().to_string();
                         if let Some(cb) = state.clipboard.as_mut() {
                             let _ = cb.set_text(&text);
+                        }
+                    }
+                    HoverTarget::CellOutputCopyButton(i) => {
+                        let output_text = match &state.tab_manager.active_tab().cells[i].output {
+                            CellOutput::None => String::new(),
+                            CellOutput::Error(e) => format!("Error: {}", e),
+                            CellOutput::Simplifying => "Simplifying...".to_string(),
+                            CellOutput::Simplified(s) => s.clone(),
+                        };
+                        if let Some(cb) = state.clipboard.as_mut() {
+                            let _ = cb.set_text(&output_text);
                         }
                     }
                     HoverTarget::CellDeleteButton(i) => {
@@ -1375,9 +1401,13 @@ impl ApplicationHandler for App {
                             state.window.request_redraw();
                             return;
                         }
-                        Key::Named(NamedKey::Tab) | Key::Named(NamedKey::Enter) => {
+                        Key::Named(NamedKey::Tab) => {
                             state.accept_autocomplete();
                             return;
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            // Dismiss autocomplete and fall through to normal Enter handling
+                            state.dismiss_autocomplete();
                         }
                         _ => {
                             // Fall through to normal key handling;
