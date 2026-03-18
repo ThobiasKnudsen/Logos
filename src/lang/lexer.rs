@@ -1,6 +1,6 @@
 use super::token::{Token, TokenType};
 
-const BUILTINS: &[&str] = &[
+pub(crate) const BUILTINS: &[&str] = &[
     "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh",
     "log", "log2", "log10", "exp", "exp2",
     "floor", "ceil", "round", "fract",
@@ -9,9 +9,9 @@ const BUILTINS: &[&str] = &[
     "length", "normalize", "dot", "cross",
 ];
 
-const AXIS_VARS: &[&str] = &["x", "y", "z", "time"];
+pub(crate) const AXIS_VARS: &[&str] = &["x", "y", "z", "time"];
 
-const TYPE_NAMES: &[(&str, TokenType)] = &[
+pub(crate) const TYPE_NAMES: &[(&str, TokenType)] = &[
     ("f32", TokenType::TypeF32),
     ("f64", TokenType::TypeF64),
     ("i32", TokenType::TypeI32),

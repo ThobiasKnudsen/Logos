@@ -1,3 +1,4 @@
+pub mod autocomplete;
 pub mod cell;
 
 pub use cell::CodeCell;
@@ -125,6 +126,13 @@ impl Buffer {
         self.text.drain(prev..self.cursor);
         self.cursor = prev;
         true
+    }
+
+    pub fn replace_range(&mut self, start: usize, end: usize, replacement: &str) {
+        self.clear_selection();
+        self.text.drain(start..end);
+        self.text.insert_str(start, replacement);
+        self.cursor = start + replacement.len();
     }
 
     pub fn delete(&mut self) -> bool {
