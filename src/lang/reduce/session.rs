@@ -76,19 +76,19 @@ impl ReduceSession {
         OUTPUT_BUF.with(|buf| buf.borrow_mut().clear());
 
         // Prepare the procedural top-level loop
-        let rc = unsafe { ffi::PROC_prepare_for_top_level_loop() };
+        let rc = unsafe { ffi::reduce_ffi_prepare_for_top_level_loop() };
         if rc != 0 {
             return Err(format!("PROC_prepare_for_top_level_loop failed: {}", rc));
         }
 
         // Set callbacks for future I/O
         unsafe {
-            ffi::PROC_set_callbacks(Some(reader_callback), Some(writer_callback));
+            ffi::reduce_ffi_set_callbacks(Some(reader_callback), Some(writer_callback));
         }
 
         // Suppress GC messages
         unsafe {
-            ffi::PROC_gc_messages(0);
+            ffi::reduce_ffi_gc_messages(0);
         }
 
         // We're in Lisp/symbolic mode. The bootstrap image has a broken
@@ -137,7 +137,7 @@ impl ReduceSession {
         for stmt in &init_stmts {
             let c = CString::new(*stmt).unwrap();
             unsafe {
-                ffi::PROC_process_one_reduce_statement(c.as_ptr());
+                ffi::reduce_ffi_process_statement(c.as_ptr());
             }
         }
 
@@ -147,7 +147,7 @@ impl ReduceSession {
         for pkg in &packages {
             OUTPUT_BUF.with(|buf| buf.borrow_mut().clear());
             let stmt = CString::new(format!("load_package({});", pkg)).unwrap();
-            let rc = unsafe { ffi::PROC_process_one_reduce_statement(stmt.as_ptr()) };
+            let rc = unsafe { ffi::reduce_ffi_process_statement(stmt.as_ptr()) };
             let output = OUTPUT_BUF.with(|buf| {
                 String::from_utf8_lossy(&buf.borrow()).to_string()
             });
@@ -162,13 +162,13 @@ impl ReduceSession {
         // Disable echo so output doesn't contain the input statement
         let echo = CString::new("echo").unwrap();
         unsafe {
-            ffi::PROC_set_switch(echo.as_ptr(), 0);
+            ffi::reduce_ffi_set_switch(echo.as_ptr(), 0);
         }
 
         // Warmup: execute a statement to absorb any remaining init output
         let warmup = CString::new("1;").unwrap();
         unsafe {
-            ffi::PROC_process_one_reduce_statement(warmup.as_ptr());
+            ffi::reduce_ffi_process_statement(warmup.as_ptr());
         }
 
         // Drain all startup and warmup output
@@ -191,7 +191,7 @@ impl ReduceSession {
         let c_stmt = CString::new(statement)
             .map_err(|e| format!("Invalid statement (contains null): {}", e))?;
 
-        let rc = unsafe { ffi::PROC_process_one_reduce_statement(c_stmt.as_ptr()) };
+        let rc = unsafe { ffi::reduce_ffi_process_statement(c_stmt.as_ptr()) };
 
         let output = OUTPUT_BUF.with(|buf| {
             String::from_utf8_lossy(&buf.borrow()).to_string()
@@ -259,20 +259,6 @@ impl ReduceSession {
         }
     }
 
-    /// Toggle a REDUCE switch (e.g. "factor", "exp", "gcd").
-    #[allow(dead_code)]
-    pub fn set_switch(&self, name: &str, on: bool) -> Result<(), String> {
-        let c_name = std::ffi::CString::new(name)
-            .map_err(|e| format!("invalid switch name: {}", e))?;
-        let val = if on { 1 } else { 0 };
-        let rc = unsafe { ffi::PROC_set_switch(c_name.as_ptr(), val) };
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(format!("PROC_set_switch({}, {}) returned {}", name, on, rc))
-        }
-    }
-
     /// Convenience: wrap an expression in `ws "expr";` to simplify it.
     /// Returns the simplified expression as a string.
     pub fn simplify(&self, expr: &str) -> Result<String, String> {
@@ -285,6 +271,21 @@ impl ReduceSession {
         };
 
         self.eval(&stmt)
+    }
+
+    /// Toggle a REDUCE switch (e.g., "factor", "echo").
+    pub fn set_switch(&self, name: &str, on: bool) -> Result<(), String> {
+        let c_name = CString::new(name)
+            .map_err(|e| format!("Invalid switch name: {}", e))?;
+        let val = if on { 1 } else { 0 };
+        let rc = unsafe { ffi::reduce_ffi_set_switch(c_name.as_ptr(), val) };
+        if rc != 0 && rc != -1 {
+            return Err(format!("set_switch({}, {}) failed: {}", name, on, rc));
+        }
+        if rc == -1 {
+            return Err(format!("set_switch({}, {}): C++ exception caught", name, on));
+        }
+        Ok(())
     }
 
 }
@@ -838,6 +839,34 @@ mod tests {
             // Verify normal mode restored
             let r2 = session.simplify("x**2 - 1").unwrap();
             assert!(r2.contains("x^2"), "after factor off: {}", r2);
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        // 10b. COMPLEX UNICODE EXPRESSION ROUND-TRIP
+        //      x²*y²+sin(x)³-sin(y²)²  (the `=9` is stripped for eval)
+        // ═══════════════════════════════════════════════════════════
+        {
+            // Unicode → REDUCE ASCII
+            let input = "x\u{00B2}*y\u{00B2}+sin(x)\u{00B3}-sin(y\u{00B2})\u{00B2}";
+            let ascii = translate::to_reduce(input);
+            assert_eq!(ascii, "x**2*y**2+sin(x)**3-sin(y**2)**2");
+
+            // Evaluate in REDUCE — should return with the same terms
+            let result = session.simplify(&ascii).unwrap();
+            // REDUCE may reorder but key subexpressions must survive
+            assert!(result.contains("sin(x)"),
+                "complex expr: expected sin(x) in: {}", result);
+            assert!(result.contains("sin(y^2)") || result.contains("sin(y^"),
+                "complex expr: expected sin(y^2) in: {}", result);
+            assert!(result.contains("x^2") || result.contains("x*y"),
+                "complex expr: expected x^2 or x*y in: {}", result);
+
+            // Round-trip back via from_reduce (** → ^)
+            let back = translate::from_reduce(&result);
+            assert!(back.contains("sin(x)"),
+                "round-trip: expected sin(x) in: {}", back);
+            assert!(back.contains("^"),
+                "round-trip: expected ^ in: {}", back);
         }
 
         // ═══════════════════════════════════════════════════════════

@@ -58,6 +58,11 @@ pub fn to_reduce(input: &str) -> String {
             '\u{2212}' => output.push('-'),   // − (minus sign)
             '\u{221A}' => output.push_str("sqrt"), // √
 
+            // Math functions / operators
+            '\u{222B}' => output.push_str("int"),   // ∫ (integral)
+            '\u{2202}' => output.push_str("df"),    // ∂ (partial derivative)
+            '\u{2207}' => output.push_str("nabla"), // ∇ (nabla/gradient)
+
             // Summation / product (these need context, basic stubs)
             '\u{2211}' => output.push_str("sum"),  // ∑
             '\u{220F}' => output.push_str("prod"), // ∏
@@ -65,54 +70,98 @@ pub fn to_reduce(input: &str) -> String {
             // Infinity
             '\u{221E}' => output.push_str("infinity"),
 
-            // Everything else passes through
-            _ => output.push(ch),
+            // Additional Greek letters (uppercase)
+            '\u{0393}' => output.push_str("Gamma"),   // Γ
+            '\u{0394}' => output.push_str("Delta"),   // Δ
+            '\u{0398}' => output.push_str("Theta"),   // Θ
+            '\u{039B}' => output.push_str("Lambda"),  // Λ
+            '\u{039E}' => output.push_str("Xi"),      // Ξ
+            '\u{03A0}' => output.push_str("Pi"),      // Π (uppercase Pi)
+            '\u{03A3}' => output.push_str("Sigma"),   // Σ
+            '\u{03A6}' => output.push_str("Phi"),     // Φ
+            '\u{03A8}' => output.push_str("Psi"),     // Ψ
+            '\u{03A9}' => output.push_str("Omega"),   // Ω
+
+            // Additional lowercase Greek letters
+            '\u{03B6}' => output.push_str("zeta"),    // ζ
+            '\u{03B7}' => output.push_str("eta"),     // η
+            '\u{03B9}' => output.push_str("iota"),    // ι
+            '\u{03BA}' => output.push_str("kappa"),   // κ
+            '\u{03BD}' => output.push_str("nu"),      // ν
+            '\u{03BE}' => output.push_str("xi"),      // ξ
+            '\u{03C1}' => output.push_str("rho"),     // ρ
+            '\u{03C5}' => output.push_str("upsilon"), // υ
+            '\u{03C7}' => output.push_str("chi"),     // χ
+            '\u{03C8}' => output.push_str("psi"),     // ψ
+
+            // Relation symbols
+            '\u{2264}' => output.push_str("<="),  // ≤
+            '\u{2265}' => output.push_str(">="),  // ≥
+            '\u{2260}' => output.push_str("!="),  // ≠
+
+            // Arrows (pass as identifiers for now)
+            '\u{2192}' => output.push_str("arrow_right"), // →
+            '\u{2190}' => output.push_str("arrow_left"),  // ←
+
+            // Only pass through REDUCE-safe ASCII characters.
+            // Strip backslashes and unmapped non-ASCII to prevent C++ exceptions.
+            _ => {
+                if ch.is_ascii_alphanumeric()
+                    || matches!(ch,
+                        ' ' | '+' | '-' | '*' | '/' | '^' | '(' | ')' | ','
+                        | '.' | ';' | '$' | ':' | '=' | '<' | '>' | '!'
+                        | '_' | '\'' | '"' | '\n' | '\t')
+                {
+                    output.push(ch);
+                }
+                // else: silently drop (backslash, @, #, non-ASCII not in map, etc.)
+            }
         }
     }
 
     output
 }
 
-/// Replace whole words only (surrounded by non-alphanumeric or string boundaries).
-fn replace_word(input: &str, from: &str, to: &str) -> String {
+/// Check whether the character at the given position is an ASCII alphanumeric
+/// or underscore — i.e. part of an identifier.
+fn is_word_char(s: &str, byte_pos: usize) -> bool {
+    s.as_bytes()
+        .get(byte_pos)
+        .map_or(false, |&b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Replace `word` with `replacement` only at word boundaries (not inside
+/// longer identifiers like "spin" when replacing "pi").
+fn replace_word(input: &str, word: &str, replacement: &str) -> String {
     let mut result = String::with_capacity(input.len());
-    let mut remaining = input;
-    while let Some(pos) = remaining.find(from) {
-        let before_ok = pos == 0
-            || !remaining[..pos]
-                .chars()
-                .last()
-                .unwrap()
-                .is_alphanumeric();
-        let after = &remaining[pos + from.len()..];
-        let after_ok = after.is_empty()
-            || !after.chars().next().unwrap().is_alphanumeric();
+    let mut start = 0;
+    while let Some(idx) = input[start..].find(word) {
+        let abs = start + idx;
+        let before_ok = abs == 0 || !is_word_char(input, abs - 1);
+        let after_ok = !is_word_char(input, abs + word.len());
         if before_ok && after_ok {
-            result.push_str(&remaining[..pos]);
-            result.push_str(to);
-            remaining = after;
+            result.push_str(&input[start..abs]);
+            result.push_str(replacement);
         } else {
-            result.push_str(&remaining[..pos + from.len()]);
-            remaining = after;
+            result.push_str(&input[start..abs + word.len()]);
         }
+        start = abs + word.len();
     }
-    result.push_str(remaining);
+    result.push_str(&input[start..]);
     result
 }
 
 /// Convert REDUCE ASCII output back to Logos notation.
 ///
-/// Converts `**` → `^` for exponentiation, and REDUCE keywords back to
-/// Unicode symbols where appropriate.
+/// Converts `**` → `^` for exponentiation (Logos parser uses `^`),
+/// and REDUCE keywords back to Unicode symbols where appropriate.
 pub fn from_reduce(input: &str) -> String {
     let mut output = input.to_string();
 
-    // Word-level replacements (whole words only to avoid mangling substrings)
-    output = replace_word(&output, "int", "integral");
-    output = replace_word(&output, "df", "derivative");
-    output = replace_word(&output, "pi", "\u{03C0}");
+    // Word-boundary-safe replacements
     output = replace_word(&output, "infinity", "\u{221E}");
     output = replace_word(&output, "sqrt", "\u{221A}");
+    output = replace_word(&output, "pi", "\u{03C0}");
 
     // ** → ^ (REDUCE exponentiation → Logos caret)
     output = output.replace("**", "^");
@@ -278,5 +327,55 @@ mod tests {
     fn test_empty_input() {
         assert_eq!(to_reduce(""), "");
         assert_eq!(from_reduce(""), "");
+    }
+
+    // ── from_reduce: Word boundary safety ─────────────────────────
+
+    #[test]
+    fn test_from_reduce_word_boundaries() {
+        // "pi" inside "spin" must NOT be replaced
+        assert_eq!(from_reduce("spin"), "spin");
+        // "pi" inside "pineapple" must NOT be replaced
+        assert_eq!(from_reduce("pineapple"), "pineapple");
+        // "pi" inside "api" must NOT be replaced
+        assert_eq!(from_reduce("api"), "api");
+        // standalone "pi" should be replaced
+        assert_eq!(from_reduce("2*pi"), "2*\u{03C0}");
+        // "sqrt" inside "isqrt" must NOT be replaced
+        assert_eq!(from_reduce("isqrt"), "isqrt");
+    }
+
+    #[test]
+    fn test_from_reduce_exponents_to_caret() {
+        // ** → ^ for all exponents
+        assert_eq!(from_reduce("x**2"), "x^2");
+        assert_eq!(from_reduce("x**29"), "x^29");
+        assert_eq!(from_reduce("x**2 + 1"), "x^2 + 1");
+    }
+
+    // ── Complex expression: x²*y²+sin(x)³-sin(y²)²=9 ──────────
+
+    #[test]
+    fn test_complex_expression_to_reduce() {
+        let input = "x\u{00B2}*y\u{00B2}+sin(x)\u{00B3}-sin(y\u{00B2})\u{00B2}=9";
+        let ascii = to_reduce(input);
+        assert_eq!(ascii, "x**2*y**2+sin(x)**3-sin(y**2)**2=9");
+    }
+
+    #[test]
+    fn test_complex_expression_from_reduce() {
+        let reduce_out = "x**2*y**2 + sin(x)**3 - sin(y**2)**2";
+        let result = from_reduce(reduce_out);
+        assert_eq!(result, "x^2*y^2 + sin(x)^3 - sin(y^2)^2");
+    }
+
+    #[test]
+    fn test_complex_expression_roundtrip() {
+        // x²*y² → x**2*y**2 → x^2*y^2 (superscripts → ** → ^)
+        let input = "x\u{00B2}*y\u{00B2}+sin(x)\u{00B3}-sin(y\u{00B2})\u{00B2}";
+        let ascii = to_reduce(input);
+        assert_eq!(ascii, "x**2*y**2+sin(x)**3-sin(y**2)**2");
+        let back = from_reduce(&ascii);
+        assert_eq!(back, "x^2*y^2+sin(x)^3-sin(y^2)^2");
     }
 }

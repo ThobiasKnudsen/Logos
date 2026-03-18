@@ -346,9 +346,7 @@ impl Parser {
                 }
                 // Indexing: expr[index]
                 TokenType::LBracket => {
-                    self.advance();
-                    let _index = self.parse_expr()?;
-                    self.expect(TokenType::RBracket)?;
+                    return Err("Array indexing is not yet supported".to_string());
                 }
                 // Property access: expr.prop
                 TokenType::Dot => {
@@ -367,12 +365,13 @@ impl Parser {
                         )),
                     }
                 }
-                // Unicode superscript square
-                TokenType::Builtin(ref s) if s == "square" => {
+                // Unicode superscript exponents (², ³, ⁰-⁹)
+                TokenType::Builtin(ref s) if is_superscript_token(s) => {
+                    let exp = superscript_exponent(s);
                     self.advance();
                     expr = AstNode::Apply {
-                        name: "mul".to_string(),
-                        args: vec![expr.clone(), expr],
+                        name: "pow".to_string(),
+                        args: vec![expr, AstNode::Number(exp)],
                     };
                 }
                 _ => break,
@@ -623,6 +622,29 @@ const EOF_TOKEN: Token = Token {
     ty: TokenType::Eof,
     span: (0, 0),
 };
+
+/// Check if a Builtin token name is a Unicode superscript exponent.
+fn is_superscript_token(name: &str) -> bool {
+    matches!(name, "square" | "cube" | "pow0" | "pow1" | "pow4"
+        | "pow5" | "pow6" | "pow7" | "pow8" | "pow9")
+}
+
+/// Map a superscript Builtin token name to its numeric exponent.
+fn superscript_exponent(name: &str) -> f64 {
+    match name {
+        "square" => 2.0,
+        "cube" => 3.0,
+        "pow0" => 0.0,
+        "pow1" => 1.0,
+        "pow4" => 4.0,
+        "pow5" => 5.0,
+        "pow6" => 6.0,
+        "pow7" => 7.0,
+        "pow8" => 8.0,
+        "pow9" => 9.0,
+        _ => 1.0,
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -160,10 +160,71 @@ impl<'a> Lexer<'a> {
             self.advance();
             return Ok(Token { ty: TokenType::Slash, span: (start, self.pos) });
         }
+        if ch == '\u{222B}' { // ∫ (integral) — CAS-only, not a WGSL builtin
+            self.advance();
+            // Use "integral" not "int" to avoid collision with WGSL's `int` keyword
+            return Ok(Token { ty: TokenType::Identifier("integral".to_string()), span: (start, self.pos) });
+        }
+        if ch == '\u{2202}' { // ∂ (partial derivative) — CAS-only, not a WGSL builtin
+            self.advance();
+            return Ok(Token { ty: TokenType::Identifier("partial".to_string()), span: (start, self.pos) });
+        }
+        if ch == '\u{2207}' { // ∇ (nabla/gradient)
+            self.advance();
+            return Ok(Token { ty: TokenType::Identifier("nabla".to_string()), span: (start, self.pos) });
+        }
+        if ch == '\u{221A}' { // √ (square root)
+            self.advance();
+            return Ok(Token { ty: TokenType::Builtin("sqrt".to_string()), span: (start, self.pos) });
+        }
+        if ch == '\u{221E}' { // ∞ (infinity)
+            self.advance();
+            return Ok(Token { ty: TokenType::Identifier("infinity".to_string()), span: (start, self.pos) });
+        }
+        if ch == '\u{2211}' { // ∑ (summation) — CAS-only, not a WGSL builtin
+            self.advance();
+            return Ok(Token { ty: TokenType::Identifier("sum".to_string()), span: (start, self.pos) });
+        }
+        if ch == '\u{220F}' { // ∏ (product) — CAS-only, not a WGSL builtin
+            self.advance();
+            return Ok(Token { ty: TokenType::Identifier("prod".to_string()), span: (start, self.pos) });
+        }
+        if ch == '\u{2264}' { // ≤
+            self.advance();
+            return Ok(Token { ty: TokenType::Lte, span: (start, self.pos) });
+        }
+        if ch == '\u{2265}' { // ≥
+            self.advance();
+            return Ok(Token { ty: TokenType::Gte, span: (start, self.pos) });
+        }
+        if ch == '\u{2260}' { // ≠
+            self.advance();
+            return Ok(Token { ty: TokenType::Neq, span: (start, self.pos) });
+        }
+        // Superscript digits 0,1,4-9
+        if let Some(exp) = match ch {
+            '\u{2070}' => Some("0"), '\u{00B9}' => Some("1"),
+            '\u{2074}' => Some("4"), '\u{2075}' => Some("5"),
+            '\u{2076}' => Some("6"), '\u{2077}' => Some("7"),
+            '\u{2078}' => Some("8"), '\u{2079}' => Some("9"),
+            _ => None,
+        } {
+            self.advance();
+            return Ok(Token {
+                ty: TokenType::Builtin(format!("pow{}", exp)),
+                span: (start, self.pos),
+            });
+        }
 
         // Identifiers / keywords / builtins
         if ch.is_alphabetic() || ch == '_' {
             return Ok(self.lex_identifier(start));
+        }
+
+        // Backslash: skip it gracefully (user typing LaTeX before autocomplete accepts)
+        if ch == '\\' {
+            self.advance();
+            return Ok(Token { ty: TokenType::Identifier("\\".to_string()), span: (start, self.pos) });
         }
 
         Err(format!("Unexpected character '{}' at position {}", ch, start))
@@ -254,13 +315,8 @@ impl<'a> Lexer<'a> {
         self.input[self.pos..].chars().next()
     }
 
-    fn peek_at(&self, offset: usize) -> Option<char> {
-        let pos = self.pos + offset;
-        if pos < self.input.len() {
-            self.input[pos..].chars().next()
-        } else {
-            None
-        }
+    fn peek_at(&self, char_offset: usize) -> Option<char> {
+        self.input[self.pos..].chars().nth(char_offset)
     }
 
     fn advance(&mut self) {
@@ -278,13 +334,31 @@ impl<'a> Lexer<'a> {
 /// These must NOT be consumed as part of identifiers.
 fn is_unicode_math_symbol(c: char) -> bool {
     matches!(c,
-        '\u{00B2}'  // ² superscript 2
+        '\u{00B2}'   // ² superscript 2
         | '\u{00B3}' // ³ superscript 3
         | '\u{03C0}' // π pi
         | '\u{03C4}' // τ tau
         | '\u{2212}' // − unicode minus
         | '\u{00D7}' // × multiplication sign
         | '\u{00F7}' // ÷ division sign
+        | '\u{222B}' // ∫ integral
+        | '\u{2202}' // ∂ partial
+        | '\u{2207}' // ∇ nabla
+        | '\u{221A}' // √ sqrt
+        | '\u{221E}' // ∞ infinity
+        | '\u{2211}' // ∑ sum
+        | '\u{220F}' // ∏ product
+        | '\u{2264}' // ≤
+        | '\u{2265}' // ≥
+        | '\u{2260}' // ≠
+        | '\u{2070}' // ⁰
+        | '\u{00B9}' // ¹
+        | '\u{2074}' // ⁴
+        | '\u{2075}' // ⁵
+        | '\u{2076}' // ⁶
+        | '\u{2077}' // ⁷
+        | '\u{2078}' // ⁸
+        | '\u{2079}' // ⁹
     )
 }
 
@@ -420,5 +494,50 @@ mod tests {
         let tokens = lexer.tokenize().unwrap();
         assert!(matches!(tokens[0].ty, TokenType::Identifier(ref s) if s == "r"));
         assert!(matches!(tokens[1].ty, TokenType::Number(_)));
+    }
+
+    #[test]
+    fn test_complex_unicode_expression() {
+        // x²*y²+sin(x)³-sin(y²)²=9
+        let input = "x\u{00B2}*y\u{00B2}+sin(x)\u{00B3}-sin(y\u{00B2})\u{00B2}=9";
+        let mut lexer = Lexer::new(input);
+        let tokens = lexer.tokenize().unwrap();
+
+        // Expected: x ² * y ² + sin ( x ) ³ - sin ( y ² ) ² = 9 EOF
+        let expected: Vec<&str> = vec![
+            "AxisVar(x)", "Builtin(square)", "Star",
+            "AxisVar(y)", "Builtin(square)", "Plus",
+            "Builtin(sin)", "LParen", "AxisVar(x)", "RParen", "Builtin(cube)", "Minus",
+            "Builtin(sin)", "LParen", "AxisVar(y)", "Builtin(square)", "RParen", "Builtin(square)",
+            "Eq", "Number(9)", "Eof",
+        ];
+
+        assert_eq!(
+            tokens.len(), expected.len(),
+            "Expected {} tokens, got {}: {:?}", expected.len(), tokens.len(),
+            tokens.iter().map(|t| format!("{:?}", t.ty)).collect::<Vec<_>>()
+        );
+
+        // Verify key tokens
+        assert!(matches!(tokens[0].ty, TokenType::AxisVar(ref s) if s == "x"));
+        assert!(matches!(tokens[1].ty, TokenType::Builtin(ref s) if s == "square"));
+        assert_eq!(tokens[2].ty, TokenType::Star);
+        assert!(matches!(tokens[3].ty, TokenType::AxisVar(ref s) if s == "y"));
+        assert!(matches!(tokens[4].ty, TokenType::Builtin(ref s) if s == "square"));
+        assert_eq!(tokens[5].ty, TokenType::Plus);
+        assert!(matches!(tokens[6].ty, TokenType::Builtin(ref s) if s == "sin"));
+        assert_eq!(tokens[7].ty, TokenType::LParen);
+        assert!(matches!(tokens[8].ty, TokenType::AxisVar(ref s) if s == "x"));
+        assert_eq!(tokens[9].ty, TokenType::RParen);
+        assert!(matches!(tokens[10].ty, TokenType::Builtin(ref s) if s == "cube"));
+        assert_eq!(tokens[11].ty, TokenType::Minus);
+        assert!(matches!(tokens[12].ty, TokenType::Builtin(ref s) if s == "sin"));
+        assert_eq!(tokens[13].ty, TokenType::LParen);
+        assert!(matches!(tokens[14].ty, TokenType::AxisVar(ref s) if s == "y"));
+        assert!(matches!(tokens[15].ty, TokenType::Builtin(ref s) if s == "square"));
+        assert_eq!(tokens[16].ty, TokenType::RParen);
+        assert!(matches!(tokens[17].ty, TokenType::Builtin(ref s) if s == "square"));
+        assert_eq!(tokens[18].ty, TokenType::Eq);
+        assert!(matches!(tokens[19].ty, TokenType::Number(n) if (n - 9.0).abs() < 1e-10));
     }
 }

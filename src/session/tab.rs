@@ -72,7 +72,7 @@ impl Tab {
             self.active_cell_index = self.cells.len() - 1;
         } else if self.active_cell_index > index {
             self.active_cell_index -= 1;
-            }
+        }
         self.is_modified = true;
     }
 

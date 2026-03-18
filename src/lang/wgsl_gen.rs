@@ -788,6 +788,7 @@ impl GenContext {
             ("tanh", 1) => Ok(format!("tanh({})", emitted[0])),
             ("log", 1) => Ok(format!("log({})", emitted[0])),
             ("log2", 1) => Ok(format!("log2({})", emitted[0])),
+            ("log10", 1) => Ok(format!("(log2({}) / log2(10.0))", emitted[0])),
             ("exp", 1) => Ok(format!("exp({})", emitted[0])),
             ("exp2", 1) => Ok(format!("exp2({})", emitted[0])),
             ("sqrt", 1) => Ok(format!("sqrt({})", emitted[0])),
@@ -820,6 +821,7 @@ impl GenContext {
 
             // Type constructors / casts
             ("f32", 1) => Ok(format!("f32({})", emitted[0])),
+            ("f64", 1) => Ok(format!("f32({})", emitted[0])),
             ("i32", 1) => Ok(format!("i32({})", emitted[0])),
             ("vec2", n) if n >= 1 => Ok(format!("vec2<f32>({})", emitted.join(", "))),
             ("vec3", n) if n >= 1 => Ok(format!("vec3<f32>({})", emitted.join(", "))),

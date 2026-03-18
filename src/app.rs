@@ -222,9 +222,9 @@ pub(crate) enum HoverTarget {
     CellEditor(usize),
     CellPlayButton(usize),
     CellCopyButton(usize),
+    CellOutputCopyButton(usize),
     CellDeleteButton(usize),
     AddCellButton,
-    CellOutputArea(usize),
     AutocompleteItem(usize),
     RenderArea,
 }
@@ -562,8 +562,8 @@ impl AppState {
                     self.set_hover(HoverTarget::CellEditor(cl.cell_index));
                     return;
                 }
-                if cl.output.h > 0.0 && point_in_rect(mx, my, &cl.output) {
-                    self.set_hover(HoverTarget::CellOutputArea(cl.cell_index));
+                if cl.output.h > 0.0 && point_in_rect(mx, my, &cl.output_copy_button) {
+                    self.set_hover(HoverTarget::CellOutputCopyButton(cl.cell_index));
                     return;
                 }
             }
@@ -589,8 +589,9 @@ impl AppState {
             self.hover_target = target;
             let icon = match target {
                 HoverTarget::SplitHandle => CursorIcon::ColResize,
-                HoverTarget::CellEditor(_) | HoverTarget::CellOutputArea(_) => CursorIcon::Text,
+                HoverTarget::CellEditor(_) => CursorIcon::Text,
                 HoverTarget::CellPlayButton(_) | HoverTarget::CellCopyButton(_)
+                | HoverTarget::CellOutputCopyButton(_)
                 | HoverTarget::AutocompleteItem(_) => CursorIcon::Pointer,
                 HoverTarget::RenderArea => match self.render_area.mouse_zone {
                     MouseZone::Center => {
@@ -652,8 +653,21 @@ impl AppState {
         let cursor = cell.buffer.cursor_byte_offset();
 
         if let Some((prefix, prefix_start)) = autocomplete::prefix_at_cursor(text, cursor) {
+            // Require minimum prefix length: 2 chars for normal identifiers,
+            // but LaTeX prefixes starting with `\` trigger at length 1.
+            let min_len = if prefix.starts_with('\\') { 1 } else { 2 };
+            if prefix.len() < min_len {
+                self.dismiss_autocomplete();
+                return;
+            }
+
             // Gather candidates
             let mut all = autocomplete::static_candidates();
+
+            // When prefix starts with `\`, include LaTeX symbol candidates
+            if prefix.starts_with('\\') {
+                all.extend(autocomplete::symbol_candidates());
+            }
 
             // Try to parse and extract user symbols (best-effort)
             let mut lex = crate::lang::lexer::Lexer::new(text);
@@ -678,7 +692,10 @@ impl AppState {
 
                     let candidates: Vec<(String, crate::editor::autocomplete::CandidateKind)> =
                         self.autocomplete.candidates.iter()
-                            .map(|c| (c.label.clone(), c.kind))
+                            .map(|c| {
+                                let text = c.display.as_deref().unwrap_or(&c.label);
+                                (text.to_string(), c.kind)
+                            })
                             .collect();
 
                     self.autocomplete_item_rects = self.renderer.open_autocomplete(
@@ -1079,6 +1096,7 @@ impl ApplicationHandler for App {
                 state.cached_layout = state.layout.compute(w, h);
                 state.recompute_hover();
                 state.sync_active_tab();
+                state.dismiss_autocomplete();
             }
 
             WindowEvent::CursorMoved { position, .. } => {
@@ -1090,6 +1108,7 @@ impl ApplicationHandler for App {
                         state.scroll_drag_offset,
                     );
                     state.sync_active_tab();
+                    state.dismiss_autocomplete();
                     state.window.request_redraw();
                 } else if state.is_dragging_split {
                     let content_x = state.cached_layout.left_pane.x;
@@ -1101,6 +1120,8 @@ impl ApplicationHandler for App {
                         state.layout.clamp_left_width(desired_width, w);
                     state.cached_layout = state.layout.compute(w, h);
                     state.sync_active_tab();
+                    // Dismiss autocomplete — pane layout changed
+                    state.dismiss_autocomplete();
                 } else if state.render_area.is_dragging {
                     // Pan the render area
                     let (mx, my) = state.cursor_position;
@@ -1214,6 +1235,8 @@ impl ApplicationHandler for App {
                     if point_in_rect(mx, my, &lp) {
                         state.renderer.scroll_by(0.0, -dy);
                         state.cell_layouts = state.renderer.cell_layouts().to_vec();
+                        // Dismiss autocomplete — cell positions shifted by scroll
+                        state.dismiss_autocomplete();
                         state.recompute_hover();
                         state.window.request_redraw();
                     }
@@ -1306,7 +1329,7 @@ impl ApplicationHandler for App {
                         event_loop.set_control_flow(ControlFlow::Poll);
                         state.sync_active_tab();
                     }
-                    HoverTarget::CellOutputArea(i) => {
+                    HoverTarget::CellOutputCopyButton(i) => {
                         state.close_menu();
                         state.dismiss_autocomplete();
                         // Copy output text to clipboard
@@ -1423,8 +1446,8 @@ impl ApplicationHandler for App {
                 let click_target = match state.mouse_press_target {
                     HoverTarget::CellPlayButton(_)
                     | HoverTarget::CellCopyButton(_)
+                    | HoverTarget::CellOutputCopyButton(_)
                     | HoverTarget::CellDeleteButton(_)
-                    | HoverTarget::CellOutputArea(_)
                     | HoverTarget::AddCellButton => state.mouse_press_target,
                     _ => state.hover_target,
                 };
@@ -1446,16 +1469,14 @@ impl ApplicationHandler for App {
                             let _ = cb.set_text(&text);
                         }
                     }
-                    HoverTarget::CellOutputArea(i) => {
-                        let text_to_copy = match &state.tab_manager.active_tab().cells[i].output {
-                            CellOutput::Simplified(s) => Some(s.clone()),
-                            CellOutput::Error(e) => Some(e.clone()),
-                            CellOutput::None => None,
+                    HoverTarget::CellOutputCopyButton(i) => {
+                        let output_text = match &state.tab_manager.active_tab().cells[i].output {
+                            CellOutput::None => String::new(),
+                            CellOutput::Error(e) => format!("Error: {}", e),
+                            CellOutput::Simplified(s) => s.clone(),
                         };
-                        if let Some(text) = text_to_copy {
-                            if let Some(cb) = state.clipboard.as_mut() {
-                                let _ = cb.set_text(&text);
-                            }
+                        if let Some(cb) = state.clipboard.as_mut() {
+                            let _ = cb.set_text(&output_text);
                         }
                     }
                     HoverTarget::CellDeleteButton(i) => {
@@ -1515,9 +1536,13 @@ impl ApplicationHandler for App {
                             state.window.request_redraw();
                             return;
                         }
-                        Key::Named(NamedKey::Tab) | Key::Named(NamedKey::Enter) => {
+                        Key::Named(NamedKey::Tab) => {
                             state.accept_autocomplete();
                             return;
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            // Dismiss autocomplete and fall through to normal Enter handling
+                            state.dismiss_autocomplete();
                         }
                         _ => {
                             // Fall through to normal key handling;
@@ -1694,6 +1719,11 @@ impl ApplicationHandler for App {
 
         if needs_redraw {
             state.sync_active_tab();
+            // Re-position autocomplete popup since cell layouts may have shifted
+            // (e.g., REDUCE output changed cell height).
+            if state.autocomplete.active {
+                state.update_autocomplete();
+            }
         }
 
         // Continuous animation when shaders are active, or polling for REDUCE

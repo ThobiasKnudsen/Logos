@@ -49,6 +49,8 @@ pub struct CellLayout {
     pub editor: Rect,
     /// Output area below the editor (for REDUCE results). Zero-sized if no output.
     pub output: Rect,
+    /// Copy button in the output section (top-right). Zero-sized if no output.
+    pub output_copy_button: Rect,
 }
 
 /// Info about a single cell, passed from AppState to the renderer.
@@ -1022,7 +1024,8 @@ impl Renderer {
                 .map_or(true, |prev| prev != output_text_ref);
             if output_changed {
                 if has_output {
-                    self.cell_output_buffers[i].set_size(&mut self.font_system, None, None);
+                    let output_width = effective_width - container_pad * 2.0 - text_pad * 2.0;
+                    self.cell_output_buffers[i].set_size(&mut self.font_system, Some(output_width), None);
                     self.cell_output_buffers[i].set_text(
                         &mut self.font_system,
                         output_text_ref,
@@ -1104,6 +1107,17 @@ impl Renderer {
                 w: effective_width - container_pad * 2.0,
                 h: output_h,
             };
+            let btn_size = cell_delete_size();
+            let output_copy_button = if output_h > 0.0 {
+                Rect {
+                    x: output.x + output.w - btn_size - spacing::xs(),
+                    y: output.y + spacing::xs(),
+                    w: btn_size,
+                    h: btn_size,
+                }
+            } else {
+                Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }
+            };
 
             layouts.push(CellLayout {
                 cell_index: i,
@@ -1115,6 +1129,7 @@ impl Renderer {
                 separator,
                 editor,
                 output,
+                output_copy_button,
             });
 
             y_offset += container_h + cell_spacing;
@@ -1533,6 +1548,11 @@ impl Renderer {
                     },
                     t.border,
                 ));
+
+                // Output copy button hover
+                if hover == HoverTarget::CellOutputCopyButton(i) {
+                    ui_rects.push(rect_from(cl.output_copy_button, t.bg_hover));
+                }
             }
         }
 
@@ -1808,6 +1828,38 @@ impl Renderer {
                         default_color: t.text_muted.to_glyphon(),
                         custom_glyphs: &[],
                     });
+                }
+
+                // Output copy button label (⎘)
+                let ocb = &cl.output_copy_button;
+                let ocb_clip_top = (ocb.y as i32).max(pane_top);
+                let ocb_clip_bottom = ((ocb.y + ocb.h) as i32).min(pane_bottom);
+                if ocb_clip_top < ocb_clip_bottom {
+                    let mut bounds = TextBounds {
+                        left: ocb.x as i32,
+                        top: ocb_clip_top,
+                        right: (ocb.x + ocb.w) as i32,
+                        bottom: ocb_clip_bottom,
+                    };
+                    let visible = dd_clip
+                        .as_ref()
+                        .map_or(true, |dd| clip_bounds_under_dropdown(&mut bounds, dd));
+
+                    if visible {
+                        let label_w = Self::measure_label_width(&self.cell_copy_label);
+                        let line_h = fonts::ui_size() * 1.4;
+                        let cx = ocb.x + (ocb.w - label_w) / 2.0;
+                        let cy = ocb.y + (ocb.h - line_h) / 2.0;
+                        text_areas.push(TextArea {
+                            buffer: &self.cell_copy_label,
+                            left: cx,
+                            top: cy,
+                            scale: 1.0,
+                            bounds,
+                            default_color: t.text_muted.to_glyphon(),
+                            custom_glyphs: &[],
+                        });
+                    }
                 }
             }
 
@@ -2496,6 +2548,7 @@ fn shift_cell_layouts(layouts: &mut [CellLayout], add_cell_rect: &mut Rect, delt
         cl.separator.y -= delta;
         cl.editor.y -= delta;
         cl.output.y -= delta;
+        cl.output_copy_button.y -= delta;
     }
     add_cell_rect.y -= delta;
 }
