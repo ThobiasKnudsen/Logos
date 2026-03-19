@@ -169,6 +169,10 @@ impl<'a> Lexer<'a> {
             self.advance();
             return Ok(Token { ty: TokenType::Identifier("partial".to_string()), span: (start, self.pos) });
         }
+        if ch == '\u{2146}' { // ⅆ (derivative) — CAS-only
+            self.advance();
+            return Ok(Token { ty: TokenType::Identifier("derivative".to_string()), span: (start, self.pos) });
+        }
         if ch == '\u{2207}' { // ∇ (nabla/gradient)
             self.advance();
             return Ok(Token { ty: TokenType::Identifier("nabla".to_string()), span: (start, self.pos) });
@@ -347,6 +351,7 @@ fn is_unicode_math_symbol(c: char) -> bool {
         | '\u{00F7}' // ÷ division sign
         | '\u{222B}' // ∫ integral
         | '\u{2202}' // ∂ partial
+        | '\u{2146}' // ⅆ derivative
         | '\u{2207}' // ∇ nabla
         | '\u{221A}' // √ sqrt
         | '\u{221E}' // ∞ infinity

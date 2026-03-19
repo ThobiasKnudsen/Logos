@@ -65,6 +65,7 @@ pub fn to_reduce(input: &str) -> String {
             // Math functions / operators
             '\u{222B}' => output.push_str("int"),   // ∫ (integral)
             '\u{2202}' => output.push_str("df"),    // ∂ (partial derivative)
+            '\u{2146}' => output.push_str("df"),    // ⅆ (derivative)
             '\u{2207}' => output.push_str("nabla"), // ∇ (nabla/gradient)
 
             // Summation / product (these need context, basic stubs)

@@ -20,7 +20,7 @@ use crate::render::RenderAreaParams;
 use crate::ui::theme::{self, fonts, spacing, split};
 
 /// CAS function names that REDUCE handles but WGSL doesn't.
-const CAS_FUNCTIONS: &[&str] = &["\u{222B}(", "\u{2202}(", "solve(", "integral(", "derivative("];
+const CAS_FUNCTIONS: &[&str] = &["\u{222B}(", "\u{2202}(", "\u{2146}(", "solve(", "integral(", "derivative("];
 
 /// Find the first CAS function call in `text` and return its byte range.
 ///
@@ -138,6 +138,120 @@ fn substitute_reduce_result(cell_text: &str, reduce_result: &str, embedded_cas: 
         }
     }
     reduce_result.to_string()
+}
+
+/// Collect name→body bindings from preceding cells and lines within the
+/// current cell that appear before the CAS call.
+///
+/// The `:` operator is treated as textual substitution: `a(x): x^2` means
+/// "wherever `a` appears, substitute `x^2`". This allows nested expansion:
+/// `ⅆ(v,x)` where `v: ⅆ(a,x)` and `a: x^2` → `ⅆ(ⅆ(x^2,x),x)`.
+fn collect_bindings(
+    cells: &[crate::editor::cell::CodeCell],
+    up_to: usize,
+    cell_text: &str,
+) -> Vec<(String, String)> {
+    use crate::editor::cell::CellOutput;
+
+    let mut bindings = Vec::new();
+
+    // From preceding cells
+    for cell in cells.iter().take(up_to) {
+        let src = match &cell.output {
+            CellOutput::Simplified(s) => s.as_str(),
+            _ => cell.buffer.text(),
+        };
+        extract_binding(src.trim(), &mut bindings);
+    }
+
+    // From lines within the current cell before the first CAS call
+    if let Some((cas_start, _)) = find_cas_call(cell_text) {
+        for line in cell_text[..cas_start].lines() {
+            extract_binding(line.trim(), &mut bindings);
+        }
+    }
+
+    bindings
+}
+
+/// Extract a single binding from a line like `name(args): body` or `name: body`.
+fn extract_binding(text: &str, bindings: &mut Vec<(String, String)>) {
+    if text.is_empty() {
+        return;
+    }
+    // Find `:` not followed by `=`
+    let colon_pos = text.char_indices().find_map(|(i, c)| {
+        if c == ':' && text.get(i + 1..i + 2) != Some("=") {
+            Some(i)
+        } else {
+            None
+        }
+    });
+    if let Some(pos) = colon_pos {
+        let lhs = text[..pos].trim();
+        let rhs = text[pos + 1..].trim();
+        if lhs.is_empty() || rhs.is_empty() {
+            return;
+        }
+        // Strip function params: a(x) → a
+        let name = if let Some(paren) = lhs.find('(') {
+            lhs[..paren].trim()
+        } else {
+            lhs
+        };
+        if !name.is_empty() {
+            bindings.push((name.to_string(), rhs.to_string()));
+        }
+    }
+}
+
+/// Expand all bindings in an expression by textual substitution.
+/// Repeats until no more substitutions are possible (fixed-point).
+fn expand_bindings(expr: &str, bindings: &[(String, String)]) -> String {
+    let mut result = expr.to_string();
+    for _ in 0..20 {
+        let mut changed = false;
+        for (name, body) in bindings {
+            let new = replace_at_word_boundaries(&result, name, &format!("({})", body));
+            if new != result {
+                result = new;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    result
+}
+
+/// Replace `word` with `replacement` only at word boundaries.
+fn replace_at_word_boundaries(input: &str, word: &str, replacement: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut start = 0;
+    while let Some(idx) = input[start..].find(word) {
+        let abs = start + idx;
+        let before_ok = abs == 0
+            || !input[..abs]
+                .chars()
+                .last()
+                .map_or(false, |c| c.is_alphanumeric() || c == '_');
+        let after_pos = abs + word.len();
+        let after_ok = after_pos >= input.len()
+            || !input[after_pos..]
+                .chars()
+                .next()
+                .map_or(false, |c| c.is_alphanumeric() || c == '_');
+        if before_ok && after_ok {
+            result.push_str(&input[start..abs]);
+            result.push_str(replacement);
+        } else {
+            result.push_str(&input[start..abs + word.len()]);
+        }
+        start = abs + word.len();
+    }
+    result.push_str(&input[start..]);
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -971,19 +1085,32 @@ impl AppState {
         if has_cas && !cell_text.is_empty() {
             let cell_id = tab.cells[cell_index].id;
             let (reduce_input, _) = extract_reduce_expr(&cell_text);
-            let reduce_expr = translate::to_reduce(reduce_input);
-            self.reduce_service.submit(cell_id, reduce_expr);
+
+            // Expand bindings inline: a(x): x^2, ⅆ(a,x) → ⅆ(x^2,x)
+            let bindings = collect_bindings(&tab.cells, cell_index, &cell_text);
+            let expanded = expand_bindings(reduce_input, &bindings);
+            let reduce_expr = translate::to_reduce(&expanded);
+            self.reduce_service.submit(cell_id, Vec::new(), reduce_expr);
         }
 
-        // Compile WGSL immediately — but skip if CAS functions are present,
+        // Compile WGSL immediately — but skip if CAS functions are present
+        // in the played cell OR any preceding cell that hasn't been evaluated,
         // since they'll fail and wgpu logs noisy errors we can't suppress.
         // REDUCE will provide the compilable form asynchronously.
-        if !has_cas {
+        let any_unresolved_cas = tab.cells.iter().take(cell_index + 1).any(|c| {
+            !matches!(c.output, CellOutput::Simplified(_)) && find_cas_call(c.buffer.text()).is_some()
+        });
+        if !has_cas && !any_unresolved_cas {
             let mut source = String::new();
             for (i, cell) in tab.cells.iter().enumerate() {
                 if i > cell_index { break; }
                 if !source.is_empty() { source.push('\n'); }
-                source.push_str(cell.buffer.text());
+                // Use CAS-evaluated output if available (e.g. ⅆ() already resolved)
+                if let CellOutput::Simplified(ref s) = cell.output {
+                    source.push_str(s);
+                } else {
+                    source.push_str(cell.buffer.text());
+                }
             }
             match lang::compile(&source) {
                 Ok(wgsl) => {
@@ -1008,6 +1135,14 @@ impl AppState {
                     cell.output_collapsed = false;
                 }
             }
+        } else if any_unresolved_cas && !has_cas {
+            // The played cell itself is fine, but preceding cells have CAS calls
+            // that haven't been evaluated yet.
+            let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+            cell.output = CellOutput::Error(
+                "Play cells with ⅆ/∫/∂ first to evaluate them".to_string(),
+            );
+            cell.output_collapsed = false;
         }
         // Don't clear output — REDUCE response will arrive async,
         // and shader errors were already set above.
@@ -1722,45 +1857,90 @@ impl ApplicationHandler for App {
                     }
                 };
 
-                // Substitute the REDUCE result back into the original expression
-                // and display the full simplified form (with context preserved).
+                // Substitute the REDUCE result back into the working text.
+                // Use previous Simplified output if available (for iterative
+                // CAS resolution), otherwise use the original cell text.
                 if let Some(result) = simplified {
-                    let cell_text = tab.cells[cell_idx].buffer.text().to_string();
-                    let (_, embedded) = extract_reduce_expr(&cell_text);
-                    let substituted = substitute_reduce_result(&cell_text, &result, embedded);
+                    let working_text = match &tab.cells[cell_idx].output {
+                        CellOutput::Simplified(s) => s.clone(),
+                        _ => tab.cells[cell_idx].buffer.text().to_string(),
+                    };
+                    let (_, embedded) = extract_reduce_expr(&working_text);
+                    let substituted =
+                        substitute_reduce_result(&working_text, &result, embedded);
                     tab.cells[cell_idx].output =
                         CellOutput::Simplified(substituted.clone());
                     tab.cells[cell_idx].output_collapsed = false;
-                    let mut source = String::new();
-                    for (i, cell) in tab.cells.iter().enumerate() {
-                        if i > cell_idx { break; }
-                        if !source.is_empty() { source.push('\n'); }
-                        if i == cell_idx {
-                            source.push_str(&substituted);
-                        } else {
-                            source.push_str(cell.buffer.text());
+
+                    // If there are still more CAS calls, expand bindings and
+                    // resubmit to REDUCE (iterative resolution).
+                    if find_cas_call(&substituted).is_some() {
+                        let (next_input, _) = extract_reduce_expr(&substituted);
+                        let bindings =
+                            collect_bindings(&tab.cells, cell_idx, &substituted);
+                        let expanded = expand_bindings(next_input, &bindings);
+                        let reduce_expr = translate::to_reduce(&expanded);
+                        let cell_id = resp.cell_id;
+                        state
+                            .reduce_service
+                            .submit(cell_id, Vec::new(), reduce_expr);
+                    } else {
+                        // All CAS calls resolved — compile WGSL
+                        let mut source = String::new();
+                        for (i, cell) in tab.cells.iter().enumerate() {
+                            if i > cell_idx {
+                                break;
+                            }
+                            if !source.is_empty() {
+                                source.push('\n');
+                            }
+                            if i == cell_idx {
+                                source.push_str(&substituted);
+                            } else if let CellOutput::Simplified(ref s) = cell.output {
+                                source.push_str(s);
+                            } else {
+                                source.push_str(cell.buffer.text());
+                            }
                         }
-                    }
-                    match lang::compile(&source) {
-                        Ok(wgsl) => {
-                            let cell_id = tab.cells[cell_idx].id;
-                            match state.renderer.compile_cell_shader(cell_id, &wgsl) {
-                                Ok(()) => {
-                                    tab.cells[cell_idx].is_playing = true;
+                        match lang::compile(&source) {
+                            Ok(wgsl) => {
+                                let cell_id = tab.cells[cell_idx].id;
+                                match state
+                                    .renderer
+                                    .compile_cell_shader(cell_id, &wgsl)
+                                {
+                                    Ok(()) => {
+                                        tab.cells[cell_idx].is_playing = true;
+                                    }
+                                    Err(e) => {
+                                        log::error!(
+                                            "Shader compilation failed: {}",
+                                            e
+                                        );
+                                        tab.cells[cell_idx].output =
+                                            CellOutput::Error(format!(
+                                                "Shader: {}",
+                                                e
+                                            ));
+                                        tab.cells[cell_idx].output_collapsed =
+                                            false;
+                                    }
                                 }
-                                Err(e) => {
-                                    log::error!("Shader compilation failed: {}", e);
+                            }
+                            Err(e) => {
+                                if !e.contains("No result expression") {
+                                    log::error!(
+                                        "Language pipeline error: {}",
+                                        e
+                                    );
                                     tab.cells[cell_idx].output =
-                                        CellOutput::Error(format!("Shader: {}", e));
+                                        CellOutput::Error(format!(
+                                            "Compile: {}",
+                                            e
+                                        ));
                                     tab.cells[cell_idx].output_collapsed = false;
                                 }
                             }
-                        }
-                        Err(e) => {
-                            log::error!("Language pipeline error: {}", e);
-                            tab.cells[cell_idx].output =
-                                CellOutput::Error(format!("Compile: {}", e));
-                            tab.cells[cell_idx].output_collapsed = false;
                         }
                     }
                 }
