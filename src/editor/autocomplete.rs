@@ -211,7 +211,8 @@ pub const LATEX_SYMBOLS: &[(&str, &str)] = &[
     ("\\Omega", "\u{03A9}"),   // Ω
 
     // Constants
-    ("\\euler", "\u{212F}"),      // ℯ (Euler's number)
+    ("\\euler", "\u{212F}"),      // ℯ
+    ("\\derivative", "\u{2146}"), // ⅆ (differential d) (Euler's number)
 
     // Math operators
     ("\\int", "\u{222B}"),        // ∫

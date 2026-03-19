@@ -259,6 +259,39 @@ impl ReduceSession {
         }
     }
 
+    /// Evaluate a REDUCE statement silently (discard output).
+    /// Used for context setup like variable assignments before the main expression.
+    pub fn eval_silent(&self, statement: &str) -> Result<(), String> {
+        let stmt = if statement.ends_with('$') || statement.ends_with(';') {
+            statement.to_string()
+        } else {
+            format!("{}$", statement) // $ suppresses output in REDUCE
+        };
+        let c_stmt = CString::new(stmt)
+            .map_err(|e| format!("Invalid statement (contains null): {}", e))?;
+        OUTPUT_BUF.with(|buf| buf.borrow_mut().clear());
+        let rc = unsafe { ffi::reduce_ffi_process_statement(c_stmt.as_ptr()) };
+        OUTPUT_BUF.with(|buf| buf.borrow_mut().clear());
+        if rc != 0 && rc != -1 {
+            return Err(format!("Context eval failed (code {})", rc));
+        }
+        Ok(())
+    }
+
+    /// Simplify an expression after evaluating context statements.
+    /// Context statements (e.g. variable assignments) are evaluated silently first,
+    /// then the expression is simplified and its result returned.
+    pub fn simplify_with_context(
+        &self,
+        context: &[String],
+        expr: &str,
+    ) -> Result<String, String> {
+        for stmt in context {
+            self.eval_silent(stmt)?;
+        }
+        self.simplify(expr)
+    }
+
     /// Convenience: wrap an expression in `ws "expr";` to simplify it.
     /// Returns the simplified expression as a string.
     pub fn simplify(&self, expr: &str) -> Result<String, String> {

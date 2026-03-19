@@ -15,6 +15,8 @@ const MAX_OUTPUT_LEN: usize = 2000;
 /// A request to simplify an expression.
 pub struct ReduceRequest {
     pub cell_id: usize,
+    /// Context statements to evaluate silently before the expression (e.g. `a := x**2`).
+    pub context: Vec<String>,
     pub expression: String,
     pub request_id: u64,
 }
@@ -78,7 +80,7 @@ impl ReduceService {
 
     /// Submit a simplification request for a cell.
     /// Returns the request_id assigned.
-    pub fn submit(&mut self, cell_id: usize, expression: String) -> u64 {
+    pub fn submit(&mut self, cell_id: usize, context: Vec<String>, expression: String) -> u64 {
         let request_id = self.next_request_id;
         self.next_request_id += 1;
         self.latest_request.insert(cell_id, request_id);
@@ -86,6 +88,7 @@ impl ReduceService {
         // Try to send; if the worker is dead, attempt respawn once
         let req = ReduceRequest {
             cell_id,
+            context,
             expression,
             request_id,
         };
@@ -181,8 +184,8 @@ fn worker_loop(
 
     // Process requests until the channel is closed
     while let Ok(req) = req_rx.recv() {
-        log::debug!("REDUCE worker: cell_id={} expr={:?}", req.cell_id, req.expression);
-        let result = session.simplify(&req.expression);
+        log::debug!("REDUCE worker: cell_id={} context={:?} expr={:?}", req.cell_id, req.context, req.expression);
+        let result = session.simplify_with_context(&req.context, &req.expression);
         match &result {
             Ok(s) => log::debug!("REDUCE worker: result={:?}", s),
             Err(e) => log::warn!("REDUCE worker: error={:?}", e),
