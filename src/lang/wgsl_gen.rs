@@ -276,7 +276,8 @@ impl GenContext {
                 }
 
                 // Check if function body returns a tuple/vec (for vec4 color output)
-                let returns_vec = body_returns_tuple(body);
+                // Use result_is_vec which also checks calls to known vec-returning functions
+                let returns_vec = self.result_is_vec(body);
 
                 // Check if the body is a block with bindings or loops
                 let needs_imperative = match body.as_ref() {
