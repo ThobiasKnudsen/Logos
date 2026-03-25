@@ -68,6 +68,8 @@ pub struct CellInfo {
     pub selection: Option<(usize, usize)>,
     /// Output text to display below the cell (simplified result, error, etc.)
     pub output_text: Option<String>,
+    /// Whether this output is an error (for red coloring).
+    pub is_error: bool,
     /// Whether the output area is collapsed (hidden).
     pub output_collapsed: bool,
 }
@@ -172,6 +174,8 @@ pub struct Renderer {
     cell_output_buffers: Vec<TextBuffer>,
     /// Cached output text for dirty-checking.
     cell_output_texts: Vec<String>,
+    /// Whether each cell's output is an error (for red coloring).
+    cell_output_is_error: Vec<bool>,
     /// Computed cell layouts for hit-testing and rendering.
     cell_layouts: Vec<CellLayout>,
     /// Which cell is currently active (receives keyboard input).
@@ -373,6 +377,7 @@ impl Renderer {
             cell_texts: Vec::new(),
             cell_output_buffers: Vec::new(),
             cell_output_texts: Vec::new(),
+            cell_output_is_error: Vec::new(),
             cell_layouts: Vec::new(),
             active_cell_index: 0,
             cursor_content_pos: (0.0, 0.0, fonts::editor_line_height()),
@@ -529,6 +534,7 @@ impl Renderer {
         self.cached_tab_info.clear();
         self.cell_texts.clear();
         self.cell_output_texts.clear();
+        self.cell_output_is_error.clear();
 
         // Close any open dropdown/autocomplete since label sizes changed
         self.close_dropdown();
@@ -1022,6 +1028,7 @@ impl Renderer {
         }
         self.cell_output_buffers.truncate(cells.len());
         self.cell_output_texts.truncate(cells.len());
+        self.cell_output_is_error.resize(cells.len(), false);
 
         // Sync output scroll offsets
         while self.cell_output_scroll_x.len() < cells.len() {
@@ -1099,9 +1106,10 @@ impl Renderer {
                 .cell_output_texts
                 .get(i)
                 .map_or(true, |prev| prev != output_text_ref);
+            self.cell_output_is_error[i] = cell_info.is_error;
             if output_changed {
                 if has_output {
-                    // No width constraint — single line, no wrapping
+                    // No width constraint — no wrapping
                     self.cell_output_buffers[i].set_size(&mut self.font_system, None, None);
                     self.cell_output_buffers[i].set_text(
                         &mut self.font_system,
@@ -1126,9 +1134,10 @@ impl Renderer {
             // Output toolbar row height (visible when output exists)
             let output_toggle_h = if has_output { output_toggle_height() } else { 0.0 };
 
-            // Output height: fixed single line when expanded, 0 when collapsed
+            // Output height: dynamic based on line count when expanded, 0 when collapsed
             let output_h = if has_output && !cell_info.output_collapsed {
-                fonts::editor_line_height() + text_pad * 2.0
+                let line_count = output_text_ref.lines().count().max(1).min(10) as f32;
+                fonts::editor_line_height() * line_count + text_pad * 2.0
             } else {
                 0.0
             };
@@ -2027,7 +2036,7 @@ impl Renderer {
                 }
             }
 
-            // Output text (REDUCE result) below the toolbar
+            // Output text (REDUCE result or error) below the toolbar
             if cl.output.h > 0.0 && i < self.cell_output_buffers.len() {
                 let scroll_x = self
                     .cell_output_scroll_x
@@ -2038,6 +2047,9 @@ impl Renderer {
                 let clip_top = (cl.output.y as i32).max(pane_top);
                 let clip_right = ((cl.output.x + cl.output.w) as i32).min(pane_right);
                 let clip_bottom = ((cl.output.y + cl.output.h) as i32).min(pane_bottom);
+
+                let is_err = self.cell_output_is_error.get(i).copied().unwrap_or(false);
+                let output_color = if is_err { t.stop_button } else { t.text_muted };
 
                 if clip_left < clip_right && clip_top < clip_bottom {
                     text_areas.push(TextArea {
@@ -2051,7 +2063,7 @@ impl Renderer {
                             right: clip_right,
                             bottom: clip_bottom,
                         },
-                        default_color: t.text_muted.to_glyphon(),
+                        default_color: output_color.to_glyphon(),
                         custom_glyphs: &[],
                     });
                 }

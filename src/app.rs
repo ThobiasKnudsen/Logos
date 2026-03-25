@@ -24,6 +24,31 @@ const CAS_FUNCTIONS: &[&str] = &["\u{222B}(", "\u{2202}(", "\u{2146}(", "solve("
 
 /// Find the first CAS function call in `text` and return its byte range.
 ///
+/// Extract a human-readable message from a wgpu shader error.
+fn format_shader_error(raw: &str) -> String {
+    // Look for "no definition in scope for identifier: 'foo'" or similar key messages
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        // wgpu puts the core error on lines starting with lowercase after stripping
+        if trimmed.starts_with("no definition") || trimmed.starts_with("unknown") {
+            return format!("Shader error: {}", trimmed);
+        }
+    }
+    // Fallback: find lines with "error:" pattern from wgpu's diagnostic
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if let Some(pos) = trimmed.find("error: ") {
+            return format!("Shader error: {}", &trimmed[pos + 7..]);
+        }
+        if let Some(pos) = trimmed.find("parsing error: ") {
+            return format!("Shader error: {}", &trimmed[pos + 15..]);
+        }
+    }
+    // Last resort: first non-empty line
+    let first = raw.lines().find(|l| !l.trim().is_empty()).unwrap_or(raw);
+    format!("Shader error: {}", first.trim())
+}
+
 /// For `x > y*int(x^2, x)` returns `Some((6, 20))` spanning `int(x^2, x)`.
 /// Uses balanced-parenthesis matching. Respects word boundaries.
 fn find_cas_call(text: &str) -> Option<(usize, usize)> {
@@ -514,6 +539,7 @@ impl AppState {
                     CellOutput::Error(e) => Some(e.clone()),
                     CellOutput::None => None,
                 },
+                is_error: matches!(&c.output, CellOutput::Error(_)),
                 output_collapsed: c.output_collapsed,
             })
             .collect();
@@ -1153,7 +1179,7 @@ impl AppState {
                         Err(e) => {
                             log::error!("Shader compilation failed: {}", e);
                             let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
-                            cell.output = CellOutput::Error(format!("Shader: {}", e));
+                            cell.output = CellOutput::Error(format_shader_error(&e.to_string()));
                             cell.output_collapsed = false;
                         }
                     }
@@ -1161,7 +1187,7 @@ impl AppState {
                 Err(e) => {
                     log::error!("Language pipeline error: {}", e);
                     let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
-                    cell.output = CellOutput::Error(format!("Compile: {}", e));
+                    cell.output = CellOutput::Error(e);
                     cell.output_collapsed = false;
                 }
             }
@@ -1948,10 +1974,9 @@ impl ApplicationHandler for App {
                                             e
                                         );
                                         tab.cells[cell_idx].output =
-                                            CellOutput::Error(format!(
-                                                "Shader: {}",
-                                                e
-                                            ));
+                                            CellOutput::Error(
+                                                format_shader_error(&e.to_string())
+                                            );
                                         tab.cells[cell_idx].output_collapsed =
                                             false;
                                     }
@@ -1964,10 +1989,7 @@ impl ApplicationHandler for App {
                                         e
                                     );
                                     tab.cells[cell_idx].output =
-                                        CellOutput::Error(format!(
-                                            "Compile: {}",
-                                            e
-                                        ));
+                                        CellOutput::Error(e);
                                     tab.cells[cell_idx].output_collapsed = false;
                                 }
                             }
