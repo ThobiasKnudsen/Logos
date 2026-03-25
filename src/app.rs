@@ -1793,7 +1793,11 @@ impl ApplicationHandler for App {
                         state.tab_manager.active_tab_mut().active_cell_mut().buffer.delete()
                     }
                     Key::Named(NamedKey::Enter) => {
-                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.insert('\n');
+                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.insert_newline_auto_indent();
+                        true
+                    }
+                    Key::Named(NamedKey::Tab) => {
+                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.insert_tab();
                         true
                     }
                     Key::Named(NamedKey::ArrowLeft) => {

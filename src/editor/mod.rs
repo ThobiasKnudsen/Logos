@@ -110,6 +110,36 @@ impl Buffer {
         self.cursor += s.len();
     }
 
+    /// Insert a tab character, replacing any selection.
+    pub fn insert_tab(&mut self) {
+        self.insert('\t');
+    }
+
+    /// Insert a newline with auto-indentation based on bracket nesting depth.
+    /// Counts unmatched `(`, `[`, `{` before the cursor to determine indent level.
+    pub fn insert_newline_auto_indent(&mut self) {
+        self.delete_selection();
+        let depth = self.paren_depth_at_cursor();
+        let indent = "\t".repeat(depth);
+        let to_insert = format!("\n{}", indent);
+        self.text.insert_str(self.cursor, &to_insert);
+        self.cursor += to_insert.len();
+    }
+
+    /// Count the net nesting depth of brackets before the cursor.
+    fn paren_depth_at_cursor(&self) -> usize {
+        let before = &self.text[..self.cursor];
+        let mut depth: i32 = 0;
+        for ch in before.chars() {
+            match ch {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        depth.max(0) as usize
+    }
+
     pub fn backspace(&mut self) -> bool {
         if self.delete_selection() {
             return true;
