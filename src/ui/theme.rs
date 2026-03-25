@@ -1,11 +1,10 @@
 // Centralized visual theme — colors, spacing, fonts, syntax themes.
 //
-// Themes are loaded from `themes.json` next to the binary. The JSON uses a
-// compact format (~20 fields per theme); all other UI colors are derived.
+// Two built-in themes (Dark/Light) using the Catppuccin palette.
+// All UI colors are derived from a compact base set (~20 fields per theme).
 #![allow(dead_code)]
 
-use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------------------
 // Rgba — with hex-string JSON serialization ("#rrggbb" / "#rrggbbaa")
@@ -55,47 +54,24 @@ impl Rgba {
     }
 }
 
-impl Serialize for Rgba {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        if self.a == 255 {
-            s.serialize_str(&format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b))
-        } else {
-            s.serialize_str(&format!("#{:02x}{:02x}{:02x}{:02x}", self.r, self.g, self.b, self.a))
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Rgba {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(d)?;
-        let s = s.trim_start_matches('#');
-        let byte = |i: usize| u8::from_str_radix(&s[i..i + 2], 16).map_err(serde::de::Error::custom);
-        match s.len() {
-            6 => Ok(Rgba { r: byte(0)?, g: byte(2)?, b: byte(4)?, a: 255 }),
-            8 => Ok(Rgba { r: byte(0)?, g: byte(2)?, b: byte(4)?, a: byte(6)? }),
-            _ => Err(serde::de::Error::custom("expected #rrggbb or #rrggbbaa")),
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Color helpers
 // ---------------------------------------------------------------------------
 
-fn lighten(c: Rgba, n: u8) -> Rgba {
+const fn lighten(c: Rgba, n: u8) -> Rgba {
     Rgba::rgb(c.r.saturating_add(n), c.g.saturating_add(n), c.b.saturating_add(n))
 }
-fn darken(c: Rgba, n: u8) -> Rgba {
+const fn darken(c: Rgba, n: u8) -> Rgba {
     Rgba::rgb(c.r.saturating_sub(n), c.g.saturating_sub(n), c.b.saturating_sub(n))
 }
-fn mid(a: Rgba, b: Rgba) -> Rgba {
+const fn mid(a: Rgba, b: Rgba) -> Rgba {
     Rgba::rgb(
         ((a.r as u16 + b.r as u16) / 2) as u8,
         ((a.g as u16 + b.g as u16) / 2) as u8,
         ((a.b as u16 + b.b as u16) / 2) as u8,
     )
 }
-fn alpha(c: Rgba, a: u8) -> Rgba {
+const fn alpha(c: Rgba, a: u8) -> Rgba {
     Rgba::new(c.r, c.g, c.b, a)
 }
 
@@ -165,12 +141,10 @@ pub struct Theme {
 }
 
 // ---------------------------------------------------------------------------
-// JsonTheme — compact representation stored in themes.json
+// JsonTheme — compact base representation that derives all Theme colors
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonTheme {
-    pub name: String,
     // UI base (7 colors — everything else derived)
     pub primary_bg: Rgba,
     pub secondary_bg: Rgba,
@@ -198,8 +172,17 @@ pub struct JsonTheme {
     pub axis: Rgba,
 }
 
+/// In dark themes, "hover" lightens; in light themes it darkens.
+const fn hover(c: Rgba, n: u8, is_dark: bool) -> Rgba {
+    if is_dark { lighten(c, n) } else { darken(c, n) }
+}
+/// In dark themes, "muted" darkens; in light themes it lightens.
+const fn muted(c: Rgba, n: u8, is_dark: bool) -> Rgba {
+    if is_dark { darken(c, n) } else { lighten(c, n) }
+}
+
 impl JsonTheme {
-    pub fn to_theme(&self) -> Theme {
+    pub const fn to_theme(&self) -> Theme {
         let pb = self.primary_bg;
         let sb = self.secondary_bg;
         let tb = self.tertiary_bg;
@@ -213,19 +196,17 @@ impl JsonTheme {
 
         // Auto-detect dark vs light from background brightness
         let is_dark = (pb.r as u16 + pb.g as u16 + pb.b as u16) < 384;
-        let hover = |c: Rgba, n: u8| if is_dark { lighten(c, n) } else { darken(c, n) };
-        let muted = |c: Rgba, n: u8| if is_dark { darken(c, n) } else { lighten(c, n) };
 
         Theme {
             bg_primary:            pb,
             bg_secondary:          sb,
             bg_elevated:           tb,
-            bg_hover:              hover(tb, 12),
+            bg_hover:              hover(tb, 12, is_dark),
             border:                b1,
             border_focus:          ac,
             text_primary:          pt,
             text_secondary:        st,
-            text_muted:            muted(st, 20),
+            text_muted:            muted(st, 20, is_dark),
             accent_primary:        ac,
             accent_secondary:      gn,
             accent_info:           ac,
@@ -242,7 +223,7 @@ impl JsonTheme {
             axis_label:            st,
             toolbar_bg:            sb,
             toolbar_button:        tb,
-            toolbar_button_hover:  hover(tb, 12),
+            toolbar_button_hover:  hover(tb, 12, is_dark),
             toolbar_button_active: gn,
             split_handle:          b1,
             split_handle_hover:    b2,
@@ -253,12 +234,12 @@ impl JsonTheme {
             menu_item_hover:       tb,
             scrollbar_track:       alpha(sb, 120),
             scrollbar_thumb:       alpha(b2, 190),
-            scrollbar_thumb_hover: alpha(hover(b2, 20), 230),
+            scrollbar_thumb_hover: alpha(hover(b2, 20, is_dark), 230),
             cursor:                pt,
             play_button:           gn,
-            play_button_hover:     hover(gn, 25),
+            play_button_hover:     hover(gn, 25, is_dark),
             stop_button:           rd,
-            stop_button_hover:     hover(rd, 25),
+            stop_button_hover:     hover(rd, 25, is_dark),
             tooltip_bg:            sb,
             tooltip_border:        b1,
             keyword:               self.keyword,
@@ -279,148 +260,78 @@ impl JsonTheme {
 }
 
 // ---------------------------------------------------------------------------
-// Default themes (compiled-in, written to themes.json on first run)
+// Built-in themes (original UI + Catppuccin syntax)
 // ---------------------------------------------------------------------------
 
-fn default_themes() -> Vec<JsonTheme> {
-    vec![
-        JsonTheme {
-            name: "Dark".into(),
-            primary_bg: Rgba::hex(0x0f1116), secondary_bg: Rgba::hex(0x14171e),
-            tertiary_bg: Rgba::hex(0x1e2128), primary_text: Rgba::hex(0xabb2bf),
-            secondary_text: Rgba::hex(0xa0a8bc), primary_border: Rgba::hex(0x3a4050),
-            secondary_border: Rgba::hex(0x505868), render_bg: Rgba::hex(0x000000),
-            accent: Rgba::hex(0x61afef),
-            red: Rgba::hex(0xc43c32), green: Rgba::hex(0x4ba55f),
-            keyword: Rgba::hex(0xc678dd), identifier: Rgba::hex(0xe06c75),
-            math_variable: Rgba::hex(0xe5c07b), number: Rgba::hex(0xd19a66),
-            operator: Rgba::hex(0x56b6c2), string: Rgba::hex(0x98c379),
-            comment: Rgba::hex(0x5c6370), builtin: Rgba::hex(0x61afef),
-            type_name: Rgba::hex(0xe5c07b), axis: Rgba::hex(0xd19a66),
-        },
-        JsonTheme {
-            name: "Light".into(),
-            primary_bg: Rgba::hex(0xffffff), secondary_bg: Rgba::hex(0xf3f4f6),
-            tertiary_bg: Rgba::hex(0xe5e7eb), primary_text: Rgba::hex(0x1f2937),
-            secondary_text: Rgba::hex(0x6b7280), primary_border: Rgba::hex(0xd1d5db),
-            secondary_border: Rgba::hex(0x9ca3af), render_bg: Rgba::hex(0xffffff),
-            accent: Rgba::hex(0x2563eb),
-            red: Rgba::hex(0xdc2626), green: Rgba::hex(0x16a34a),
-            keyword: Rgba::hex(0x7c3aed), identifier: Rgba::hex(0x059669),
-            math_variable: Rgba::hex(0xdc2626), number: Rgba::hex(0xd97706),
-            operator: Rgba::hex(0x4b5563), string: Rgba::hex(0x16a34a),
-            comment: Rgba::hex(0x9ca3af), builtin: Rgba::hex(0x2563eb),
-            type_name: Rgba::hex(0x0891b2), axis: Rgba::hex(0xd97706),
-        },
-    ]
-}
+const THEMES: [Theme; 2] = [
+    // Dark — original UI, Catppuccin Mocha syntax
+    JsonTheme {
+        primary_bg: Rgba::hex(0x0f1116), secondary_bg: Rgba::hex(0x14171e),
+        tertiary_bg: Rgba::hex(0x1e2128), primary_text: Rgba::hex(0xabb2bf),
+        secondary_text: Rgba::hex(0xa0a8bc), primary_border: Rgba::hex(0x3a4050),
+        secondary_border: Rgba::hex(0x505868), render_bg: Rgba::hex(0x000000),
+        accent: Rgba::hex(0x61afef),
+        red: Rgba::hex(0xc43c32), green: Rgba::hex(0x4ba55f),
+        keyword: Rgba::hex(0xcba6f7), identifier: Rgba::hex(0xf2cdcd),
+        math_variable: Rgba::hex(0xf9e2af), number: Rgba::hex(0xfab387),
+        operator: Rgba::hex(0x89dceb), string: Rgba::hex(0xa6e3a1),
+        comment: Rgba::hex(0x6c7086), builtin: Rgba::hex(0x89b4fa),
+        type_name: Rgba::hex(0xf9e2af), axis: Rgba::hex(0xfab387),
+    }.to_theme(),
+    // Light — original UI, Catppuccin Latte syntax
+    JsonTheme {
+        primary_bg: Rgba::hex(0xffffff), secondary_bg: Rgba::hex(0xf3f4f6),
+        tertiary_bg: Rgba::hex(0xe5e7eb), primary_text: Rgba::hex(0x1f2937),
+        secondary_text: Rgba::hex(0x6b7280), primary_border: Rgba::hex(0xd1d5db),
+        secondary_border: Rgba::hex(0x9ca3af), render_bg: Rgba::hex(0xffffff),
+        accent: Rgba::hex(0x2563eb),
+        red: Rgba::hex(0xdc2626), green: Rgba::hex(0x16a34a),
+        keyword: Rgba::hex(0x8839ef), identifier: Rgba::hex(0xdd7878),
+        math_variable: Rgba::hex(0xdf8e1d), number: Rgba::hex(0xfe640b),
+        operator: Rgba::hex(0x04a5e5), string: Rgba::hex(0x40a02b),
+        comment: Rgba::hex(0x9ca0b0), builtin: Rgba::hex(0x1e66f5),
+        type_name: Rgba::hex(0xdf8e1d), axis: Rgba::hex(0xfe640b),
+    }.to_theme(),
+];
 
-// ---------------------------------------------------------------------------
-// Runtime theme store
-// ---------------------------------------------------------------------------
-
-struct ThemeStore {
-    names: Vec<String>,
-    themes: Vec<Theme>,
-}
-
-static THEME_STORE: OnceLock<Mutex<ThemeStore>> = OnceLock::new();
-
-fn store() -> &'static Mutex<ThemeStore> {
-    THEME_STORE.get_or_init(|| {
-        let json_themes = load_or_create_themes_json();
-        let names = json_themes.iter().map(|t| t.name.clone()).collect();
-        let themes = json_themes.iter().map(|t| t.to_theme()).collect();
-        Mutex::new(ThemeStore { names, themes })
-    })
-}
-
-fn themes_json_path() -> std::path::PathBuf {
-    std::env::current_exe()
-        .unwrap_or_default()
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("themes.json")
-}
-
-fn load_or_create_themes_json() -> Vec<JsonTheme> {
-    let path = themes_json_path();
-    if path.exists() {
-        if let Ok(json) = std::fs::read_to_string(&path) {
-            match serde_json::from_str::<Vec<JsonTheme>>(&json) {
-                Ok(t) if !t.is_empty() => {
-                    log::info!("Loaded {} themes from {}", t.len(), path.display());
-                    return t;
-                }
-                Ok(_) => log::warn!("themes.json is empty, using defaults"),
-                Err(e) => log::warn!("Failed to parse themes.json: {e}, using defaults"),
-            }
-        }
-    }
-    let defaults = default_themes();
-    if let Ok(json) = serde_json::to_string_pretty(&defaults) {
-        if let Err(e) = std::fs::write(&path, &json) {
-            log::warn!("Failed to write themes.json: {e}");
-        } else {
-            log::info!("Created themes.json at {}", path.display());
-        }
-    }
-    defaults
-}
+const THEME_NAMES: [&str; 2] = ["Dark", "Light"];
 
 // ---------------------------------------------------------------------------
 // Active theme selection + public API
 // ---------------------------------------------------------------------------
 
+static CURRENT_THEME: AtomicUsize = AtomicUsize::new(0);
+
 mod theme_state {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static CURRENT: AtomicUsize = AtomicUsize::new(0);
-    pub fn index() -> usize { CURRENT.load(Ordering::Relaxed) }
-    pub fn set(i: usize) { CURRENT.store(i, Ordering::Relaxed); }
+    use super::*;
+    pub fn index() -> usize { CURRENT_THEME.load(Ordering::Relaxed) }
+    pub fn set(i: usize) { CURRENT_THEME.store(i, Ordering::Relaxed); }
 }
 
 pub fn theme() -> &'static Theme {
-    let s = store().lock().unwrap();
-    let idx = theme_state::index().min(s.themes.len() - 1);
-    unsafe { &*(&s.themes[idx] as *const Theme) }
+    &THEMES[theme_state::index()]
 }
 
 pub fn active_theme_name() -> String {
-    let s = store().lock().unwrap();
-    let idx = theme_state::index().min(s.names.len() - 1);
-    s.names[idx].clone()
+    THEME_NAMES[theme_state::index()].to_string()
 }
 
 pub fn theme_names() -> Vec<String> {
-    store().lock().unwrap().names.clone()
+    THEME_NAMES.iter().map(|s| s.to_string()).collect()
 }
 
 pub fn cycle_theme() -> String {
-    let s = store().lock().unwrap();
-    let next = (theme_state::index() + 1) % s.themes.len();
+    let next = (theme_state::index() + 1) % THEMES.len();
     theme_state::set(next);
-    s.names[next].clone()
+    THEME_NAMES[next].to_string()
 }
 
 pub fn set_theme(idx: usize) {
-    let s = store().lock().unwrap();
-    if idx < s.themes.len() { theme_state::set(idx); }
+    if idx < THEMES.len() { theme_state::set(idx); }
 }
 
 pub fn theme_count() -> usize {
-    store().lock().unwrap().themes.len()
-}
-
-pub fn reload_themes() -> usize {
-    let jt = load_or_create_themes_json();
-    let names: Vec<String> = jt.iter().map(|t| t.name.clone()).collect();
-    let count = names.len();
-    let themes = jt.iter().map(|t| t.to_theme()).collect();
-    let mut s = store().lock().unwrap();
-    s.names = names;
-    s.themes = themes;
-    if theme_state::index() >= count { theme_state::set(0); }
-    count
+    THEMES.len()
 }
 
 // ---------------------------------------------------------------------------
@@ -436,7 +347,7 @@ pub mod spacing {
     pub const MENU_HEIGHT: f32 = 28.0;
     pub const TAB_HEIGHT: f32 = 36.0;
     pub const STATUS_HEIGHT: f32 = 24.0;
-    pub const SPLIT_HANDLE_WIDTH: f32 = 6.0;
+    pub const SPLIT_HANDLE_WIDTH: f32 = 2.4;
     pub const WINDOW_CONTROL_WIDTH: f32 = 46.0;
     pub const DROPDOWN_ITEM_HEIGHT: f32 = 28.0;
     pub const DROPDOWN_PADDING: f32 = 4.0;

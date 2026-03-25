@@ -1808,6 +1808,28 @@ impl Renderer {
             }
         }
 
+        // Line between tab bar and content area (drawn after tab backgrounds)
+        ui_rects.push(RectInstance {
+            x: 0.0,
+            y: layout.tab_bar.y + layout.tab_bar.h,
+            w: sw,
+            h: 1.0,
+            color: t.border.to_f32_array(),
+            corner_radius: 0.0,
+            _padding: [0.0; 3],
+        });
+
+        // Line above status bar
+        ui_rects.push(RectInstance {
+            x: 0.0,
+            y: layout.status_bar.y,
+            w: sw,
+            h: 1.0,
+            color: t.border.to_f32_array(),
+            corner_radius: 0.0,
+            _padding: [0.0; 3],
+        });
+
         // Plus button (tab bar)
         let plus_color = if hover == HoverTarget::PlusButton {
             t.tab_hover
@@ -2098,7 +2120,7 @@ impl Renderer {
                         top: cy,
                         scale: 1.0,
                         bounds,
-                        default_color: t.text_primary.to_glyphon(),
+                        default_color: GlyphonColor::rgb(255, 255, 255),
                         custom_glyphs: &[],
                     });
                 }
@@ -2131,7 +2153,7 @@ impl Renderer {
                             top: cy,
                             scale: 1.0,
                             bounds,
-                            default_color: t.text_muted.to_glyphon(),
+                            default_color: GlyphonColor::rgb(255, 255, 255),
                             custom_glyphs: &[],
                         });
                     }
@@ -2164,7 +2186,7 @@ impl Renderer {
                         top: cy,
                         scale: 1.0,
                         bounds,
-                        default_color: t.text_muted.to_glyphon(),
+                        default_color: GlyphonColor::rgb(255, 255, 255),
                         custom_glyphs: &[],
                     });
                 }
@@ -2235,7 +2257,7 @@ impl Renderer {
                     top: cy,
                     scale: 1.0,
                     bounds,
-                    default_color: t.text_muted.to_glyphon(),
+                    default_color: GlyphonColor::rgb(255, 255, 255),
                     custom_glyphs: &[],
                 });
             }
@@ -2549,11 +2571,7 @@ impl Renderer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
-        // Build axis overlay rects (grid lines + label backing rects)
-        let mut axis_rects: Vec<RectInstance> = Vec::new();
-        let label_h = fonts::small_size() * 1.4;
-
-        // Grid lines at every tick position
+        // Grid lines at every tick position (rendered in Pass 1, behind shader plots)
         let grid_color = theme::theme().graph_grid.to_f32_array();
         let zero_color = {
             let g = theme::theme().graph_grid;
@@ -2565,7 +2583,7 @@ impl Renderer {
                 let sx = rp.x + t * rp.w;
                 if sx >= rp.x && sx <= rp.x + rp.w {
                     let is_zero = tick.abs() < f32::EPSILON;
-                    axis_rects.push(RectInstance {
+                    ui_rects.push(RectInstance {
                         x: if is_zero { sx - 0.5 } else { sx },
                         y: rp.y,
                         w: if is_zero { 2.0 } else { 1.0 },
@@ -2582,7 +2600,7 @@ impl Renderer {
                 let sy = rp.y + rp.h - t * rp.h;
                 if sy >= rp.y && sy <= rp.y + rp.h {
                     let is_zero = tick.abs() < f32::EPSILON;
-                    axis_rects.push(RectInstance {
+                    ui_rects.push(RectInstance {
                         x: rp.x,
                         y: if is_zero { sy - 0.5 } else { sy },
                         w: rp.w,
@@ -2593,6 +2611,10 @@ impl Renderer {
                 }
             }
         }
+
+        // Build axis overlay rects (label backing rects — rendered in Pass 3, on top of plots)
+        let axis_rects: Vec<RectInstance> = Vec::new();
+        let label_h = fonts::small_size() * 1.4;
 
         // Label backing rects + text areas (on-plot, with semi-transparent bg)
         let mut axis_text_areas: Vec<TextArea> = Vec::new();
