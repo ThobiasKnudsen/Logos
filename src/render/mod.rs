@@ -293,7 +293,7 @@ impl Renderer {
         let swapchain_format = caps
             .formats
             .iter()
-            .find(|f| f.is_srgb())
+            .find(|f| !f.is_srgb())
             .copied()
             .unwrap_or(caps.formats[0]);
         let surface_config = SurfaceConfiguration {

@@ -22,11 +22,12 @@ use super::token::{Token, TokenType};
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    source: String,
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+    pub fn new(tokens: Vec<Token>, source: String) -> Self {
+        Self { tokens, pos: 0, source }
     }
 
     pub fn parse(&mut self) -> Result<AstNode, String> {
@@ -359,9 +360,9 @@ impl Parser {
                                 property: prop,
                             };
                         }
-                        _ => return Err(format!(
-                            "Expected property name after '.', found {:?} at position {}",
-                            self.peek().ty, self.peek().span.0
+                        _ => return Err(super::format_error_at(
+                            &self.source, self.peek().span.0,
+                            &format!("Expected property name after '.', found {}", self.peek().ty),
                         )),
                     }
                 }
@@ -538,7 +539,10 @@ impl Parser {
                 }
             }
             _ => {
-                Err(format!("Unexpected token {:?} at position {}", self.peek().ty, self.peek().span.0))
+                Err(super::format_error_at(
+                    &self.source, self.peek().span.0,
+                    &format!("Unexpected token {}", self.peek().ty),
+                ))
             }
         }
     }
@@ -608,11 +612,9 @@ impl Parser {
             self.advance();
             Ok(())
         } else {
-            Err(format!(
-                "Expected {:?}, found {:?} at position {}",
-                expected,
-                self.peek().ty,
-                self.peek().span.0,
+            Err(super::format_error_at(
+                &self.source, self.peek().span.0,
+                &format!("Expected {}, found {}", expected, self.peek().ty),
             ))
         }
     }
@@ -654,7 +656,7 @@ mod tests {
     fn parse(input: &str) -> AstNode {
         let mut lexer = Lexer::new(input);
         let tokens = lexer.tokenize().unwrap();
-        let mut parser = Parser::new(tokens);
+        let mut parser = Parser::new(tokens, input.to_string());
         parser.parse().unwrap()
     }
 

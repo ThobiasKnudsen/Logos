@@ -235,7 +235,7 @@ impl<'a> Lexer<'a> {
             return Ok(Token { ty: TokenType::Identifier("\\".to_string()), span: (start, self.pos) });
         }
 
-        Err(format!("Unexpected character '{}' at position {}", ch, start))
+        Err(super::format_error_at(self.input, start, &format!("Unexpected character '{}'", ch)))
     }
 
     fn try_two_char_op(&mut self) -> Option<TokenType> {

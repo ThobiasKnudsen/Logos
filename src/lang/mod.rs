@@ -6,12 +6,44 @@ pub mod wgsl_gen;
 pub mod highlight;
 pub mod reduce;
 
+/// Convert a byte offset in source to (line, col) — both 1-based.
+pub(crate) fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
+    let offset = offset.min(source.len());
+    let mut line = 1;
+    let mut line_start = 0;
+    for (i, ch) in source.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            line_start = i + 1;
+        }
+    }
+    let col = source[line_start..offset].chars().count() + 1;
+    (line, col)
+}
+
+/// Format a rich error message with source context and caret.
+pub(crate) fn format_error_at(source: &str, offset: usize, message: &str) -> String {
+    let (line, col) = offset_to_line_col(source, offset);
+    let source_line = source.lines().nth(line - 1).unwrap_or("");
+    let line_str = line.to_string();
+    let pad = " ".repeat(line_str.len());
+    format!(
+        "Line {}, Col {}: {}\n  {} | {}\n  {} | {}^",
+        line, col, message,
+        line_str, source_line,
+        pad, " ".repeat(col.saturating_sub(1))
+    )
+}
+
 /// Compile source code through the full pipeline: lex → parse → WGSL gen.
 /// Returns the complete WGSL shader source string.
 pub fn compile(source: &str) -> Result<String, String> {
     let mut lex = lexer::Lexer::new(source);
     let tokens = lex.tokenize()?;
-    let mut parser = parser::Parser::new(tokens);
+    let mut parser = parser::Parser::new(tokens, source.to_string());
     let ast = parser.parse()?;
     wgsl_gen::generate(&ast)
 }

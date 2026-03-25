@@ -511,7 +511,7 @@ impl AppState {
                 selection: c.buffer.selection_range(),
                 output_text: match &c.output {
                     CellOutput::Simplified(s) => Some(s.clone()),
-                    CellOutput::Error(e) => Some(format!("Error: {}", e)),
+                    CellOutput::Error(e) => Some(e.clone()),
                     CellOutput::None => None,
                 },
                 output_collapsed: c.output_collapsed,
@@ -823,7 +823,7 @@ impl AppState {
             // Try to parse and extract user symbols (best-effort)
             let mut lex = crate::lang::lexer::Lexer::new(text);
             if let Ok(tokens) = lex.tokenize() {
-                let mut parser = crate::lang::parser::Parser::new(tokens);
+                let mut parser = crate::lang::parser::Parser::new(tokens, text.to_string());
                 if let Ok(ast) = parser.parse() {
                     all.extend(autocomplete::extract_user_symbols(&ast));
                 }
@@ -1665,7 +1665,7 @@ impl ApplicationHandler for App {
                     HoverTarget::CellOutputCopyButton(i) => {
                         let output_text = match &state.tab_manager.active_tab().cells[i].output {
                             CellOutput::None => String::new(),
-                            CellOutput::Error(e) => format!("Error: {}", e),
+                            CellOutput::Error(e) => e.clone(),
                             CellOutput::Simplified(s) => s.clone(),
                         };
                         if let Some(cb) = state.clipboard.as_mut() {

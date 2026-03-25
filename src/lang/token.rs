@@ -1,3 +1,5 @@
+use std::fmt;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenType {
     // Literals
@@ -57,6 +59,53 @@ pub enum TokenType {
 
     // Special
     Eof,
+}
+
+impl fmt::Display for TokenType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TokenType::Number(n) => write!(f, "{n}"),
+            TokenType::Identifier(s) => write!(f, "'{s}'"),
+            TokenType::BoolLit(b) => write!(f, "{b}"),
+            TokenType::If => write!(f, "'if'"),
+            TokenType::Else => write!(f, "'else'"),
+            TokenType::For => write!(f, "'for'"),
+            TokenType::While => write!(f, "'while'"),
+            TokenType::And => write!(f, "'and'"),
+            TokenType::Or => write!(f, "'or'"),
+            TokenType::Not => write!(f, "'not'"),
+            TokenType::TypeF32 => write!(f, "'f32'"),
+            TokenType::TypeF64 => write!(f, "'f64'"),
+            TokenType::TypeI32 => write!(f, "'i32'"),
+            TokenType::TypeVec2 => write!(f, "'vec2'"),
+            TokenType::TypeVec3 => write!(f, "'vec3'"),
+            TokenType::TypeVec4 => write!(f, "'vec4'"),
+            TokenType::TypeBool => write!(f, "'bool'"),
+            TokenType::Builtin(s) => write!(f, "'{s}'"),
+            TokenType::AxisVar(s) => write!(f, "'{s}'"),
+            TokenType::Plus => write!(f, "'+'"),
+            TokenType::Minus => write!(f, "'-'"),
+            TokenType::Star => write!(f, "'*'"),
+            TokenType::Slash => write!(f, "'/'"),
+            TokenType::Percent => write!(f, "'%'"),
+            TokenType::Caret => write!(f, "'^'"),
+            TokenType::Eq => write!(f, "'='"),
+            TokenType::Neq => write!(f, "'!='"),
+            TokenType::Lt => write!(f, "'<'"),
+            TokenType::Gt => write!(f, "'>'"),
+            TokenType::Lte => write!(f, "'<='"),
+            TokenType::Gte => write!(f, "'>='"),
+            TokenType::Colon => write!(f, "':'"),
+            TokenType::LParen => write!(f, "'('"),
+            TokenType::RParen => write!(f, "')'"),
+            TokenType::LBracket => write!(f, "'['"),
+            TokenType::RBracket => write!(f, "']'"),
+            TokenType::Comma => write!(f, "','"),
+            TokenType::Dot => write!(f, "'.'"),
+            TokenType::Newline => write!(f, "newline"),
+            TokenType::Eof => write!(f, "end of input"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

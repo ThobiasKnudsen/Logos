@@ -103,7 +103,7 @@ fn compile_stages(source: &str) -> String {
     eprintln!("  lex: {} tokens", tokens.len());
 
     // Stage 2: Parse
-    let mut parser = crate::lang::parser::Parser::new(tokens);
+    let mut parser = crate::lang::parser::Parser::new(tokens, source.to_string());
     let ast = parser.parse().unwrap_or_else(|e| {
         panic!("PARSER FAILED\n  source: {:?}\n  error: {}", source, e)
     });
@@ -318,7 +318,7 @@ fn test_incremental_nested_functions() {
         let mut lexer = crate::lang::lexer::Lexer::new(&source);
         let tokens = lexer.tokenize();
         assert!(tokens.is_ok(), "Lex failed at cell {}: {:?}", i, tokens.err());
-        let mut parser = crate::lang::parser::Parser::new(tokens.unwrap());
+        let mut parser = crate::lang::parser::Parser::new(tokens.unwrap(), source.clone());
         let ast = parser.parse();
         assert!(ast.is_ok(), "Parse failed at cell {}: {:?}", i, ast.err());
     }
