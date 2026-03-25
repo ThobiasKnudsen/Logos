@@ -24,19 +24,37 @@ const CAS_FUNCTIONS: &[&str] = &["\u{222B}(", "\u{2202}(", "\u{2146}(", "solve("
 
 /// Find the first CAS function call in `text` and return its byte range.
 ///
-/// Extract a human-readable message from a wgpu shader error.
-fn format_shader_error(raw: &str) -> String {
-    // Look for "no definition in scope for identifier: 'foo'" or similar key messages
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        // wgpu puts the core error on lines starting with lowercase after stripping
-        if trimmed.starts_with("no definition") || trimmed.starts_with("unknown") {
-            return format!("Shader error: {}", trimmed);
+/// Extract a human-readable message from a wgpu shader error,
+/// locating the problematic identifier in the user's source if possible.
+fn format_shader_error(raw: &str, source: &str) -> String {
+    // Try to extract the undefined identifier name from wgpu's error
+    // Pattern: "no definition in scope for identifier: 'foo'"
+    let ident = raw.lines().find_map(|line| {
+        let t = line.trim();
+        if t.starts_with("no definition in scope for identifier:") {
+            // Extract the name between quotes
+            t.rsplit('\'').nth(1).map(|s| s.to_string())
+        } else {
+            None
         }
+    });
+
+    if let Some(ref name) = ident {
+        // Search for the identifier in the user's source to get line:col
+        // Look for it as a word boundary match
+        if let Some(offset) = find_ident_offset(source, name) {
+            let msg = format!("Undefined function or variable '{}'", name);
+            return crate::lang::format_error_at(source, offset, &msg);
+        }
+        return format!("Undefined function or variable '{}'", name);
     }
+
     // Fallback: find lines with "error:" pattern from wgpu's diagnostic
     for line in raw.lines() {
         let trimmed = line.trim();
+        if trimmed.starts_with("no definition") || trimmed.starts_with("unknown") {
+            return format!("Shader error: {}", trimmed);
+        }
         if let Some(pos) = trimmed.find("error: ") {
             return format!("Shader error: {}", &trimmed[pos + 7..]);
         }
@@ -47,6 +65,26 @@ fn format_shader_error(raw: &str) -> String {
     // Last resort: first non-empty line
     let first = raw.lines().find(|l| !l.trim().is_empty()).unwrap_or(raw);
     format!("Shader error: {}", first.trim())
+}
+
+/// Find the byte offset of an identifier in source (word-boundary aware).
+fn find_ident_offset(source: &str, name: &str) -> Option<usize> {
+    let mut start = 0;
+    while let Some(pos) = source[start..].find(name) {
+        let abs = start + pos;
+        let before_ok = abs == 0
+            || !source.as_bytes()[abs - 1].is_ascii_alphanumeric()
+                && source.as_bytes()[abs - 1] != b'_';
+        let end = abs + name.len();
+        let after_ok = end >= source.len()
+            || !source.as_bytes()[end].is_ascii_alphanumeric()
+                && source.as_bytes()[end] != b'_';
+        if before_ok && after_ok {
+            return Some(abs);
+        }
+        start = abs + 1;
+    }
+    None
 }
 
 /// For `x > y*int(x^2, x)` returns `Some((6, 20))` spanning `int(x^2, x)`.
@@ -1173,13 +1211,14 @@ impl AppState {
                     let cell_id = tab.cells[cell_index].id;
                     match self.renderer.compile_cell_shader(cell_id, &wgsl) {
                         Ok(()) => {
-                            self.tab_manager.active_tab_mut().cells[cell_index].is_playing =
-                                true;
+                            let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+                            cell.is_playing = true;
+                            cell.output = CellOutput::None;
                         }
                         Err(e) => {
                             log::error!("Shader compilation failed: {}", e);
                             let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
-                            cell.output = CellOutput::Error(format_shader_error(&e.to_string()));
+                            cell.output = CellOutput::Error(format_shader_error(&e.to_string(), &source));
                             cell.output_collapsed = false;
                         }
                     }
@@ -1971,6 +2010,7 @@ impl ApplicationHandler for App {
                                 {
                                     Ok(()) => {
                                         tab.cells[cell_idx].is_playing = true;
+                                        tab.cells[cell_idx].output = CellOutput::None;
                                     }
                                     Err(e) => {
                                         log::error!(
@@ -1979,7 +2019,7 @@ impl ApplicationHandler for App {
                                         );
                                         tab.cells[cell_idx].output =
                                             CellOutput::Error(
-                                                format_shader_error(&e.to_string())
+                                                format_shader_error(&e.to_string(), &source)
                                             );
                                         tab.cells[cell_idx].output_collapsed =
                                             false;

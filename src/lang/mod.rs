@@ -25,7 +25,7 @@ pub(crate) fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) 
 }
 
 /// Format a rich error message with source context and caret.
-pub(crate) fn format_error_at(source: &str, offset: usize, message: &str) -> String {
+pub fn format_error_at(source: &str, offset: usize, message: &str) -> String {
     let (line, col) = offset_to_line_col(source, offset);
     let source_line = source.lines().nth(line - 1).unwrap_or("");
     let line_str = line.to_string();
