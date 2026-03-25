@@ -2553,14 +2553,23 @@ impl Renderer {
         let label_h = fonts::small_size() * 1.4;
 
         // Grid lines at every tick position
+        let grid_color = theme::theme().graph_grid.to_f32_array();
+        let zero_color = {
+            let g = theme::theme().graph_grid;
+            Rgba::new(g.r, g.g, g.b, (g.a as u16 * 2).min(255) as u8).to_f32_array()
+        };
         if x_range > f32::EPSILON {
             for tick in &x_ticks {
                 let t = (tick - render_area.axis_x_min) / x_range;
                 let sx = rp.x + t * rp.w;
                 if sx >= rp.x && sx <= rp.x + rp.w {
+                    let is_zero = tick.abs() < f32::EPSILON;
                     axis_rects.push(RectInstance {
-                        x: sx, y: rp.y, w: 1.0, h: rp.h,
-                        color: theme::theme().graph_grid.to_f32_array(),
+                        x: if is_zero { sx - 0.5 } else { sx },
+                        y: rp.y,
+                        w: if is_zero { 2.0 } else { 1.0 },
+                        h: rp.h,
+                        color: if is_zero { zero_color } else { grid_color },
                         corner_radius: 0.0, _padding: [0.0; 3],
                     });
                 }
@@ -2571,9 +2580,13 @@ impl Renderer {
                 let t = (tick - render_area.axis_y_min) / y_range;
                 let sy = rp.y + rp.h - t * rp.h;
                 if sy >= rp.y && sy <= rp.y + rp.h {
+                    let is_zero = tick.abs() < f32::EPSILON;
                     axis_rects.push(RectInstance {
-                        x: rp.x, y: sy, w: rp.w, h: 1.0,
-                        color: theme::theme().graph_grid.to_f32_array(),
+                        x: rp.x,
+                        y: if is_zero { sy - 0.5 } else { sy },
+                        w: rp.w,
+                        h: if is_zero { 2.0 } else { 1.0 },
+                        color: if is_zero { zero_color } else { grid_color },
                         corner_radius: 0.0, _padding: [0.0; 3],
                     });
                 }
