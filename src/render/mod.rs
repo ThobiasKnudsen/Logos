@@ -1003,10 +1003,11 @@ impl Renderer {
 
         // Sync cell_buffers count with cells count
         while self.cell_buffers.len() < cells.len() {
-            let buf = TextBuffer::new(
+            let mut buf = TextBuffer::new(
                 &mut self.font_system,
                 Metrics::new(fonts::editor_size(), fonts::editor_line_height()),
             );
+            buf.set_tab_width(&mut self.font_system, 4);
             self.cell_buffers.push(buf);
         }
         self.cell_buffers.truncate(cells.len());
