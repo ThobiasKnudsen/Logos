@@ -326,7 +326,7 @@ pub(crate) struct MenuItemDef {
     pub shortcut: &'static str,
 }
 
-pub(crate) const MENU_NAMES: &[&str] = &["File", "Edit", "View", "Theme", "Help"];
+pub(crate) const MENU_NAMES: &[&str] = &["File", "Edit", "View", "Examples", "Theme", "Help"];
 
 const MENU_FILE_ITEMS: &[MenuItemDef] = &[
     MenuItemDef { label: "New Tab", shortcut: "Ctrl+N" },
@@ -348,6 +348,20 @@ const MENU_VIEW_ITEMS: &[MenuItemDef] = &[
     MenuItemDef { label: "Zoom In", shortcut: "Ctrl+=" },
     MenuItemDef { label: "Zoom Out", shortcut: "Ctrl+-" },
     MenuItemDef { label: "Reset Zoom", shortcut: "Ctrl+0" },
+];
+
+const MENU_EXAMPLES_ITEMS: &[MenuItemDef] = &[
+    MenuItemDef { label: "Gradient", shortcut: "" },
+    MenuItemDef { label: "Ripple", shortcut: "" },
+    MenuItemDef { label: "Mandelbrot", shortcut: "" },
+    MenuItemDef { label: "Warp", shortcut: "" },
+];
+
+const EXAMPLE_SOURCES: &[&str] = &[
+    include_str!("../examples/gradient.txt"),
+    include_str!("../examples/ripple.txt"),
+    include_str!("../examples/mandlebrot.txt"),
+    include_str!("../examples/warp.txt"),
 ];
 
 /// Dynamic theme menu items built from themes.json at runtime.
@@ -385,7 +399,8 @@ pub(crate) fn menu_items(index: usize) -> &'static [MenuItemDef] {
         0 => MENU_FILE_ITEMS,
         1 => MENU_EDIT_ITEMS,
         2 => MENU_VIEW_ITEMS,
-        // Theme menu handled separately via theme_menu_count / theme_menu_label
+        3 => MENU_EXAMPLES_ITEMS,
+        // Theme menu (4) handled separately via theme_menu_count / theme_menu_label
         _ => &[],
     }
 }
@@ -833,8 +848,8 @@ impl AppState {
             return;
         }
         let menu_rect = self.menu_item_rects[index];
-        // Theme menu (index 3) highlights the currently active theme
-        let active_item = if index == 3 {
+        // Theme menu (index 4) highlights the currently active theme
+        let active_item = if index == 4 {
             Some(active_theme_index())
         } else {
             None
@@ -983,8 +998,18 @@ impl AppState {
             (2, 0) => { self.do_zoom(|_| fonts::zoom_in()); }
             (2, 1) => { self.do_zoom(|_| fonts::zoom_out()); }
             (2, 2) => { self.do_zoom(|_| fonts::reset_zoom()); }
+            // Examples menu — load built-in example into a new tab
+            (3, i) => {
+                if let Some(&src) = EXAMPLE_SOURCES.get(i) {
+                    let name = MENU_EXAMPLES_ITEMS.get(i).map(|m| m.label).unwrap_or("Example");
+                    self.tab_manager.new_tab();
+                    self.tab_manager.active_tab_mut().name = name.to_string();
+                    self.tab_manager.active_tab_mut().active_cell_mut().buffer.set_text(src);
+                    self.sync_active_tab();
+                }
+            }
             // Theme menu — each item selects a theme by index
-            (3, i) => { self.select_theme(i); }
+            (4, i) => { self.select_theme(i); }
             _ => {}
         }
     }

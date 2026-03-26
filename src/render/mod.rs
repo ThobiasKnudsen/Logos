@@ -591,7 +591,7 @@ impl Renderer {
     ) -> Vec<Rect> {
         // Build label/shortcut pairs — theme menu (index 3) is dynamic from JSON
         let static_items: &[MenuItemDef] = app::menu_items(menu_index);
-        let is_theme_menu = menu_index == 3;
+        let is_theme_menu = menu_index == 4;
         let item_count = if is_theme_menu {
             app::theme_menu_count()
         } else {
