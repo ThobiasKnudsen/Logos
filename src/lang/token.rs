@@ -15,6 +15,8 @@ pub enum TokenType {
     And,
     Or,
     Not,
+    Parallel,
+    In,
 
     // Types
     TypeF32,
@@ -46,7 +48,7 @@ pub enum TokenType {
     Gte,        // >=
 
     // Binding
-    Colon,      // : (binding/definition operator)
+    Colon,      // := (binding/definition operator)
 
     // Punctuation
     LParen,
@@ -55,6 +57,7 @@ pub enum TokenType {
     RBracket,
     Comma,
     Dot,
+    DotDot,     // .. (range)
     Newline,    // Statement separator at top level
 
     // Special
@@ -74,6 +77,8 @@ impl fmt::Display for TokenType {
             TokenType::And => write!(f, "'and'"),
             TokenType::Or => write!(f, "'or'"),
             TokenType::Not => write!(f, "'not'"),
+            TokenType::Parallel => write!(f, "'parallel'"),
+            TokenType::In => write!(f, "'in'"),
             TokenType::TypeF32 => write!(f, "'f32'"),
             TokenType::TypeF64 => write!(f, "'f64'"),
             TokenType::TypeI32 => write!(f, "'i32'"),
@@ -95,13 +100,14 @@ impl fmt::Display for TokenType {
             TokenType::Gt => write!(f, "'>'"),
             TokenType::Lte => write!(f, "'<='"),
             TokenType::Gte => write!(f, "'>='"),
-            TokenType::Colon => write!(f, "':'"),
+            TokenType::Colon => write!(f, "':='"),
             TokenType::LParen => write!(f, "'('"),
             TokenType::RParen => write!(f, "')'"),
             TokenType::LBracket => write!(f, "'['"),
             TokenType::RBracket => write!(f, "']'"),
             TokenType::Comma => write!(f, "','"),
             TokenType::Dot => write!(f, "'.'"),
+            TokenType::DotDot => write!(f, "'..'"),
             TokenType::Newline => write!(f, "newline"),
             TokenType::Eof => write!(f, "end of input"),
         }

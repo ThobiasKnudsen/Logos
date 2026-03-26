@@ -19,6 +19,22 @@ use crate::ui::layout::{LayoutResult, Rect, UiLayout};
 use crate::render::RenderAreaParams;
 use crate::ui::theme::{self, fonts, spacing, split};
 
+// ---------------------------------------------------------------------------
+// GPU dispatch adapter for the interpreter
+// ---------------------------------------------------------------------------
+
+/// Bridges the interpreter's GpuDispatch trait to the real wgpu compute pipeline.
+struct WgpuGpuDispatch<'a> {
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+}
+
+impl<'a> lang::interpreter::GpuDispatch for WgpuGpuDispatch<'a> {
+    fn dispatch(&self, request: &lang::interpreter::ParallelForRequest) -> Result<Vec<(String, Vec<f64>)>, String> {
+        crate::render::compute_pipeline::dispatch(self.device, self.queue, request)
+    }
+}
+
 /// CAS function names that REDUCE handles but WGSL doesn't.
 const CAS_FUNCTIONS: &[&str] = &["\u{222B}(", "\u{2202}(", "\u{2146}(", "solve(", "integral(", "derivative("];
 
@@ -221,7 +237,7 @@ fn collect_bindings(
     // From preceding cells
     for cell in cells.iter().take(up_to) {
         let src = match &cell.output {
-            CellOutput::Simplified(s) => s.as_str(),
+            CellOutput::Simplified(s) | CellOutput::Computed(s) => s.as_str(),
             _ => cell.buffer.text(),
         };
         extract_binding(src.trim(), &mut bindings);
@@ -588,7 +604,7 @@ impl AppState {
                 is_playing: c.is_playing,
                 selection: c.buffer.selection_range(),
                 output_text: match &c.output {
-                    CellOutput::Simplified(s) => Some(s.clone()),
+                    CellOutput::Simplified(s) | CellOutput::Computed(s) => Some(s.clone()),
                     CellOutput::Error(e) => Some(e.clone()),
                     CellOutput::None => None,
                 },
@@ -1190,47 +1206,79 @@ impl AppState {
             || self.is_dragging_editor
     }
 
-    /// Compile and start playing a cell's shader.
+    /// Compile and start playing a cell's shader, or run the interpreter
+    /// for array/parallel-for code.
     ///
-    /// If the cell contains CAS functions (int, solve, df), submit to REDUCE
-    /// first — the shader will be compiled from the simplified result.
-    /// Otherwise compile WGSL immediately.
+    /// Routing:
+    /// - If AST contains arrays/parallel for → interpreter (one-shot, result as text)
+    /// - If CAS functions present → REDUCE first, then shader
+    /// - Otherwise → fragment shader (continuous rendering)
     fn trigger_cell_play(&mut self, cell_index: usize) {
         let tab = self.tab_manager.active_tab();
         let cell_text = tab.cells[cell_index].buffer.text().trim().to_string();
 
-        // Only submit to REDUCE if there are CAS functions to evaluate.
+        // Gather source from all cells up to this one
+        let mut source = String::new();
+        for (i, cell) in tab.cells.iter().enumerate() {
+            if i > cell_index { break; }
+            if !source.is_empty() { source.push('\n'); }
+            match &cell.output {
+                CellOutput::Simplified(s) | CellOutput::Computed(s) => source.push_str(s),
+                _ => source.push_str(cell.buffer.text()),
+            }
+        }
+
+        // Parse first to determine which path to take
+        let ast = match lang::parse(&source) {
+            Ok(ast) => ast,
+            Err(e) => {
+                log::error!("Parse error: {}", e);
+                let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+                cell.output = CellOutput::Error(e);
+                cell.output_collapsed = false;
+                self.sync_active_tab();
+                return;
+            }
+        };
+
+        // Route: interpreter path for array/parallel-for code
+        if lang::needs_interpreter(&ast) {
+            let (device, queue) = self.renderer.gpu_refs();
+            let gpu = WgpuGpuDispatch { device, queue };
+            match lang::interpreter::eval(&ast, &gpu) {
+                Ok(val) => {
+                    let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+                    cell.output = CellOutput::Computed(format!("{}", val));
+                    cell.output_collapsed = false;
+                }
+                Err(e) => {
+                    log::error!("Interpreter error: {}", e);
+                    let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+                    cell.output = CellOutput::Error(e);
+                    cell.output_collapsed = false;
+                }
+            }
+            self.sync_active_tab();
+            return;
+        }
+
+        // CAS path: submit to REDUCE if CAS functions present
         let has_cas = find_cas_call(&cell_text).is_some();
         if has_cas && !cell_text.is_empty() {
             let cell_id = tab.cells[cell_index].id;
             let (reduce_input, _) = extract_reduce_expr(&cell_text);
 
-            // Expand bindings inline: a(x): x^2, ⅆ(a,x) → ⅆ(x^2,x)
             let bindings = collect_bindings(&tab.cells, cell_index, &cell_text);
             let expanded = expand_bindings(reduce_input, &bindings);
             let reduce_expr = translate::to_reduce(&expanded);
             self.reduce_service.submit(cell_id, Vec::new(), reduce_expr);
         }
 
-        // Compile WGSL immediately — but skip if CAS functions are present
-        // in the played cell OR any preceding cell that hasn't been evaluated,
-        // since they'll fail and wgpu logs noisy errors we can't suppress.
-        // REDUCE will provide the compilable form asynchronously.
+        // Fragment shader path
         let any_unresolved_cas = tab.cells.iter().take(cell_index + 1).any(|c| {
             !matches!(c.output, CellOutput::Simplified(_)) && find_cas_call(c.buffer.text()).is_some()
         });
         if !has_cas && !any_unresolved_cas {
-            let mut source = String::new();
-            for (i, cell) in tab.cells.iter().enumerate() {
-                if i > cell_index { break; }
-                if !source.is_empty() { source.push('\n'); }
-                // Use CAS-evaluated output if available (e.g. ⅆ() already resolved)
-                if let CellOutput::Simplified(ref s) = cell.output {
-                    source.push_str(s);
-                } else {
-                    source.push_str(cell.buffer.text());
-                }
-            }
             match lang::compile(&source) {
                 Ok(wgsl) => {
                     let cell_id = tab.cells[cell_index].id;
@@ -1256,16 +1304,12 @@ impl AppState {
                 }
             }
         } else if any_unresolved_cas && !has_cas {
-            // The played cell itself is fine, but preceding cells have CAS calls
-            // that haven't been evaluated yet.
             let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
             cell.output = CellOutput::Error(
                 "Play cells with ⅆ/∫/∂ first to evaluate them".to_string(),
             );
             cell.output_collapsed = false;
         }
-        // Don't clear output — REDUCE response will arrive async,
-        // and shader errors were already set above.
         self.sync_active_tab();
     }
 
@@ -1616,7 +1660,7 @@ impl ApplicationHandler for App {
                         state.dismiss_autocomplete();
                         // Copy output text to clipboard
                         let text_to_copy = match &state.tab_manager.active_tab().cells[i].output {
-                            CellOutput::Simplified(s) => Some(s.clone()),
+                            CellOutput::Simplified(s) | CellOutput::Computed(s) => Some(s.clone()),
                             CellOutput::Error(e) => Some(e.clone()),
                             CellOutput::None => None,
                         };
@@ -1756,7 +1800,7 @@ impl ApplicationHandler for App {
                         let output_text = match &state.tab_manager.active_tab().cells[i].output {
                             CellOutput::None => String::new(),
                             CellOutput::Error(e) => e.clone(),
-                            CellOutput::Simplified(s) => s.clone(),
+                            CellOutput::Simplified(s) | CellOutput::Computed(s) => s.clone(),
                         };
                         if let Some(cb) = state.clipboard.as_mut() {
                             let _ = cb.set_text(&output_text);

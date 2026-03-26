@@ -1,5 +1,6 @@
 pub mod rects;
 pub mod shader_pipeline;
+pub mod compute_pipeline;
 
 use std::sync::Arc;
 
@@ -788,6 +789,11 @@ impl Renderer {
 
     pub fn remove_cell_shader(&mut self, cell_id: usize) {
         self.shader_pipeline.remove(cell_id);
+    }
+
+    /// Get references to device and queue for GPU compute dispatch.
+    pub fn gpu_refs(&self) -> (&wgpu::Device, &wgpu::Queue) {
+        (&self.device, &self.queue)
     }
 
     pub fn has_active_shaders(&self) -> bool {

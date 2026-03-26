@@ -4,7 +4,7 @@ use super::token::{Token, TokenType};
 /// Recursive-descent parser for the Logos math language.
 ///
 /// Key differences from typical languages:
-/// - `:` is the binding operator (like `=` in other languages)
+/// - `:=` is the binding operator (like `=` in other languages)
 /// - `=` is the equality operator (like `==` in other languages)
 /// - Comma separates statements inside parenthesized blocks
 /// - Newline separates statements at top level
@@ -23,11 +23,15 @@ pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     source: String,
+    /// When false, bare identifiers followed by `(` are NOT parsed as function
+    /// calls in parse_postfix. Used to prevent the `(body)` of `parallel for`
+    /// from being consumed as a call on the last range token.
+    allow_ident_call: bool,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>, source: String) -> Self {
-        Self { tokens, pos: 0, source }
+        Self { tokens, pos: 0, source, allow_ident_call: true }
     }
 
     pub fn parse(&mut self) -> Result<AstNode, String> {
@@ -62,28 +66,29 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Result<AstNode, String> {
-        // Check for tuple destructuring binding: (a, b): expr
+        // Check for tuple destructuring binding: (a, b) := expr
         if let Some(tb) = self.try_parse_tuple_binding()? {
             return Ok(tb);
         }
 
-        // Check for function definition: name(params): body
+        // Check for function definition: name(params) := body
         if let Some(func) = self.try_parse_function_def()? {
             return Ok(func);
         }
 
-        // Check for binding: name: expr
+        // Check for binding: name := expr
         if let Some(binding) = self.try_parse_binding()? {
             return Ok(binding);
         }
 
-        self.parse_expr()
+        let expr = self.parse_expr()?;
+        self.try_index_assign(expr)
     }
 
     fn try_parse_function_def(&mut self) -> Result<Option<AstNode>, String> {
         let save = self.pos;
 
-        // name(params): body  OR  name(params) = body (for backward compat)
+        // name(params) := body  OR  name(params) = body (for backward compat)
         let name = match &self.peek().ty {
             TokenType::Identifier(name) => name.clone(),
             _ => return Ok(None),
@@ -115,7 +120,7 @@ impl Parser {
         }
         self.advance(); // consume ')'
 
-        // Body follows `:` (primary) or `=` (backward compat)
+        // Body follows `:=` (primary) or `=` (backward compat)
         if self.peek().ty == TokenType::Colon {
             self.advance();
             let body = self.parse_expr()?;
@@ -126,13 +131,13 @@ impl Parser {
             }));
         }
 
-        // If no colon follows, this isn't a function def — might be a function call
+        // If no := follows, this isn't a function def — might be a function call
         self.pos = save;
         Ok(None)
     }
 
     fn try_parse_binding(&mut self) -> Result<Option<AstNode>, String> {
-        // name: expr (using colon for binding)
+        // name := expr (using := for binding)
         let name = match &self.peek().ty {
             TokenType::Identifier(name) => name.clone(),
             _ => return Ok(None),
@@ -143,7 +148,7 @@ impl Parser {
         }
 
         self.advance(); // consume identifier
-        self.advance(); // consume ':'
+        self.advance(); // consume ':='
         let value = self.parse_expr()?;
         Ok(Some(AstNode::Binding {
             name,
@@ -151,7 +156,7 @@ impl Parser {
         }))
     }
 
-    /// Try to parse a tuple destructuring binding: `(a, b): expr`
+    /// Try to parse a tuple destructuring binding: `(a, b) := expr`
     fn try_parse_tuple_binding(&mut self) -> Result<Option<AstNode>, String> {
         if self.peek().ty != TokenType::LParen {
             return Ok(None);
@@ -188,12 +193,12 @@ impl Parser {
         }
         self.advance(); // consume ')'
 
-        // Must be followed by ':'
+        // Must be followed by ':='
         if self.peek().ty != TokenType::Colon {
             self.pos = save;
             return Ok(None);
         }
-        self.advance(); // consume ':'
+        self.advance(); // consume ':='
 
         let value = self.parse_expr()?;
         Ok(Some(AstNode::TupleBinding {
@@ -235,7 +240,7 @@ impl Parser {
     }
 
     fn parse_comparison(&mut self) -> Result<AstNode, String> {
-        let mut left = self.parse_addition()?;
+        let mut left = self.parse_range()?;
         loop {
             let op = match self.peek().ty {
                 TokenType::Eq => "eq",
@@ -254,6 +259,20 @@ impl Parser {
             };
         }
         Ok(left)
+    }
+
+    fn parse_range(&mut self) -> Result<AstNode, String> {
+        let left = self.parse_addition()?;
+        if self.peek().ty == TokenType::DotDot {
+            self.advance();
+            let right = self.parse_addition()?;
+            Ok(AstNode::Range {
+                start: Box::new(left),
+                end: Box::new(right),
+            })
+        } else {
+            Ok(left)
+        }
     }
 
     fn parse_addition(&mut self) -> Result<AstNode, String> {
@@ -335,6 +354,9 @@ impl Parser {
             match &self.peek().ty {
                 // Function call: expr(args)
                 TokenType::LParen => {
+                    if !self.allow_ident_call {
+                        break;
+                    }
                     if let AstNode::Identifier(ref name) = expr {
                         let name = name.clone();
                         self.advance(); // consume '('
@@ -347,7 +369,13 @@ impl Parser {
                 }
                 // Indexing: expr[index]
                 TokenType::LBracket => {
-                    return Err("Array indexing is not yet supported".to_string());
+                    self.advance(); // consume '['
+                    let index = self.parse_expr()?;
+                    self.expect(TokenType::RBracket)?;
+                    expr = AstNode::IndexAccess {
+                        array: Box::new(expr),
+                        index: Box::new(index),
+                    };
                 }
                 // Property access: expr.prop
                 TokenType::Dot => {
@@ -443,11 +471,11 @@ impl Parser {
                     // Single parenthesized expression
                     Ok(items.pop().unwrap())
                 } else {
-                    // If any item is a Binding, FunctionDef, ForLoop, WhileLoop, or TupleBinding, it's a block
+                    // If any item is a Binding, FunctionDef, WhileLoop, IndexAssign, or TupleBinding, it's a block
                     let has_block_items = items.iter().any(|item| {
                         matches!(item,
                             AstNode::Binding { .. } | AstNode::FunctionDef { .. }
-                            | AstNode::ForLoop { .. } | AstNode::WhileLoop { .. }
+                            | AstNode::WhileLoop { .. } | AstNode::IndexAssign { .. }
                             | AstNode::TupleBinding { .. }
                         )
                     });
@@ -496,22 +524,110 @@ impl Parser {
                     body: Box::new(body),
                 })
             }
-            // For loop: for(init, condition, update) body
+            // For loop: for var in range (body) — sequential CPU
             TokenType::For => {
                 self.advance(); // consume 'for'
-                self.expect(TokenType::LParen)?;
-                let init = self.parse_block_item()?;
-                self.expect(TokenType::Comma)?;
-                let condition = self.parse_expr()?;
-                self.expect(TokenType::Comma)?;
-                let update = self.parse_block_item()?;
-                self.expect(TokenType::RParen)?;
+                let var = match &self.peek().ty {
+                    TokenType::Identifier(name) | TokenType::AxisVar(name) => {
+                        let name = name.clone();
+                        self.advance();
+                        name
+                    }
+                    _ => return Err(super::format_error_at(
+                        &self.source, self.peek().span.0,
+                        &format!("Expected loop variable after 'for', found {}", self.peek().ty),
+                    )),
+                };
+                self.expect(TokenType::In)?;
+                self.allow_ident_call = false;
+                let range = self.parse_expr()?;
+                self.allow_ident_call = true;
                 self.skip_newlines();
-                let body = self.parse_expr()?;
+                self.expect(TokenType::LParen)?;
+                self.skip_newlines();
+                let mut stmts = Vec::new();
+                while self.peek().ty != TokenType::RParen && !self.at_end() {
+                    stmts.push(self.parse_block_item()?);
+                    self.skip_newlines();
+                    if self.peek().ty == TokenType::Comma {
+                        self.advance();
+                    }
+                    self.skip_newlines();
+                }
+                self.expect(TokenType::RParen)?;
+                let body = if stmts.len() == 1 {
+                    stmts.pop().unwrap()
+                } else {
+                    AstNode::Block(stmts)
+                };
                 Ok(AstNode::ForLoop {
-                    init: Box::new(init),
-                    condition: Box::new(condition),
-                    update: Box::new(update),
+                    var,
+                    range: Box::new(range),
+                    body: Box::new(body),
+                })
+            }
+            // Array literal: [expr, expr, ...]
+            TokenType::LBracket => {
+                self.advance(); // consume '['
+                let mut elements = Vec::new();
+                self.skip_newlines();
+                if self.peek().ty != TokenType::RBracket {
+                    elements.push(self.parse_expr()?);
+                    while self.peek().ty == TokenType::Comma {
+                        self.advance();
+                        self.skip_newlines();
+                        if self.peek().ty == TokenType::RBracket {
+                            break; // trailing comma
+                        }
+                        elements.push(self.parse_expr()?);
+                    }
+                }
+                self.expect(TokenType::RBracket)?;
+                Ok(AstNode::ArrayLiteral(elements))
+            }
+            // Parallel for: parallel for var in range (body)
+            TokenType::Parallel => {
+                self.advance(); // consume 'parallel'
+                self.expect(TokenType::For)?;
+                let var = match &self.peek().ty {
+                    TokenType::Identifier(name) | TokenType::AxisVar(name) => {
+                        let name = name.clone();
+                        self.advance();
+                        name
+                    }
+                    _ => return Err(super::format_error_at(
+                        &self.source, self.peek().span.0,
+                        &format!("Expected loop variable after 'parallel for', found {}", self.peek().ty),
+                    )),
+                };
+                self.expect(TokenType::In)?;
+                // Disable identifier function calls so the body `(` isn't
+                // consumed as a call on the last range token.
+                self.allow_ident_call = false;
+                let range = self.parse_expr()?;
+                self.allow_ident_call = true;
+                self.skip_newlines();
+                // Body is a parenthesized block of statements
+                self.expect(TokenType::LParen)?;
+                self.skip_newlines();
+                let mut stmts = Vec::new();
+                while self.peek().ty != TokenType::RParen && !self.at_end() {
+                    stmts.push(self.parse_block_item()?);
+                    self.skip_newlines();
+                    if self.peek().ty == TokenType::Comma {
+                        self.advance();
+                    }
+                    self.skip_newlines();
+                }
+                self.expect(TokenType::RParen)?;
+                let body = if stmts.len() == 1 {
+                    stmts.pop().unwrap()
+                } else {
+                    AstNode::Block(stmts)
+                };
+                Ok(AstNode::ParallelFor {
+                    var,
+                    range: Box::new(range),
                     body: Box::new(body),
                 })
             }
@@ -547,7 +663,7 @@ impl Parser {
         }
     }
 
-    /// Parse an item inside a parenthesized block (handles binding with colon).
+    /// Parse an item inside a parenthesized block (handles binding with `:=`).
     fn parse_block_item(&mut self) -> Result<AstNode, String> {
         // Try tuple destructuring binding: (a, b): expr
         if let Some(tb) = self.try_parse_tuple_binding()? {
@@ -561,7 +677,24 @@ impl Parser {
         if let Some(binding) = self.try_parse_binding()? {
             return Ok(binding);
         }
-        self.parse_expr()
+        let expr = self.parse_expr()?;
+        self.try_index_assign(expr)
+    }
+
+    /// If `expr` is an IndexAccess and next token is `:=`, parse as IndexAssign.
+    fn try_index_assign(&mut self, expr: AstNode) -> Result<AstNode, String> {
+        if let AstNode::IndexAccess { ref array, ref index } = expr {
+            if self.peek().ty == TokenType::Colon {
+                self.advance(); // consume ':='
+                let value = self.parse_expr()?;
+                return Ok(AstNode::IndexAssign {
+                    array: array.clone(),
+                    index: index.clone(),
+                    value: Box::new(value),
+                });
+            }
+        }
+        Ok(expr)
     }
 
     fn parse_arg_list(&mut self) -> Result<Vec<AstNode>, String> {
@@ -754,8 +887,8 @@ mod tests {
 
     #[test]
     fn test_binding_with_colon() {
-        // `:` is the binding operator in Logos
-        let ast = parse("a: 5");
+        // `:=` is the binding operator in Logos
+        let ast = parse("a := 5");
         match ast {
             AstNode::Binding { name, .. } => assert_eq!(name, "a"),
             _ => panic!("Expected Binding, got {:?}", ast),
@@ -777,7 +910,7 @@ mod tests {
 
     #[test]
     fn test_function_def_with_colon() {
-        let ast = parse("f(x, y): x + y");
+        let ast = parse("f(x, y) := x + y");
         match ast {
             AstNode::FunctionDef { name, params, .. } => {
                 assert_eq!(name, "f");
@@ -813,7 +946,7 @@ mod tests {
     #[test]
     fn test_multiline_statements() {
         // Newline-separated statements
-        let ast = parse("a: 5\nb: 10\na + b");
+        let ast = parse("a := 5\nb := 10\na + b");
         match ast {
             AstNode::Block(stmts) => {
                 assert_eq!(stmts.len(), 3);
@@ -827,7 +960,7 @@ mod tests {
     #[test]
     fn test_block_in_parens() {
         // Comma-separated block inside parens
-        let ast = parse("(a: 5, b: 10, a + b)");
+        let ast = parse("(a := 5, b := 10, a + b)");
         match ast {
             AstNode::Block(stmts) => {
                 assert_eq!(stmts.len(), 3);
@@ -860,7 +993,7 @@ mod tests {
     #[test]
     fn test_function_def_with_block_body() {
         // Function with block body (comma-separated bindings)
-        let ast = parse("f(a, b): (r: a + b, r * 2)");
+        let ast = parse("f(a, b) := (r := a + b, r * 2)");
         match ast {
             AstNode::FunctionDef { name, params, body } => {
                 assert_eq!(name, "f");

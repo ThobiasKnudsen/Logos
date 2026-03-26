@@ -1,7 +1,7 @@
-cx: x - 0.5,
-cy: y - 0.5,
-r: sqrt(cx * cx + cy * cy),
-wave: sin(r * 40.0 - time_s * 4.0) * 0.5 + 0.5,
-fade: 1.0 - clamp(r * 2.0, 0.0, 1.0),
-v: wave * fade,
+cx := x - 0.5
+cy := y - 0.5
+r := sqrt(cx * cx + cy * cy)
+wave := sin(r * 40.0 - t * 4.0) * 0.5 + 0.5
+fade := 1.0 - clamp(r * 2.0, 0.0, 1.0)
+v := wave * fade
 (v * 0.2, v * 0.5, v * 0.9, 1.0)

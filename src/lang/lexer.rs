@@ -7,9 +7,10 @@ pub(crate) const BUILTINS: &[&str] = &[
     "abs", "sign", "pow", "sqrt", "mod", "min", "max",
     "clamp", "mix", "step", "smoothstep",
     "length", "normalize", "dot", "cross",
+    "len",
 ];
 
-pub(crate) const AXIS_VARS: &[&str] = &["x", "y", "z", "time"];
+pub(crate) const AXIS_VARS: &[&str] = &["x", "y", "z", "t"];
 
 pub(crate) const TYPE_NAMES: &[(&str, TokenType)] = &[
     ("f32", TokenType::TypeF32),
@@ -72,21 +73,10 @@ impl<'a> Lexer<'a> {
                     _ => break,
                 }
             }
-            // Skip line comments (consume up to but not including newline)
-            if self.starts_with("//") {
+            // Skip line comments: # to end of line
+            if self.peek() == Some('#') {
                 while self.pos < self.input.len() && self.peek() != Some('\n') {
                     self.pos += self.peek().unwrap().len_utf8();
-                }
-                continue;
-            }
-            // Skip block comments
-            if self.starts_with("/*") {
-                self.pos += 2;
-                while self.pos < self.input.len() && !self.starts_with("*/") {
-                    self.pos += self.peek().unwrap().len_utf8();
-                }
-                if self.starts_with("*/") {
-                    self.pos += 2;
                 }
                 continue;
             }
@@ -115,7 +105,7 @@ impl<'a> Lexer<'a> {
             '>' => { self.advance(); return Ok(Token { ty: TokenType::Gt, span: (start, self.pos) }); }
             // `=` is equality in Logos (not assignment)
             '=' => { self.advance(); return Ok(Token { ty: TokenType::Eq, span: (start, self.pos) }); }
-            ':' => { self.advance(); return Ok(Token { ty: TokenType::Colon, span: (start, self.pos) }); }
+            // `:=` is handled in try_two_char_op; bare `:` is not a token
             '(' => { self.advance(); return Ok(Token { ty: TokenType::LParen, span: (start, self.pos) }); }
             ')' => { self.advance(); return Ok(Token { ty: TokenType::RParen, span: (start, self.pos) }); }
             '[' => { self.advance(); return Ok(Token { ty: TokenType::LBracket, span: (start, self.pos) }); }
@@ -244,6 +234,8 @@ impl<'a> Lexer<'a> {
         if self.starts_with("!=") { self.pos += 2; return Some(TokenType::Neq); }
         if self.starts_with("<=") { self.pos += 2; return Some(TokenType::Lte); }
         if self.starts_with(">=") { self.pos += 2; return Some(TokenType::Gte); }
+        if self.starts_with("..") { self.pos += 2; return Some(TokenType::DotDot); }
+        if self.starts_with(":=") { self.pos += 2; return Some(TokenType::Colon); }
         None
     }
 
@@ -292,6 +284,8 @@ impl<'a> Lexer<'a> {
             "and" => TokenType::And,
             "or" => TokenType::Or,
             "not" => TokenType::Not,
+            "parallel" => TokenType::Parallel,
+            "in" => TokenType::In,
             "true" => TokenType::BoolLit(true),
             "false" => TokenType::BoolLit(false),
             _ => {
@@ -408,7 +402,7 @@ mod tests {
 
     #[test]
     fn test_colon_binding() {
-        let mut lexer = Lexer::new("r: 5");
+        let mut lexer = Lexer::new("r := 5");
         let tokens = lexer.tokenize().unwrap();
         assert!(matches!(tokens[0].ty, TokenType::Identifier(ref s) if s == "r"));
         assert_eq!(tokens[1].ty, TokenType::Colon);
@@ -447,7 +441,7 @@ mod tests {
 
     #[test]
     fn test_comments() {
-        let mut lexer = Lexer::new("x // comment\n+ y /* block */ * z");
+        let mut lexer = Lexer::new("x # comment\n+ y * z");
         let tokens = lexer.tokenize().unwrap();
         assert!(matches!(tokens[0].ty, TokenType::AxisVar(ref s) if s == "x"));
         // After comment, there's a newline token, then + y * z
@@ -460,9 +454,9 @@ mod tests {
 
     #[test]
     fn test_newlines_as_separators() {
-        let mut lexer = Lexer::new("a: 5\nb: 10\na + b");
+        let mut lexer = Lexer::new("a := 5\nb := 10\na + b");
         let tokens = lexer.tokenize().unwrap();
-        // a : 5 \n b : 10 \n a + b EOF
+        // a := 5 \n b := 10 \n a + b EOF
         assert!(matches!(tokens[0].ty, TokenType::Identifier(ref s) if s == "a"));
         assert_eq!(tokens[1].ty, TokenType::Colon);
         assert!(matches!(tokens[2].ty, TokenType::Number(_)));

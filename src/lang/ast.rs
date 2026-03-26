@@ -49,11 +49,10 @@ pub enum AstNode {
         body: Box<AstNode>,
     },
 
-    /// For loop: `for(init, condition, update) body`
+    /// For loop: `for i in 0..n ( body )` — sequential CPU execution
     ForLoop {
-        init: Box<AstNode>,
-        condition: Box<AstNode>,
-        update: Box<AstNode>,
+        var: String,
+        range: Box<AstNode>,
         body: Box<AstNode>,
     },
 
@@ -73,5 +72,35 @@ pub enum AstNode {
     TupleBinding {
         names: Vec<String>,
         value: Box<AstNode>,
+    },
+
+    /// Array literal: `[1, 2, 3]`
+    ArrayLiteral(Vec<AstNode>),
+
+    /// Array index access: `a[i]`
+    IndexAccess {
+        array: Box<AstNode>,
+        index: Box<AstNode>,
+    },
+
+    /// Range: `0..n`
+    Range {
+        start: Box<AstNode>,
+        end: Box<AstNode>,
+    },
+
+    /// Indexed assignment: `data[i]: data[i] * 2`
+    IndexAssign {
+        array: Box<AstNode>,
+        index: Box<AstNode>,
+        value: Box<AstNode>,
+    },
+
+    /// Parallel for: `parallel for i in 0..n ( body )`
+    /// Mutates arrays in-place. Body contains IndexAssign statements.
+    ParallelFor {
+        var: String,
+        range: Box<AstNode>,
+        body: Box<AstNode>,
     },
 }

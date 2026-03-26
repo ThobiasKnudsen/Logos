@@ -23,7 +23,9 @@ fn token_color(ty: &TokenType) -> Rgba {
         | TokenType::While
         | TokenType::And
         | TokenType::Or
-        | TokenType::Not => theme.keyword,
+        | TokenType::Not
+        | TokenType::Parallel
+        | TokenType::In => theme.keyword,
 
         // Literals
         TokenType::Number(_) => theme.number,
@@ -70,7 +72,8 @@ fn token_color(ty: &TokenType) -> Rgba {
         | TokenType::LBracket
         | TokenType::RBracket
         | TokenType::Comma
-        | TokenType::Dot => theme.punctuation,
+        | TokenType::Dot
+        | TokenType::DotDot => theme.punctuation,
 
         // Whitespace / separators
         TokenType::Newline => theme.whitespace,

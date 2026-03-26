@@ -27,8 +27,8 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
 
     // Check for top-level loops (for or while)
     let top_has_loops = match ast {
-        AstNode::Block(stmts) => stmts.iter().any(|s| matches!(s, AstNode::ForLoop { .. } | AstNode::WhileLoop { .. })),
-        AstNode::ForLoop { .. } | AstNode::WhileLoop { .. } => true,
+        AstNode::Block(stmts) => stmts.iter().any(|s| matches!(s, AstNode::WhileLoop { .. } | AstNode::ForLoop { .. })),
+        AstNode::WhileLoop { .. } | AstNode::ForLoop { .. } => true,
         _ => false,
     };
 
@@ -282,8 +282,9 @@ impl GenContext {
                 // Check if the body is a block with bindings or loops
                 let needs_imperative = match body.as_ref() {
                     AstNode::Block(stmts) => stmts.iter().any(|s| {
-                        matches!(s, AstNode::Binding { .. } | AstNode::ForLoop { .. }
-                            | AstNode::WhileLoop { .. } | AstNode::TupleBinding { .. })
+                        matches!(s, AstNode::Binding { .. }
+                            | AstNode::WhileLoop { .. } | AstNode::ForLoop { .. }
+                            | AstNode::TupleBinding { .. })
                     }),
                     _ => false,
                 };
@@ -351,7 +352,7 @@ impl GenContext {
     /// Emit a function body that contains bindings and/or loops.
     /// Returns the WGSL body code including the final `return` statement.
     fn emit_function_body(&self, stmts: &[AstNode]) -> Result<String, String> {
-        let has_loops = stmts.iter().any(|s| matches!(s, AstNode::ForLoop { .. } | AstNode::WhileLoop { .. }));
+        let has_loops = stmts.iter().any(|s| matches!(s, AstNode::WhileLoop { .. } | AstNode::ForLoop { .. }));
         let var_keyword = if has_loops { "var" } else { "let" };
         let mut code = String::new();
         let mut declared: HashSet<String> = HashSet::new();
@@ -371,32 +372,8 @@ impl GenContext {
                 AstNode::TupleBinding { names, value } => {
                     self.emit_tuple_binding(&mut code, names, value, "    ", var_keyword, &mut declared)?;
                 }
-                AstNode::ForLoop { init, condition, update, body } => {
-                    // Emit init binding
-                    if let AstNode::Binding { name, value } = init.as_ref() {
-                        let val = self.emit_expr(value)?;
-                        if declared.contains(name.as_str()) {
-                            code += &format!("    {} = {};\n", name, val);
-                        } else {
-                            code += &format!("    var {} = {};\n", name, val);
-                            declared.insert(name.clone());
-                        }
-                    }
-                    // Emit loop with iteration guard
-                    let cond = self.emit_expr(condition)?;
-                    code += &format!(
-                        "    for (var _loop_guard: u32 = 0u; _loop_guard < {}u; _loop_guard = _loop_guard + 1u) {{\n",
-                        MAX_LOOP_ITERATIONS
-                    );
-                    code += &format!("        if (!({cond})) {{ break; }}\n");
-                    // Emit body
-                    self.emit_loop_body_stmts(&mut code, body, &mut declared)?;
-                    // Emit update
-                    if let AstNode::Binding { name, value } = update.as_ref() {
-                        let val = self.emit_expr(value)?;
-                        code += &format!("        {} = {};\n", name, val);
-                    }
-                    code += "    }\n";
+                AstNode::ForLoop { var, range, body } => {
+                    self.emit_for_loop(&mut code, var, range, body, "    ", &mut declared)?;
                 }
                 AstNode::WhileLoop { condition, body } => {
                     // Extract inline bindings from the condition (e.g. sq: expr inside block)
@@ -426,6 +403,43 @@ impl GenContext {
     }
 
     /// Emit statements inside a loop body.
+    /// Emit a `for var in start..end (body)` as a WGSL for-loop with iteration guard.
+    fn emit_for_loop(
+        &self,
+        code: &mut String,
+        var: &str,
+        range: &AstNode,
+        body: &AstNode,
+        indent: &str,
+        declared: &mut HashSet<String>,
+    ) -> Result<(), String> {
+        let (start_expr, end_expr) = match range {
+            AstNode::Range { start, end } => {
+                (self.emit_expr(start)?, self.emit_expr(end)?)
+            }
+            _ => return Err("for loop range must be start..end".to_string()),
+        };
+        // Declare or reassign the loop variable
+        if declared.contains(var) {
+            code.push_str(&format!("{}{} = {};\n", indent, var, start_expr));
+        } else {
+            code.push_str(&format!("{}var {} = {};\n", indent, var, start_expr));
+            declared.insert(var.to_string());
+        }
+        // Iteration-guarded loop
+        code.push_str(&format!(
+            "{}for (var _loop_guard: u32 = 0u; _loop_guard < {}u; _loop_guard = _loop_guard + 1u) {{\n",
+            indent, MAX_LOOP_ITERATIONS
+        ));
+        code.push_str(&format!("{}    if (!({} < {})) {{ break; }}\n", indent, var, end_expr));
+        // Body
+        self.emit_loop_body_stmts(code, body, declared)?;
+        // Update: var = var + 1.0
+        code.push_str(&format!("{}    {} = {} + 1.0;\n", indent, var, var));
+        code.push_str(&format!("{}}}\n", indent));
+        Ok(())
+    }
+
     fn emit_loop_body_stmts(
         &self,
         code: &mut String,
@@ -605,28 +619,8 @@ impl GenContext {
                 AstNode::TupleBinding { names, value } => {
                     self.emit_tuple_binding(&mut code, names, value, indent, "var", declared)?;
                 }
-                AstNode::ForLoop { init, condition, update, body } => {
-                    if let AstNode::Binding { name, value } = init.as_ref() {
-                        let val = self.emit_expr(value)?;
-                        if declared.contains(name.as_str()) {
-                            code += &format!("{}{} = {};\n", indent, name, val);
-                        } else {
-                            code += &format!("{}var {} = {};\n", indent, name, val);
-                            declared.insert(name.clone());
-                        }
-                    }
-                    let cond = self.emit_expr(condition)?;
-                    code += &format!(
-                        "{}for (var _loop_guard: u32 = 0u; _loop_guard < {}u; _loop_guard = _loop_guard + 1u) {{\n",
-                        indent, MAX_LOOP_ITERATIONS
-                    );
-                    code += &format!("{}    if (!({cond})) {{ break; }}\n", indent);
-                    self.emit_loop_body_stmts(&mut code, body, declared)?;
-                    if let AstNode::Binding { name, value } = update.as_ref() {
-                        let val = self.emit_expr(value)?;
-                        code += &format!("{}    {} = {};\n", indent, name, val);
-                    }
-                    code += &format!("{}}}\n", indent);
+                AstNode::ForLoop { var, range, body } => {
+                    self.emit_for_loop(&mut code, var, range, body, indent, declared)?;
                 }
                 AstNode::WhileLoop { condition, body } => {
                     // Pre-declare condition bindings
@@ -680,8 +674,8 @@ impl GenContext {
                         return Ok(y_var.to_string());
                     }
                 }
-                // Map time/time_s → u.time (accessible in user functions too)
-                if name == "time_s" || name == "time" {
+                // Map time/t → u.time (accessible in user functions too)
+                if name == "t" {
                     return Ok("u.time".to_string());
                 }
                 Ok(name.clone())
@@ -717,8 +711,6 @@ impl GenContext {
                 }
             }
             AstNode::FunctionDef { .. } => Ok("0.0".to_string()),
-            AstNode::ForLoop { .. } => Ok("0.0".to_string()), // Loops emitted imperatively, not as expressions
-            AstNode::WhileLoop { .. } => Ok("0.0".to_string()), // Loops emitted imperatively
             AstNode::PropertyAccess { object, property } => {
                 // Map x.min → u.axis_min.x, x.max → u.axis_max.x, etc.
                 if let AstNode::Identifier(ref base) = **object {
@@ -736,6 +728,13 @@ impl GenContext {
                 Ok(format!("{}.{}", obj, property))
             }
             AstNode::TupleBinding { .. } => Ok("0.0".to_string()), // Emitted imperatively
+            AstNode::ForLoop { .. } => Ok("0.0".to_string()), // Emitted imperatively
+            AstNode::WhileLoop { .. } => Ok("0.0".to_string()), // Emitted imperatively
+            AstNode::ArrayLiteral(_) | AstNode::IndexAccess { .. }
+            | AstNode::Range { .. } | AstNode::ParallelFor { .. }
+            | AstNode::IndexAssign { .. } => {
+                Err("Array/parallel operations are not supported in fragment shaders".to_string())
+            }
         }
     }
 
@@ -974,12 +973,6 @@ fn collect_identifiers(node: &AstNode, result: &mut HashSet<String>) {
             collect_identifiers(then_branch, result);
             if let Some(eb) = else_branch { collect_identifiers(eb, result); }
         }
-        AstNode::ForLoop { init, condition, update, body } => {
-            collect_identifiers(init, result);
-            collect_identifiers(condition, result);
-            collect_identifiers(update, result);
-            collect_identifiers(body, result);
-        }
         AstNode::WhileLoop { condition, body } => {
             collect_identifiers(condition, result);
             collect_identifiers(body, result);
@@ -987,16 +980,36 @@ fn collect_identifiers(node: &AstNode, result: &mut HashSet<String>) {
         AstNode::FunctionDef { body, .. } => { collect_identifiers(body, result); }
         AstNode::PropertyAccess { object, .. } => { collect_identifiers(object, result); }
         AstNode::Number(_) | AstNode::BoolLit(_) => {}
+        AstNode::ArrayLiteral(elems) => {
+            for e in elems { collect_identifiers(e, result); }
+        }
+        AstNode::IndexAccess { array, index } => {
+            collect_identifiers(array, result);
+            collect_identifiers(index, result);
+        }
+        AstNode::Range { start, end } => {
+            collect_identifiers(start, result);
+            collect_identifiers(end, result);
+        }
+        AstNode::ForLoop { range, body, .. } | AstNode::ParallelFor { range, body, .. } => {
+            collect_identifiers(range, result);
+            collect_identifiers(body, result);
+        }
+        AstNode::IndexAssign { array, index, value } => {
+            collect_identifiers(array, result);
+            collect_identifiers(index, result);
+            collect_identifiers(value, result);
+        }
     }
 }
 
-/// Check if an AST node is a constant expression (no x, y, z, time references).
+/// Check if an AST node is a constant expression (no x, y, z, t references).
 /// `const_names` tracks bindings already known to be constant.
 fn is_const_expr(node: &AstNode, const_names: &HashSet<String>) -> bool {
     match node {
         AstNode::Number(_) | AstNode::BoolLit(_) => true,
         AstNode::Identifier(name) => {
-            if matches!(name.as_str(), "x" | "y" | "z" | "time") {
+            if matches!(name.as_str(), "x" | "y" | "z" | "t") {
                 return false;
             }
             const_names.contains(name)
@@ -1025,7 +1038,7 @@ fn body_returns_tuple(body: &AstNode) -> bool {
             for stmt in stmts.iter().rev() {
                 match stmt {
                     AstNode::Binding { .. } | AstNode::FunctionDef { .. }
-                    | AstNode::ForLoop { .. } | AstNode::WhileLoop { .. }
+                    | AstNode::WhileLoop { .. } | AstNode::ForLoop { .. }
                     | AstNode::TupleBinding { .. } => continue,
                     other => return body_returns_tuple(other),
                 }
@@ -1063,7 +1076,7 @@ fn find_result_expr(ast: &AstNode) -> Result<&AstNode, String> {
             for stmt in stmts.iter().rev() {
                 match stmt {
                     AstNode::Binding { .. } | AstNode::FunctionDef { .. }
-                    | AstNode::ForLoop { .. } | AstNode::WhileLoop { .. }
+                    | AstNode::WhileLoop { .. } | AstNode::ForLoop { .. }
                     | AstNode::TupleBinding { .. } => continue,
                     other => return Ok(other),
                 }
@@ -1112,13 +1125,13 @@ mod tests {
 
     #[test]
     fn test_with_binding() {
-        let shader = gen("r: sqrt(x * x + y * y)\nr");
+        let shader = gen("r := sqrt(x * x + y * y)\nr");
         assert!(shader.contains("let r = sqrt(((x * x) + (y * y)))"));
     }
 
     #[test]
     fn test_with_function_def() {
-        let shader = gen("f(a, b): a + b\nf(x, y)");
+        let shader = gen("f(a, b) := a + b\nf(x, y)");
         assert!(shader.contains("fn f(a: f32, b: f32) -> f32"));
         assert!(shader.contains("f(x, y)"));
     }
@@ -1132,7 +1145,7 @@ mod tests {
 
     #[test]
     fn test_binding_and_use_multiline() {
-        let shader = gen("a: x + 1\nb: y + 2\na * b");
+        let shader = gen("a := x + 1\nb := y + 2\na * b");
         assert!(shader.contains("let a = (x + 1.0)"));
         assert!(shader.contains("let b = (y + 2.0)"));
         assert!(shader.contains("(a * b)"));
@@ -1140,14 +1153,14 @@ mod tests {
 
     #[test]
     fn test_function_with_block_body() {
-        let shader = gen("f(a): (r: a * 2, r + 1)\nf(x)");
+        let shader = gen("f(a) := (r := a * 2, r + 1)\nf(x)");
         assert!(shader.contains("fn f(a: f32) -> f32"));
         assert!(shader.contains("f(x)"));
     }
 
     #[test]
     fn test_mandelbrot_like_expr() {
-        let shader = gen("r: sqrt(x*x + y*y)\nif (r < 2) 1 else 0");
+        let shader = gen("r := sqrt(x*x + y*y)\nif (r < 2) 1 else 0");
         assert!(shader.contains("let r = sqrt("));
         assert!(shader.contains("select("));
     }
@@ -1276,14 +1289,14 @@ mod tests {
 
     #[test]
     fn test_binding_then_bool_result_uses_corners() {
-        let shader = gen("r: x * x + y * y\nr < 1");
+        let shader = gen("r := x * x + y * y\nr < 1");
         assert!(shader.contains("x_m"), "bool result should trigger corner checking");
         assert!(shader.contains("select(0.0, 1.0, _result)"));
     }
 
     #[test]
     fn test_binding_then_numeric_result_uses_clamp() {
-        let shader = gen("r: x * x + y * y\nsin(r)");
+        let shader = gen("r := x * x + y * y\nsin(r)");
         assert!(shader.contains("clamp(_result, 0.0, 1.0)"));
     }
 
@@ -1314,69 +1327,19 @@ mod tests {
         assert!(shader.contains("!("), "equality uses straddle check");
     }
 
-    // --- For loop tests ---
-
-    #[test]
-    fn test_for_loop_in_function_body() {
-        let shader = gen("f(x): (sum:0, delta:0.01, for(i:0, i<x, i:i+delta) (sum:sum+i*delta), sum)\nf(x)");
-        assert!(shader.contains("fn f(x: f32) -> f32"), "should emit function def");
-        assert!(shader.contains("var sum = 0.0"), "should emit var for mutable binding");
-        assert!(shader.contains("var delta = 0.01"), "should emit var for delta");
-        assert!(shader.contains("var i = 0.0"), "should emit var for loop init");
-        assert!(shader.contains("_loop_guard"), "should have loop guard");
-        assert!(shader.contains("10000u"), "should have max iteration limit");
-        assert!(shader.contains("if (!("), "should have condition check with break");
-        assert!(shader.contains("return sum"), "should return the accumulator");
-    }
-
-    #[test]
-    fn test_for_loop_with_newlines() {
-        // Newlines inside parens should work as separators
-        let input = "f(n): (\n  sum:0\n  for(i:0, i<n, i:i+1) (\n    sum:sum+i\n  )\n  sum\n)\nf(x)";
-        let shader = gen(input);
-        assert!(shader.contains("var sum = 0.0"), "should handle newline-separated block");
-        assert!(shader.contains("var i = 0.0"), "should handle for loop");
-        assert!(shader.contains("return sum"), "should return accumulator");
-    }
-
-    #[test]
-    fn test_for_loop_function_called_with_corners() {
-        // Function with for loop called in boolean expression uses corner checking
-        let input = "F(n): (sum:0, for(i:0, i<n, i:i+1) (sum:sum+i), sum)\nF(x) + F(y) = 9";
-        let shader = gen(input);
-        assert!(shader.contains("fn F(n: f32) -> f32"), "should emit F function");
-        assert!(shader.contains("_loop_guard"), "should have loop guard");
-        assert!(shader.contains("x_m"), "boolean eq should use corner checking");
-        assert!(shader.contains("F(x_m)") || shader.contains("F(x_p)"),
-            "F should be called with corner values");
-    }
-
     #[test]
     fn test_function_body_with_bindings_no_loops() {
         // Function body with bindings but no loops should use let
-        let shader = gen("f(a): (r: a * 2, r + 1)\nf(x)");
+        let shader = gen("f(a) := (r := a * 2, r + 1)\nf(x)");
         assert!(shader.contains("let r = (a * 2.0)"), "bindings without loops should use let");
         assert!(shader.contains("return (r + 1.0)"), "should return last expression");
-    }
-
-    #[test]
-    fn test_users_exact_input() {
-        // The user's exact code (with commas)
-        let input = "f(x): x\u{00B2}\nF(x): (sum:0, delta:0.01, for(i:0, i<x, i:i+delta) (sum:sum+f(x)*delta), sum)\nF(x) + F(y) = 9";
-        let result = crate::lang::compile(input);
-        assert!(result.is_ok(), "User's code should compile, got: {:?}", result);
-        let shader = result.unwrap();
-        assert!(shader.contains("fn f(x: f32) -> f32"), "should define f");
-        assert!(shader.contains("fn F(x: f32) -> f32"), "should define F");
-        assert!(shader.contains("_loop_guard"), "should have loop guard in F");
-        assert!(shader.contains("x_m"), "result should use corner checking");
     }
 
     // --- New feature tests for Mandelbrot support ---
 
     #[test]
     fn test_top_level_comma_separators() {
-        let shader = gen("a: 1, b: 2, a + b");
+        let shader = gen("a := 1, b := 2, a + b");
         // Simple number constants are emitted at module level
         assert!(shader.contains("const a = 1.0"));
         assert!(shader.contains("const b = 2.0"));
@@ -1385,7 +1348,7 @@ mod tests {
 
     #[test]
     fn test_while_loop_in_function() {
-        let input = "f(n): (i: 0, s: 0, while (i < n) (s: s + i, i: i + 1), s)\nf(x)";
+        let input = "f(n) := (i := 0, s := 0, while (i < n) (s := s + i, i := i + 1), s)\nf(x)";
         let shader = gen(input);
         assert!(shader.contains("fn f(n: f32) -> f32"), "should define function");
         assert!(shader.contains("_loop_guard"), "should have loop guard");
@@ -1394,7 +1357,7 @@ mod tests {
 
     #[test]
     fn test_tuple_destructuring_binding() {
-        let input = "f(a, b): (r: a + b, r * 2)\n(p, q): (1, 2)\nf(p, q)";
+        let input = "f(a, b) := (r := a + b, r * 2)\n(p, q) := (1, 2)\nf(p, q)";
         let result = crate::lang::compile(input);
         assert!(result.is_ok(), "tuple destructuring should compile: {:?}", result);
     }
@@ -1414,34 +1377,33 @@ mod tests {
     }
 
     #[test]
-    fn test_time_s_mapped_to_time() {
-        let shader = gen("sin(time_s)");
-        assert!(shader.contains("sin(u.time)"), "time_s should map to u.time");
-        assert!(!shader.contains("time_s"), "time_s should not appear in output");
+    fn test_t_mapped_to_time() {
+        let shader = gen("sin(t)");
+        assert!(shader.contains("sin(u.time)"), "t should map to u.time");
     }
 
     #[test]
     fn test_function_returning_vec4() {
-        let input = "f(a): (1.0, a, 0.0, 1.0)\nf(x)";
+        let input = "f(a) := (1.0, a, 0.0, 1.0)\nf(x)";
         let shader = gen(input);
         assert!(shader.contains("fn f(a: f32) -> vec4<f32>"), "function returning tuple should have vec4 return type");
     }
 
     #[test]
     fn test_mandelbrot_full_program() {
-        let input = r#"BASE_ITER: 128,
-BAILOUT: 4.0,
-MAX_ITER_CAP: 512,
-INITIAL_ZOOM: 0.2,
-ROOT_SAMPLES: 3,
+        let input = r#"BASE_ITER := 128,
+BAILOUT := 4.0,
+MAX_ITER_CAP := 512,
+INITIAL_ZOOM := 0.2,
+ROOT_SAMPLES := 3,
 
-mandelbrot_color(iter, sq): (
-    mu: f32(iter) + 1.0 - log(0.5 * log(sq) / log(2.0)) / log(2.0),
-    base_mod: 0.05 * mu + 0.3 * time_s,
-    hue_mod: 0.1 * mu + time_s,
-    color_base: 0.9 + 0.1 * cos(0.05 * mu + 0.5 * time_s),
-    fade: 0.8 + 0.2 * sin(hue_mod),
-    triwave_channel(offset): (
+mandelbrot_color(iter, sq) := (
+    mu := f32(iter) + 1.0 - log(0.5 * log(sq) / log(2.0)) / log(2.0),
+    base_mod := 0.05 * mu + 0.3 * t,
+    hue_mod := 0.1 * mu + t,
+    color_base := 0.9 + 0.1 * cos(0.05 * mu + 0.5 * t),
+    fade := 0.8 + 0.2 * sin(hue_mod),
+    triwave_channel(offset) := (
         color_base * ((1.0 - fade) + fade * clamp(
             abs(fract(fract(base_mod) + offset) * 6.0 - 3.0) - 1.0,
             0.0,
@@ -1450,19 +1412,19 @@ mandelbrot_color(iter, sq): (
     ),
     (triwave_channel(0.5), triwave_channel(1.0/3.0), triwave_channel(0.25), 1.0)
 ),
-mandelbrot(x, y): (
-    (width_x, width_y): (x.max - x.min, y.max - y.min),
-    effective_zoom: 1.0 / width_y,
-    (c_x, c_y): (x.min + x * width_x, y.min + y * width_y),
-    (z_x, z_y): (0.0, 0.0),
-    sq: 0.0,
-    max_iter: min(BASE_ITER + (40.0 * log(effective_zoom / INITIAL_ZOOM + 1.0)), MAX_ITER_CAP),
-    iter: 0,
-    while (iter < max_iter and (sq: z_x * z_x + z_y * z_y, sq) < BAILOUT) (
-        zy2: z_y * z_y,
-        z_y: 2.0 * z_x * z_y + c_y,
-        z_x: z_x * z_x - zy2 + c_x,
-        iter: iter + 1
+mandelbrot(x, y) := (
+    (width_x, width_y) := (x.max - x.min, y.max - y.min),
+    effective_zoom := 1.0 / width_y,
+    (c_x, c_y) := (x.min + x * width_x, y.min + y * width_y),
+    (z_x, z_y) := (0.0, 0.0),
+    sq := 0.0,
+    max_iter := min(BASE_ITER + (40.0 * log(effective_zoom / INITIAL_ZOOM + 1.0)), MAX_ITER_CAP),
+    iter := 0,
+    while (iter < max_iter and (sq := z_x * z_x + z_y * z_y, sq) < BAILOUT) (
+        zy2 := z_y * z_y,
+        z_y := 2.0 * z_x * z_y + c_y,
+        z_x := z_x * z_x - zy2 + c_x,
+        iter := iter + 1
     ),
     if (iter < max_iter) (
         mandelbrot_color(iter, sq)
