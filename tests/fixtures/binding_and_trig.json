@@ -1,5 +1,5 @@
 {
   "cells": [
-    { "code": "r: sqrt(x*x + y*y)\nsin(r * 10) / r", "color": "#ff8800" }
+    { "code": "r := sqrt(x*x + y*y)\nsin(r * 10) / r", "color": "#ff8800" }
   ]
 }

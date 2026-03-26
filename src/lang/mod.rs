@@ -5,6 +5,8 @@ pub mod parser;
 pub mod wgsl_gen;
 pub mod highlight;
 pub mod reduce;
+pub mod interpreter;
+pub mod compute_gen;
 
 /// Convert a byte offset in source to (line, col) — both 1-based.
 pub(crate) fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
@@ -36,6 +38,36 @@ pub fn format_error_at(source: &str, offset: usize, message: &str) -> String {
         line_str, source_line,
         pad, " ".repeat(col.saturating_sub(1))
     )
+}
+
+/// Check whether the AST contains nodes that require the interpreter
+/// (arrays, parallel for) rather than the fragment shader path.
+pub fn needs_interpreter(ast: &ast::AstNode) -> bool {
+    match ast {
+        ast::AstNode::ArrayLiteral(_) | ast::AstNode::IndexAccess { .. }
+        | ast::AstNode::ParallelFor { .. } | ast::AstNode::IndexAssign { .. } => true,
+        ast::AstNode::Block(stmts) => stmts.iter().any(needs_interpreter),
+        ast::AstNode::Binding { value, .. } => needs_interpreter(value),
+        ast::AstNode::TupleBinding { value, .. } => needs_interpreter(value),
+        ast::AstNode::FunctionDef { body, .. } => needs_interpreter(body),
+        ast::AstNode::IfExpr { condition, then_branch, else_branch } => {
+            needs_interpreter(condition) || needs_interpreter(then_branch)
+                || else_branch.as_ref().map_or(false, |e| needs_interpreter(e))
+        }
+        ast::AstNode::Apply { args, .. } => args.iter().any(needs_interpreter),
+        ast::AstNode::WhileLoop { condition, body } => {
+            needs_interpreter(condition) || needs_interpreter(body)
+        }
+        _ => false,
+    }
+}
+
+/// Lex and parse source code into an AST.
+pub fn parse(source: &str) -> Result<ast::AstNode, String> {
+    let mut lex = lexer::Lexer::new(source);
+    let tokens = lex.tokenize()?;
+    let mut p = parser::Parser::new(tokens, source.to_string());
+    p.parse()
 }
 
 /// Compile source code through the full pipeline: lex → parse → WGSL gen.
@@ -111,14 +143,14 @@ mod integration_tests {
 
     #[test]
     fn test_with_bindings_and_result() {
-        let shader = compile_and_validate("r: sqrt(x*x + y*y)\nsin(r * 10) / r");
+        let shader = compile_and_validate("r := sqrt(x*x + y*y)\nsin(r * 10) / r");
         assert!(shader.contains("let r = sqrt("));
         assert!(shader.contains("(sin((r * 10.0)) / r)"));
     }
 
     #[test]
     fn test_function_def_and_call() {
-        let shader = compile_and_validate("dist(a, b): sqrt(a*a + b*b)\ndist(x, y)");
+        let shader = compile_and_validate("dist(a, b) := sqrt(a*a + b*b)\ndist(x, y)");
         assert!(shader.contains("fn dist(a: f32, b: f32) -> f32"));
         assert!(shader.contains("dist(x, y)"));
     }
@@ -138,13 +170,13 @@ mod integration_tests {
 
     #[test]
     fn test_time_animation() {
-        let shader = compile_and_validate("sin(x + time)");
+        let shader = compile_and_validate("sin(x + t)");
         assert!(shader.contains("sin((x + u.time))"));
     }
 
     #[test]
     fn test_nested_blocks() {
-        let shader = compile_and_validate("f(a): (b: a * 2, b + 1)\nf(x)");
+        let shader = compile_and_validate("f(a) := (b := a * 2, b + 1)\nf(x)");
         assert!(shader.contains("fn f("));
     }
 
@@ -157,7 +189,7 @@ mod integration_tests {
 
     #[test]
     fn test_complex_mandelbrot_style() {
-        let shader = compile_and_validate("r: x*x + y*y\nif (r < 4) (1 - r/4) else 0");
+        let shader = compile_and_validate("r := x*x + y*y\nif (r < 4) (1 - r/4) else 0");
         assert!(shader.contains("let r ="));
         assert!(shader.contains("select("));
     }

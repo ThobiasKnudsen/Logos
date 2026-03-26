@@ -4,6 +4,7 @@ use super::Buffer;
 pub enum CellOutput {
     None,
     Simplified(String),
+    Computed(String),
     Error(String),
 }
 

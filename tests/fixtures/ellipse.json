@@ -1,5 +1,5 @@
 {
   "cells": [
-    { "code": "a: 3\nb: 2\n(x/a)² + (y/b)² = 1", "color": "#dd44dd" }
+    { "code": "a := 3\nb := 2\n(x/a)² + (y/b)² = 1", "color": "#dd44dd" }
   ]
 }

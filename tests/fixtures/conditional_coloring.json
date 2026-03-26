@@ -1,5 +1,5 @@
 {
   "cells": [
-    { "code": "r: sqrt(x*x + y*y)\nif (r < 2) 1 else 0", "color": "#ff00ff" }
+    { "code": "r := sqrt(x*x + y*y)\nif (r < 2) 1 else 0", "color": "#ff00ff" }
   ]
 }

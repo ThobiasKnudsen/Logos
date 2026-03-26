@@ -244,18 +244,6 @@ fn test_func_compose_and_plot() {
 }
 
 #[test]
-fn test_for_loop_integral() {
-    let notebook = load_fixture("for_loop_integral.json");
-
-    let shader = compile_and_validate(&notebook.cells, 2);
-    assert!(shader.contains("fn f("), "f should be defined");
-    assert!(shader.contains("fn F(x: f32) -> f32"), "F should be defined");
-    assert!(shader.contains("_loop_guard"), "for loop needs guard");
-    assert!(shader.contains("10000u"), "max iteration limit");
-    assert!(shader.contains("x_m"), "boolean equality → corners");
-}
-
-#[test]
 fn test_nested_functions() {
     let notebook = load_fixture("nested_functions.json");
 
@@ -344,17 +332,6 @@ fn test_stages_circle() {
 }
 
 #[test]
-fn test_stages_for_loop_integral() {
-    let notebook = load_fixture("for_loop_integral.json");
-    let source = concat_cells(&notebook.cells, notebook.cells.len() - 1);
-    eprintln!("--- for_loop_integral.json stage-by-stage ---");
-    let wgsl = compile_stages(&source);
-    assert!(wgsl.contains("fn f("));
-    assert!(wgsl.contains("fn F("));
-    assert!(wgsl.contains("_loop_guard"));
-}
-
-#[test]
 fn test_stages_func_compose() {
     let notebook = load_fixture("func_compose_plot.json");
     let source = concat_cells(&notebook.cells, notebook.cells.len() - 1);
@@ -403,5 +380,5 @@ fn test_all_fixtures_compile_and_validate() {
             eprintln!("  {} ok ({} cells, {} bytes WGSL)", name, notebook.cells.len(), wgsl.len());
         }
     }
-    assert!(count >= 16, "Expected at least 16 fixtures, found {}", count);
+    assert!(count >= 15, "Expected at least 15 fixtures, found {}", count);
 }

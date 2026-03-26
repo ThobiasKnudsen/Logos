@@ -1,7 +1,7 @@
 {
   "cells": [
-    { "code": "EPS: 0.001\nGLOW: 6.0", "color": "#000000" },
-    { "code": "glow(d): GLOW / (abs(d) + EPS)", "color": "#ff8800" },
-    { "code": "r: sqrt(x*x + y*y)\nglow(r - 2)", "color": "#ffff00" }
+    { "code": "EPS := 0.001\nGLOW := 6.0", "color": "#000000" },
+    { "code": "glow(d) := GLOW / (abs(d) + EPS)", "color": "#ff8800" },
+    { "code": "r := sqrt(x*x + y*y)\nglow(r - 2)", "color": "#ffff00" }
   ]
 }

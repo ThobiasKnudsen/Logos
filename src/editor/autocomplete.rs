@@ -551,10 +551,7 @@ fn walk_ast(node: &AstNode, result: &mut Vec<Candidate>) {
                 walk_ast(eb, result);
             }
         }
-        AstNode::ForLoop { body, .. } => {
-            walk_ast(body, result);
-        }
-        AstNode::WhileLoop { body, .. } => {
+        AstNode::WhileLoop { body, .. } | AstNode::ForLoop { body, .. } => {
             walk_ast(body, result);
         }
         _ => {}
