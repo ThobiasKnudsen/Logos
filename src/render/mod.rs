@@ -2577,19 +2577,17 @@ impl Renderer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
-        // Grid lines at every tick position (rendered in Pass 1, behind shader plots)
-        let grid_color = theme::theme().graph_grid.to_f32_array();
-        let zero_color = {
-            let g = theme::theme().graph_grid;
-            Rgba::new(g.r, g.g, g.b, (g.a as u16 * 2).min(255) as u8).to_f32_array()
-        };
+        // Grid lines at every tick position (rendered in Pass 3, on top of shader plots)
+        let grid_color = [1.0_f32, 1.0, 1.0, 0.08];
+        let zero_color = [1.0_f32, 1.0, 1.0, 0.2];
+        let mut axis_rects: Vec<RectInstance> = Vec::new();
         if x_range > f32::EPSILON {
             for tick in &x_ticks {
                 let t = (tick - render_area.axis_x_min) / x_range;
                 let sx = rp.x + t * rp.w;
                 if sx >= rp.x && sx <= rp.x + rp.w {
                     let is_zero = tick.abs() < f32::EPSILON;
-                    ui_rects.push(RectInstance {
+                    axis_rects.push(RectInstance {
                         x: if is_zero { sx - 0.5 } else { sx },
                         y: rp.y,
                         w: if is_zero { 2.0 } else { 1.0 },
@@ -2606,7 +2604,7 @@ impl Renderer {
                 let sy = rp.y + rp.h - t * rp.h;
                 if sy >= rp.y && sy <= rp.y + rp.h {
                     let is_zero = tick.abs() < f32::EPSILON;
-                    ui_rects.push(RectInstance {
+                    axis_rects.push(RectInstance {
                         x: rp.x,
                         y: if is_zero { sy - 0.5 } else { sy },
                         w: rp.w,
@@ -2617,9 +2615,6 @@ impl Renderer {
                 }
             }
         }
-
-        // Build axis overlay rects (label backing rects — rendered in Pass 3, on top of plots)
-        let axis_rects: Vec<RectInstance> = Vec::new();
         let label_h = fonts::small_size() * 1.4;
 
         // Label backing rects + text areas (on-plot, with semi-transparent bg)
