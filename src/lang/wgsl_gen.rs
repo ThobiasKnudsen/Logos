@@ -87,19 +87,10 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
     shader.push_str("@fragment\n");
     shader.push_str("fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {\n");
 
-    if is_vec {
-        // Vec4 output (e.g. Mandelbrot): x/y are UV [0,1] coordinates.
-        // User code handles its own UV→world mapping via x.min/x.max properties.
-        // This matches the Zig version's convention.
-        shader.push_str("    let x = uv.x;\n");
-        shader.push_str("    let y = uv.y;\n");
-    } else {
-        // Scalar/boolean output: x/y are world coordinates.
-        // Simple expressions like sin(x) work directly in the visible viewport.
-        shader.push_str("    let world = mix(u.axis_min, u.axis_max, uv);\n");
-        shader.push_str("    let x = world.x;\n");
-        shader.push_str("    let y = world.y;\n");
-    }
+    // x/y are always world coordinates so plots follow the axis bounds
+    shader.push_str("    let world = mix(u.axis_min, u.axis_max, uv);\n");
+    shader.push_str("    let x = world.x;\n");
+    shader.push_str("    let y = world.y;\n");
 
     if top_has_loops {
         // Imperative emission for top-level code with loops
@@ -1413,17 +1404,15 @@ mandelbrot_color(iter, sq) := (
     (triwave_channel(0.5), triwave_channel(1.0/3.0), triwave_channel(0.25), 1.0)
 ),
 mandelbrot(x, y) := (
-    (width_x, width_y) := (x.max - x.min, y.max - y.min),
-    effective_zoom := 1.0 / width_y,
-    (c_x, c_y) := (x.min + x * width_x, y.min + y * width_y),
+    effective_zoom := 1.0 / (y.max - y.min),
     (z_x, z_y) := (0.0, 0.0),
     sq := 0.0,
     max_iter := min(BASE_ITER + (40.0 * log(effective_zoom / INITIAL_ZOOM + 1.0)), MAX_ITER_CAP),
     iter := 0,
     while (iter < max_iter and (sq := z_x * z_x + z_y * z_y, sq) < BAILOUT) (
         zy2 := z_y * z_y,
-        z_y := 2.0 * z_x * z_y + c_y,
-        z_x := z_x * z_x - zy2 + c_x,
+        z_y := 2.0 * z_x * z_y + y,
+        z_x := z_x * z_x - zy2 + x,
         iter := iter + 1
     ),
     if (iter < max_iter) (
@@ -1439,7 +1428,6 @@ mandelbrot(x, y)"#;
         let shader = result.unwrap();
         assert!(shader.contains("fn mandelbrot_color("), "should define mandelbrot_color");
         assert!(shader.contains("fn mandelbrot("), "should define mandelbrot");
-        assert!(shader.contains("u.axis_min"), "should reference axis bounds");
         assert!(shader.contains("_loop_guard"), "should have loop guard for while");
     }
 }

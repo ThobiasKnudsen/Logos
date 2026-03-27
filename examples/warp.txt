@@ -12,14 +12,10 @@ warp_color(p_x, col_r, col_g, col_b, col_a) := (
 )
 
 warp(x, y) := (
-    dx := x.max - x.min,
-    dy := y.max - y.min,
-    p_x := x.min + x * dx,
-    p_y := y.min + y * dy,  # flips y-axis so top of screen maps to higher p_y (positive up)
-    length_p := sqrt(p_x * p_x + p_y * p_y),
+    length_p := sqrt(x * x + y * y),
     denom1 := length_p - RAD_OFFSET,
-    denom2 := abs(p_x - p_y) + DENOM_EPS,
-    (v_x, v_y) := (p_x / denom1 / denom2, p_y / denom1 / denom2),
+    denom2 := abs(x - y) + DENOM_EPS,
+    (v_x, v_y) := (x / denom1 / denom2, y / denom1 / denom2),
     (col_r, col_g, col_b, col_a) := (0.0, 0.0, 0.0, 0.0),
     i := 0.0,
     while (i < MAX_ITER) (
@@ -39,7 +35,7 @@ warp(x, y) := (
         v_x := v_x + upd_x,
         v_y := v_y + upd_y
     ),
-    warp_color(p_x, col_r, col_g, col_b, col_a)
+    warp_color(x, col_r, col_g, col_b, col_a)
 )
 
 warp(x, y)
