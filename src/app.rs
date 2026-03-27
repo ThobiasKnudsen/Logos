@@ -5,7 +5,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{CursorIcon, Window, WindowId};
+use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
 use crate::editor::autocomplete::{self, AutocompleteState};
 use crate::editor::cell::CellOutput;
@@ -466,6 +466,7 @@ pub(crate) enum HoverTarget {
     AddCellButton,
     AutocompleteItem(usize),
     RenderArea,
+    WindowEdge(ResizeDirection),
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +485,14 @@ struct RenderAreaState {
     axis_x_max: f32,
     axis_y_min: f32,
     axis_y_max: f32,
+    /// World units per screen pixel — kept equal for X and Y (square pixels in world space).
+    world_per_pixel: f32,
+    /// Previous right-pane rect in window-local coords.
+    prev_pane: Option<Rect>,
+    /// Window position on screen at the time of the last `adjust_for_pane_change` call.
+    prev_win_pos: (f32, f32),
+    /// Window inner size at the time of the last `adjust_for_pane_change` call.
+    prev_win_size: (u32, u32),
     is_dragging: bool,
     last_drag_pos: (f32, f32),
     mouse_zone: MouseZone,
@@ -496,10 +505,98 @@ impl Default for RenderAreaState {
             axis_x_max: 5.0,
             axis_y_min: -5.0,
             axis_y_max: 5.0,
+            world_per_pixel: 0.0, // set on first layout via adjust_for_pane_change
+            prev_pane: None,
+            prev_win_pos: (0.0, 0.0),
+            prev_win_size: (0, 0),
             is_dragging: false,
             last_drag_pos: (0.0, 0.0),
             mouse_zone: MouseZone::Center,
         }
+    }
+}
+
+impl RenderAreaState {
+    /// Adjust axis bounds when the right pane or window geometry changes.
+    ///
+    /// `win_pos` is the window's position on screen (physical pixels), queried
+    /// fresh via `window.outer_position()`.
+    ///
+    /// Shifts axis bounds by the exact screen-space delta of the pane origin so
+    /// that every world point keeps its **physical monitor pixel** position.
+    ///
+    /// On the very first call (`prev_pane` is `None`), initialises `world_per_pixel`
+    /// from the default axis range and enforces equal X/Y scaling.
+    fn adjust_for_pane_change(&mut self, new_pane: &Rect, win_pos: (f32, f32), win_size: (u32, u32)) {
+        if new_pane.w <= 0.0 || new_pane.h <= 0.0 {
+            return;
+        }
+
+        if let Some(old) = self.prev_pane {
+            let wpp = self.world_per_pixel;
+
+            // X: screen_x of a world point wx is:
+            //   screen_left + (wx - axis_x_min) / wpp
+            // where screen_left = win_x + pane.x.
+            // For this to stay constant: axis_x_min must shift by the screen_left delta.
+            let old_screen_left = self.prev_win_pos.0 + old.x;
+            let new_screen_left = win_pos.0 + new_pane.x;
+            self.axis_x_min += (new_screen_left - old_screen_left) * wpp;
+            self.axis_x_max = self.axis_x_min + new_pane.w * wpp;
+
+            // Y: screen_y of a world point wy is:
+            //   screen_bottom - (wy - axis_y_min) / wpp
+            // where screen_bottom = win_y + pane.y + pane.h   (y increases upward).
+            // For this to stay constant: axis_y_min must shift opposite to the bottom delta.
+            let old_screen_bottom = self.prev_win_pos.1 + old.y + old.h;
+            let new_screen_bottom = win_pos.1 + new_pane.y + new_pane.h;
+            self.axis_y_min -= (new_screen_bottom - old_screen_bottom) * wpp;
+            self.axis_y_max = self.axis_y_min + new_pane.h * wpp;
+        } else {
+            // First layout: pick the larger wpp so the default range fits entirely,
+            // then expand the smaller axis to fill the pane with equal scaling.
+            let wpp_x = (self.axis_x_max - self.axis_x_min) / new_pane.w;
+            let wpp_y = (self.axis_y_max - self.axis_y_min) / new_pane.h;
+            self.world_per_pixel = wpp_x.max(wpp_y);
+
+            let cx = (self.axis_x_min + self.axis_x_max) / 2.0;
+            let cy = (self.axis_y_min + self.axis_y_max) / 2.0;
+            let half_w = new_pane.w * self.world_per_pixel / 2.0;
+            let half_h = new_pane.h * self.world_per_pixel / 2.0;
+            self.axis_x_min = cx - half_w;
+            self.axis_x_max = cx + half_w;
+            self.axis_y_min = cy - half_h;
+            self.axis_y_max = cy + half_h;
+        }
+
+        self.prev_pane = Some(*new_pane);
+        self.prev_win_pos = win_pos;
+        self.prev_win_size = win_size;
+    }
+
+    /// Zoom both axes uniformly by `factor`, anchored at `cursor_screen` position.
+    fn zoom_uniform(&mut self, factor: f32, cursor_screen: (f32, f32), pane: &Rect) {
+        if pane.w <= 0.0 || pane.h <= 0.0 {
+            return;
+        }
+
+        // Cursor UV within the pane
+        let uv_x = ((cursor_screen.0 - pane.x) / pane.w).clamp(0.0, 1.0);
+        // t_y: 0 at bottom (axis_y_min), 1 at top (axis_y_max)
+        let t_y = ((pane.y + pane.h - cursor_screen.1) / pane.h).clamp(0.0, 1.0);
+
+        // World point under cursor
+        let wx = self.axis_x_min + uv_x * (self.axis_x_max - self.axis_x_min);
+        let wy = self.axis_y_min + t_y * (self.axis_y_max - self.axis_y_min);
+
+        // Scale
+        self.world_per_pixel *= factor;
+
+        // Recompute bounds so the cursor world-point stays at its screen pixel
+        self.axis_x_min = wx - uv_x * pane.w * self.world_per_pixel;
+        self.axis_x_max = self.axis_x_min + pane.w * self.world_per_pixel;
+        self.axis_y_min = wy - t_y * pane.h * self.world_per_pixel;
+        self.axis_y_max = self.axis_y_min + pane.h * self.world_per_pixel;
     }
 }
 
@@ -677,6 +774,15 @@ impl AppState {
         let (mx, my) = self.cursor_position;
         let wc = &self.win_control_rects;
 
+        // Window edge resize (highest priority — only for undecorated windows)
+        if !self.is_maximized {
+            let size = self.window.inner_size();
+            if let Some(dir) = edge_resize_direction(mx, my, size.width as f32, size.height as f32) {
+                self.set_hover(HoverTarget::WindowEdge(dir));
+                return;
+            }
+        }
+
         // Autocomplete items (highest priority)
         if self.autocomplete.active {
             for (i, rect) in self.autocomplete_item_rects.iter().enumerate() {
@@ -850,6 +956,7 @@ impl AppState {
                     MouseZone::XAxisEdge => CursorIcon::EwResize,
                     MouseZone::YAxisEdge => CursorIcon::NsResize,
                 },
+                HoverTarget::WindowEdge(dir) => CursorIcon::from(dir),
                 _ => CursorIcon::Default,
             };
             self.window.set_cursor(icon);
@@ -1067,6 +1174,8 @@ impl AppState {
         self.layout.apply_scale();
         let size = self.window.inner_size();
         self.cached_layout = self.layout.compute(size.width as f32, size.height as f32);
+        let wp = win_pos(&self.window);
+        self.render_area.adjust_for_pane_change(&self.cached_layout.right_pane, wp, size.into());
         self.sync_active_tab();
     }
 
@@ -1375,6 +1484,9 @@ impl ApplicationHandler for App {
             reduce_service: ReduceService::new(),
         };
 
+        let wp = win_pos(&state.window);
+        let ws = state.window.inner_size();
+        state.render_area.adjust_for_pane_change(&state.cached_layout.right_pane, wp, ws.into());
         state.sync_active_tab();
         self.state = Some(state);
     }
@@ -1396,12 +1508,29 @@ impl ApplicationHandler for App {
                 state.modifiers = mods.state();
             }
 
+            WindowEvent::Moved(_) => {
+                // Keep prev_win_pos fresh so a later resize doesn't
+                // misattribute the move as a resize-induced position change.
+                //
+                // Skip the update when the window size also changed
+                // (resize-move combo, e.g. drag from left edge) — the
+                // Resized handler needs the OLD prev_win_pos for its delta.
+                let cur = state.window.inner_size();
+                let size_changed = cur.width != state.render_area.prev_win_size.0
+                    || cur.height != state.render_area.prev_win_size.1;
+                if !size_changed {
+                    state.render_area.prev_win_pos = win_pos(&state.window);
+                }
+            }
+
             WindowEvent::Resized(size) => {
                 state.renderer.resize(size);
                 let (w, h) = (size.width as f32, size.height as f32);
                 state.split_left_width =
                     state.layout.clamp_left_width(state.split_left_width, w);
                 state.cached_layout = state.layout.compute(w, h);
+                let wp = win_pos(&state.window);
+                state.render_area.adjust_for_pane_change(&state.cached_layout.right_pane, wp, (size.width, size.height));
                 state.recompute_hover();
                 state.sync_active_tab();
                 state.dismiss_autocomplete();
@@ -1427,35 +1556,35 @@ impl ApplicationHandler for App {
                     state.split_left_width =
                         state.layout.clamp_left_width(desired_width, w);
                     state.cached_layout = state.layout.compute(w, h);
+                    let wp = win_pos(&state.window);
+                    state.render_area.adjust_for_pane_change(&state.cached_layout.right_pane, wp, (size.width, size.height));
                     state.sync_active_tab();
                     // Dismiss autocomplete — pane layout changed
                     state.dismiss_autocomplete();
                 } else if state.render_area.is_dragging {
                     // Pan the render area
                     let (mx, my) = state.cursor_position;
-                    let rp = state.cached_layout.right_pane;
                     let dx = mx - state.render_area.last_drag_pos.0;
                     let dy = my - state.render_area.last_drag_pos.1;
 
-                    let x_range = state.render_area.axis_x_max - state.render_area.axis_x_min;
-                    let y_range = state.render_area.axis_y_max - state.render_area.axis_y_min;
+                    let wpp = state.render_area.world_per_pixel;
 
                     match state.render_area.mouse_zone {
                         MouseZone::Center => {
-                            let world_dx = -dx * x_range / rp.w;
-                            let world_dy = dy * y_range / rp.h;
+                            let world_dx = -dx * wpp;
+                            let world_dy = dy * wpp;
                             state.render_area.axis_x_min += world_dx;
                             state.render_area.axis_x_max += world_dx;
                             state.render_area.axis_y_min += world_dy;
                             state.render_area.axis_y_max += world_dy;
                         }
                         MouseZone::XAxisEdge => {
-                            let world_dx = -dx * x_range / rp.w;
+                            let world_dx = -dx * wpp;
                             state.render_area.axis_x_min += world_dx;
                             state.render_area.axis_x_max += world_dx;
                         }
                         MouseZone::YAxisEdge => {
-                            let world_dy = dy * y_range / rp.h;
+                            let world_dy = dy * wpp;
                             state.render_area.axis_y_min += world_dy;
                             state.render_area.axis_y_max += world_dy;
                         }
@@ -1495,46 +1624,8 @@ impl ApplicationHandler for App {
                 // Check if cursor is over the render area (right pane) — zoom
                 let rp = state.cached_layout.right_pane;
                 if point_in_rect(mx, my, &rp) && dy.abs() > 0.001 {
-                    let zone = detect_mouse_zone(mx, my, &rp);
                     let factor = if dy > 0.0 { 0.97 } else { 1.03 };
-
-                    // Mouse position as ratio within the pane
-                    let rel_x = ((mx - rp.x) / rp.w).clamp(0.0, 1.0);
-                    let rel_y = (1.0 - (my - rp.y) / rp.h).clamp(0.0, 1.0);
-
-                    let ra = &mut state.render_area;
-                    match zone {
-                        MouseZone::Center => {
-                            zoom_axis(
-                                &mut ra.axis_x_min,
-                                &mut ra.axis_x_max,
-                                factor,
-                                rel_x,
-                            );
-                            zoom_axis(
-                                &mut ra.axis_y_min,
-                                &mut ra.axis_y_max,
-                                factor,
-                                rel_y,
-                            );
-                        }
-                        MouseZone::XAxisEdge => {
-                            zoom_axis(
-                                &mut ra.axis_x_min,
-                                &mut ra.axis_x_max,
-                                factor,
-                                rel_x,
-                            );
-                        }
-                        MouseZone::YAxisEdge => {
-                            zoom_axis(
-                                &mut ra.axis_y_min,
-                                &mut ra.axis_y_max,
-                                factor,
-                                rel_y,
-                            );
-                        }
-                    }
+                    state.render_area.zoom_uniform(factor, (mx, my), &rp);
                     state.window.request_redraw();
                 }
                 // Check if cursor is over the editor pane — scroll
@@ -1575,6 +1666,11 @@ impl ApplicationHandler for App {
                 state.mouse_press_target = state.hover_target;
 
                 match state.hover_target {
+                    HoverTarget::WindowEdge(dir) => {
+                        if let Err(e) = state.window.drag_resize_window(dir) {
+                            log::warn!("drag_resize_window failed: {}", e);
+                        }
+                    }
                     HoverTarget::SplitHandle => {
                         state.close_menu();
                         state.is_dragging_split = true;
@@ -2198,6 +2294,38 @@ fn point_in_rect(x: f32, y: f32, r: &Rect) -> bool {
     x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
 }
 
+/// Detect if the cursor is within the resize border of an undecorated window.
+/// Returns the appropriate `ResizeDirection` or `None`.
+const RESIZE_BORDER: f32 = 6.0;
+
+fn edge_resize_direction(mx: f32, my: f32, win_w: f32, win_h: f32) -> Option<ResizeDirection> {
+    let left = mx < RESIZE_BORDER;
+    let right = mx > win_w - RESIZE_BORDER;
+    let top = my < RESIZE_BORDER;
+    let bottom = my > win_h - RESIZE_BORDER;
+
+    match (left, right, top, bottom) {
+        (true, _, true, _) => Some(ResizeDirection::NorthWest),
+        (true, _, _, true) => Some(ResizeDirection::SouthWest),
+        (_, true, true, _) => Some(ResizeDirection::NorthEast),
+        (_, true, _, true) => Some(ResizeDirection::SouthEast),
+        (true, _, _, _) => Some(ResizeDirection::West),
+        (_, true, _, _) => Some(ResizeDirection::East),
+        (_, _, true, _) => Some(ResizeDirection::North),
+        (_, _, _, true) => Some(ResizeDirection::South),
+        _ => None,
+    }
+}
+
+/// Get the window's position on screen in physical pixels.
+/// Falls back to (0, 0) on platforms that don't support it (e.g. Wayland).
+fn win_pos(window: &Window) -> (f32, f32) {
+    window
+        .outer_position()
+        .map(|p| (p.x as f32, p.y as f32))
+        .unwrap_or((0.0, 0.0))
+}
+
 /// Detect which interaction zone the mouse is in within the render pane.
 /// Bottom edge → X axis, left edge → Y axis, everything else → center.
 fn detect_mouse_zone(mx: f32, my: f32, pane: &Rect) -> MouseZone {
@@ -2212,11 +2340,3 @@ fn detect_mouse_zone(mx: f32, my: f32, pane: &Rect) -> MouseZone {
     }
 }
 
-/// Zoom an axis range around a cursor ratio (0..1), preserving the world point under the cursor.
-fn zoom_axis(axis_min: &mut f32, axis_max: &mut f32, factor: f32, cursor_ratio: f32) {
-    let range = *axis_max - *axis_min;
-    let cursor_world = *axis_min + cursor_ratio * range;
-    let new_range = range * factor;
-    *axis_min = cursor_world - cursor_ratio * new_range;
-    *axis_max = cursor_world + (1.0 - cursor_ratio) * new_range;
-}
