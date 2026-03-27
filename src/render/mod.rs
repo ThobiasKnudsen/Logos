@@ -796,6 +796,18 @@ impl Renderer {
         (&self.device, &self.queue)
     }
 
+    pub fn stash_tab_shaders(&mut self, tab_index: usize) {
+        self.shader_pipeline.stash(tab_index);
+    }
+
+    pub fn restore_tab_shaders(&mut self, tab_index: usize) {
+        self.shader_pipeline.restore(tab_index);
+    }
+
+    pub fn drop_stashed_tab_shaders(&mut self, tab_index: usize) {
+        self.shader_pipeline.drop_stashed(tab_index);
+    }
+
     pub fn has_active_shaders(&self) -> bool {
         self.shader_pipeline.has_active()
     }
