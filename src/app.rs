@@ -884,12 +884,38 @@ impl AppState {
         }
     }
 
-    fn dismiss_autocomplete(&mut self) {
-        if self.autocomplete.active {
-            self.autocomplete.dismiss();
-            self.autocomplete_item_rects.clear();
-            self.renderer.close_autocomplete();
+    /// Save current axis bounds to old tab, restore from new tab (or reset to default).
+    fn switch_tab_axis(&mut self, old_tab: usize, new_tab: usize) {
+        // Save current axis state to old tab
+        if let Some(tab) = self.tab_manager.tabs.get_mut(old_tab) {
+            tab.axis_bounds = Some([
+                self.render_area.axis_x_min,
+                self.render_area.axis_x_max,
+                self.render_area.axis_y_min,
+                self.render_area.axis_y_max,
+            ]);
         }
+        // Restore axis state from new tab (or reset to default)
+        if let Some(tab) = self.tab_manager.tabs.get(new_tab) {
+            if let Some([xmin, xmax, ymin, ymax]) = tab.axis_bounds {
+                self.render_area.axis_x_min = xmin;
+                self.render_area.axis_x_max = xmax;
+                self.render_area.axis_y_min = ymin;
+                self.render_area.axis_y_max = ymax;
+            } else {
+                let default = RenderAreaState::default();
+                self.render_area.axis_x_min = default.axis_x_min;
+                self.render_area.axis_x_max = default.axis_x_max;
+                self.render_area.axis_y_min = default.axis_y_min;
+                self.render_area.axis_y_max = default.axis_y_max;
+            }
+        }
+    }
+
+    fn dismiss_autocomplete(&mut self) {
+        self.autocomplete.dismiss();
+        self.autocomplete_item_rects.clear();
+        self.renderer.close_autocomplete();
     }
 
     fn update_autocomplete(&mut self) {
@@ -979,8 +1005,10 @@ impl AppState {
         match (menu_idx, item_idx) {
             // File menu
             (0, 0) => {
-                self.renderer.stash_tab_shaders(self.tab_manager.active_index);
-                self.tab_manager.new_tab();
+                let old = self.tab_manager.active_index;
+                self.renderer.stash_tab_shaders(old);
+                let new_idx = self.tab_manager.new_tab();
+                self.switch_tab_axis(old, new_idx);
                 self.sync_active_tab();
             }
             (0, 1) => {
@@ -1023,8 +1051,10 @@ impl AppState {
             (3, i) => {
                 if let Some(&src) = EXAMPLE_SOURCES.get(i) {
                     let name = MENU_EXAMPLES_ITEMS.get(i).map(|m| m.label).unwrap_or("Example");
-                    self.renderer.stash_tab_shaders(self.tab_manager.active_index);
-                    self.tab_manager.new_tab();
+                    let old = self.tab_manager.active_index;
+                    self.renderer.stash_tab_shaders(old);
+                    let new_idx = self.tab_manager.new_tab();
+                    self.switch_tab_axis(old, new_idx);
                     self.tab_manager.active_tab_mut().name = name.to_string();
                     self.tab_manager.active_tab_mut().active_cell_mut().buffer.set_text(src);
                     self.sync_active_tab();
@@ -1101,8 +1131,10 @@ impl AppState {
         match key {
             Key::Character(c) if c.as_str() == "n" => {
                 self.close_menu();
-                self.renderer.stash_tab_shaders(self.tab_manager.active_index);
-                self.tab_manager.new_tab();
+                let old = self.tab_manager.active_index;
+                self.renderer.stash_tab_shaders(old);
+                let new_idx = self.tab_manager.new_tab();
+                self.switch_tab_axis(old, new_idx);
                 self.sync_active_tab();
                 true
             }
@@ -1756,6 +1788,7 @@ impl ApplicationHandler for App {
                         if old != i {
                             state.renderer.stash_tab_shaders(old);
                             state.renderer.restore_tab_shaders(i);
+                            state.switch_tab_axis(old, i);
                         }
                         state.tab_manager.set_active(i);
                         state.reduce_service.clear_pending();
@@ -1767,7 +1800,8 @@ impl ApplicationHandler for App {
                 if point_in_rect(mx, my, &state.plus_button_rect) {
                     let old = state.tab_manager.active_index;
                     state.renderer.stash_tab_shaders(old);
-                    state.tab_manager.new_tab();
+                    let new_idx = state.tab_manager.new_tab();
+                    state.switch_tab_axis(old, new_idx);
                     state.sync_active_tab();
                     return;
                 }
@@ -2160,9 +2194,13 @@ impl ApplicationHandler for App {
                     }
                     match kind {
                         DialogKind::Open => {
-                            state.renderer.stash_tab_shaders(state.tab_manager.active_index);
+                            let old = state.tab_manager.active_index;
+                            state.renderer.stash_tab_shaders(old);
                             if let Err(e) = state.tab_manager.open_file(&path) {
                                 log::error!("Failed to open file: {}", e);
+                            } else {
+                                let new_idx = state.tab_manager.active_index;
+                                state.switch_tab_axis(old, new_idx);
                             }
                         }
                         DialogKind::Save => {
