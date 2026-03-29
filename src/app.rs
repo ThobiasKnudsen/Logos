@@ -466,6 +466,9 @@ pub(crate) enum HoverTarget {
     CellDeleteButton(usize),
     AddCellButton,
     AutocompleteItem(usize),
+    CellResizeHandle(usize),
+    CellEditorHScrollThumb(usize),
+    CellEditorVScrollThumb(usize),
     RenderArea,
     WindowEdge(ResizeDirection),
 }
@@ -659,6 +662,22 @@ struct AppState {
     is_dragging_editor: bool,
     editor_drag_cell: Option<usize>,
 
+    // Cell resize dragging (bottom edge)
+    is_dragging_cell_resize: bool,
+    cell_resize_index: Option<usize>,
+    cell_resize_start_y: f32,
+    cell_resize_start_h: f32,
+
+    // Cell editor horizontal scrollbar dragging
+    is_dragging_cell_h_scroll: bool,
+    cell_h_scroll_index: Option<usize>,
+    cell_h_scroll_drag_offset: f32,
+
+    // Cell editor vertical scrollbar dragging
+    is_dragging_cell_v_scroll: bool,
+    cell_v_scroll_index: Option<usize>,
+    cell_v_scroll_drag_offset: f32,
+
     // Window controls
     win_control_rects: WindowControlRects,
     is_maximized: bool,
@@ -732,6 +751,7 @@ impl AppState {
                     },
                     is_error: matches!(&c.output, CellOutput::Error(_)),
                     output_collapsed: c.output_collapsed,
+                    contracted_editor_h: c.contracted_editor_h,
                 }
             })
             .collect();
@@ -931,7 +951,7 @@ impl AppState {
                 return;
             }
 
-            // Check cells (play button, copy button, delete button, then editor area)
+            // Check cells (buttons, h-scrollbar, resize handle, editor area)
             for cl in &self.cell_layouts {
                 if point_in_rect(mx, my, &cl.play_button) {
                     self.set_hover(HoverTarget::CellPlayButton(cl.cell_index));
@@ -945,6 +965,19 @@ impl AppState {
                     self.set_hover(HoverTarget::CellDeleteButton(cl.cell_index));
                     return;
                 }
+                // Editor scrollbar thumbs (before general editor check)
+                if cl.editor_h_scrollbar_thumb.h > 0.0
+                    && point_in_rect(mx, my, &cl.editor_h_scrollbar_thumb)
+                {
+                    self.set_hover(HoverTarget::CellEditorHScrollThumb(cl.cell_index));
+                    return;
+                }
+                if cl.editor_v_scrollbar_thumb.h > 0.0
+                    && point_in_rect(mx, my, &cl.editor_v_scrollbar_thumb)
+                {
+                    self.set_hover(HoverTarget::CellEditorVScrollThumb(cl.cell_index));
+                    return;
+                }
                 if point_in_rect(mx, my, &cl.editor) {
                     self.set_hover(HoverTarget::CellEditor(cl.cell_index));
                     return;
@@ -955,6 +988,11 @@ impl AppState {
                 }
                 if cl.output_toggle.h > 0.0 && point_in_rect(mx, my, &cl.output_toggle) {
                     self.set_hover(HoverTarget::CellOutputToggle(cl.cell_index));
+                    return;
+                }
+                // Resize handle at the bottom edge of cell
+                if point_in_rect(mx, my, &cl.resize_handle) {
+                    self.set_hover(HoverTarget::CellResizeHandle(cl.cell_index));
                     return;
                 }
             }
@@ -980,6 +1018,7 @@ impl AppState {
             self.hover_target = target;
             let icon = match target {
                 HoverTarget::SplitHandle => CursorIcon::ColResize,
+                HoverTarget::CellResizeHandle(_) => CursorIcon::NsResize,
                 HoverTarget::CellEditor(_) => CursorIcon::Text,
                 HoverTarget::CellPlayButton(_) | HoverTarget::CellCopyButton(_)
                 | HoverTarget::CellOutputCopyButton(_)
@@ -1397,6 +1436,9 @@ impl AppState {
             || self.is_dragging_v_scroll
             || self.render_area.is_dragging
             || self.is_dragging_editor
+            || self.is_dragging_cell_resize
+            || self.is_dragging_cell_h_scroll
+            || self.is_dragging_cell_v_scroll
     }
 
     /// Compile and start playing a cell's shader, or run the interpreter
@@ -1555,6 +1597,16 @@ impl ApplicationHandler for App {
             scroll_drag_offset: 0.0,
             is_dragging_editor: false,
             editor_drag_cell: None,
+            is_dragging_cell_resize: false,
+            cell_resize_index: None,
+            cell_resize_start_y: 0.0,
+            cell_resize_start_h: 0.0,
+            is_dragging_cell_h_scroll: false,
+            cell_h_scroll_index: None,
+            cell_h_scroll_drag_offset: 0.0,
+            is_dragging_cell_v_scroll: false,
+            cell_v_scroll_index: None,
+            cell_v_scroll_drag_offset: 0.0,
             win_control_rects: WindowControlRects::default(),
             is_maximized: false,
             last_title_click: None,
@@ -1679,6 +1731,49 @@ impl ApplicationHandler for App {
 
                     state.render_area.last_drag_pos = (mx, my);
                     state.window.request_redraw();
+                } else if state.is_dragging_cell_resize {
+                    if let Some(idx) = state.cell_resize_index {
+                        let delta_y = state.cursor_position.1 - state.cell_resize_start_y;
+                        let new_h = state.cell_resize_start_h + delta_y;
+                        let text_pad = spacing::sm();
+                        let min_h = fonts::editor_line_height() + text_pad * 2.0;
+                        let content_h = state.cell_layouts.iter()
+                            .find(|cl| cl.cell_index == idx)
+                            .map(|cl| cl.content_height)
+                            .unwrap_or(new_h);
+                        let natural_h = content_h + text_pad * 2.0;
+                        let clamped = new_h.clamp(min_h, natural_h);
+                        let tab = state.tab_manager.active_tab_mut();
+                        if idx < tab.cells.len() {
+                            if (clamped - natural_h).abs() < 1.0 {
+                                tab.cells[idx].contracted_editor_h = None;
+                            } else {
+                                tab.cells[idx].contracted_editor_h = Some(clamped);
+                            }
+                        }
+                        state.sync_active_tab();
+                        state.window.request_redraw();
+                    }
+                } else if state.is_dragging_cell_h_scroll {
+                    if let Some(idx) = state.cell_h_scroll_index {
+                        state.renderer.set_editor_h_scroll_from_drag(
+                            idx,
+                            state.cursor_position.0,
+                            state.cell_h_scroll_drag_offset,
+                        );
+                        state.sync_active_tab();
+                        state.window.request_redraw();
+                    }
+                } else if state.is_dragging_cell_v_scroll {
+                    if let Some(idx) = state.cell_v_scroll_index {
+                        state.renderer.set_editor_v_scroll_from_drag(
+                            idx,
+                            state.cursor_position.1,
+                            state.cell_v_scroll_drag_offset,
+                        );
+                        state.sync_active_tab();
+                        state.window.request_redraw();
+                    }
                 } else if state.is_dragging_editor {
                     // Drag-to-select: extend selection to current mouse position
                     if let Some(cell_idx) = state.editor_drag_cell {
@@ -1719,21 +1814,58 @@ impl ApplicationHandler for App {
                 else {
                     let lp = state.cached_layout.left_pane;
                     if point_in_rect(mx, my, &lp) {
+                        let mut handled = false;
+
                         // Check if cursor is over a cell's output area — horizontal scroll
-                        let mut handled_h_scroll = false;
                         for cl in &state.cell_layouts {
                             if cl.output.h > 0.0 && point_in_rect(mx, my, &cl.output) {
                                 let h_delta = if dx.abs() > 0.001 { dx } else { -dy };
                                 state.renderer.scroll_output_x(cl.cell_index, -h_delta);
-                                handled_h_scroll = true;
+                                handled = true;
                                 state.window.request_redraw();
                                 break;
                             }
                         }
-                        if !handled_h_scroll {
+
+                        // Check if cursor is over a cell's editor area
+                        if !handled {
+                            let mut editor_cell = None;
+                            for cl in &state.cell_layouts {
+                                if point_in_rect(mx, my, &cl.editor) {
+                                    editor_cell = Some(cl.cell_index);
+                                    break;
+                                }
+                            }
+                            if let Some(idx) = editor_cell {
+                                // Horizontal scroll (explicit dx from trackpad)
+                                if dx.abs() > 0.001 {
+                                    state.renderer.scroll_editor_x(idx, -dx);
+                                }
+                                // Vertical scroll within contracted cell (with passthrough)
+                                if dy.abs() > 0.001 {
+                                    if state.renderer.cell_is_contracted(idx) {
+                                        let unconsumed = state.renderer.scroll_editor_y(idx, -dy);
+                                        if unconsumed.abs() > 0.001 {
+                                            state.renderer.scroll_by(0.0, unconsumed);
+                                            state.dismiss_autocomplete();
+                                        }
+                                    } else {
+                                        state.renderer.scroll_by(0.0, -dy);
+                                        state.dismiss_autocomplete();
+                                    }
+                                }
+                                // Rebuild layouts to update scrollbar thumb positions
+                                state.sync_active_tab();
+                                state.recompute_hover();
+                                state.window.request_redraw();
+                                handled = true;
+                            }
+                        }
+
+                        // Default: notebook-level vertical scroll
+                        if !handled {
                             state.renderer.scroll_by(0.0, -dy);
                             state.cell_layouts = state.renderer.cell_layouts().to_vec();
-                            // Dismiss autocomplete — cell positions shifted by scroll
                             state.dismiss_autocomplete();
                             state.recompute_hover();
                             state.window.request_redraw();
@@ -1853,6 +1985,41 @@ impl ApplicationHandler for App {
                             }
                         }
                     }
+                    HoverTarget::CellResizeHandle(i) => {
+                        state.close_menu();
+                        state.is_dragging_cell_resize = true;
+                        state.cell_resize_index = Some(i);
+                        state.cell_resize_start_y = state.cursor_position.1;
+                        let editor_h = state.cell_layouts.iter()
+                            .find(|cl| cl.cell_index == i)
+                            .map(|cl| cl.editor.h)
+                            .unwrap_or(100.0);
+                        state.cell_resize_start_h = editor_h;
+                        state.window.set_cursor(CursorIcon::NsResize);
+                        event_loop.set_control_flow(ControlFlow::Poll);
+                    }
+                    HoverTarget::CellEditorHScrollThumb(i) => {
+                        state.close_menu();
+                        state.is_dragging_cell_h_scroll = true;
+                        state.cell_h_scroll_index = Some(i);
+                        let thumb_x = state.cell_layouts.iter()
+                            .find(|cl| cl.cell_index == i)
+                            .map(|cl| cl.editor_h_scrollbar_thumb.x)
+                            .unwrap_or(0.0);
+                        state.cell_h_scroll_drag_offset = state.cursor_position.0 - thumb_x;
+                        event_loop.set_control_flow(ControlFlow::Poll);
+                    }
+                    HoverTarget::CellEditorVScrollThumb(i) => {
+                        state.close_menu();
+                        state.is_dragging_cell_v_scroll = true;
+                        state.cell_v_scroll_index = Some(i);
+                        let thumb_y = state.cell_layouts.iter()
+                            .find(|cl| cl.cell_index == i)
+                            .map(|cl| cl.editor_v_scrollbar_thumb.y)
+                            .unwrap_or(0.0);
+                        state.cell_v_scroll_drag_offset = state.cursor_position.1 - thumb_y;
+                        event_loop.set_control_flow(ControlFlow::Poll);
+                    }
                     _ => {
                         // Click outside menus closes dropdown
                         if state.open_menu.is_some() {
@@ -1878,6 +2045,12 @@ impl ApplicationHandler for App {
                     state.render_area.is_dragging = false;
                     state.is_dragging_editor = false;
                     state.editor_drag_cell = None;
+                    state.is_dragging_cell_resize = false;
+                    state.cell_resize_index = None;
+                    state.is_dragging_cell_h_scroll = false;
+                    state.cell_h_scroll_index = None;
+                    state.is_dragging_cell_v_scroll = false;
+                    state.cell_v_scroll_index = None;
                     if state.pending_dialog.is_none() {
                         event_loop.set_control_flow(ControlFlow::Wait);
                     }
