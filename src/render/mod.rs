@@ -1989,6 +1989,28 @@ impl Renderer {
             _padding: [0.0; 3],
         });
 
+        // Vertical line on left side of notebook (left pane)
+        ui_rects.push(RectInstance {
+            x: layout.left_pane.x,
+            y: layout.left_pane.y,
+            w: 1.0,
+            h: layout.left_pane.h,
+            color: t.border.to_f32_array(),
+            corner_radius: 0.0,
+            _padding: [0.0; 3],
+        });
+
+        // Vertical line on right side of render area (right pane)
+        ui_rects.push(RectInstance {
+            x: layout.right_pane.x + layout.right_pane.w - 1.0,
+            y: layout.right_pane.y,
+            w: 1.0,
+            h: layout.right_pane.h,
+            color: t.border.to_f32_array(),
+            corner_radius: 0.0,
+            _padding: [0.0; 3],
+        });
+
         // Window control hover
         if hover == HoverTarget::WinBtnMinimize {
             ui_rects.push(rect_from(win_controls.minimize, t.bg_hover));
