@@ -345,6 +345,9 @@ pub struct Renderer {
     // Cursor crosshair labels (larger font, shown on hover)
     cursor_x_label: TextBuffer,
     cursor_y_label: TextBuffer,
+    cursor_rect_renderer: RectRenderer,
+    cursor_text_atlas: TextAtlas,
+    cursor_text_renderer: TextRenderer,
 
     // Inverted-overlay compositing resources
     scene_texture: wgpu::Texture,
@@ -434,6 +437,12 @@ impl Renderer {
             .collect();
         let cursor_x_label = Self::create_label(&mut font_system, fonts::ui_size(), "0");
         let cursor_y_label = Self::create_label(&mut font_system, fonts::ui_size(), "0");
+        let cursor_rect_renderer = RectRenderer::new(&device, swapchain_format);
+        let cursor_text_cache = Cache::new(&device);
+        let mut cursor_text_atlas =
+            TextAtlas::new(&device, &queue, &cursor_text_cache, swapchain_format);
+        let cursor_text_renderer =
+            TextRenderer::new(&mut cursor_text_atlas, &device, MultisampleState::default(), None);
 
         // Inverted-overlay compositing resources
         let (scene_texture, scene_view) = Self::create_offscreen_texture(
@@ -612,6 +621,9 @@ impl Renderer {
             axis_label_buffers,
             cursor_x_label,
             cursor_y_label,
+            cursor_rect_renderer,
+            cursor_text_atlas,
+            cursor_text_renderer,
             scene_texture,
             scene_view,
             overlay_texture,
@@ -3428,7 +3440,7 @@ impl Renderer {
                 let t = (tick - render_area.axis_y_min) / y_range;
                 let sy = rp.y + rp.h - t * rp.h;
                 let lx = rp.x + label_pad;
-                let ly = (sy - label_h / 2.0).max(rp.y + label_pad);
+                let ly = (sy - label_h - 1.0).max(rp.y + label_pad);
                 axis_text_areas.push(TextArea {
                     buffer: &self.axis_label_buffers[MAX_AXIS_LABELS + i],
                     left: lx, top: ly, scale: 1.0,
@@ -3440,6 +3452,8 @@ impl Renderer {
         }
 
         // Cursor crosshair lines + coordinate labels (only when hovering render area)
+        let mut cursor_bg_rects: Vec<RectInstance> = Vec::new();
+        let mut cursor_text_areas: Vec<TextArea> = Vec::new();
         if hover == HoverTarget::RenderArea {
             let cursor_color = [1.0_f32, 1.0, 1.0, 0.8];
             let line_thickness = 2.0_f32;
@@ -3447,13 +3461,12 @@ impl Renderer {
             let cx = rp.x + mu * rp.w;
             let cy = rp.y + (1.0 - mv) * rp.h; // mv is Y-flipped (0=bottom)
 
-            // Vertical cursor line
+            // Crosshair lines (rendered in overlay → inverted)
             axis_rects.push(RectInstance {
                 x: cx - line_thickness / 2.0, y: rp.y, w: line_thickness, h: rp.h,
                 color: cursor_color,
                 corner_radius: 0.0, _padding: [0.0; 3],
             });
-            // Horizontal cursor line
             axis_rects.push(RectInstance {
                 x: rp.x, y: cy - line_thickness / 2.0, w: rp.w, h: line_thickness,
                 color: cursor_color,
@@ -3466,6 +3479,7 @@ impl Renderer {
             let cursor_label_h = fonts::ui_size() * 1.4;
             let x_decimals = cursor_decimals(x_range);
             let y_decimals = cursor_decimals(y_range);
+            let cursor_text_color = GlyphonColor::rgba(255, 255, 255, 255);
 
             let cx_text = format!("{:.prec$}", world_x, prec = x_decimals);
             self.cursor_x_label.set_text(
@@ -3478,13 +3492,6 @@ impl Renderer {
             let cx_lw = Self::measure_label_width(&self.cursor_x_label);
             let cx_lx = (cx - cx_lw / 2.0).clamp(rp.x + label_pad, rp.x + rp.w - cx_lw - label_pad);
             let cx_ly = rp.y + rp.h - cursor_label_h - label_pad;
-            axis_text_areas.push(TextArea {
-                buffer: &self.cursor_x_label,
-                left: cx_lx, top: cx_ly, scale: 1.0,
-                bounds: rp_bounds,
-                default_color: label_color,
-                custom_glyphs: &[],
-            });
 
             let cy_text = format!("{:.prec$}", world_y, prec = y_decimals);
             self.cursor_y_label.set_text(
@@ -3494,13 +3501,38 @@ impl Renderer {
                 Shaping::Advanced,
             );
             self.cursor_y_label.shape_until_scroll(&mut self.font_system, false);
-            let cy_ly = (cy - cursor_label_h / 2.0).clamp(rp.y + label_pad, rp.y + rp.h - cursor_label_h - label_pad);
+            let cy_lw = Self::measure_label_width(&self.cursor_y_label);
+            let cy_ly = (cy - cursor_label_h - 1.0).clamp(rp.y + label_pad, rp.y + rp.h - cursor_label_h - label_pad);
             let cy_lx = rp.x + label_pad;
-            axis_text_areas.push(TextArea {
+
+            // Bg rects + text rendered directly to surface in Pass 5 (no inversion)
+            let bg_pad = 3.0_f32 * scale;
+            let bg_color = [0.0_f32, 0.0, 0.0, 0.9];
+            cursor_bg_rects.push(RectInstance {
+                x: cx_lx - bg_pad, y: cx_ly - bg_pad,
+                w: cx_lw + bg_pad * 2.0, h: cursor_label_h + bg_pad * 2.0,
+                color: bg_color,
+                corner_radius: 3.0, _padding: [0.0; 3],
+            });
+            cursor_bg_rects.push(RectInstance {
+                x: cy_lx - bg_pad, y: cy_ly - bg_pad,
+                w: cy_lw + bg_pad * 2.0, h: cursor_label_h + bg_pad * 2.0,
+                color: bg_color,
+                corner_radius: 3.0, _padding: [0.0; 3],
+            });
+
+            cursor_text_areas.push(TextArea {
+                buffer: &self.cursor_x_label,
+                left: cx_lx, top: cx_ly, scale: 1.0,
+                bounds: rp_bounds,
+                default_color: cursor_text_color,
+                custom_glyphs: &[],
+            });
+            cursor_text_areas.push(TextArea {
                 buffer: &self.cursor_y_label,
                 left: cy_lx, top: cy_ly, scale: 1.0,
                 bounds: rp_bounds,
-                default_color: label_color,
+                default_color: cursor_text_color,
                 custom_glyphs: &[],
             });
         }
@@ -3626,10 +3658,47 @@ impl Renderer {
             pass.draw(0..3, 0..1);
         }
 
+        // Pass 5: Cursor bg rects + labels → surface (direct, on top of everything)
+        if !cursor_bg_rects.is_empty() {
+            self.cursor_text_renderer
+                .prepare(
+                    &self.device,
+                    &self.queue,
+                    &mut self.font_system,
+                    &mut self.cursor_text_atlas,
+                    &self.viewport,
+                    cursor_text_areas,
+                    &mut self.swash_cache,
+                )
+                .unwrap();
+
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("cursor_overlay_pass"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Load,
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            self.cursor_rect_renderer
+                .draw(&self.queue, &mut pass, sw, sh, &cursor_bg_rects);
+            self.cursor_text_renderer
+                .render(&self.cursor_text_atlas, &self.viewport, &mut pass)
+                .unwrap();
+        }
+
         self.queue.submit(Some(encoder.finish()));
         frame.present();
         self.atlas.trim();
         self.axis_atlas.trim();
+        self.cursor_text_atlas.trim();
     }
 }
 

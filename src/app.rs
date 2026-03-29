@@ -1232,6 +1232,16 @@ impl AppState {
                 let idx = self.tab_manager.active_index;
                 self.renderer.drop_stashed_tab_shaders(idx);
                 self.tab_manager.close_tab(idx);
+                let new_idx = self.tab_manager.active_index;
+                self.renderer.restore_tab_shaders(new_idx);
+                if let Some(tab) = self.tab_manager.tabs.get(new_idx) {
+                    if let Some([xmin, xmax, ymin, ymax]) = tab.axis_bounds {
+                        self.render_area.axis_x_min = xmin;
+                        self.render_area.axis_x_max = xmax;
+                        self.render_area.axis_y_min = ymin;
+                        self.render_area.axis_y_max = ymax;
+                    }
+                }
                 self.sync_active_tab();
             }
             (0, 5) => { event_loop.exit(); }
@@ -1375,6 +1385,16 @@ impl AppState {
                 let idx = self.tab_manager.active_index;
                 self.renderer.drop_stashed_tab_shaders(idx);
                 self.tab_manager.close_tab(idx);
+                let new_idx = self.tab_manager.active_index;
+                self.renderer.restore_tab_shaders(new_idx);
+                if let Some(tab) = self.tab_manager.tabs.get(new_idx) {
+                    if let Some([xmin, xmax, ymin, ymax]) = tab.axis_bounds {
+                        self.render_area.axis_x_min = xmin;
+                        self.render_area.axis_x_max = xmax;
+                        self.render_area.axis_y_min = ymin;
+                        self.render_area.axis_y_max = ymax;
+                    }
+                }
                 self.sync_active_tab();
                 true
             }
@@ -2116,7 +2136,21 @@ impl ApplicationHandler for App {
                 for (i, hit) in state.tab_hit_rects.iter().enumerate() {
                     if point_in_rect(mx, my, &hit.close) {
                         state.renderer.drop_stashed_tab_shaders(i);
+                        let was_active = i == state.tab_manager.active_index;
                         state.tab_manager.close_tab(i);
+                        if was_active {
+                            let new_idx = state.tab_manager.active_index;
+                            state.renderer.restore_tab_shaders(new_idx);
+                            // Restore axis bounds for the new tab
+                            if let Some(tab) = state.tab_manager.tabs.get(new_idx) {
+                                if let Some([xmin, xmax, ymin, ymax]) = tab.axis_bounds {
+                                    state.render_area.axis_x_min = xmin;
+                                    state.render_area.axis_x_max = xmax;
+                                    state.render_area.axis_y_min = ymin;
+                                    state.render_area.axis_y_max = ymax;
+                                }
+                            }
+                        }
                         state.sync_active_tab();
                         return;
                     }
