@@ -159,7 +159,7 @@ impl UiLayout {
             (self.title_bar, None, Some(spacing::menu_height())),
             (self.tab_bar, None, Some(spacing::tab_height())),
             (self.status_bar, None, Some(spacing::status_height())),
-            (self.split_handle, Some(spacing::split_handle_width()), None),
+            (self.split_handle, Some(spacing::SPLIT_HANDLE_WIDTH), None),
         ];
         for (node, w, h) in updates {
             let mut style = self.tree.style(node).unwrap().clone();
@@ -184,7 +184,7 @@ impl UiLayout {
     /// for the given viewport width.  Returns the (possibly adjusted) width.
     pub fn clamp_left_width(&mut self, left_width: f32, viewport_w: f32) -> f32 {
         use crate::ui::theme::{spacing, split};
-        let handle = spacing::split_handle_width();
+        let handle = spacing::SPLIT_HANDLE_WIDTH;
         let max = (viewport_w - handle - split::MIN_PANE_SIZE).max(split::MIN_PANE_SIZE);
         let clamped = left_width.clamp(split::MIN_PANE_SIZE, max);
         self.set_left_pane_width(clamped);

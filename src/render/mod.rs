@@ -902,6 +902,18 @@ impl Renderer {
         (&self.device, &self.queue)
     }
 
+    pub fn stash_tab_shaders(&mut self, tab_index: usize) {
+        self.shader_pipeline.stash(tab_index);
+    }
+
+    pub fn restore_tab_shaders(&mut self, tab_index: usize) {
+        self.shader_pipeline.restore(tab_index);
+    }
+
+    pub fn drop_stashed_tab_shaders(&mut self, tab_index: usize) {
+        self.shader_pipeline.drop_stashed(tab_index);
+    }
+
     pub fn has_active_shaders(&self) -> bool {
         self.shader_pipeline.has_active()
     }
@@ -1086,8 +1098,9 @@ impl Renderer {
 
         if need_v && visible_h > 0.0 && self.cells_total_height > 0.0 {
             let sb_w = spacing::scrollbar_width();
+            let sb_gap = 4.0; // gap between scrollbar and split handle
             let track_h = pane.h;
-            let sb_x = pane.x + pane.w - sb_w;
+            let sb_x = pane.x + pane.w - sb_w - sb_gap;
             self.v_track_rect = Some(Rect { x: sb_x, y: pane.y, w: sb_w, h: track_h });
 
             let ratio = visible_h / self.cells_total_height;
@@ -1800,14 +1813,14 @@ impl Renderer {
                 ui_rects.push(rect_rounded(cl.play_button, btn_color, 4.0 * fonts::scale()));
             }
 
-            // Copy button hover
+            // Copy button hover (round)
             if hover == HoverTarget::CellCopyButton(i) {
-                ui_rects.push(rect_from(cl.copy_button, t.bg_hover));
+                ui_rects.push(rect_rounded(cl.copy_button, t.bg_hover, cl.copy_button.w / 2.0));
             }
 
-            // Delete button hover
+            // Delete button hover (round)
             if hover == HoverTarget::CellDeleteButton(i) {
-                ui_rects.push(rect_from(cl.delete_button, t.bg_hover));
+                ui_rects.push(rect_rounded(cl.delete_button, t.bg_hover, cl.delete_button.w / 2.0));
             }
 
             // Separator line
@@ -1818,14 +1831,14 @@ impl Renderer {
                 // Full-width separator line between editor and output
                 ui_rects.push(rect_from(cl.output_separator, t.border));
 
-                // Chevron toggle button hover
+                // Chevron toggle button hover (round)
                 if hover == HoverTarget::CellOutputToggle(i) {
-                    ui_rects.push(rect_from(cl.output_toggle, t.bg_hover));
+                    ui_rects.push(rect_rounded(cl.output_toggle, t.bg_hover, cl.output_toggle.w / 2.0));
                 }
 
-                // Copy button hover
+                // Copy button hover (round)
                 if hover == HoverTarget::CellOutputCopyButton(i) {
-                    ui_rects.push(rect_from(cl.output_copy_button, t.bg_hover));
+                    ui_rects.push(rect_rounded(cl.output_copy_button, t.bg_hover, cl.output_copy_button.w / 2.0));
                 }
             }
         }
@@ -1938,17 +1951,26 @@ impl Renderer {
             ui_rects.push(rect_from(*rect, color));
         }
 
-        // Tab close hover bg
+        // Tab close hover bg (round)
         for (idx, close_rect) in self.tab_close_rects.iter().enumerate() {
             if hover == HoverTarget::TabClose(idx) {
-                ui_rects.push(rect_from(*close_rect, t.bg_hover));
+                ui_rects.push(rect_rounded(*close_rect, t.bg_hover, close_rect.w / 2.0));
             }
         }
 
-        // Line between tab bar and content area (drawn after tab backgrounds)
+        // Plus button (tab bar, round circle same size as close buttons)
+        if hover == HoverTarget::PlusButton {
+            let size = tab_close_size();
+            let cx = self.plus_rect.x + self.plus_rect.w / 2.0;
+            let cy = self.plus_rect.y + self.plus_rect.h / 2.0;
+            let r = Rect { x: cx - size / 2.0, y: cy - size / 2.0, w: size, h: size };
+            ui_rects.push(rect_rounded(r, t.bg_hover, size / 2.0));
+        }
+
+        // Line at bottom of tab bar (inside tab area, above content — drawn after plus button)
         ui_rects.push(RectInstance {
             x: 0.0,
-            y: layout.tab_bar.y + layout.tab_bar.h,
+            y: layout.tab_bar.y + layout.tab_bar.h - 1.0,
             w: sw,
             h: 1.0,
             color: t.border.to_f32_array(),
@@ -1966,14 +1988,6 @@ impl Renderer {
             corner_radius: 0.0,
             _padding: [0.0; 3],
         });
-
-        // Plus button (tab bar)
-        let plus_color = if hover == HoverTarget::PlusButton {
-            t.tab_hover
-        } else {
-            t.tab_inactive
-        };
-        ui_rects.push(rect_from(self.plus_rect, plus_color));
 
         // Window control hover
         if hover == HoverTarget::WinBtnMinimize {
