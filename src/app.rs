@@ -11,6 +11,7 @@ use crate::editor::autocomplete::{self, AutocompleteState};
 use crate::editor::cell::CellOutput;
 use crate::file_dialog::{DialogKind, DialogResult, FileDialog};
 use crate::lang;
+use crate::lang::lang_service::LangService;
 use crate::lang::reduce::service::ReduceService;
 use crate::lang::reduce::translate;
 use crate::render::{CellInfo, CellLayout, Renderer, TabHitRect, TabInfo};
@@ -701,6 +702,13 @@ struct AppState {
 
     // REDUCE CAS integration
     reduce_service: ReduceService,
+
+    // Background language service (autocomplete symbol extraction)
+    lang_service: LangService,
+    cached_user_symbols: Vec<autocomplete::Candidate>,
+    /// Track what text was last submitted to lang_service per cell,
+    /// so we don't re-submit unchanged text.
+    last_submitted_texts: Vec<String>,
 }
 
 const DOUBLE_CLICK_MS: u128 = 400;
@@ -709,33 +717,56 @@ const SCROLL_LINE_PIXELS: f32 = 40.0;
 impl AppState {
     /// Sync renderer with the active tab's cells and all tab infos.
     fn sync_active_tab(&mut self) {
+        static SYNC_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SYNC_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let sync_start = Instant::now();
+
         let lp = self.cached_layout.left_pane;
         let tab = self.tab_manager.active_tab();
+        // Ensure cached vectors match cell count
+        let cell_count = tab.cells.len();
+        self.last_submitted_texts.resize(cell_count, String::new());
+
+        let t0 = Instant::now();
         let cell_infos: Vec<CellInfo> = tab
             .cells
             .iter()
-            .map(|c| CellInfo {
-                text: c.buffer.text().to_string(),
-                cursor_byte: c.buffer.cursor_byte_offset(),
-                is_playing: c.is_playing,
-                selection: c.buffer.selection_range(),
-                output_text: match &c.output {
-                    CellOutput::Simplified(s) | CellOutput::Computed(s) => Some(s.clone()),
-                    CellOutput::Error(e) => Some(e.clone()),
-                    CellOutput::None => None,
-                },
-                is_error: matches!(&c.output, CellOutput::Error(_)),
-                output_collapsed: c.output_collapsed,
-                contracted_editor_h: c.contracted_editor_h,
+            .enumerate()
+            .map(|(i, c)| {
+                let text = c.buffer.text().to_string();
+                // Only submit to lang service if text actually changed
+                if self.last_submitted_texts[i] != text {
+                    self.lang_service.submit(i, text.clone());
+                    self.last_submitted_texts[i].clone_from(&text);
+                }
+                CellInfo {
+                    text,
+                    cursor_byte: c.buffer.cursor_byte_offset(),
+                    is_playing: c.is_playing,
+                    selection: c.buffer.selection_range(),
+                    output_text: match &c.output {
+                        CellOutput::Simplified(s) | CellOutput::Computed(s) => Some(s.clone()),
+                        CellOutput::Error(e) => Some(e.clone()),
+                        CellOutput::None => None,
+                    },
+                    is_error: matches!(&c.output, CellOutput::Error(_)),
+                    output_collapsed: c.output_collapsed,
+                    contracted_editor_h: c.contracted_editor_h,
+                }
             })
             .collect();
+        let build_cell_infos_us = t0.elapsed().as_micros();
+
+        let t1 = Instant::now();
         self.cell_layouts = self.renderer.update_cells(
             &cell_infos,
             tab.active_cell_index,
             lp,
         );
+        let update_cells_us = t1.elapsed().as_micros();
 
         // Update tab bar
+        let t2 = Instant::now();
         let tab_infos: Vec<TabInfo> = self
             .tab_manager
             .tabs
@@ -763,8 +794,10 @@ impl AppState {
         self.menu_item_rects = self
             .renderer
             .update_menu_items(self.cached_layout.title_bar, self.win_control_rects.minimize.x);
+        let ui_chrome_us = t2.elapsed().as_micros();
 
         // Update status bar
+        let t3 = Instant::now();
         let tab = self.tab_manager.active_tab();
         let cell = tab.active_cell();
         let (line, col) = line_col_from(cell.buffer.text(), cell.buffer.cursor_byte_offset());
@@ -785,6 +818,13 @@ impl AppState {
             col + 1,
             theme::active_theme_name(),
         ));
+        let status_bar_us = t3.elapsed().as_micros();
+
+        let total_us = sync_start.elapsed().as_micros();
+        log::warn!(
+            "[perf] sync_active_tab[#{}]: {}us total | build_cell_infos={}us update_cells={}us ui_chrome={}us status_bar={}us",
+            seq, total_us, build_cell_infos_us, update_cells_us, ui_chrome_us, status_bar_us
+        );
 
         self.window.request_redraw();
     }
@@ -1030,12 +1070,38 @@ impl AppState {
         }
     }
 
-    fn dismiss_autocomplete(&mut self) {
-        if self.autocomplete.active {
-            self.autocomplete.dismiss();
-            self.autocomplete_item_rects.clear();
-            self.renderer.close_autocomplete();
+    /// Save current axis bounds to old tab, restore from new tab (or reset to default).
+    fn switch_tab_axis(&mut self, old_tab: usize, new_tab: usize) {
+        // Save current axis state to old tab
+        if let Some(tab) = self.tab_manager.tabs.get_mut(old_tab) {
+            tab.axis_bounds = Some([
+                self.render_area.axis_x_min,
+                self.render_area.axis_x_max,
+                self.render_area.axis_y_min,
+                self.render_area.axis_y_max,
+            ]);
         }
+        // Restore axis state from new tab (or reset to default)
+        if let Some(tab) = self.tab_manager.tabs.get(new_tab) {
+            if let Some([xmin, xmax, ymin, ymax]) = tab.axis_bounds {
+                self.render_area.axis_x_min = xmin;
+                self.render_area.axis_x_max = xmax;
+                self.render_area.axis_y_min = ymin;
+                self.render_area.axis_y_max = ymax;
+            } else {
+                let default = RenderAreaState::default();
+                self.render_area.axis_x_min = default.axis_x_min;
+                self.render_area.axis_x_max = default.axis_x_max;
+                self.render_area.axis_y_min = default.axis_y_min;
+                self.render_area.axis_y_max = default.axis_y_max;
+            }
+        }
+    }
+
+    fn dismiss_autocomplete(&mut self) {
+        self.autocomplete.dismiss();
+        self.autocomplete_item_rects.clear();
+        self.renderer.close_autocomplete();
     }
 
     fn update_autocomplete(&mut self) {
@@ -1061,14 +1127,8 @@ impl AppState {
                 all.extend(autocomplete::symbol_candidates());
             }
 
-            // Try to parse and extract user symbols (best-effort)
-            let mut lex = crate::lang::lexer::Lexer::new(text);
-            if let Ok(tokens) = lex.tokenize() {
-                let mut parser = crate::lang::parser::Parser::new(tokens, text.to_string());
-                if let Ok(ast) = parser.parse() {
-                    all.extend(autocomplete::extract_user_symbols(&ast));
-                }
-            }
+            // Use cached user symbols from background lang service
+            all.extend(self.cached_user_symbols.clone());
 
             self.autocomplete.update(prefix, prefix_start, &all);
 
@@ -1124,7 +1184,13 @@ impl AppState {
         self.close_menu();
         match (menu_idx, item_idx) {
             // File menu
-            (0, 0) => { self.tab_manager.new_tab(); self.sync_active_tab(); }
+            (0, 0) => {
+                let old = self.tab_manager.active_index;
+                self.renderer.stash_tab_shaders(old);
+                let new_idx = self.tab_manager.new_tab();
+                self.switch_tab_axis(old, new_idx);
+                self.sync_active_tab();
+            }
             (0, 1) => {
                 if self.pending_dialog.is_none() {
                     self.pending_dialog = Some(FileDialog::spawn(DialogKind::Open));
@@ -1147,6 +1213,7 @@ impl AppState {
             }
             (0, 4) => {
                 let idx = self.tab_manager.active_index;
+                self.renderer.drop_stashed_tab_shaders(idx);
                 self.tab_manager.close_tab(idx);
                 self.sync_active_tab();
             }
@@ -1164,7 +1231,10 @@ impl AppState {
             (3, i) => {
                 if let Some(&src) = EXAMPLE_SOURCES.get(i) {
                     let name = MENU_EXAMPLES_ITEMS.get(i).map(|m| m.label).unwrap_or("Example");
-                    self.tab_manager.new_tab();
+                    let old = self.tab_manager.active_index;
+                    self.renderer.stash_tab_shaders(old);
+                    let new_idx = self.tab_manager.new_tab();
+                    self.switch_tab_axis(old, new_idx);
                     self.tab_manager.active_tab_mut().name = name.to_string();
                     self.tab_manager.active_tab_mut().active_cell_mut().buffer.set_text(src);
                     self.sync_active_tab();
@@ -1222,6 +1292,7 @@ impl AppState {
         let name = theme::cycle_theme();
         log::info!("Switched theme to: {}", name);
         self.renderer.invalidate_cell_texts();
+        self.invalidate_lang_cache();
         self.sync_active_tab();
     }
 
@@ -1229,7 +1300,16 @@ impl AppState {
         theme::set_theme(index);
         log::info!("Selected theme: {}", theme::active_theme_name());
         self.renderer.invalidate_cell_texts();
+        self.invalidate_lang_cache();
         self.sync_active_tab();
+    }
+
+    /// Clear cached user symbols so they are re-computed by the
+    /// background lang service on the next sync.
+    fn invalidate_lang_cache(&mut self) {
+        self.cached_user_symbols.clear();
+        self.last_submitted_texts.clear();
+        self.lang_service.clear_pending();
     }
 
     fn handle_shortcut(&mut self, event_loop: &ActiveEventLoop, key: &Key) -> bool {
@@ -1243,7 +1323,10 @@ impl AppState {
         match key {
             Key::Character(c) if c.as_str() == "n" => {
                 self.close_menu();
-                self.tab_manager.new_tab();
+                let old = self.tab_manager.active_index;
+                self.renderer.stash_tab_shaders(old);
+                let new_idx = self.tab_manager.new_tab();
+                self.switch_tab_axis(old, new_idx);
                 self.sync_active_tab();
                 true
             }
@@ -1273,6 +1356,7 @@ impl AppState {
             Key::Character(c) if c.as_str() == "w" => {
                 self.close_menu();
                 let idx = self.tab_manager.active_index;
+                self.renderer.drop_stashed_tab_shaders(idx);
                 self.tab_manager.close_tab(idx);
                 self.sync_active_tab();
                 true
@@ -1534,6 +1618,9 @@ impl ApplicationHandler for App {
             autocomplete: AutocompleteState::new(),
             autocomplete_item_rects: Vec::new(),
             reduce_service: ReduceService::new(),
+            lang_service: LangService::new(),
+            cached_user_symbols: Vec::new(),
+            last_submitted_texts: Vec::new(),
         };
 
         let wp = win_pos(&state.window);
@@ -2004,6 +2091,7 @@ impl ApplicationHandler for App {
 
                 for (i, hit) in state.tab_hit_rects.iter().enumerate() {
                     if point_in_rect(mx, my, &hit.close) {
+                        state.renderer.drop_stashed_tab_shaders(i);
                         state.tab_manager.close_tab(i);
                         state.sync_active_tab();
                         return;
@@ -2012,15 +2100,25 @@ impl ApplicationHandler for App {
 
                 for (i, hit) in state.tab_hit_rects.iter().enumerate() {
                     if point_in_rect(mx, my, &hit.full) {
+                        let old = state.tab_manager.active_index;
+                        if old != i {
+                            state.renderer.stash_tab_shaders(old);
+                            state.renderer.restore_tab_shaders(i);
+                            state.switch_tab_axis(old, i);
+                        }
                         state.tab_manager.set_active(i);
                         state.reduce_service.clear_pending();
+                        state.invalidate_lang_cache();
                         state.sync_active_tab();
                         return;
                     }
                 }
 
                 if point_in_rect(mx, my, &state.plus_button_rect) {
-                    state.tab_manager.new_tab();
+                    let old = state.tab_manager.active_index;
+                    state.renderer.stash_tab_shaders(old);
+                    let new_idx = state.tab_manager.new_tab();
+                    state.switch_tab_axis(old, new_idx);
                     state.sync_active_tab();
                     return;
                 }
@@ -2087,10 +2185,12 @@ impl ApplicationHandler for App {
                             state.renderer.remove_cell_shader(cell.id);
                         }
                         state.tab_manager.active_tab_mut().remove_cell(i);
+                        state.invalidate_lang_cache();
                         state.sync_active_tab();
                     }
                     HoverTarget::AddCellButton => {
                         state.tab_manager.active_tab_mut().add_cell();
+                        state.invalidate_lang_cache();
                         state.sync_active_tab();
                     }
                     _ => {}
@@ -2213,9 +2313,19 @@ impl ApplicationHandler for App {
                 };
 
                 if changed {
+                    let key_start = Instant::now();
                     state.tab_manager.active_tab_mut().mark_modified();
+                    log::warn!("[perf] --- KEYSTROKE --- (1st sync: text changed, no highlight spans yet)");
                     state.sync_active_tab();
+                    let t_sync = key_start.elapsed().as_micros();
+                    let ac_start = Instant::now();
                     state.update_autocomplete();
+                    let t_ac = ac_start.elapsed().as_micros();
+                    let t_total = key_start.elapsed().as_micros();
+                    log::warn!(
+                        "[perf] keystroke done: {}us total | sync={}us autocomplete={}us",
+                        t_total, t_sync, t_ac
+                    );
                     state.window.request_redraw();
                 } else {
                     // Dismiss autocomplete only for explicit cursor navigation keys.
@@ -2275,6 +2385,11 @@ impl ApplicationHandler for App {
         };
 
         let mut needs_redraw = false;
+
+        // --- Lang service: poll for autocomplete symbol results ---
+        while let Some(resp) = state.lang_service.try_recv() {
+            state.cached_user_symbols = resp.user_symbols;
+        }
 
         // --- REDUCE: poll for completed responses ---
         while let Some(resp) = state.reduce_service.try_recv() {
@@ -2413,8 +2528,13 @@ impl ApplicationHandler for App {
                     }
                     match kind {
                         DialogKind::Open => {
+                            let old = state.tab_manager.active_index;
+                            state.renderer.stash_tab_shaders(old);
                             if let Err(e) = state.tab_manager.open_file(&path) {
                                 log::error!("Failed to open file: {}", e);
+                            } else {
+                                let new_idx = state.tab_manager.active_index;
+                                state.switch_tab_axis(old, new_idx);
                             }
                         }
                         DialogKind::Save => {

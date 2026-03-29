@@ -201,7 +201,7 @@ impl JsonTheme {
             bg_primary:            pb,
             bg_secondary:          sb,
             bg_elevated:           tb,
-            bg_hover:              hover(tb, 12, is_dark),
+            bg_hover:              hover(tb, 40, is_dark),
             border:                b1,
             border_focus:          ac,
             text_primary:          pt,
@@ -347,7 +347,7 @@ pub mod spacing {
     pub const MENU_HEIGHT: f32 = 28.0;
     pub const TAB_HEIGHT: f32 = 36.0;
     pub const STATUS_HEIGHT: f32 = 24.0;
-    pub const SPLIT_HANDLE_WIDTH: f32 = 2.4;
+    pub const SPLIT_HANDLE_WIDTH: f32 = 4.08;
     pub const WINDOW_CONTROL_WIDTH: f32 = 46.0;
     pub const DROPDOWN_ITEM_HEIGHT: f32 = 28.0;
     pub const DROPDOWN_PADDING: f32 = 4.0;

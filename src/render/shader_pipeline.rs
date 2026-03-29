@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
@@ -90,6 +91,7 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
 
 pub struct ShaderPipelineManager {
     pipelines: Vec<CellPipeline>,
+    stashed: HashMap<usize, Vec<CellPipeline>>,
     vertex_shader: wgpu::ShaderModule,
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
@@ -126,6 +128,7 @@ impl ShaderPipelineManager {
 
         Self {
             pipelines: Vec::new(),
+            stashed: HashMap::new(),
             vertex_shader,
             bind_group_layout,
             pipeline_layout,
@@ -229,6 +232,26 @@ impl ShaderPipelineManager {
     /// Returns true if any cell has an active shader pipeline.
     pub fn has_active(&self) -> bool {
         !self.pipelines.is_empty()
+    }
+
+    /// Stash current pipelines for a tab (pause rendering without destroying GPU resources).
+    pub fn stash(&mut self, tab_index: usize) {
+        let pipelines = std::mem::take(&mut self.pipelines);
+        if !pipelines.is_empty() {
+            self.stashed.insert(tab_index, pipelines);
+        }
+    }
+
+    /// Restore previously stashed pipelines for a tab.
+    pub fn restore(&mut self, tab_index: usize) {
+        if let Some(pipelines) = self.stashed.remove(&tab_index) {
+            self.pipelines = pipelines;
+        }
+    }
+
+    /// Drop stashed pipelines for a tab (e.g. when closing it).
+    pub fn drop_stashed(&mut self, tab_index: usize) {
+        self.stashed.remove(&tab_index);
     }
 
     /// Render all active shader pipelines into the given surface view.

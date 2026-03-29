@@ -5,8 +5,10 @@ pub mod compute_pipeline;
 use std::sync::Arc;
 
 use glyphon::{
-    Attrs, Buffer as TextBuffer, Cache, Color as GlyphonColor, Family, FontSystem, Metrics,
-    Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Attrs, AttrsList, Buffer as TextBuffer, BufferLine, Cache, Color as GlyphonColor, Family,
+    FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds,
+    TextRenderer, Viewport,
+    cosmic_text::LineEnding,
 };
 use wgpu::{
     CommandEncoderDescriptor, DeviceDescriptor, Instance, InstanceDescriptor, LoadOp,
@@ -571,6 +573,110 @@ impl Renderer {
         self.cell_texts.clear();
     }
 
+    /// Update a cosmic-text buffer incrementally: only reshape lines that
+    /// actually changed.  Returns the number of lines that were reshaped.
+    fn incremental_set_rich_text(
+        buffer: &mut TextBuffer,
+        new_text: &str,
+        spans: &[crate::lang::highlight::HighlightSpan],
+        default_attrs: Attrs,
+    ) -> usize {
+        // Split new text into lines (preserving empty trailing line for trailing '\n')
+        let new_lines: Vec<&str> = new_text.split('\n').collect();
+        let new_count = new_lines.len();
+        let old_count = buffer.lines.len();
+
+        // Find matching prefix (lines unchanged from the top)
+        let top_match = {
+            let limit = old_count.min(new_count);
+            let mut m = 0;
+            while m < limit && buffer.lines[m].text() == new_lines[m] {
+                m += 1;
+            }
+            m
+        };
+
+        // Find matching suffix (lines unchanged from the bottom)
+        let bottom_match = {
+            let limit = (old_count - top_match).min(new_count - top_match);
+            let mut m = 0;
+            while m < limit
+                && buffer.lines[old_count - 1 - m].text() == new_lines[new_count - 1 - m]
+            {
+                m += 1;
+            }
+            m
+        };
+
+        let old_mid_start = top_match;
+        let old_mid_end = old_count - bottom_match;
+        let new_mid_start = top_match;
+        let new_mid_end = new_count - bottom_match;
+        let new_mid_count = new_mid_end - new_mid_start;
+
+        // Pre-compute byte offset at each line start for span mapping
+        let mut line_byte_starts = Vec::with_capacity(new_count);
+        let mut offset = 0usize;
+        for (idx, line) in new_lines.iter().enumerate() {
+            line_byte_starts.push(offset);
+            offset += line.len();
+            if idx < new_count - 1 {
+                offset += 1; // '\n'
+            }
+        }
+
+        // Build replacement BufferLines for the changed middle section
+        let mut replacement = Vec::with_capacity(new_mid_count);
+        for idx in new_mid_start..new_mid_end {
+            let line_text = new_lines[idx];
+            let ending = if idx < new_count - 1 {
+                LineEnding::Lf
+            } else {
+                LineEnding::None
+            };
+            let line_start = line_byte_starts[idx];
+            let line_end = line_start + line_text.len();
+
+            // Build per-line AttrsList from global highlight spans
+            let mut attrs_list = AttrsList::new(default_attrs);
+            for span in spans {
+                if span.end <= line_start || span.start >= line_end {
+                    continue;
+                }
+                let local_start = span.start.saturating_sub(line_start);
+                let local_end = (span.end - line_start).min(line_text.len());
+                if local_start < local_end {
+                    let a = default_attrs.color(GlyphonColor::rgba(
+                        span.color.r,
+                        span.color.g,
+                        span.color.b,
+                        span.color.a,
+                    ));
+                    attrs_list.add_span(local_start..local_end, a);
+                }
+            }
+            replacement.push(BufferLine::new(line_text, ending, attrs_list, Shaping::Advanced));
+        }
+
+        let lines_updated = replacement.len();
+        buffer.lines.splice(old_mid_start..old_mid_end, replacement);
+
+        // Fix line ending on the line just before the middle (it may have
+        // changed from None→Lf or vice versa when lines were added/removed)
+        if top_match > 0 && old_count != new_count {
+            let prev = top_match - 1;
+            let ending = if prev < new_count - 1 {
+                LineEnding::Lf
+            } else {
+                LineEnding::None
+            };
+            buffer.lines[prev].set_ending(ending);
+        }
+
+        buffer.set_redraw(true);
+        lines_updated
+    }
+
     pub fn set_maximized_icon(&mut self, is_maximized: bool) {
         let icon = if is_maximized { "\u{274F}" } else { "\u{25A1}" };
         self.win_max_label.set_text(
@@ -817,6 +923,18 @@ impl Renderer {
     /// Get references to device and queue for GPU compute dispatch.
     pub fn gpu_refs(&self) -> (&wgpu::Device, &wgpu::Queue) {
         (&self.device, &self.queue)
+    }
+
+    pub fn stash_tab_shaders(&mut self, tab_index: usize) {
+        self.shader_pipeline.stash(tab_index);
+    }
+
+    pub fn restore_tab_shaders(&mut self, tab_index: usize) {
+        self.shader_pipeline.restore(tab_index);
+    }
+
+    pub fn drop_stashed_tab_shaders(&mut self, tab_index: usize) {
+        self.shader_pipeline.drop_stashed(tab_index);
     }
 
     pub fn has_active_shaders(&self) -> bool {
@@ -1143,8 +1261,9 @@ impl Renderer {
 
         if need_v && visible_h > 0.0 && self.cells_total_height > 0.0 {
             let sb_w = spacing::scrollbar_width();
+            let sb_gap = 4.0; // gap between scrollbar and split handle
             let track_h = pane.h;
-            let sb_x = pane.x + pane.w - sb_w;
+            let sb_x = pane.x + pane.w - sb_w - sb_gap;
             self.v_track_rect = Some(Rect { x: sb_x, y: pane.y, w: sb_w, h: track_h });
 
             let ratio = visible_h / self.cells_total_height;
@@ -1235,43 +1354,54 @@ impl Renderer {
 
         let mut layouts = Vec::with_capacity(cells.len());
         let mut y_offset = cell_pad; // accumulates from top of cell container
+        let mut perf_reshape_us: u128 = 0;
+        let mut perf_set_rich_text_us: u128 = 0;
+        let mut perf_shape_us: u128 = 0;
+        let mut perf_measure_us: u128 = 0;
+        let mut perf_output_us: u128 = 0;
+        let mut perf_layout_us: u128 = 0;
+        let mut reshape_count = 0u32;
+        let mut reshape_reasons: Vec<String> = Vec::new();
+        let uc_start = std::time::Instant::now();
 
         for (i, cell_info) in cells.iter().enumerate() {
             // Only reshape if text actually changed (cosmic-text shaping is expensive)
             let text_changed = self.cell_texts.get(i).map_or(true, |prev| *prev != cell_info.text);
             if text_changed {
+                let rs = std::time::Instant::now();
+
                 self.cell_buffers[i].set_size(&mut self.font_system, None, None);
 
-                // Syntax-highlighted rich text
+                // Syntax-highlighted spans (lexing is cheap, ~0.1ms)
                 let spans = crate::lang::highlight::highlight(&cell_info.text);
                 let default_attrs = Attrs::new().family(Family::Monospace);
-                let rich_spans: Vec<(&str, Attrs)> = spans
-                    .iter()
-                    .map(|s| {
-                        let text_slice = &cell_info.text[s.start..s.end];
-                        let attrs = default_attrs.color(GlyphonColor::rgba(
-                            s.color.r, s.color.g, s.color.b, s.color.a,
-                        ));
-                        (text_slice, attrs)
-                    })
-                    .collect();
-                self.cell_buffers[i].set_rich_text(
-                    &mut self.font_system,
-                    rich_spans,
-                    default_attrs,
-                    Shaping::Advanced,
-                );
 
+                let srt = std::time::Instant::now();
+                let lines_updated = Self::incremental_set_rich_text(
+                    &mut self.cell_buffers[i],
+                    &cell_info.text,
+                    &spans,
+                    default_attrs,
+                );
+                perf_set_rich_text_us += srt.elapsed().as_micros();
+                reshape_count += 1;
+                reshape_reasons.push(format!("cell[{}]:{}lines", i, lines_updated));
+
+                let sh = std::time::Instant::now();
                 self.cell_buffers[i].shape_until_scroll(&mut self.font_system, false);
+                perf_shape_us += sh.elapsed().as_micros();
+
                 // Update cached text
                 if i < self.cell_texts.len() {
                     self.cell_texts[i].clone_from(&cell_info.text);
                 } else {
                     self.cell_texts.push(cell_info.text.clone());
                 }
+                perf_reshape_us += rs.elapsed().as_micros();
             }
 
             // Measure content height
+            let ms = std::time::Instant::now();
             let mut content_h = Self::measure_content_height(&self.cell_buffers[i])
                 .max(fonts::editor_line_height());
             // Trailing newline creates an empty line that layout_runs() doesn't report
@@ -1288,8 +1418,10 @@ impl Renderer {
                 }
                 None => natural_editor_h,
             };
+            perf_measure_us += ms.elapsed().as_micros();
 
             // Update output buffer text if changed
+            let os = std::time::Instant::now();
             let has_output = cell_info.output_text.is_some();
             let output_text_ref = cell_info.output_text.as_deref().unwrap_or("");
             let output_changed = self
@@ -1321,7 +1453,9 @@ impl Renderer {
                 }
             }
 
+            perf_output_us += os.elapsed().as_micros();
             // Output toolbar row height (visible when output exists)
+            let ls = std::time::Instant::now();
             let output_toggle_h = if has_output { output_toggle_height() } else { 0.0 };
 
             // Output height: dynamic based on line count when expanded, 0 when collapsed
@@ -1546,7 +1680,17 @@ impl Renderer {
                 content_height: content_h,
             });
 
+            perf_layout_us += ls.elapsed().as_micros();
             y_offset += container_h + cell_spacing;
+        }
+
+        let uc_total = uc_start.elapsed().as_micros();
+        if reshape_count > 0 || uc_total > 500 {
+            log::warn!(
+                "[perf] update_cells: {}us total | reshapes={} set_rich_text={}us shape={}us measure={}us output={}us layout={}us | reasons=[{}]",
+                uc_total, reshape_count, perf_set_rich_text_us, perf_shape_us, perf_measure_us, perf_output_us, perf_layout_us,
+                reshape_reasons.join(", ")
+            );
         }
 
         // Add cell button (round, centered)
@@ -1971,14 +2115,14 @@ impl Renderer {
                 ui_rects.push(rect_rounded(cl.play_button, btn_color, 4.0 * fonts::scale()));
             }
 
-            // Copy button hover
+            // Copy button hover (round)
             if hover == HoverTarget::CellCopyButton(i) {
-                ui_rects.push(rect_from(cl.copy_button, t.bg_hover));
+                ui_rects.push(rect_rounded(cl.copy_button, t.bg_hover, cl.copy_button.w / 2.0));
             }
 
-            // Delete button hover
+            // Delete button hover (round)
             if hover == HoverTarget::CellDeleteButton(i) {
-                ui_rects.push(rect_from(cl.delete_button, t.bg_hover));
+                ui_rects.push(rect_rounded(cl.delete_button, t.bg_hover, cl.delete_button.w / 2.0));
             }
 
             // Separator line
@@ -1989,14 +2133,14 @@ impl Renderer {
                 // Full-width separator line between editor and output
                 ui_rects.push(rect_from(cl.output_separator, t.border));
 
-                // Chevron toggle button hover
+                // Chevron toggle button hover (round)
                 if hover == HoverTarget::CellOutputToggle(i) {
-                    ui_rects.push(rect_from(cl.output_toggle, t.bg_hover));
+                    ui_rects.push(rect_rounded(cl.output_toggle, t.bg_hover, cl.output_toggle.w / 2.0));
                 }
 
-                // Copy button hover
+                // Copy button hover (round)
                 if hover == HoverTarget::CellOutputCopyButton(i) {
-                    ui_rects.push(rect_from(cl.output_copy_button, t.bg_hover));
+                    ui_rects.push(rect_rounded(cl.output_copy_button, t.bg_hover, cl.output_copy_button.w / 2.0));
                 }
             }
 
@@ -2157,17 +2301,26 @@ impl Renderer {
             ui_rects.push(rect_from(*rect, color));
         }
 
-        // Tab close hover bg
+        // Tab close hover bg (round)
         for (idx, close_rect) in self.tab_close_rects.iter().enumerate() {
             if hover == HoverTarget::TabClose(idx) {
-                ui_rects.push(rect_from(*close_rect, t.bg_hover));
+                ui_rects.push(rect_rounded(*close_rect, t.bg_hover, close_rect.w / 2.0));
             }
         }
 
-        // Line between tab bar and content area (drawn after tab backgrounds)
+        // Plus button (tab bar, round circle same size as close buttons)
+        if hover == HoverTarget::PlusButton {
+            let size = tab_close_size();
+            let cx = self.plus_rect.x + self.plus_rect.w / 2.0;
+            let cy = self.plus_rect.y + self.plus_rect.h / 2.0;
+            let r = Rect { x: cx - size / 2.0, y: cy - size / 2.0, w: size, h: size };
+            ui_rects.push(rect_rounded(r, t.bg_hover, size / 2.0));
+        }
+
+        // Line at bottom of tab bar (inside tab area, above content — drawn after plus button)
         ui_rects.push(RectInstance {
             x: 0.0,
-            y: layout.tab_bar.y + layout.tab_bar.h,
+            y: layout.tab_bar.y + layout.tab_bar.h - 1.0,
             w: sw,
             h: 1.0,
             color: t.border.to_f32_array(),
@@ -2185,14 +2338,6 @@ impl Renderer {
             corner_radius: 0.0,
             _padding: [0.0; 3],
         });
-
-        // Plus button (tab bar)
-        let plus_color = if hover == HoverTarget::PlusButton {
-            t.tab_hover
-        } else {
-            t.tab_inactive
-        };
-        ui_rects.push(rect_from(self.plus_rect, plus_color));
 
         // Window control hover
         if hover == HoverTarget::WinBtnMinimize {

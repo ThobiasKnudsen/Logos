@@ -11,6 +11,8 @@ pub struct Tab {
     pub active_cell_index: usize,
     next_cell_id: usize,
     pub is_modified: bool,
+    /// Per-tab axis bounds (saved/restored on tab switch).
+    pub axis_bounds: Option<[f32; 4]>,
 }
 
 impl Tab {
@@ -23,6 +25,7 @@ impl Tab {
             active_cell_index: 0,
             next_cell_id: 1,
             is_modified: false,
+            axis_bounds: None,
         }
     }
 
@@ -41,6 +44,7 @@ impl Tab {
             active_cell_index: 0,
             next_cell_id: 1,
             is_modified: false,
+            axis_bounds: None,
         })
     }
 
