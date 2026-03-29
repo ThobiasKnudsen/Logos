@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::lang::ast::AstNode;
 use crate::lang::lexer;
 
@@ -385,7 +387,8 @@ pub fn static_candidates() -> Vec<Candidate> {
 /// Extract user-defined symbols from the AST of the current cell.
 pub fn extract_user_symbols(ast: &AstNode) -> Vec<Candidate> {
     let mut result = Vec::new();
-    walk_ast(ast, &mut result);
+    let mut seen = HashSet::new();
+    walk_ast(ast, &mut result, &mut seen);
     result
 }
 
@@ -502,10 +505,10 @@ mod tests {
     }
 }
 
-fn walk_ast(node: &AstNode, result: &mut Vec<Candidate>) {
+fn walk_ast(node: &AstNode, result: &mut Vec<Candidate>, seen: &mut HashSet<String>) {
     match node {
         AstNode::Binding { name, .. } => {
-            if !result.iter().any(|c| c.label == *name) {
+            if seen.insert(name.clone()) {
                 result.push(Candidate {
                     label: name.clone(),
                     kind: CandidateKind::UserBinding,
@@ -515,7 +518,7 @@ fn walk_ast(node: &AstNode, result: &mut Vec<Candidate>) {
             }
         }
         AstNode::FunctionDef { name, .. } => {
-            if !result.iter().any(|c| c.label == *name) {
+            if seen.insert(name.clone()) {
                 result.push(Candidate {
                     label: name.clone(),
                     kind: CandidateKind::UserFunc,
@@ -526,7 +529,7 @@ fn walk_ast(node: &AstNode, result: &mut Vec<Candidate>) {
         }
         AstNode::TupleBinding { names, .. } => {
             for n in names {
-                if !result.iter().any(|c| c.label == *n) {
+                if seen.insert(n.clone()) {
                     result.push(Candidate {
                         label: n.clone(),
                         kind: CandidateKind::UserBinding,
@@ -538,7 +541,7 @@ fn walk_ast(node: &AstNode, result: &mut Vec<Candidate>) {
         }
         AstNode::Block(stmts) => {
             for s in stmts {
-                walk_ast(s, result);
+                walk_ast(s, result, seen);
             }
         }
         AstNode::IfExpr {
@@ -546,13 +549,13 @@ fn walk_ast(node: &AstNode, result: &mut Vec<Candidate>) {
             else_branch,
             ..
         } => {
-            walk_ast(then_branch, result);
+            walk_ast(then_branch, result, seen);
             if let Some(eb) = else_branch {
-                walk_ast(eb, result);
+                walk_ast(eb, result, seen);
             }
         }
         AstNode::WhileLoop { body, .. } | AstNode::ForLoop { body, .. } => {
-            walk_ast(body, result);
+            walk_ast(body, result, seen);
         }
         _ => {}
     }

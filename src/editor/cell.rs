@@ -14,6 +14,8 @@ pub struct CodeCell {
     pub is_playing: bool,
     pub output: CellOutput,
     pub output_collapsed: bool,
+    /// User-set contracted height for the editor area (None = auto-fit to content).
+    pub contracted_editor_h: Option<f32>,
 }
 
 impl CodeCell {
@@ -24,6 +26,7 @@ impl CodeCell {
             is_playing: false,
             output: CellOutput::None,
             output_collapsed: false,
+            contracted_editor_h: None,
         }
     }
 }
