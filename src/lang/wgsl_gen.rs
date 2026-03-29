@@ -847,19 +847,20 @@ impl GenContext {
 
             AstNode::Apply { name, args } => {
                 match name.as_str() {
-                    // Logical ops: recursively apply corner checking
+                    // Logical ops: recursively apply corner checking.
+                    // Operands may be bool (comparisons) or float (implicit curves).
                     "and" if args.len() == 2 => {
-                        let l = self.emit_bool_with_corners(&args[0])?;
-                        let r = self.emit_bool_with_corners(&args[1])?;
+                        let l = self.emit_bool_operand_with_corners(&args[0])?;
+                        let r = self.emit_bool_operand_with_corners(&args[1])?;
                         Ok(format!("({} && {})", l, r))
                     }
                     "or" if args.len() == 2 => {
-                        let l = self.emit_bool_with_corners(&args[0])?;
-                        let r = self.emit_bool_with_corners(&args[1])?;
+                        let l = self.emit_bool_operand_with_corners(&args[0])?;
+                        let r = self.emit_bool_operand_with_corners(&args[1])?;
                         Ok(format!("({} || {})", l, r))
                     }
                     "not" if args.len() == 1 => {
-                        let inner = self.emit_bool_with_corners(&args[0])?;
+                        let inner = self.emit_bool_operand_with_corners(&args[0])?;
                         Ok(format!("!({})", inner))
                     }
                     // Comparison ops: apply corner checking
@@ -873,6 +874,19 @@ impl GenContext {
 
             // Non-boolean nodes or identifiers: emit normally
             _ => self.emit_expr(node),
+        }
+    }
+
+    /// Emit an operand of a logical op (and/or/not) with corner-checking.
+    /// If the operand is boolean, recurse normally. If it's a float
+    /// expression, treat it as an implicit curve (expr = 0).
+    fn emit_bool_operand_with_corners(&self, node: &AstNode) -> Result<String, String> {
+        if returns_bool(node) {
+            self.emit_bool_with_corners(node)
+        } else {
+            // Float expression used as implicit curve: treat as expr = 0
+            let zero = AstNode::Number(0.0);
+            self.emit_comparison_with_corners("eq", node, &zero)
         }
     }
 
