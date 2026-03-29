@@ -7,6 +7,7 @@ pub mod highlight;
 pub mod reduce;
 pub mod interpreter;
 pub mod compute_gen;
+pub mod lang_service;
 
 /// Convert a byte offset in source to (line, col) — both 1-based.
 pub(crate) fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
