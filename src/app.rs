@@ -2495,7 +2495,41 @@ impl ApplicationHandler for App {
                             .reduce_service
                             .submit(cell_id, Vec::new(), reduce_expr);
                     } else {
-                        // All CAS calls resolved — compile WGSL
+                        // All CAS calls resolved — check for unsolvable
+                        // results before attempting WGSL compilation.
+
+                        // 1) REDUCE returned the operation unevaluated
+                        //    (e.g. int(sin(cos(x)),x) — couldn't solve).
+                        if let Some(op) = translate::detect_unevaluated_cas(
+                            &substituted,
+                        ) {
+                            let msg = format!(
+                                "This {} cannot be computed symbolically. \
+                                 Consider using a numerical method instead.",
+                                op,
+                            );
+                            tab.cells[cell_idx].output =
+                                CellOutput::Error(msg);
+                            tab.cells[cell_idx].output_collapsed = false;
+                        }
+                        // 2) Result involves special functions Logos
+                        //    can't evaluate (e.g. fresnel_s, erf).
+                        else {
+                            let special = translate::detect_special_functions(
+                                &substituted,
+                            );
+                            if !special.is_empty() {
+                            let names: Vec<&str> =
+                                special.iter().map(|(_, desc)| *desc).collect();
+                            let msg = format!(
+                                "No closed-form solution \u{2014} result requires {}. \
+                                 Consider using a numerical method instead.",
+                                names.join(", "),
+                            );
+                            tab.cells[cell_idx].output =
+                                CellOutput::Error(msg);
+                            tab.cells[cell_idx].output_collapsed = false;
+                        } else {
                         let mut source = String::new();
                         for (i, cell) in tab.cells.iter().enumerate() {
                             if i > cell_idx {
@@ -2549,6 +2583,8 @@ impl ApplicationHandler for App {
                                 }
                             }
                         }
+                        } // else: no special functions
+                        } // else: no unevaluated CAS ops
                     }
                 }
             }

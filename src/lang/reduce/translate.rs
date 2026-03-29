@@ -156,6 +156,106 @@ fn replace_word(input: &str, word: &str, replacement: &str) -> String {
     result
 }
 
+/// Special functions that REDUCE may return but Logos cannot evaluate.
+/// Each entry is (REDUCE name, human-readable description).
+const SPECIAL_FUNCTIONS: &[(&str, &str)] = &[
+    // Fresnel integrals
+    ("fresnel_s", "Fresnel S"),
+    ("fresnel_c", "Fresnel C"),
+    // Error functions
+    ("erf", "error function"),
+    ("erfc", "complementary error function"),
+    ("erfi", "imaginary error function"),
+    // Integral functions
+    ("si", "sine integral"),
+    ("ci", "cosine integral"),
+    ("ei", "exponential integral"),
+    ("li", "logarithmic integral"),
+    ("dilog", "dilogarithm"),
+    ("polylog", "polylogarithm"),
+    // Bessel functions
+    ("besseli", "Bessel I"),
+    ("besselj", "Bessel J"),
+    ("besselk", "Bessel K"),
+    ("bessely", "Bessel Y"),
+    ("hankel1", "Hankel H₁"),
+    ("hankel2", "Hankel H₂"),
+    // Airy functions
+    ("airy_ai", "Airy Ai"),
+    ("airy_bi", "Airy Bi"),
+    // Gamma / beta
+    ("gamma", "gamma function"),
+    ("beta", "beta function"),
+    ("polygamma", "polygamma"),
+    ("psi", "digamma"),
+    // Hypergeometric
+    ("hypergeometric", "hypergeometric"),
+    // Elliptic integrals
+    ("elliptice", "elliptic E"),
+    ("elliptick", "elliptic K"),
+    ("ellipticf", "elliptic F"),
+    // Zeta
+    ("zeta", "Riemann zeta"),
+    // Lambert W
+    ("lambert_w", "Lambert W"),
+    // Whittaker
+    ("whittakerm", "Whittaker M"),
+    ("whittakerw", "Whittaker W"),
+];
+
+/// Unevaluated CAS operations that REDUCE returns when it cannot solve
+/// a problem. Each entry is (REDUCE keyword, human-readable operation).
+const UNEVALUATED_OPS: &[(&str, &str)] = &[
+    ("int", "integral"),
+    ("df", "derivative"),
+];
+
+/// Check whether REDUCE returned an unevaluated CAS operation (meaning
+/// it could not solve the problem). Returns the human-readable name of
+/// the first unevaluated operation found, if any.
+pub fn detect_unevaluated_cas(reduce_output: &str) -> Option<&'static str> {
+    let lower = reduce_output.to_ascii_lowercase();
+    for &(keyword, description) in UNEVALUATED_OPS {
+        let mut start = 0;
+        while let Some(idx) = lower[start..].find(keyword) {
+            let abs = start + idx;
+            let before_ok = abs == 0 || !is_word_char(&lower, abs - 1);
+            // Must be followed by '(' to be a function call, not just a variable
+            let after = lower.as_bytes().get(abs + keyword.len());
+            if before_ok && after == Some(&b'(') {
+                return Some(description);
+            }
+            start = abs + keyword.len();
+        }
+    }
+    None
+}
+
+/// Check whether REDUCE output contains special functions that Logos
+/// cannot evaluate. Returns the list of (name, description) pairs found.
+pub fn detect_special_functions(reduce_output: &str) -> Vec<(&'static str, &'static str)> {
+    let lower = reduce_output.to_ascii_lowercase();
+    SPECIAL_FUNCTIONS
+        .iter()
+        .filter(|&&(name, _)| {
+            // Word-boundary check: the function name must not be part of a
+            // longer identifier (same logic as replace_word).
+            let mut start = 0;
+            while let Some(idx) = lower[start..].find(name) {
+                let abs = start + idx;
+                let before_ok = abs == 0 || !is_word_char(&lower, abs - 1);
+                let after_ok = !is_word_char(&lower, abs + name.len());
+                if before_ok && after_ok {
+                    return true;
+                }
+                start = abs + name.len();
+            }
+            false
+        })
+        .map(|&(name, desc)| (name, desc))
+        .collect()
+}
+
 /// Convert REDUCE ASCII output back to Logos notation.
 ///
 /// Converts `**` → `^` for exponentiation (Logos parser uses `^`),
@@ -384,5 +484,78 @@ mod tests {
         assert_eq!(ascii, "x**2*y**2+sin(x)**3-sin(y**2)**2");
         let back = from_reduce(&ascii);
         assert_eq!(back, "x^2*y^2+sin(x)^3-sin(y^2)^2");
+    }
+
+    // ── detect_special_functions ─────────────────────────────────
+
+    #[test]
+    fn test_detect_fresnel() {
+        let result = detect_special_functions("sqrt(pi)*fresnel_s(sqrt(2)*x/sqrt(pi))/sqrt(2)");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "fresnel_s");
+    }
+
+    #[test]
+    fn test_detect_erf() {
+        let result = detect_special_functions("erf(x)");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "erf");
+    }
+
+    #[test]
+    fn test_detect_none_for_elementary() {
+        let result = detect_special_functions("sin(x)^2 + cos(x)^2");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_detect_no_false_positive_on_substrings() {
+        // "erf" should not match inside "serf" or "erfurt"
+        let result = detect_special_functions("serf(x) + erfurt");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_detect_multiple() {
+        let result = detect_special_functions("fresnel_s(x) + erf(y) + besselj(0, z)");
+        let names: Vec<&str> = result.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"fresnel_s"));
+        assert!(names.contains(&"erf"));
+        assert!(names.contains(&"besselj"));
+    }
+
+    // ── detect_unevaluated_cas ──────────────────────────────────
+
+    #[test]
+    fn test_detect_unevaluated_int() {
+        assert_eq!(
+            detect_unevaluated_cas("int(sin(cos(x)),x)"),
+            Some("integral"),
+        );
+    }
+
+    #[test]
+    fn test_detect_unevaluated_df() {
+        assert_eq!(
+            detect_unevaluated_cas("df(foo(x),x)"),
+            Some("derivative"),
+        );
+    }
+
+    #[test]
+    fn test_detect_unevaluated_none_for_solved() {
+        // Normal result with no leftover int/df
+        assert_eq!(
+            detect_unevaluated_cas("sin(x)^2 + cos(x)"),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_detect_unevaluated_no_false_positive() {
+        // "int" as part of a word should not match
+        assert_eq!(detect_unevaluated_cas("interval + mint"), None);
+        // "df" as part of a word should not match
+        assert_eq!(detect_unevaluated_cas("pdf + adf"), None);
     }
 }

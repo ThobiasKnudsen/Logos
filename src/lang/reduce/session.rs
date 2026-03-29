@@ -249,8 +249,10 @@ impl ReduceSession {
         }
 
         if !result_lines.is_empty() {
-            // Got a result (possibly with warnings — ignore them)
-            Ok(result_lines.join("\n"))
+            // Got a result (possibly with warnings — ignore them).
+            // Join with space: CSL wraps long output at its line width,
+            // but the result is always a single expression.
+            Ok(result_lines.join(" "))
         } else if !error_lines.is_empty() {
             // Only error lines, no result
             Err(error_lines.join("\n"))
