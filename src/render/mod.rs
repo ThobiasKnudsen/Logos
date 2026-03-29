@@ -9,9 +9,10 @@ use glyphon::{
     Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use wgpu::{
-    CommandEncoderDescriptor, DeviceDescriptor, Instance, InstanceDescriptor, LoadOp,
+    CommandEncoderDescriptor, DeviceDescriptor, Extent3d, Instance, InstanceDescriptor, LoadOp,
     MultisampleState, Operations, PresentMode, RenderPassColorAttachment, RenderPassDescriptor,
-    RequestAdapterOptions, StoreOp, SurfaceConfiguration, TextureUsages, TextureViewDescriptor,
+    RequestAdapterOptions, StoreOp, SurfaceConfiguration, TextureDimension, TextureUsages,
+    TextureViewDescriptor,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -22,6 +23,40 @@ use crate::ui::layout::{LayoutResult, Rect};
 use crate::ui::theme::{self, fonts, spacing, Rgba};
 use rects::{RectInstance, RectRenderer};
 use shader_pipeline::ShaderPipelineManager;
+
+const COMPOSITE_SHADER_WGSL: &str = r#"
+struct VsOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
+    var pos: array<vec2<f32>, 3> = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 3.0, -1.0),
+        vec2<f32>(-1.0,  3.0),
+    );
+    let p = pos[vi];
+    var out: VsOut;
+    out.position = vec4<f32>(p.x, p.y, 0.0, 1.0);
+    out.uv = vec2<f32>((p.x + 1.0) * 0.5, 1.0 - (p.y + 1.0) * 0.5);
+    return out;
+}
+
+@group(0) @binding(0) var scene_tex: texture_2d<f32>;
+@group(0) @binding(1) var overlay_tex: texture_2d<f32>;
+@group(0) @binding(2) var tex_sampler: sampler;
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let scene = textureSample(scene_tex, tex_sampler, in.uv);
+    let overlay = textureSample(overlay_tex, tex_sampler, in.uv);
+    let inverted = fract(scene.rgb - vec3<f32>(0.5));
+    let blended = mix(scene.rgb, inverted, overlay.a);
+    return vec4<f32>(blended, 1.0);
+}
+"#;
 
 /// Info about a single tab, passed from AppState to the renderer.
 pub struct TabInfo {
@@ -118,6 +153,16 @@ fn generate_ticks(axis_min: f32, axis_max: f32, step: f32) -> Vec<f32> {
         v += step;
     }
     ticks
+}
+
+/// Compute decimal places for cursor labels based on axis range.
+/// 5 orders of magnitude below the range magnitude.
+/// E.g. range 8.7 → ceil(log10(8.7))=1 → 5-1=4 decimals.
+fn cursor_decimals(range: f32) -> usize {
+    if range <= f32::EPSILON {
+        return 6;
+    }
+    (5 - range.log10().ceil() as i32).clamp(0, 10) as usize
 }
 
 /// Format a tick value for axis labels.
@@ -274,6 +319,20 @@ pub struct Renderer {
     axis_atlas: TextAtlas,
     axis_text_renderer: TextRenderer,
     axis_label_buffers: Vec<TextBuffer>,
+
+    // Cursor crosshair labels (larger font, shown on hover)
+    cursor_x_label: TextBuffer,
+    cursor_y_label: TextBuffer,
+
+    // Inverted-overlay compositing resources
+    scene_texture: wgpu::Texture,
+    scene_view: wgpu::TextureView,
+    overlay_texture: wgpu::Texture,
+    overlay_view: wgpu::TextureView,
+    composite_pipeline: wgpu::RenderPipeline,
+    composite_bind_group_layout: wgpu::BindGroupLayout,
+    composite_bind_group: wgpu::BindGroup,
+    composite_sampler: wgpu::Sampler,
 }
 
 impl Renderer {
@@ -351,6 +410,96 @@ impl Renderer {
         let axis_label_buffers: Vec<TextBuffer> = (0..MAX_AXIS_LABELS * 2)
             .map(|_| Self::create_label(&mut font_system, fonts::small_size(), "0"))
             .collect();
+        let cursor_x_label = Self::create_label(&mut font_system, fonts::ui_size(), "0");
+        let cursor_y_label = Self::create_label(&mut font_system, fonts::ui_size(), "0");
+
+        // Inverted-overlay compositing resources
+        let (scene_texture, scene_view) = Self::create_offscreen_texture(
+            &device, physical_size.width, physical_size.height, swapchain_format, "scene_texture",
+        );
+        let (overlay_texture, overlay_view) = Self::create_offscreen_texture(
+            &device, physical_size.width, physical_size.height, swapchain_format, "overlay_texture",
+        );
+        let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("composite_sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let composite_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("composite_bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("composite_shader"),
+            source: wgpu::ShaderSource::Wgsl(COMPOSITE_SHADER_WGSL.into()),
+        });
+        let composite_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("composite_pl"),
+                bind_group_layouts: &[&composite_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        let composite_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("composite_pipeline"),
+                layout: Some(&composite_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &composite_shader,
+                    entry_point: "vs_main",
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &composite_shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: swapchain_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        let composite_bind_group = Self::create_composite_bind_group(
+            &device, &composite_bind_group_layout, &scene_view, &overlay_view, &composite_sampler,
+        );
 
         let add_cell_label = Self::create_label(&mut font_system, fonts::ui_size(), "+");
         let cell_delete_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{2715}");
@@ -436,7 +585,69 @@ impl Renderer {
             axis_atlas,
             axis_text_renderer,
             axis_label_buffers,
+            cursor_x_label,
+            cursor_y_label,
+            scene_texture,
+            scene_view,
+            overlay_texture,
+            overlay_view,
+            composite_pipeline,
+            composite_bind_group_layout,
+            composite_bind_group,
+            composite_sampler,
         }
+    }
+
+    fn create_offscreen_texture(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        label: &str,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&TextureViewDescriptor::default());
+        (texture, view)
+    }
+
+    fn create_composite_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        scene_view: &wgpu::TextureView,
+        overlay_view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("composite_bg"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(scene_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(overlay_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        })
     }
 
     fn create_label(font_system: &mut FontSystem, size: f32, text: &str) -> TextBuffer {
@@ -469,6 +680,33 @@ impl Renderer {
         self.surface_config.width = new_size.width;
         self.surface_config.height = new_size.height;
         self.surface.configure(&self.device, &self.surface_config);
+
+        // Recreate offscreen textures at new size
+        let (scene_texture, scene_view) = Self::create_offscreen_texture(
+            &self.device,
+            new_size.width,
+            new_size.height,
+            self.surface_config.format,
+            "scene_texture",
+        );
+        let (overlay_texture, overlay_view) = Self::create_offscreen_texture(
+            &self.device,
+            new_size.width,
+            new_size.height,
+            self.surface_config.format,
+            "overlay_texture",
+        );
+        self.composite_bind_group = Self::create_composite_bind_group(
+            &self.device,
+            &self.composite_bind_group_layout,
+            &scene_view,
+            &overlay_view,
+            &self.composite_sampler,
+        );
+        self.scene_texture = scene_texture;
+        self.scene_view = scene_view;
+        self.overlay_texture = overlay_texture;
+        self.overlay_view = overlay_view;
     }
 
     /// Recreate all label buffers at current font sizes (after zoom change).
@@ -528,6 +766,13 @@ impl Renderer {
         for buf in &mut self.axis_label_buffers {
             buf.set_metrics(&mut self.font_system, axis_metrics);
             buf.set_size(&mut self.font_system, Some(2000.0), Some(axis_size * 2.0));
+            buf.shape_until_scroll(&mut self.font_system, false);
+        }
+        let cursor_size = fonts::ui_size();
+        let cursor_metrics = Metrics::new(cursor_size, cursor_size * 1.4);
+        for buf in [&mut self.cursor_x_label, &mut self.cursor_y_label] {
+            buf.set_metrics(&mut self.font_system, cursor_metrics);
+            buf.set_size(&mut self.font_system, Some(2000.0), Some(cursor_size * 2.0));
             buf.shape_until_scroll(&mut self.font_system, false);
         }
 
@@ -2592,8 +2837,8 @@ impl Renderer {
         }
 
         // Grid lines at every tick position (rendered in Pass 3, on top of shader plots)
-        let grid_color = [1.0_f32, 1.0, 1.0, 0.08];
-        let zero_color = [1.0_f32, 1.0, 1.0, 0.2];
+        let grid_color = [1.0_f32, 1.0, 1.0, 0.5];
+        let zero_color = [1.0_f32, 1.0, 1.0, 0.5];
         let mut axis_rects: Vec<RectInstance> = Vec::new();
         if x_range > f32::EPSILON {
             for tick in &x_ticks {
@@ -2633,7 +2878,7 @@ impl Renderer {
 
         // Label backing rects + text areas (on-plot, with semi-transparent bg)
         let mut axis_text_areas: Vec<TextArea> = Vec::new();
-        let label_color = t.axis_label.to_glyphon();
+        let label_color = GlyphonColor::rgba(255, 255, 255, 255);
         let rp_bounds = TextBounds {
             left: rp.x as i32,
             top: rp.y as i32,
@@ -2676,6 +2921,72 @@ impl Renderer {
             }
         }
 
+        // Cursor crosshair lines + coordinate labels (only when hovering render area)
+        if hover == HoverTarget::RenderArea {
+            let cursor_color = [1.0_f32, 1.0, 1.0, 0.8];
+            let line_thickness = 2.0_f32;
+            let [mu, mv] = render_area.mouse_uv;
+            let cx = rp.x + mu * rp.w;
+            let cy = rp.y + (1.0 - mv) * rp.h; // mv is Y-flipped (0=bottom)
+
+            // Vertical cursor line
+            axis_rects.push(RectInstance {
+                x: cx - line_thickness / 2.0, y: rp.y, w: line_thickness, h: rp.h,
+                color: cursor_color,
+                corner_radius: 0.0, _padding: [0.0; 3],
+            });
+            // Horizontal cursor line
+            axis_rects.push(RectInstance {
+                x: rp.x, y: cy - line_thickness / 2.0, w: rp.w, h: line_thickness,
+                color: cursor_color,
+                corner_radius: 0.0, _padding: [0.0; 3],
+            });
+
+            // Cursor world coordinates — precision based on axis range
+            let world_x = render_area.axis_x_min + mu * x_range;
+            let world_y = render_area.axis_y_min + mv * y_range;
+            let cursor_label_h = fonts::ui_size() * 1.4;
+            let x_decimals = cursor_decimals(x_range);
+            let y_decimals = cursor_decimals(y_range);
+
+            let cx_text = format!("{:.prec$}", world_x, prec = x_decimals);
+            self.cursor_x_label.set_text(
+                &mut self.font_system,
+                &cx_text,
+                Attrs::new().family(Family::Monospace),
+                Shaping::Advanced,
+            );
+            self.cursor_x_label.shape_until_scroll(&mut self.font_system, false);
+            let cx_lw = Self::measure_label_width(&self.cursor_x_label);
+            let cx_lx = (cx - cx_lw / 2.0).clamp(rp.x + label_pad, rp.x + rp.w - cx_lw - label_pad);
+            let cx_ly = rp.y + rp.h - cursor_label_h - label_pad;
+            axis_text_areas.push(TextArea {
+                buffer: &self.cursor_x_label,
+                left: cx_lx, top: cx_ly, scale: 1.0,
+                bounds: rp_bounds,
+                default_color: label_color,
+                custom_glyphs: &[],
+            });
+
+            let cy_text = format!("{:.prec$}", world_y, prec = y_decimals);
+            self.cursor_y_label.set_text(
+                &mut self.font_system,
+                &cy_text,
+                Attrs::new().family(Family::Monospace),
+                Shaping::Advanced,
+            );
+            self.cursor_y_label.shape_until_scroll(&mut self.font_system, false);
+            let cy_ly = (cy - cursor_label_h / 2.0).clamp(rp.y + label_pad, rp.y + rp.h - cursor_label_h - label_pad);
+            let cy_lx = rp.x + label_pad;
+            axis_text_areas.push(TextArea {
+                buffer: &self.cursor_y_label,
+                left: cy_lx, top: cy_ly, scale: 1.0,
+                bounds: rp_bounds,
+                default_color: label_color,
+                custom_glyphs: &[],
+            });
+        }
+
         // -- GPU submit --
         self.text_renderer
             .prepare(
@@ -2714,7 +3025,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("main_pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &view,
+                    view: &self.scene_view,
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Clear(t.bg_primary.to_wgpu()),
@@ -2737,7 +3048,7 @@ impl Renderer {
         if self.shader_pipeline.has_active() {
             self.shader_pipeline.render(
                 &mut encoder,
-                &view,
+                &self.scene_view,
                 &self.queue,
                 &layout.right_pane,
                 (self.surface_config.width, self.surface_config.height),
@@ -2751,15 +3062,15 @@ impl Renderer {
             );
         }
 
-        // Pass 3: Axis overlay (zone backgrounds, grid lines, tick labels)
+        // Pass 3: Axis overlay → overlay_texture (transparent background)
         {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("axis_overlay_pass"),
+                label: Some("overlay_pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &view,
+                    view: &self.overlay_view,
                     resolve_target: None,
                     ops: Operations {
-                        load: LoadOp::Load,
+                        load: LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: StoreOp::Store,
                     },
                 })],
@@ -2773,6 +3084,28 @@ impl Renderer {
             self.axis_text_renderer
                 .render(&self.axis_atlas, &self.viewport, &mut pass)
                 .unwrap();
+        }
+
+        // Pass 4: Composite scene + overlay → surface (inversion where overlay present)
+        {
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("composite_pass"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(wgpu::Color::BLACK),
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            pass.set_pipeline(&self.composite_pipeline);
+            pass.set_bind_group(0, &self.composite_bind_group, &[]);
+            pass.draw(0..3, 0..1);
         }
 
         self.queue.submit(Some(encoder.finish()));

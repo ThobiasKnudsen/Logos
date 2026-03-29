@@ -533,25 +533,21 @@ impl RenderAreaState {
         }
 
         if let Some(old) = self.prev_pane {
-            let wpp = self.world_per_pixel;
+            // Per-axis world-per-pixel (may differ after per-axis zoom)
+            let wpp_x = if old.w > 0.0 { (self.axis_x_max - self.axis_x_min) / old.w } else { self.world_per_pixel };
+            let wpp_y = if old.h > 0.0 { (self.axis_y_max - self.axis_y_min) / old.h } else { self.world_per_pixel };
 
-            // X: screen_x of a world point wx is:
-            //   screen_left + (wx - axis_x_min) / wpp
-            // where screen_left = win_x + pane.x.
-            // For this to stay constant: axis_x_min must shift by the screen_left delta.
+            // X: shift axis_x_min by screen-left delta, recompute axis_x_max from new pane width
             let old_screen_left = self.prev_win_pos.0 + old.x;
             let new_screen_left = win_pos.0 + new_pane.x;
-            self.axis_x_min += (new_screen_left - old_screen_left) * wpp;
-            self.axis_x_max = self.axis_x_min + new_pane.w * wpp;
+            self.axis_x_min += (new_screen_left - old_screen_left) * wpp_x;
+            self.axis_x_max = self.axis_x_min + new_pane.w * wpp_x;
 
-            // Y: screen_y of a world point wy is:
-            //   screen_bottom - (wy - axis_y_min) / wpp
-            // where screen_bottom = win_y + pane.y + pane.h   (y increases upward).
-            // For this to stay constant: axis_y_min must shift opposite to the bottom delta.
+            // Y: shift axis_y_min by screen-bottom delta, recompute axis_y_max from new pane height
             let old_screen_bottom = self.prev_win_pos.1 + old.y + old.h;
             let new_screen_bottom = win_pos.1 + new_pane.y + new_pane.h;
-            self.axis_y_min -= (new_screen_bottom - old_screen_bottom) * wpp;
-            self.axis_y_max = self.axis_y_min + new_pane.h * wpp;
+            self.axis_y_min -= (new_screen_bottom - old_screen_bottom) * wpp_y;
+            self.axis_y_max = self.axis_y_min + new_pane.h * wpp_y;
         } else {
             // First layout: pick the larger wpp so the default range fits entirely,
             // then expand the smaller axis to fill the pane with equal scaling.
@@ -575,28 +571,49 @@ impl RenderAreaState {
     }
 
     /// Zoom both axes uniformly by `factor`, anchored at `cursor_screen` position.
+    /// Scales the current axis ranges (preserves any per-axis stretching).
     fn zoom_uniform(&mut self, factor: f32, cursor_screen: (f32, f32), pane: &Rect) {
         if pane.w <= 0.0 || pane.h <= 0.0 {
             return;
         }
 
-        // Cursor UV within the pane
         let uv_x = ((cursor_screen.0 - pane.x) / pane.w).clamp(0.0, 1.0);
-        // t_y: 0 at bottom (axis_y_min), 1 at top (axis_y_max)
         let t_y = ((pane.y + pane.h - cursor_screen.1) / pane.h).clamp(0.0, 1.0);
 
-        // World point under cursor
         let wx = self.axis_x_min + uv_x * (self.axis_x_max - self.axis_x_min);
         let wy = self.axis_y_min + t_y * (self.axis_y_max - self.axis_y_min);
 
-        // Scale
-        self.world_per_pixel *= factor;
+        let x_range = (self.axis_x_max - self.axis_x_min) * factor;
+        let y_range = (self.axis_y_max - self.axis_y_min) * factor;
 
-        // Recompute bounds so the cursor world-point stays at its screen pixel
-        self.axis_x_min = wx - uv_x * pane.w * self.world_per_pixel;
-        self.axis_x_max = self.axis_x_min + pane.w * self.world_per_pixel;
-        self.axis_y_min = wy - t_y * pane.h * self.world_per_pixel;
-        self.axis_y_max = self.axis_y_min + pane.h * self.world_per_pixel;
+        self.axis_x_min = wx - uv_x * x_range;
+        self.axis_x_max = self.axis_x_min + x_range;
+        self.axis_y_min = wy - t_y * y_range;
+        self.axis_y_max = self.axis_y_min + y_range;
+    }
+
+    /// Zoom only the X axis by `factor`, anchored at the cursor's X screen position.
+    fn zoom_x(&mut self, factor: f32, cursor_screen: (f32, f32), pane: &Rect) {
+        if pane.w <= 0.0 {
+            return;
+        }
+        let uv_x = ((cursor_screen.0 - pane.x) / pane.w).clamp(0.0, 1.0);
+        let wx = self.axis_x_min + uv_x * (self.axis_x_max - self.axis_x_min);
+        let range = (self.axis_x_max - self.axis_x_min) * factor;
+        self.axis_x_min = wx - uv_x * range;
+        self.axis_x_max = self.axis_x_min + range;
+    }
+
+    /// Zoom only the Y axis by `factor`, anchored at the cursor's Y screen position.
+    fn zoom_y(&mut self, factor: f32, cursor_screen: (f32, f32), pane: &Rect) {
+        if pane.h <= 0.0 {
+            return;
+        }
+        let t_y = ((pane.y + pane.h - cursor_screen.1) / pane.h).clamp(0.0, 1.0);
+        let wy = self.axis_y_min + t_y * (self.axis_y_max - self.axis_y_min);
+        let range = (self.axis_y_max - self.axis_y_min) * factor;
+        self.axis_y_min = wy - t_y * range;
+        self.axis_y_max = self.axis_y_min + range;
     }
 }
 
@@ -1607,24 +1624,26 @@ impl ApplicationHandler for App {
                     let dx = mx - state.render_area.last_drag_pos.0;
                     let dy = my - state.render_area.last_drag_pos.1;
 
-                    let wpp = state.render_area.world_per_pixel;
+                    let rp = state.cached_layout.right_pane;
+                    let wpp_x = if rp.w > 0.0 { (state.render_area.axis_x_max - state.render_area.axis_x_min) / rp.w } else { state.render_area.world_per_pixel };
+                    let wpp_y = if rp.h > 0.0 { (state.render_area.axis_y_max - state.render_area.axis_y_min) / rp.h } else { state.render_area.world_per_pixel };
 
                     match state.render_area.mouse_zone {
                         MouseZone::Center => {
-                            let world_dx = -dx * wpp;
-                            let world_dy = dy * wpp;
+                            let world_dx = -dx * wpp_x;
+                            let world_dy = dy * wpp_y;
                             state.render_area.axis_x_min += world_dx;
                             state.render_area.axis_x_max += world_dx;
                             state.render_area.axis_y_min += world_dy;
                             state.render_area.axis_y_max += world_dy;
                         }
                         MouseZone::XAxisEdge => {
-                            let world_dx = -dx * wpp;
+                            let world_dx = -dx * wpp_x;
                             state.render_area.axis_x_min += world_dx;
                             state.render_area.axis_x_max += world_dx;
                         }
                         MouseZone::YAxisEdge => {
-                            let world_dy = dy * wpp;
+                            let world_dy = dy * wpp_y;
                             state.render_area.axis_y_min += world_dy;
                             state.render_area.axis_y_max += world_dy;
                         }
@@ -1665,7 +1684,12 @@ impl ApplicationHandler for App {
                 let rp = state.cached_layout.right_pane;
                 if point_in_rect(mx, my, &rp) && dy.abs() > 0.001 {
                     let factor = if dy > 0.0 { 0.97 } else { 1.03 };
-                    state.render_area.zoom_uniform(factor, (mx, my), &rp);
+                    let zone = detect_mouse_zone(mx, my, &rp);
+                    match zone {
+                        MouseZone::Center => state.render_area.zoom_uniform(factor, (mx, my), &rp),
+                        MouseZone::XAxisEdge => state.render_area.zoom_x(factor, (mx, my), &rp),
+                        MouseZone::YAxisEdge => state.render_area.zoom_y(factor, (mx, my), &rp),
+                    }
                     state.window.request_redraw();
                 }
                 // Check if cursor is over the editor pane — scroll
