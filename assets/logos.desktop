@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Logos
+Comment=Math-native code editor
+Exec=logos
+Icon=logos
+Type=Application
+Categories=Science;Math;Education;Development;
+Terminal=false
+MimeType=text/plain;

@@ -1,11 +1,13 @@
 use std::env;
 
 fn main() {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+
     let mut build = cc::Build::new();
 
     build
         .cpp(true)
-        .std("gnu++17")
         .warnings(false)
         // Include paths
         .include("vendor/csl/include")   // config.h
@@ -16,6 +18,14 @@ fn main() {
         .define("EMBEDDED", "1")
         .define("BUILTIN_IMAGE", "1")
         .define("NO_BYTECOUNTS", "1");
+
+    // MSVC uses /std:c++17 (set by cc crate from "c++17")
+    // GCC/Clang use -std=gnu++17 for GNU extensions
+    if target_env == "msvc" {
+        build.std("c++17");
+    } else {
+        build.std("gnu++17");
+    }
 
     // Core CSL source files
     let csl_sources = [
@@ -77,13 +87,21 @@ fn main() {
     build.compile("csl");
 
     // Link libraries AFTER compiling CSL (link order matters)
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "linux" {
         println!("cargo:rustc-link-lib=pthread");
+        println!("cargo:rustc-link-lib=stdc++");
+    } else if target_os == "macos" {
+        println!("cargo:rustc-link-lib=c++");
     }
-    println!("cargo:rustc-link-lib=z");
-    println!("cargo:rustc-link-lib=m");
-    println!("cargo:rustc-link-lib=stdc++");
+    // MSVC links the C++ runtime automatically
+
+    if target_env != "msvc" {
+        println!("cargo:rustc-link-lib=z");
+        println!("cargo:rustc-link-lib=m");
+    } else {
+        // Windows MSVC: link zlib (installed via vcpkg or similar)
+        println!("cargo:rustc-link-lib=zlib");
+    }
 
     // Tell cargo to re-run if vendor files change
     println!("cargo:rerun-if-changed=vendor/csl/");

@@ -68,8 +68,10 @@
 // Well here are some constraints on the support for arithmetic!
 
 #define SIGNED_SHIFTS_ARE_ARITHMETIC 1
+#ifndef _MSC_VER
 #define HAVE_UNSIGNED___INT128 1
 #define HAVE___INT128 1
+#endif
 
 /* System identification for internal use */
 #define BUILTFOR "generic"

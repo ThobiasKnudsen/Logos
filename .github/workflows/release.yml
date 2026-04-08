@@ -1,0 +1,240 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux — build + AppImage
+  # ---------------------------------------------------------------------------
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zlib1g-dev libfuse2
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Create AppImage
+        run: |
+          # Download linuxdeploy
+          curl -fSL -o linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy
+
+          # Set up AppDir structure
+          mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps AppDir/usr/share/applications
+          cp target/release/logos AppDir/usr/bin/
+          cp assets/icon_256x256.png AppDir/usr/share/icons/hicolor/256x256/apps/logos.png
+          cp assets/logos.desktop AppDir/usr/share/applications/
+
+          # Build AppImage
+          ARCH=x86_64 ./linuxdeploy --appdir AppDir --desktop-file assets/logos.desktop --icon-file assets/icon_256x256.png --output appimage
+          mv Logos-*.AppImage logos-linux-x86_64.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: logos-linux-x86_64.AppImage
+          path: logos-linux-x86_64.AppImage
+
+  # ---------------------------------------------------------------------------
+  # macOS — build universal binary + .dmg
+  # ---------------------------------------------------------------------------
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build (arm64)
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Build (x86_64)
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Create universal binary
+        run: |
+          lipo -create \
+            target/aarch64-apple-darwin/release/logos \
+            target/x86_64-apple-darwin/release/logos \
+            -output logos
+
+      - name: Create .app bundle
+        run: |
+          APP="Logos.app"
+          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/Resources"
+          cp logos "$APP/Contents/MacOS/logos"
+
+          # Generate .icns from PNGs
+          ICONSET="logos.iconset"
+          mkdir -p "$ICONSET"
+          cp assets/icon_16x16.png   "$ICONSET/icon_16x16.png"
+          cp assets/icon_32x32.png   "$ICONSET/icon_16x16@2x.png"
+          cp assets/icon_32x32.png   "$ICONSET/icon_32x32.png"
+          cp assets/icon_64x64.png   "$ICONSET/icon_32x32@2x.png"
+          cp assets/icon_128x128.png "$ICONSET/icon_128x128.png"
+          cp assets/icon_256x256.png "$ICONSET/icon_128x128@2x.png"
+          cp assets/icon_256x256.png "$ICONSET/icon_256x256.png"
+          cp assets/icon_512x512.png "$ICONSET/icon_256x256@2x.png"
+          cp assets/icon_512x512.png "$ICONSET/icon_512x512.png"
+          cp assets/icon_1024x1024.png "$ICONSET/icon_512x512@2x.png"
+          iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/logos.icns"
+
+          # Info.plist
+          VERSION="${GITHUB_REF_NAME#v}"
+          cat > "$APP/Contents/Info.plist" << PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>Logos</string>
+            <key>CFBundleDisplayName</key>
+            <string>Logos</string>
+            <key>CFBundleIdentifier</key>
+            <string>net.metalogos.logos</string>
+            <key>CFBundleVersion</key>
+            <string>$VERSION</string>
+            <key>CFBundleShortVersionString</key>
+            <string>$VERSION</string>
+            <key>CFBundleExecutable</key>
+            <string>logos</string>
+            <key>CFBundleIconFile</key>
+            <string>logos</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+          </dict>
+          </plist>
+          PLIST
+
+      - name: Create .dmg
+        run: |
+          mkdir -p dmg_staging
+          cp -r Logos.app dmg_staging/
+          ln -s /Applications dmg_staging/Applications
+          hdiutil create -volname "Logos" -srcfolder dmg_staging -ov -format UDZO logos-macos-universal.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: logos-macos-universal.dmg
+          path: logos-macos-universal.dmg
+
+  # ---------------------------------------------------------------------------
+  # Windows — build + MSI installer via WiX
+  # ---------------------------------------------------------------------------
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zlib via vcpkg
+        run: |
+          vcpkg install zlib:x64-windows-static
+          echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+
+      - name: Set vcpkg lib path
+        run: |
+          echo "RUSTFLAGS=-L $env:VCPKG_INSTALLATION_ROOT\installed\x64-windows-static\lib" >> $env:GITHUB_ENV
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Create MSI installer
+        run: |
+          # Install WiX v4
+          dotnet tool install --global wix
+
+          # Create WiX source
+          @"
+          <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+            <Package Name="Logos"
+                     Manufacturer="Logos AS"
+                     Version="!(bind.FileVersion.LogosExe)"
+                     UpgradeCode="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+
+              <MajorUpgrade DowngradeErrorMessage="A newer version of Logos is already installed." />
+              <MediaTemplate EmbedCab="yes" />
+
+              <StandardDirectory Id="ProgramFiles6432Folder">
+                <Directory Id="INSTALLFOLDER" Name="Logos">
+                  <Component Id="MainExecutable" Guid="*">
+                    <File Id="LogosExe" Source="target\release\logos.exe" KeyPath="yes" />
+                  </Component>
+                  <Component Id="IconFile" Guid="*">
+                    <File Id="LogosIco" Source="assets\icon.ico" KeyPath="yes" />
+                  </Component>
+                </Directory>
+              </StandardDirectory>
+
+              <StandardDirectory Id="ProgramMenuFolder">
+                <Component Id="StartMenuShortcut" Guid="*">
+                  <Shortcut Id="LogosShortcut"
+                            Name="Logos"
+                            Target="[INSTALLFOLDER]logos.exe"
+                            Icon="LogosIcon"
+                            WorkingDirectory="INSTALLFOLDER" />
+                  <RegistryValue Root="HKCU" Key="Software\Logos\Installed" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
+                </Component>
+              </StandardDirectory>
+
+              <Icon Id="LogosIcon" SourceFile="assets\icon.ico" />
+
+              <Feature Id="MainFeature" Title="Logos" Level="1">
+                <ComponentRef Id="MainExecutable" />
+                <ComponentRef Id="IconFile" />
+                <ComponentRef Id="StartMenuShortcut" />
+              </Feature>
+            </Package>
+          </Wix>
+          "@ | Out-File -Encoding UTF8 installer.wxs
+
+          wix build installer.wxs -o logos-windows-x64.msi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: logos-windows-x64.msi
+          path: logos-windows-x64.msi
+
+  # ---------------------------------------------------------------------------
+  # Publish GitHub Release
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          generate_release_notes: true
+          files: |
+            artifacts/logos-linux-x86_64.AppImage/logos-linux-x86_64.AppImage
+            artifacts/logos-macos-universal.dmg/logos-macos-universal.dmg
+            artifacts/logos-windows-x64.msi/logos-windows-x64.msi
