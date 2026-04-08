@@ -23,6 +23,8 @@ fn main() {
     // GCC/Clang use -std=gnu++17 for GNU extensions
     if target_env == "msvc" {
         build.std("c++17");
+        // CSL code checks `WIN32` (no underscore) but MSVC only defines `_WIN32`
+        build.define("WIN32", "1");
     } else {
         build.std("gnu++17");
     }
