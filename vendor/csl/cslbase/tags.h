@@ -1929,7 +1929,7 @@ inline void discard_basic_vector(LispObject v)
             vechdr(v) = TYPE_PADDER + (size << (Tw+5)) + TAG_HDR_IMMED;
 // I retag the pointer in case at some stage I use this scheme for (eg)
 // bignums.
-            v = (v & ~reinterpret_cast<uintptr_t>(TAG_BITS)) | TAG_VECTOR;
+            v = (v & ~static_cast<uintptr_t>(TAG_BITS)) | TAG_VECTOR;
             free_vectors[i] = v;
         }
     }
