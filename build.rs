@@ -25,6 +25,10 @@ fn main() {
         build.std("c++17");
         // CSL code checks `WIN32` (no underscore) but MSVC only defines `_WIN32`
         build.define("WIN32", "1");
+        // Prevent windows.h from defining min/max macros (breaks std::min/std::max)
+        build.define("NOMINMAX", "1");
+        // Enable C++ exception handling (suppresses C4530 warnings)
+        build.flag("/EHsc");
     } else {
         build.std("gnu++17");
     }
