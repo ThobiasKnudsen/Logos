@@ -281,7 +281,9 @@ using std::atomic;    // If I am going to be multi-threaded then very many
 #endif // INADDR_NONE
 
 #else
+#ifndef _MSC_VER
 #include <unistd.h>
+#endif
 #endif //WIN32
 
 // I ought to go "using std::fopen;" and things like that wherever I use a

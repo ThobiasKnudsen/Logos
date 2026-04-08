@@ -550,7 +550,9 @@ void both()
 
 }
 
+#ifndef _MSC_VER
 #include <sys/wait.h>
+#endif
 
 void gc_start()
 {   dest.open("gc_start.log");

@@ -101,8 +101,10 @@
 #include <stdarg.h>
 #include <inttypes.h>
 #include <assert.h>
+#ifndef _MSC_VER
 #include <unistd.h>
 #include <sys/time.h>
+#endif
 #include <string.h>
 
 #include <iostream>
