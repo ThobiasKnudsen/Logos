@@ -29,6 +29,15 @@ fn main() {
         build.define("NOMINMAX", "1");
         // Enable C++ exception handling (suppresses C4530 warnings)
         build.flag("/EHsc");
+
+        // Add vcpkg include/lib paths for zlib on Windows
+        if let Ok(vcpkg_root) = env::var("VCPKG_ROOT") {
+            let triplet = "x64-windows-static";
+            let include_path = format!("{}/installed/{}/include", vcpkg_root, triplet);
+            let lib_path = format!("{}/installed/{}/lib", vcpkg_root, triplet);
+            build.include(&include_path);
+            println!("cargo:rustc-link-search=native={}", lib_path);
+        }
     } else {
         build.std("gnu++17");
     }
@@ -109,7 +118,8 @@ fn main() {
         println!("cargo:rustc-link-lib=zlib");
     }
 
-    // Tell cargo to re-run if vendor files change
+    // Tell cargo to re-run if vendor files or env change
     println!("cargo:rerun-if-changed=vendor/csl/");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
 }
