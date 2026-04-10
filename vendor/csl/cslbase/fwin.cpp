@@ -100,7 +100,11 @@
 // The declaration here is an expression of optimism! It applies
 // if <unistd.h> seems not to be available and in that case I just
 // HOPE there is a getcwd() with this signature.
+// On MSVC, <direct.h> (included below) provides getcwd — declaring it
+// here would conflict with the SDK header's linkage attributes.
+#ifndef _MSC_VER
 extern "C" char* getcwd(char* s, int n);
+#endif
 #pragma message "without unistd.h"
 #endif // HAVE_UNISTD_H
 
