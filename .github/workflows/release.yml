@@ -55,6 +55,13 @@ jobs:
   # ---------------------------------------------------------------------------
   macos:
     runs-on: macos-latest
+    env:
+      APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v4
 
@@ -128,12 +135,53 @@ jobs:
           </plist>
           PLIST
 
+      - name: Import signing certificate
+        if: env.APPLE_CERTIFICATE_P12 != ''
+        run: |
+          # Decode certificate
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > certificate.p12
+
+          # Create temporary keychain
+          security create-keychain -p actions build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p actions build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+
+          # Import certificate
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions build.keychain
+
+          rm -f certificate.p12
+
+      - name: Code sign .app bundle
+        if: env.APPLE_CERTIFICATE_P12 != ''
+        run: |
+          codesign --deep --force --verify --verbose \
+            --timestamp --options runtime \
+            --sign "Developer ID Application: $APPLE_SIGNING_IDENTITY" \
+            Logos.app
+
       - name: Create .dmg
         run: |
           mkdir -p dmg_staging
           cp -r Logos.app dmg_staging/
           ln -s /Applications dmg_staging/Applications
           hdiutil create -volname "Logos" -srcfolder dmg_staging -ov -format UDZO logos-macos-universal.dmg
+
+      - name: Notarize .dmg
+        if: env.APPLE_CERTIFICATE_P12 != ''
+        run: |
+          xcrun notarytool submit logos-macos-universal.dmg \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple logos-macos-universal.dmg
+
+      - name: Clean up keychain
+        if: always()
+        run: |
+          security delete-keychain build.keychain 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
         with:
@@ -145,6 +193,9 @@ jobs:
   # ---------------------------------------------------------------------------
   windows:
     runs-on: windows-latest
+    env:
+      WINDOWS_CERTIFICATE_P12: ${{ secrets.WINDOWS_CERTIFICATE_P12 }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -161,6 +212,14 @@ jobs:
 
       - name: Build release
         run: cargo build --release
+
+      - name: Sign executable
+        if: env.WINDOWS_CERTIFICATE_P12 != ''
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes("cert.pfx", [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_P12))
+          & signtool sign /f cert.pfx /p "$env:WINDOWS_CERTIFICATE_PASSWORD" /tr http://timestamp.digicert.com /td sha256 /fd sha256 target\release\logos.exe
+          Remove-Item cert.pfx
 
       - name: Create MSI installer
         run: |
@@ -213,6 +272,14 @@ jobs:
 
           wix build installer.wxs -o logos-windows-x64.msi
 
+      - name: Sign MSI installer
+        if: env.WINDOWS_CERTIFICATE_P12 != ''
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes("cert.pfx", [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_P12))
+          & signtool sign /f cert.pfx /p "$env:WINDOWS_CERTIFICATE_PASSWORD" /tr http://timestamp.digicert.com /td sha256 /fd sha256 logos-windows-x64.msi
+          Remove-Item cert.pfx
+
       - uses: actions/upload-artifact@v4
         with:
           name: logos-windows-x64.msi
@@ -225,16 +292,22 @@ jobs:
     needs: [linux, macos, windows]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Create GitHub Release
+      - name: Publish release to public repo
         uses: softprops/action-gh-release@v2
         with:
+          repository: ThobiasKnudsen/logos-releases
+          token: ${{ secrets.RELEASE_PAT }}
+          tag_name: ${{ github.ref_name }}
           draft: false
           generate_release_notes: true
           files: |
             artifacts/logos-linux-x86_64.AppImage/logos-linux-x86_64.AppImage
             artifacts/logos-macos-universal.dmg/logos-macos-universal.dmg
             artifacts/logos-windows-x64.msi/logos-windows-x64.msi
+            LICENSE
