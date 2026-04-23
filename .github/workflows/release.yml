@@ -151,6 +151,11 @@ jobs:
           security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions build.keychain
 
+          # Import Developer ID G2 intermediate certificate
+          curl -fSL -o DevIDG2.cer https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          security import DevIDG2.cer -k build.keychain
+          rm -f DevIDG2.cer
+
           rm -f certificate.p12
 
       - name: Code sign .app bundle
