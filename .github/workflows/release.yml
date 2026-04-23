@@ -294,6 +294,7 @@ jobs:
   # Publish to website (metalogos.net)
   # ---------------------------------------------------------------------------
   publish:
+    if: always()
     needs: [linux, macos, windows]
     runs-on: ubuntu-latest
     steps:
@@ -309,9 +310,9 @@ jobs:
           cd website
 
           mkdir -p downloads
-          cp ../artifacts/logos-linux-x86_64.AppImage/logos-linux-x86_64.AppImage downloads/
-          cp ../artifacts/logos-macos-universal.dmg/logos-macos-universal.dmg downloads/
-          cp ../artifacts/logos-windows-x64.msi/logos-windows-x64.msi downloads/
+          cp ../artifacts/logos-linux-x86_64.AppImage/logos-linux-x86_64.AppImage downloads/ 2>/dev/null || echo "Linux build not available"
+          cp ../artifacts/logos-macos-universal.dmg/logos-macos-universal.dmg downloads/ 2>/dev/null || echo "macOS build not available"
+          cp ../artifacts/logos-windows-x64.msi/logos-windows-x64.msi downloads/ 2>/dev/null || echo "Windows build not available"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
