@@ -15,3 +15,6 @@ build/.venv/
 # Added by cargo
 
 /target
+
+# Playwright MCP debug logs
+.playwright-mcp/

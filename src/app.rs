@@ -372,6 +372,7 @@ const MENU_EXAMPLES_ITEMS: &[MenuItemDef] = &[
     MenuItemDef { label: "Ripple", shortcut: "" },
     MenuItemDef { label: "Mandelbrot", shortcut: "" },
     MenuItemDef { label: "Warp", shortcut: "" },
+    MenuItemDef { label: "Monte Carlo", shortcut: "" },
 ];
 
 const EXAMPLE_SOURCES: &[&str] = &[
@@ -379,6 +380,7 @@ const EXAMPLE_SOURCES: &[&str] = &[
     include_str!("../examples/ripple.txt"),
     include_str!("../examples/mandlebrot.txt"),
     include_str!("../examples/warp.txt"),
+    include_str!("../examples/monte_carlo.txt"),
 ];
 
 /// Dynamic theme menu items built from themes.json at runtime.

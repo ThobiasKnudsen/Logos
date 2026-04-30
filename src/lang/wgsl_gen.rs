@@ -22,7 +22,7 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
     // Find the expression to evaluate (last non-binding, non-function-def statement)
     let expr = find_result_expr(ast)?;
 
-    let is_bool = returns_bool(expr);
+    let is_bool = ctx.result_is_bool(expr);
     let is_vec = ctx.result_is_vec(expr);
 
     // Check for top-level loops (for or while)
@@ -181,11 +181,22 @@ struct EmittedFunction {
     wgsl_code: String,
 }
 
+/// Stored AST of a bool function for inlining in the plotting context.
+struct BoolFunctionDef {
+    params: Vec<String>,
+    body: AstNode,
+}
+
 struct GenContext {
     functions: Vec<EmittedFunction>,
     bindings: Vec<EmittedBinding>,
     /// Names of user-defined functions that return vec types (not f32).
     vec_functions: HashSet<String>,
+    /// Names of user-defined functions that return bool.
+    bool_functions: HashSet<String>,
+    /// AST bodies of bool functions — used for inlining during corner-checking
+    /// so that comparisons go through sign-change detection, not float ==.
+    bool_function_defs: std::collections::HashMap<String, BoolFunctionDef>,
     /// For hoisted nested functions: maps function name → extra captured variables to pass.
     captured_vars: std::collections::HashMap<String, Vec<String>>,
 }
@@ -200,6 +211,8 @@ impl GenContext {
             functions: Vec::new(),
             bindings: Vec::new(),
             vec_functions: HashSet::new(),
+            bool_functions: HashSet::new(),
+            bool_function_defs: std::collections::HashMap::new(),
             captured_vars: std::collections::HashMap::new(),
         }
     }
@@ -280,9 +293,23 @@ impl GenContext {
                     _ => false,
                 };
 
-                let ret_type = if returns_vec { "vec4<f32>" } else { "f32" };
+                let returns_bool_val = returns_bool(body);
+                let ret_type = if returns_vec {
+                    "vec4<f32>"
+                } else if returns_bool_val {
+                    "bool"
+                } else {
+                    "f32"
+                };
                 if returns_vec {
                     self.vec_functions.insert(name.clone());
+                }
+                if returns_bool_val {
+                    self.bool_functions.insert(name.clone());
+                    self.bool_function_defs.insert(name.clone(), BoolFunctionDef {
+                        params: params.clone(),
+                        body: body.as_ref().clone(),
+                    });
                 }
 
                 if needs_imperative {
@@ -469,6 +496,24 @@ impl GenContext {
             _ => {} // Single expression body — no side effects to emit
         }
         Ok(())
+    }
+
+    /// Check if an expression produces a bool type, including user-defined bool functions.
+    fn result_is_bool(&self, node: &AstNode) -> bool {
+        match node {
+            AstNode::Apply { name, .. } => {
+                if self.bool_functions.contains(name) {
+                    return true;
+                }
+                returns_bool(node)
+            }
+            AstNode::Block(stmts) => stmts.last().map_or(false, |s| self.result_is_bool(s)),
+            AstNode::IfExpr { then_branch, else_branch, .. } => {
+                self.result_is_bool(then_branch)
+                    || else_branch.as_ref().map_or(false, |e| self.result_is_bool(e))
+            }
+            other => returns_bool(other),
+        }
     }
 
     /// Check if an expression produces a vec type (for shader output detection).
@@ -867,6 +912,13 @@ impl GenContext {
                     "eq" | "neq" | "lt" | "gt" | "lte" | "gte" if args.len() == 2 => {
                         self.emit_comparison_with_corners(name, &args[0], &args[1])
                     }
+                    // User-defined bool function: inline body and apply corner-checking.
+                    // This makes f(x,y) produce identical rendering to the inline expression.
+                    _ if self.bool_function_defs.contains_key(name) => {
+                        let func_def = self.bool_function_defs.get(name).unwrap();
+                        let inlined = substitute_params(&func_def.body, &func_def.params, args);
+                        self.emit_bool_with_corners(&inlined)
+                    }
                     // Anything else: fall back to normal emission
                     _ => self.emit_expr(node),
                 }
@@ -1058,6 +1110,57 @@ fn body_returns_tuple(body: &AstNode) -> bool {
     }
 }
 
+/// Substitute parameter names with argument expressions in an AST.
+/// Used for inlining bool functions in the corner-checking context so that
+/// comparisons go through sign-change detection rather than float `==`.
+fn substitute_params(body: &AstNode, params: &[String], args: &[AstNode]) -> AstNode {
+    match body {
+        AstNode::Identifier(name) => {
+            if let Some(i) = params.iter().position(|p| p == name) {
+                if i < args.len() {
+                    return args[i].clone();
+                }
+            }
+            body.clone()
+        }
+        AstNode::Apply { name, args: func_args } => {
+            // Don't substitute the function name, only its arguments
+            let new_args = func_args.iter()
+                .map(|a| substitute_params(a, params, args))
+                .collect();
+            AstNode::Apply { name: name.clone(), args: new_args }
+        }
+        AstNode::Block(stmts) => {
+            AstNode::Block(stmts.iter().map(|s| substitute_params(s, params, args)).collect())
+        }
+        AstNode::Binding { name, value } => {
+            AstNode::Binding {
+                name: name.clone(),
+                value: Box::new(substitute_params(value, params, args)),
+            }
+        }
+        AstNode::IfExpr { condition, then_branch, else_branch } => {
+            AstNode::IfExpr {
+                condition: Box::new(substitute_params(condition, params, args)),
+                then_branch: Box::new(substitute_params(then_branch, params, args)),
+                else_branch: else_branch.as_ref().map(|e| Box::new(substitute_params(e, params, args))),
+            }
+        }
+        AstNode::Tuple(items) => {
+            AstNode::Tuple(items.iter().map(|i| substitute_params(i, params, args)).collect())
+        }
+        AstNode::Number(_) | AstNode::BoolLit(_) => body.clone(),
+        AstNode::PropertyAccess { object, property } => {
+            AstNode::PropertyAccess {
+                object: Box::new(substitute_params(object, params, args)),
+                property: property.clone(),
+            }
+        }
+        // For remaining node types, clone as-is (loops, arrays, etc. are unlikely in bool functions)
+        _ => body.clone(),
+    }
+}
+
 /// Check if an AST node produces a boolean value in WGSL.
 ///
 /// Comparisons, logical ops, and boolean literals produce `bool` in WGSL,
@@ -1161,6 +1264,50 @@ mod tests {
         let shader = gen("f(a) := (r := a * 2, r + 1)\nf(x)");
         assert!(shader.contains("fn f(a: f32) -> f32"));
         assert!(shader.contains("f(x)"));
+    }
+
+    #[test]
+    fn test_function_returning_bool() {
+        let shader = gen("f(a, b) := a = b\nf(x, y)");
+        assert!(shader.contains("fn f(a: f32, b: f32) -> bool"),
+            "bool-returning function should have -> bool, got:\n{}", shader);
+    }
+
+    #[test]
+    fn test_function_returning_bool_inlined_matches_inline() {
+        // f(a,b) with arbitrary param names, called with axis vars, must match inline
+        let inline_shader = crate::lang::compile("x\u{00B2} = y or y = x").unwrap();
+        let func_shader = crate::lang::compile("f(a, b) := a\u{00B2} = b or b = a\nf(x, y)").unwrap();
+
+        // Extract just the fs_main body (after "fn fs_main")
+        let inline_main = inline_shader.split("fn fs_main").nth(1).unwrap();
+        let func_main = func_shader.split("fn fs_main").nth(1).unwrap();
+
+        assert_eq!(inline_main, func_main,
+            "Function call must produce identical fs_main as inline.\n\nInline:\n{}\n\nFunction:\n{}",
+            inline_shader, func_shader);
+    }
+
+    #[test]
+    fn test_function_returning_bool_compound() {
+        // The exact user case: f(x,y) := x²=y and x=y
+        let input = "f(x, y) := x\u{00B2} = y and x = y\nf(x, y)";
+        let result = crate::lang::compile(input);
+        assert!(result.is_ok(), "bool function should compile, got: {:?}", result);
+        let shader = result.unwrap();
+        assert!(shader.contains("-> bool"),
+            "compound bool function should return bool, got:\n{}", shader);
+        // Validate with naga
+        let module = naga::front::wgsl::parse_str(&shader).unwrap_or_else(|e| {
+            panic!("naga parse failed:\n{}\n\n--- WGSL ---\n{}", e, shader)
+        });
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        validator.validate(&module).unwrap_or_else(|e| {
+            panic!("naga validation failed:\n{}\n\n--- WGSL ---\n{}", e, shader)
+        });
     }
 
     #[test]
@@ -1443,5 +1590,97 @@ mandelbrot(x, y)"#;
         assert!(shader.contains("fn mandelbrot_color("), "should define mandelbrot_color");
         assert!(shader.contains("fn mandelbrot("), "should define mandelbrot");
         assert!(shader.contains("_loop_guard"), "should have loop guard for while");
+    }
+
+    // --- Monte Carlo tests: simple to complex ---
+
+    #[test]
+    fn test_mc_hash_function() {
+        // Simple pseudo-random hash — should compile and validate
+        let input = "hash(s) := fract(sin(s * 127.1 + 311.7) * 43758.5453)\nhash(x + y * 100.0)";
+        let shader = gen(input);
+        assert!(shader.contains("fn hash(s: f32) -> f32"), "should define hash function");
+        assert!(shader.contains("fract("), "should use fract");
+        assert!(shader.contains("sin("), "should use sin");
+    }
+
+    #[test]
+    fn test_mc_step_branchless_count() {
+        // Branchless hit counting using step() — core Monte Carlo pattern
+        let input = "d := x * x + y * y\n1.0 - step(1.0, d)";
+        let shader = gen(input);
+        assert!(shader.contains("step(1.0, d)"), "should use step for branchless");
+    }
+
+    #[test]
+    fn test_mc_multiline_while_in_function() {
+        // Verify multiline while body inside function compiles
+        // Single-line version works: f(n) := (i := 0, s := 0, while (i < n) (s := s + i, i := i + 1), s)
+        // Test multiline version
+        let input = "sim(seed) := (j := 0.0, s := 0.0, while (j < 10.0) (s := s + j, j := j + 1.0), s)\nsim(x)";
+        let result = crate::lang::compile(input);
+        assert!(result.is_ok(), "Single-line while-in-function should compile, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_mc_function_with_while_loop_called_from_loop() {
+        // Core pattern: function with internal while loop, called from top-level while loop
+        // Note: 'z' is an AxisVar, use 'rn' instead for bindings inside loops
+        let input = "hash(s) := fract(sin(s * 127.1 + 311.7) * 43758.5453)\nsim(tf, seed) := (lp := 0.0, j := 0.0, while (j < 10.0) (rn := (hash(seed + j * 17.31) - 0.5) * 3.46, lp := lp + rn * 0.01, j := j + 1.0), exp(lp))\nnx := (x - x.min) / (x.max - x.min)\nny := (y - y.min) / (y.max - y.min)\nbright := 0.0\ni := 0.0\nwhile (i < 4.0) (p := sim(nx, i * 137.0), d := abs(ny - p * 0.5), bright := bright + smoothstep(0.01, 0.0, d), i := i + 1.0)\nbright";
+        let result = crate::lang::compile(input);
+        assert!(result.is_ok(), "Nested loop pattern should compile, got: {:?}", result);
+        let shader = result.unwrap();
+        assert!(shader.contains("fn sim("), "should define sim function");
+        assert!(shader.contains("fn hash("), "should define hash function");
+    }
+
+    #[test]
+    fn test_mc_distance_field_line_rendering() {
+        // Line rendering via smoothstep distance — core visual technique
+        let input = r#"nx := (x - x.min) / (x.max - x.min)
+ny := (y - y.min) / (y.max - y.min)
+curve_y := 0.5 + 0.3 * sin(nx * 6.28)
+d := abs(ny - curve_y)
+smoothstep(0.005, 0.0, d)"#;
+        let result = crate::lang::compile(input);
+        assert!(result.is_ok(), "Distance-field line should compile, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_mc_confidence_band() {
+        // Analytical confidence band using step() for region shading
+        let input = r#"nx := (x - x.min) / (x.max - x.min)
+ny := (y - y.min) / (y.max - y.min)
+tf := max(nx, 0.001)
+upper := exp(0.035 * tf + 0.588 * sqrt(tf))
+lower := exp(0.035 * tf - 0.588 * sqrt(tf))
+step(lower, ny) * step(ny, upper)"#;
+        let result = crate::lang::compile(input);
+        assert!(result.is_ok(), "Confidence band should compile, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_mc_full_example_compiles_and_validates() {
+        // Full Monte Carlo example as it will appear in the Examples menu
+        let input = include_str!("../../examples/monte_carlo.txt");
+        let result = crate::lang::compile(input);
+        assert!(result.is_ok(), "Full Monte Carlo example should compile, got: {:?}", result);
+        let shader = result.unwrap();
+        // Validate with naga (same validation wgpu does)
+        let module = naga::front::wgsl::parse_str(&shader).unwrap_or_else(|e| {
+            panic!("naga parse failed:\n{}\n\n--- WGSL ---\n{}", e, shader)
+        });
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        validator.validate(&module).unwrap_or_else(|e| {
+            panic!("naga validation failed:\n{}\n\n--- WGSL ---\n{}", e, shader)
+        });
+        // Structural checks
+        assert!(shader.contains("fn hash("), "should define hash");
+        assert!(shader.contains("fn sim("), "should define sim");
+        assert!(shader.contains("fn monte_carlo("), "should define monte_carlo");
+        assert!(shader.contains("smoothstep("), "should use smoothstep for line rendering");
     }
 }
