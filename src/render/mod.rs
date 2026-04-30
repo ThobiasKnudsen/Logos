@@ -12,9 +12,9 @@ use glyphon::{
 };
 use wgpu::{
     CommandEncoderDescriptor, DeviceDescriptor, Extent3d, Instance, InstanceDescriptor, LoadOp,
-    MultisampleState, Operations, PresentMode, RenderPassColorAttachment, RenderPassDescriptor,
-    RequestAdapterOptions, StoreOp, SurfaceConfiguration, TextureDimension, TextureUsages,
-    TextureViewDescriptor,
+    MultisampleState, Operations, PowerPreference, PresentMode, RenderPassColorAttachment,
+    RenderPassDescriptor, RequestAdapterOptions, StoreOp, SurfaceConfiguration, TextureDimension,
+    TextureUsages, TextureViewDescriptor,
 };
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -365,18 +365,22 @@ impl Renderer {
         let physical_size = window.inner_size();
 
         let instance = Instance::new(InstanceDescriptor::default());
+        let surface = instance
+            .create_surface(window.clone())
+            .expect("create surface");
         let adapter = instance
-            .request_adapter(&RequestAdapterOptions::default())
+            .request_adapter(&RequestAdapterOptions {
+                power_preference: PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
             .await
             .unwrap();
+        log::info!("GPU: {}", adapter.get_info().name);
         let (device, queue) = adapter
             .request_device(&DeviceDescriptor::default(), None)
             .await
             .unwrap();
-
-        let surface = instance
-            .create_surface(window.clone())
-            .expect("create surface");
 
         let caps = surface.get_capabilities(&adapter);
         let swapchain_format = caps
@@ -385,15 +389,20 @@ impl Renderer {
             .find(|f| !f.is_srgb())
             .copied()
             .unwrap_or(caps.formats[0]);
+        let present_mode = if caps.present_modes.contains(&PresentMode::Immediate) {
+            PresentMode::Immediate
+        } else {
+            PresentMode::Fifo
+        };
         let surface_config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
             format: swapchain_format,
             width: physical_size.width,
             height: physical_size.height,
-            present_mode: PresentMode::Fifo,
+            present_mode,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            desired_maximum_frame_latency: 3,
         };
         surface.configure(&device, &surface_config);
 

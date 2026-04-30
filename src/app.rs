@@ -728,6 +728,8 @@ struct AppState {
     /// Track what text was last submitted to lang_service per cell,
     /// so we don't re-submit unchanged text.
     last_submitted_texts: Vec<String>,
+
+    last_frame_time: Instant,
 }
 
 const DOUBLE_CLICK_MS: u128 = 400;
@@ -1660,6 +1662,7 @@ impl ApplicationHandler for App {
             lang_service: LangService::new(),
             cached_user_symbols: Vec::new(),
             last_submitted_texts: Vec::new(),
+            last_frame_time: Instant::now(),
         };
 
         let wp = win_pos(&state.window);
@@ -2604,8 +2607,15 @@ impl ApplicationHandler for App {
 
         // Continuous animation when shaders are active, or polling for REDUCE
         if state.renderer.has_active_shaders() || state.reduce_service.has_pending() {
-            event_loop.set_control_flow(ControlFlow::Poll);
-            state.window.request_redraw();
+            const TARGET_FRAME_TIME: std::time::Duration = std::time::Duration::from_micros(16_667);
+            let elapsed = state.last_frame_time.elapsed();
+            if elapsed >= TARGET_FRAME_TIME {
+                state.last_frame_time = Instant::now();
+                state.window.request_redraw();
+            } else {
+                let wait_until = Instant::now() + (TARGET_FRAME_TIME - elapsed);
+                event_loop.set_control_flow(ControlFlow::WaitUntil(wait_until));
+            }
         } else if !state.is_any_drag_active()
             && state.pending_dialog.is_none()
         {
