@@ -15,12 +15,12 @@
 | Name | Role | Company | Location | Industry | Status | Notes |
 |---|---|---|---|---|---|---|
 | Allen Becker | Quantitative Risk Analyst | DNB Markets | Oslo | Quant Finance | Talking | Asked about workflow, awaiting reply |
-| Immanuel N. Jiya | PhD, Clean Tech Innovation | ex-Norhybrid Renewables | Horten, Norway | Power Systems | Talking | Asked about modelling tools |
+| Immanuel N. Jiya | PhD, Clean Tech Innovation | ex-Norhybrid Renewables | Horten, Norway | Power Systems | Talking | Asked about tools & pain points, awaiting reply |
 | Huiyan Xue | Lead Quantitative Analyst | Nordea | Oslo | Quant Finance | Follow-up | Talk after Easter |
 | Ludwig George | Power Quality System Studies Engineer | Hitachi Energy | Uppsala, Sweden | Power Systems | Connected | |
 | Ali Pirbazari | Senior Electrical Engineer | Siemens Energy | Oslo | Power Systems | Connected | |
-| Ilgar Azizov | Senior Reservoir Engineer, PhD | Equinor | Norway | Oil & Gas | Connected | Reservoir simulation, MATLAB user |
-| Angelos Bouchouri | Optical Engineer | Tiny Telescope | Netherlands | Optics | Connected | |
+| Ilgar Azizov | Senior Reservoir Engineer, PhD | Equinor | Norway | Oil & Gas | Not relevant | Pain is data management (TBs, 100+ heterogeneous formats) and tool training, not computation. Moving to cloud/AI. Suggested AkerBP or smaller companies may have different pain. |
+| Angelos Bouchouri | Optical Engineer | Tiny Telescope | Netherlands | Optics | Not relevant | Low-element satellite optics, all done in Zemax, not complicated enough to need external tools. Suggested metalens optimization as better fit. |
 | Guillaume Coqueret | Professor of Finance, Data Science | University | Lyon, France | Econometrics | Connected | 7K followers |
 
 ## Sent — Quant Finance
@@ -32,14 +32,14 @@
 | Mehdi Foroughi | Quantitative Power Market Analyst | Nord Pool | Oslo | Energy Trading | Sent | |
 | Juuso Nissinen | Head of Market Risk Measurement | — | Oslo | Quant Finance | Sent | Quant portfolio management, market risk |
 | Rolf Minardi | Quant Researcher | BNP Paribas | London | Quant Finance | Sent | |
-| Jorge Montalvo | Senior Data Scientist, Quant Researcher | ENGIE | Brussels | Energy Trading | Sent | Power markets, algo trading, BESS |
+| Jorge Montalvo | Senior Data Scientist, Quant Researcher | ENGIE | Brussels | Energy Trading | Talking | Pure Python/ML stack (scikit-learn, polars, numpy, pytorch, duckdb). No CAS or symbolic math. Weak fit — probing if others at ENGIE do quant work. |
 
 ## Sent — Signal Processing / DSP
 
 | Name | Role | Company | Location | Industry | Status | Notes |
 |---|---|---|---|---|---|---|
 | Mark Thomas | Principal Researcher, Audio & Acoustics | Dolby Laboratories | San Francisco | Audio DSP | Sent | |
-| Jesus Rodriguez | Wireless System Engineer | Apple | Spain | Signal Processing | Sent | |
+| Jesus Rodriguez | Wireless System Engineer | Apple | Spain | Signal Processing | Talking | Engaged — workflow is algorithm → MATLAB reference → VHDL/Verilog. Interested in iterative numerical exploration phase (BER sims, Monte Carlo). Clarified Telos replaces MATLAB step, not HDL. |
 | Milan Shah | Incoming DSP Engineer | SpaceX | Evanston, USA | DSP | Sent | linkedin.com/in/milan-shah-nu/ |
 | Prasath Kumaraveeran | DSP IP Architect, Automotive Radar | NXP Semiconductors | Munich | DSP | Sent | |
 | Yevgen S. | Systems Engineer - Signal Processing | Raytheon Missiles & Defense | Tucson, USA | DSP / Defense | Sent | |
@@ -115,7 +115,7 @@
 
 | Name | Role | Company | Location | Industry | Status | Notes |
 |---|---|---|---|---|---|---|
-| Jørgen V. Knutsen | MSc Cybernetics & Robotics, TA | NTNU | Trondheim | Education / Control | Sent | 10 mutual connections |
+| Jørgen V. Knutsen | MSc Cybernetics & Robotics, TA | NTNU | Trondheim | Education / Control | Talking | **Best prospect.** Uses SymPy→C++/MATLAB pipeline manually. Anti-MATLAB (syntax+cost). Validated Telos scope (CAS→machine code). Wants signal inspection, 3D viz. Robotics kinematics ~30 state dims. |
 | Promit Paul | Graduate Engineer, Optimization/Control | — | Grimstad, Norway | Control Systems | Sent | MATLAB, Simulink, Python |
 | Youngjoo Kim | Principal Engineer | Nearthlab | Trondheim | Engineering | Sent | |
 
