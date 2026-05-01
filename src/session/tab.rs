@@ -4,6 +4,12 @@ use std::path::{Path, PathBuf};
 
 use crate::editor::CodeCell;
 use crate::lang::ast::AstNode;
+use crate::notebook::{NoReduce, Notebook};
+use crate::ui::theme::Rgba;
+
+/// Default plot color for new cells until per-cell coloring is exposed via
+/// the UI. Catppuccin Mocha "blue" — readable on both dark and light bgs.
+const DEFAULT_PLOT_COLOR: u32 = 0x89b4fa;
 
 pub struct Tab {
     pub name: String,
@@ -12,13 +18,22 @@ pub struct Tab {
     pub active_cell_index: usize,
     next_cell_id: usize,
     pub is_modified: bool,
-    /// Per-tab axis bounds (saved/restored on tab switch).
+    /// Per-tab axis bounds (saved/restored on tab switch). UI viewport state;
+    /// will move to `NotebookView` in step 3.
     pub axis_bounds: Option<[f32; 4]>,
+    /// Headless backend that mirrors `cells` for cell text and structure.
+    /// Step 2 keeps this in sync via `add_cell` / `remove_cell` /
+    /// `sync_texts_to_notebook`. Step 3 flips the source of truth so
+    /// `cells` becomes a derived view (or goes away entirely) and the
+    /// real `ReduceServiceBackend` from `App` is wired in.
+    pub notebook: Notebook,
 }
 
 impl Tab {
     pub fn new_untitled(name: String) -> Self {
         let cell = CodeCell::new(0);
+        let mut notebook = empty_notebook();
+        notebook.add_cell("", Rgba::hex(DEFAULT_PLOT_COLOR));
         Self {
             name,
             file_path: None,
@@ -27,6 +42,7 @@ impl Tab {
             next_cell_id: 1,
             is_modified: false,
             axis_bounds: None,
+            notebook,
         }
     }
 
@@ -38,6 +54,8 @@ impl Tab {
             .unwrap_or_else(|| "Unknown".into());
         let mut cell = CodeCell::new(0);
         cell.buffer.set_text(&contents);
+        let mut notebook = empty_notebook();
+        notebook.add_cell(&contents, Rgba::hex(DEFAULT_PLOT_COLOR));
         Ok(Self {
             name,
             file_path: Some(path.to_path_buf()),
@@ -46,6 +64,7 @@ impl Tab {
             next_cell_id: 1,
             is_modified: false,
             axis_bounds: None,
+            notebook,
         })
     }
 
@@ -62,6 +81,8 @@ impl Tab {
         self.next_cell_id += 1;
         let cell = CodeCell::new(id);
         self.cells.push(cell);
+        // Mirror in the notebook with the same default color.
+        self.notebook.add_cell("", Rgba::hex(DEFAULT_PLOT_COLOR));
         let new_index = self.cells.len() - 1;
         self.active_cell_index = new_index;
         self.is_modified = true;
@@ -73,12 +94,23 @@ impl Tab {
             return;
         }
         self.cells.remove(index);
+        self.notebook.remove_cell(index);
         if self.active_cell_index >= self.cells.len() {
             self.active_cell_index = self.cells.len() - 1;
         } else if self.active_cell_index > index {
             self.active_cell_index -= 1;
         }
         self.is_modified = true;
+    }
+
+    /// Push every cell's current buffer text into the notebook. App writes
+    /// directly to `cell.buffer` per keystroke; the notebook isn't told
+    /// until something needs it (typically right before `notebook.play`).
+    /// Step 3 will replace this with a reactive flow.
+    pub fn sync_texts_to_notebook(&mut self) {
+        for (i, cell) in self.cells.iter().enumerate() {
+            self.notebook.set_text(i, cell.buffer.text());
+        }
     }
 
     pub fn set_active_cell(&mut self, index: usize) {
@@ -137,5 +169,68 @@ impl Tab {
             }
         }
         Ok(AstNode::Block(all_stmts))
+    }
+}
+
+/// Construct a `Notebook` with no cells, no REDUCE wired, and the default
+/// CPU dispatcher. Used by `Tab` constructors during the step-2 transition;
+/// step 3 replaces this with a shared `ReduceServiceBackend` from `App`.
+fn empty_notebook() -> Notebook {
+    Notebook::new(Box::new(NoReduce), None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_untitled_mirrors_one_empty_cell_into_notebook() {
+        let tab = Tab::new_untitled("scratch".into());
+        assert_eq!(tab.cells.len(), 1);
+        assert_eq!(tab.notebook.len(), 1);
+        assert_eq!(tab.notebook.cell(0).text, "");
+    }
+
+    #[test]
+    fn add_cell_mirrors_into_notebook() {
+        let mut tab = Tab::new_untitled("scratch".into());
+        tab.add_cell();
+        assert_eq!(tab.cells.len(), 2);
+        assert_eq!(tab.notebook.len(), 2);
+    }
+
+    #[test]
+    fn remove_cell_mirrors_into_notebook() {
+        let mut tab = Tab::new_untitled("scratch".into());
+        tab.add_cell();
+        tab.add_cell();
+        assert_eq!(tab.cells.len(), 3);
+        assert_eq!(tab.notebook.len(), 3);
+        tab.remove_cell(1);
+        assert_eq!(tab.cells.len(), 2);
+        assert_eq!(tab.notebook.len(), 2);
+    }
+
+    #[test]
+    fn sync_texts_pushes_buffer_state_into_notebook() {
+        let mut tab = Tab::new_untitled("scratch".into());
+        tab.cells[0].buffer.set_text("plot(y = sin(x))");
+        // Before sync, the notebook's text is still empty.
+        assert_eq!(tab.notebook.cell(0).text, "");
+        tab.sync_texts_to_notebook();
+        assert_eq!(tab.notebook.cell(0).text, "plot(y = sin(x))");
+    }
+
+    #[test]
+    fn notebook_can_play_after_text_sync() {
+        let mut tab = Tab::new_untitled("scratch".into());
+        tab.cells[0].buffer.set_text("plot(y = sin(x))");
+        tab.sync_texts_to_notebook();
+        tab.notebook.play(0);
+        let cell = tab.notebook.cell(0);
+        assert!(
+            cell.outcome.shader.is_some(),
+            "notebook play should produce a shader"
+        );
     }
 }

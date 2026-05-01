@@ -21,7 +21,7 @@ mod shader;
 
 pub use cell::{CellMessage, CellOutcome, CellState, NotebookCell};
 pub use diagnostic::{Diagnostic, Severity, Span};
-pub use reduce_backend::{ReduceBackend, ReduceServiceBackend};
+pub use reduce_backend::{NoReduce, ReduceBackend, ReduceServiceBackend};
 pub use shader::{Access, BindingSpec, DispatchKind, ScalarType, ShaderSpec, SizeSpec};
 
 use std::collections::HashMap;
