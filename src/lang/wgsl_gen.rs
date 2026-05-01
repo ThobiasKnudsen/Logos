@@ -110,9 +110,23 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
         let imperative_code = ctx.emit_imperative_stmts(top_stmts, "    ", &mut declared)?;
         shader.push_str(&imperative_code);
     } else {
-        // Emit non-constant bindings as immutable let inside fs_main
+        // Emit non-constant bindings as immutable let inside fs_main.
+        // For block-valued bindings (e.g. `f := (sum := 0; for ... ; y = sum)`)
+        // emit the block's imperative statements as a preamble so any locals
+        // the result expression depends on are in scope.
+        let mut declared: HashSet<String> = HashSet::new();
+        declared.insert("x".to_string());
+        declared.insert("y".to_string());
+        for name in &module_binding_names {
+            declared.insert(name.clone());
+        }
         for binding in &fs_main_bindings {
+            if let Some(stmts) = &binding.block_preamble {
+                let preamble = ctx.emit_imperative_stmts(stmts, "    ", &mut declared)?;
+                shader.push_str(&preamble);
+            }
             shader.push_str(&format!("    let {} = {};\n", binding.name, binding.expr));
+            declared.insert(binding.name.clone());
         }
     }
 
@@ -135,6 +149,28 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
         shader.push_str("    let x_p = x + half_px;\n");
         shader.push_str("    let y_m = y - half_py;\n");
         shader.push_str("    let y_p = y + half_py;\n");
+
+        // Hoist each lifted block's per-corner evaluation into a single `let`,
+        // so the corner-check expression below can reuse the values without
+        // re-invoking the (potentially loop-heavy) function multiple times.
+        for (binding_name, def) in &ctx.lifted_block_defs {
+            shader.push_str(&format!(
+                "    let _corner_{0}_mm = {1}(x_m, y_m);\n",
+                binding_name, def.fn_name
+            ));
+            shader.push_str(&format!(
+                "    let _corner_{0}_mp = {1}(x_m, y_p);\n",
+                binding_name, def.fn_name
+            ));
+            shader.push_str(&format!(
+                "    let _corner_{0}_pm = {1}(x_p, y_m);\n",
+                binding_name, def.fn_name
+            ));
+            shader.push_str(&format!(
+                "    let _corner_{0}_pp = {1}(x_p, y_p);\n",
+                binding_name, def.fn_name
+            ));
+        }
 
         let corner_code = ctx.emit_bool_with_corners(expr)?;
         shader.push_str(&format!("    let _result = {};\n", corner_code));
@@ -177,6 +213,11 @@ const UNIFORM_STRUCT: &str = r#"struct Uniforms {
 struct EmittedBinding {
     name: String,
     expr: String,
+    /// If the binding's value was a block with imperative statements
+    /// (e.g. `f := (sum := 0; for ... ; y = sum)`), these are the block's
+    /// statements — emitted as a preamble before `let name = expr` so any
+    /// vars/loops the result expression depends on are in scope.
+    block_preamble: Option<Vec<AstNode>>,
 }
 
 struct EmittedFunction {
@@ -202,8 +243,36 @@ struct GenContext {
     /// AST values of bool-typed bindings — used for inlining during
     /// corner-checking so `f := x = y^2; plot(f)` renders the curve correctly.
     bool_binding_defs: std::collections::HashMap<String, AstNode>,
+    /// Block-valued bindings (e.g. `f := (sum := 0; for ... ; y = sum)`) lifted
+    /// into WGSL functions so corner-checking can re-evaluate the block at each
+    /// corner, not just the pixel center.
+    lifted_block_defs: std::collections::HashMap<String, LiftedBlockDef>,
+    /// User-defined bool functions whose bodies are imperative + comparison.
+    /// Tracks the matching `_diff_<name>` companion that returns lhs - rhs so
+    /// corner-checking can call the function at each corner without re-inlining
+    /// the imperative body (which doesn't survive emit_bool_with_corners).
+    lifted_function_defs: std::collections::HashMap<String, LiftedFunctionDef>,
     /// For hoisted nested functions: maps function name → extra captured variables to pass.
     captured_vars: std::collections::HashMap<String, Vec<String>>,
+}
+
+/// Metadata for a block-valued binding lifted into a WGSL function.
+/// The function signature is `fn fn_name(x: f32, y: f32) -> f32`. When
+/// `comparison_op` is set, the function returns `lhs - rhs`; otherwise it
+/// returns the block's float result directly.
+#[derive(Debug, Clone)]
+struct LiftedBlockDef {
+    fn_name: String,
+    comparison_op: Option<String>,
+}
+
+/// Metadata for a user-defined function whose bool body has imperative content.
+/// `diff_fn_name(args..., x_corner, y_corner) -> f32` returns `lhs - rhs` of the
+/// body's comparison so corner-checking can sign-check at four corners.
+#[derive(Debug, Clone)]
+struct LiftedFunctionDef {
+    diff_fn_name: String,
+    comparison_op: String,
 }
 
 /// Optional x/y substitution for corner-checking.
@@ -219,6 +288,8 @@ impl GenContext {
             bool_functions: HashSet::new(),
             bool_function_defs: std::collections::HashMap::new(),
             bool_binding_defs: std::collections::HashMap::new(),
+            lifted_block_defs: std::collections::HashMap::new(),
+            lifted_function_defs: std::collections::HashMap::new(),
             captured_vars: std::collections::HashMap::new(),
         }
     }
@@ -262,15 +333,25 @@ impl GenContext {
                     }
                 }
 
-                // Determine captured variables (scope bindings referenced in body, not in params)
+                // Determine captured variables (scope bindings or axis variables
+                // referenced in body, not shadowed by params). `x`/`y` are
+                // implicitly available in fs_main but not inside WGSL functions —
+                // pass them as extra params when the body references them, so e.g.
+                // `f(n) := (sum := x; for ... ; y = sum)` compiles correctly.
                 let mut captured = Vec::new();
-                if !scope_bindings.is_empty() {
-                    let param_set: HashSet<&str> = params.iter().map(|s| s.as_str()).collect();
-                    let referenced = find_referenced_identifiers(body);
-                    for var in scope_bindings {
-                        if referenced.contains(var.as_str()) && !param_set.contains(var.as_str()) {
-                            captured.push(var.clone());
-                        }
+                let param_set: HashSet<&str> = params.iter().map(|s| s.as_str()).collect();
+                let referenced = find_referenced_identifiers(body);
+                for var in scope_bindings {
+                    if referenced.contains(var.as_str()) && !param_set.contains(var.as_str()) {
+                        captured.push(var.clone());
+                    }
+                }
+                for axis in ["x", "y"] {
+                    if referenced.contains(axis)
+                        && !param_set.contains(axis)
+                        && !captured.iter().any(|c| c == axis)
+                    {
+                        captured.push(axis.to_string());
                     }
                 }
 
@@ -282,7 +363,7 @@ impl GenContext {
                 }
 
                 if !captured.is_empty() {
-                    self.captured_vars.insert(name.clone(), captured);
+                    self.captured_vars.insert(name.clone(), captured.clone());
                 }
 
                 // Check if function body returns a tuple/vec (for vec4 color output)
@@ -325,6 +406,57 @@ impl GenContext {
                     );
                 }
 
+                // For bool functions with imperative bodies whose result is a
+                // direct comparison, also emit a `_diff_<name>` companion that
+                // returns lhs - rhs. Corner-checking uses this so it can call
+                // the function at each pixel corner without re-inlining the
+                // imperative body (which `emit_bool_with_corners` can't handle).
+                if returns_bool_val && needs_imperative {
+                    if let AstNode::Block(stmts) = body.as_ref() {
+                        if let Some(result) = block_result_expr_from_stmts(stmts) {
+                            if let AstNode::Apply { name: op, args: cmp_args } = result {
+                                if cmp_args.len() == 2
+                                    && matches!(
+                                        op.as_str(),
+                                        "eq" | "neq" | "lt" | "gt" | "lte" | "gte"
+                                    )
+                                {
+                                    let diff_name = format!("_diff_{}", name);
+                                    let mut declared: HashSet<String> = HashSet::new();
+                                    for p in params {
+                                        declared.insert(p.clone());
+                                    }
+                                    for c in &captured {
+                                        declared.insert(c.clone());
+                                    }
+                                    if let Ok(diff_body) = self.emit_lifted_block_body_with(
+                                        stmts,
+                                        result,
+                                        &Some(op.clone()),
+                                        declared,
+                                    ) {
+                                        let diff_wgsl = format!(
+                                            "fn {}({}) -> f32 {{\n{}}}\n",
+                                            diff_name,
+                                            all_params.join(", "),
+                                            diff_body,
+                                        );
+                                        self.functions
+                                            .push(EmittedFunction { wgsl_code: diff_wgsl });
+                                        self.lifted_function_defs.insert(
+                                            name.clone(),
+                                            LiftedFunctionDef {
+                                                diff_fn_name: diff_name,
+                                                comparison_op: op.clone(),
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if needs_imperative {
                     if let AstNode::Block(stmts) = body.as_ref() {
                         if let Ok(body_wgsl) = self.emit_function_body(stmts) {
@@ -350,13 +482,52 @@ impl GenContext {
                 }
             }
             AstNode::Binding { name, value } => {
+                // Block-valued bindings with imperative content (var/loop) are lifted
+                // into WGSL functions so corner-checking can re-evaluate the block at
+                // each corner of a pixel — without this, e.g. `sum` is computed once
+                // at pixel-center x and the curve renders dotted on steep parts.
+                let imperative_block_stmts = match value.as_ref() {
+                    AstNode::Block(stmts) if has_imperative_stmt(stmts) => Some(stmts.clone()),
+                    _ => None,
+                };
+
+                if let Some(stmts) = imperative_block_stmts {
+                    if let Ok((fn_name, comparison_op, binding_expr)) =
+                        self.lift_block_to_fn(name, &stmts)
+                    {
+                        let is_comparison = comparison_op.is_some();
+                        self.lifted_block_defs.insert(
+                            name.clone(),
+                            LiftedBlockDef {
+                                fn_name,
+                                comparison_op,
+                            },
+                        );
+                        // For lifted comparison results we render via corner-checking
+                        // (which calls the function 4 times directly); the regular
+                        // `let name = call(x, y) <op> 0.0` binding would only add a
+                        // 5th unused call per pixel. Skip emitting it.
+                        if !is_comparison {
+                            self.bindings.push(EmittedBinding {
+                                name: name.clone(),
+                                expr: binding_expr,
+                                block_preamble: None,
+                            });
+                        }
+                        return;
+                    }
+                    // Fall through if lifting failed.
+                }
+
                 if returns_bool(value) {
-                    self.bool_binding_defs.insert(name.clone(), (**value).clone());
+                    let result_expr = block_result_expr(value).clone();
+                    self.bool_binding_defs.insert(name.clone(), result_expr);
                 }
                 if let Ok(expr_code) = self.emit_expr(value) {
                     self.bindings.push(EmittedBinding {
                         name: name.clone(),
                         expr: expr_code,
+                        block_preamble: None,
                     });
                 }
             }
@@ -369,6 +540,7 @@ impl GenContext {
                                 self.bindings.push(EmittedBinding {
                                     name: name.clone(),
                                     expr: expr_code,
+                                    block_preamble: None,
                                 });
                             }
                         }
@@ -381,6 +553,147 @@ impl GenContext {
 
     /// Emit a function body that contains bindings and/or loops.
     /// Returns the WGSL body code including the final `return` statement.
+    /// Lift a block-valued binding into a WGSL function so its body re-runs
+    /// at every corner during corner-checking. Returns
+    /// `(fn_name, comparison_op, binding_call_expr)`.
+    fn lift_block_to_fn(
+        &mut self,
+        binding_name: &str,
+        stmts: &[AstNode],
+    ) -> Result<(String, Option<String>, String), String> {
+        let result = block_result_expr_from_stmts(stmts)
+            .ok_or_else(|| format!("block-valued binding `{}` has no result", binding_name))?;
+
+        let comparison_op = match result {
+            AstNode::Apply { name, args }
+                if args.len() == 2
+                    && matches!(
+                        name.as_str(),
+                        "eq" | "neq" | "lt" | "gt" | "lte" | "gte"
+                    ) =>
+            {
+                Some(name.clone())
+            }
+            _ => None,
+        };
+
+        let fn_name = format!("_lifted_{}", binding_name);
+        let body = self.emit_lifted_block_body(stmts, result, &comparison_op)?;
+        let func_wgsl = format!("fn {}(x: f32, y: f32) -> f32 {{\n{}}}\n", fn_name, body);
+        self.functions.push(EmittedFunction { wgsl_code: func_wgsl });
+
+        let binding_expr = if let Some(op) = &comparison_op {
+            let wgsl_op = match op.as_str() {
+                "eq" => "==",
+                "neq" => "!=",
+                "lt" => "<",
+                "gt" => ">",
+                "lte" => "<=",
+                "gte" => ">=",
+                _ => "==",
+            };
+            format!("({}(x, y) {} 0.0)", fn_name, wgsl_op)
+        } else {
+            format!("{}(x, y)", fn_name)
+        };
+
+        Ok((fn_name, comparison_op, binding_expr))
+    }
+
+    /// Emit a lifted-block function body: imperative statements then a return
+    /// of either `lhs - rhs` (for comparison results) or the float result.
+    /// Default `declared` is `{x, y}` (lifted-block functions take those two);
+    /// callers needing a different signature use `emit_lifted_block_body_with`.
+    fn emit_lifted_block_body(
+        &self,
+        stmts: &[AstNode],
+        result: &AstNode,
+        comparison_op: &Option<String>,
+    ) -> Result<String, String> {
+        let mut declared: HashSet<String> = HashSet::new();
+        declared.insert("x".to_string());
+        declared.insert("y".to_string());
+        self.emit_lifted_block_body_with(stmts, result, comparison_op, declared)
+    }
+
+    /// Like `emit_lifted_block_body` but with caller-supplied initial `declared`
+    /// set — used for `_diff_<name>` companions of user functions whose params
+    /// (and captured vars) need to be in scope before emitting imperative stmts.
+    fn emit_lifted_block_body_with(
+        &self,
+        stmts: &[AstNode],
+        result: &AstNode,
+        comparison_op: &Option<String>,
+        mut declared: HashSet<String>,
+    ) -> Result<String, String> {
+        let mut code = String::new();
+
+        for stmt in stmts {
+            match stmt {
+                AstNode::Binding { name, value } => {
+                    let val = self.emit_expr(value)?;
+                    if declared.contains(name.as_str()) {
+                        code += &format!("    {} = {};\n", name, val);
+                    } else {
+                        code += &format!("    var {} = {};\n", name, val);
+                        declared.insert(name.clone());
+                    }
+                }
+                AstNode::TupleBinding { names, value } => {
+                    self.emit_tuple_binding(
+                        &mut code,
+                        names,
+                        value,
+                        "    ",
+                        "var",
+                        &mut declared,
+                    )?;
+                }
+                AstNode::ForLoop { var, range, body } => {
+                    self.emit_for_loop(&mut code, var, range, body, "    ", &mut declared)?;
+                }
+                AstNode::WhileLoop { condition, body } => {
+                    self.emit_while_condition_bindings(
+                        &mut code,
+                        condition,
+                        "    ",
+                        &mut declared,
+                    )?;
+                    let cond = self.emit_expr(condition)?;
+                    code += &format!(
+                        "    for (var _loop_guard: u32 = 0u; _loop_guard < {}u; _loop_guard = _loop_guard + 1u) {{\n",
+                        MAX_LOOP_ITERATIONS
+                    );
+                    self.emit_while_condition_bindings_inner(
+                        &mut code,
+                        condition,
+                        "        ",
+                        &mut declared,
+                    )?;
+                    code += &format!("        if (!({cond})) {{ break; }}\n");
+                    self.emit_loop_body_stmts(&mut code, body, &mut declared)?;
+                    code += "    }\n";
+                }
+                AstNode::FunctionDef { .. } => {}
+                _ => {} // result expression handled below
+            }
+        }
+
+        if comparison_op.is_some() {
+            if let AstNode::Apply { args, .. } = result {
+                if args.len() == 2 {
+                    let lhs = self.emit_expr(&args[0])?;
+                    let rhs = self.emit_expr(&args[1])?;
+                    code += &format!("    return ({}) - ({});\n", lhs, rhs);
+                    return Ok(code);
+                }
+            }
+        }
+        let result_code = self.emit_expr(result)?;
+        code += &format!("    return {};\n", result_code);
+        Ok(code)
+    }
+
     fn emit_function_body(&self, stmts: &[AstNode]) -> Result<String, String> {
         let has_loops = stmts
             .iter()
@@ -542,7 +855,13 @@ impl GenContext {
                 }
                 returns_bool(node)
             }
-            AstNode::Identifier(name) => self.bool_binding_defs.contains_key(name),
+            AstNode::Identifier(name) => {
+                self.bool_binding_defs.contains_key(name)
+                    || self
+                        .lifted_block_defs
+                        .get(name)
+                        .is_some_and(|d| d.comparison_op.is_some())
+            }
             AstNode::Block(stmts) => stmts.last().is_some_and(|s| self.result_is_bool(s)),
             AstNode::IfExpr {
                 then_branch,
@@ -895,7 +1214,22 @@ impl GenContext {
             ("ceil", 1) => Ok(format!("ceil({})", emitted[0])),
             ("round", 1) => Ok(format!("round({})", emitted[0])),
             ("fract", 1) => Ok(format!("fract({})", emitted[0])),
-            ("pow", 2) => Ok(format!("pow({}, {})", emitted[0], emitted[1])),
+            ("pow", 2) => {
+                // pow(x, n) for small non-negative integer n is much cheaper as
+                // repeated multiplication — pow() costs ~20+ GPU ops via exp2/log2,
+                // and `x²` (very common in plotting) shouldn't pay that.
+                if let AstNode::Number(n) = &args[1] {
+                    if *n >= 0.0 && n.fract() == 0.0 && *n <= 8.0 {
+                        let times = *n as u32;
+                        if times == 0 {
+                            return Ok("1.0".to_string());
+                        }
+                        let factors = vec![format!("({})", emitted[0]); times as usize];
+                        return Ok(format!("({})", factors.join(" * ")));
+                    }
+                }
+                Ok(format!("pow({}, {})", emitted[0], emitted[1]))
+            }
             ("min", 2) => Ok(format!("min({}, {})", emitted[0], emitted[1])),
             ("max", 2) => Ok(format!("max({}, {})", emitted[0], emitted[1])),
             ("clamp", 3) => Ok(format!(
@@ -951,6 +1285,84 @@ impl GenContext {
         match node {
             AstNode::BoolLit(b) => Ok(format!("{}", b)),
 
+            // Lifted block-valued binding: call the synthesized WGSL function at
+            // each pixel corner so the loop/local state re-runs for x_m/x_p/y_m/y_p
+            // rather than reusing the pixel-center value (which causes dotted curves).
+            // The four corner calls are hoisted into `__lifted_<name>_mm/mp/pm/pp`
+            // by the caller so we only invoke the function 4 times per pixel,
+            // not 6+ (the corner expression below references each corner twice).
+            AstNode::Identifier(name) if self.lifted_block_defs.contains_key(name) => {
+                let def = self.lifted_block_defs.get(name).unwrap();
+                let calls: Vec<String> = vec![
+                    format!("_corner_{}_mm", name),
+                    format!("_corner_{}_mp", name),
+                    format!("_corner_{}_pm", name),
+                    format!("_corner_{}_pp", name),
+                ];
+
+                if let Some(op) = &def.comparison_op {
+                    match op.as_str() {
+                        "eq" => {
+                            let sides: Vec<String> = calls
+                                .iter()
+                                .map(|c| format!("(({}) > 0.0)", c))
+                                .collect();
+                            Ok(format!(
+                                "(!({} == {} && {} == {} && {} == {}))",
+                                sides[0],
+                                sides[1],
+                                sides[1],
+                                sides[2],
+                                sides[2],
+                                sides[3]
+                            ))
+                        }
+                        "neq" => {
+                            let sides: Vec<String> = calls
+                                .iter()
+                                .map(|c| format!("(({}) > 0.0)", c))
+                                .collect();
+                            Ok(format!(
+                                "({} == {} && {} == {} && {} == {})",
+                                sides[0],
+                                sides[1],
+                                sides[1],
+                                sides[2],
+                                sides[2],
+                                sides[3]
+                            ))
+                        }
+                        "lt" => Ok(format!(
+                            "(({}) < 0.0 && ({}) < 0.0 && ({}) < 0.0 && ({}) < 0.0)",
+                            calls[0], calls[1], calls[2], calls[3]
+                        )),
+                        "gt" => Ok(format!(
+                            "(({}) > 0.0 && ({}) > 0.0 && ({}) > 0.0 && ({}) > 0.0)",
+                            calls[0], calls[1], calls[2], calls[3]
+                        )),
+                        "lte" => Ok(format!(
+                            "(({}) <= 0.0 && ({}) <= 0.0 && ({}) <= 0.0 && ({}) <= 0.0)",
+                            calls[0], calls[1], calls[2], calls[3]
+                        )),
+                        "gte" => Ok(format!(
+                            "(({}) >= 0.0 && ({}) >= 0.0 && ({}) >= 0.0 && ({}) >= 0.0)",
+                            calls[0], calls[1], calls[2], calls[3]
+                        )),
+                        _ => self.emit_expr(node),
+                    }
+                } else {
+                    // No comparison — treat the float result as an implicit curve `f = 0`.
+                    let sides: Vec<String> = calls
+                        .iter()
+                        .map(|c| format!("(({}) > 0.0)", c))
+                        .collect();
+                    Ok(format!(
+                        "(!({} == {} && {} == {} && {} == {}))",
+                        sides[0], sides[1], sides[1], sides[2], sides[2], sides[3]
+                    ))
+                }
+            }
+
             // Identifier bound to a bool expression: inline so the comparison
             // goes through corner-checking instead of a direct float ==.
             AstNode::Identifier(name) if self.bool_binding_defs.contains_key(name) => {
@@ -982,6 +1394,94 @@ impl GenContext {
                     }
                     // User-defined bool function: inline body and apply corner-checking.
                     // This makes f(x,y) produce identical rendering to the inline expression.
+                    // User-defined function with imperative body + comparison
+                    // result: call the precomputed `_diff_<name>` companion at
+                    // the four pixel corners. Inlining doesn't work here because
+                    // emit_bool_with_corners can't re-emit imperative stmts.
+                    _ if self.lifted_function_defs.contains_key(name) => {
+                        let def = self.lifted_function_defs.get(name).unwrap().clone();
+                        let captured = self
+                            .captured_vars
+                            .get(name)
+                            .cloned()
+                            .unwrap_or_default();
+                        // Build the regular argument list (not yet corner-substituted).
+                        let arg_strs: Result<Vec<String>, String> = args
+                            .iter()
+                            .map(|a| self.emit_expr(a))
+                            .collect();
+                        let arg_strs = arg_strs?;
+
+                        let corner_call = |xc: &str, yc: &str| {
+                            let mut all = arg_strs.clone();
+                            for cap in &captured {
+                                let s = match cap.as_str() {
+                                    "x" => xc.to_string(),
+                                    "y" => yc.to_string(),
+                                    other => other.to_string(),
+                                };
+                                all.push(s);
+                            }
+                            format!("{}({})", def.diff_fn_name, all.join(", "))
+                        };
+
+                        let calls = [
+                            corner_call("x_m", "y_m"),
+                            corner_call("x_m", "y_p"),
+                            corner_call("x_p", "y_m"),
+                            corner_call("x_p", "y_p"),
+                        ];
+
+                        match def.comparison_op.as_str() {
+                            "eq" => {
+                                let sides: Vec<String> = calls
+                                    .iter()
+                                    .map(|c| format!("(({}) > 0.0)", c))
+                                    .collect();
+                                Ok(format!(
+                                    "(!({} == {} && {} == {} && {} == {}))",
+                                    sides[0],
+                                    sides[1],
+                                    sides[1],
+                                    sides[2],
+                                    sides[2],
+                                    sides[3]
+                                ))
+                            }
+                            "neq" => {
+                                let sides: Vec<String> = calls
+                                    .iter()
+                                    .map(|c| format!("(({}) > 0.0)", c))
+                                    .collect();
+                                Ok(format!(
+                                    "({} == {} && {} == {} && {} == {})",
+                                    sides[0],
+                                    sides[1],
+                                    sides[1],
+                                    sides[2],
+                                    sides[2],
+                                    sides[3]
+                                ))
+                            }
+                            "lt" => Ok(format!(
+                                "(({}) < 0.0 && ({}) < 0.0 && ({}) < 0.0 && ({}) < 0.0)",
+                                calls[0], calls[1], calls[2], calls[3]
+                            )),
+                            "gt" => Ok(format!(
+                                "(({}) > 0.0 && ({}) > 0.0 && ({}) > 0.0 && ({}) > 0.0)",
+                                calls[0], calls[1], calls[2], calls[3]
+                            )),
+                            "lte" => Ok(format!(
+                                "(({}) <= 0.0 && ({}) <= 0.0 && ({}) <= 0.0 && ({}) <= 0.0)",
+                                calls[0], calls[1], calls[2], calls[3]
+                            )),
+                            "gte" => Ok(format!(
+                                "(({}) >= 0.0 && ({}) >= 0.0 && ({}) >= 0.0 && ({}) >= 0.0)",
+                                calls[0], calls[1], calls[2], calls[3]
+                            )),
+                            _ => self.emit_expr(node),
+                        }
+                    }
                     _ if self.bool_function_defs.contains_key(name) => {
                         let func_def = self.bool_function_defs.get(name).unwrap();
                         let inlined = substitute_params(&func_def.body, &func_def.params, args);
@@ -1257,6 +1757,46 @@ fn substitute_params(body: &AstNode, params: &[String], args: &[AstNode]) -> Ast
 ///
 /// Comparisons, logical ops, and boolean literals produce `bool` in WGSL,
 /// which cannot be passed to `clamp()`. We use corner-checking for these instead.
+/// True if a list of block statements contains any imperative content
+/// (bindings, tuple bindings, loops) that wouldn't be picked up by emit_expr.
+fn has_imperative_stmt(stmts: &[AstNode]) -> bool {
+    stmts.iter().any(|s| {
+        matches!(
+            s,
+            AstNode::Binding { .. }
+                | AstNode::TupleBinding { .. }
+                | AstNode::WhileLoop { .. }
+                | AstNode::ForLoop { .. }
+        )
+    })
+}
+
+/// If `node` is a Block, return its result expression (the last non-imperative
+/// statement). Otherwise return `node` itself.
+fn block_result_expr(node: &AstNode) -> &AstNode {
+    if let AstNode::Block(stmts) = node {
+        if let Some(r) = block_result_expr_from_stmts(stmts) {
+            return r;
+        }
+    }
+    node
+}
+
+/// Find the result expression in a block's statement list.
+fn block_result_expr_from_stmts(stmts: &[AstNode]) -> Option<&AstNode> {
+    for stmt in stmts.iter().rev() {
+        match stmt {
+            AstNode::Binding { .. }
+            | AstNode::FunctionDef { .. }
+            | AstNode::WhileLoop { .. }
+            | AstNode::ForLoop { .. }
+            | AstNode::TupleBinding { .. } => continue,
+            other => return Some(other),
+        }
+    }
+    None
+}
+
 fn returns_bool(node: &AstNode) -> bool {
     match node {
         AstNode::BoolLit(_) => true,

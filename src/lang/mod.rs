@@ -273,6 +273,269 @@ mod integration_tests {
     }
 
     #[test]
+    fn test_pow_with_small_int_exponent_uses_multiplication() {
+        // pow() costs 20+ GPU ops; x² should compile to (x * x), not pow(x, 2.0).
+        let shader = compile_and_validate("y = x^2");
+        assert!(
+            !shader.contains("pow("),
+            "x^2 should NOT use pow(); got:\n{}",
+            shader
+        );
+        assert!(
+            shader.contains("(x) * (x)") || shader.contains("(x_m) * (x_m)"),
+            "x^2 should compile to repeated multiplication; got:\n{}",
+            shader
+        );
+    }
+
+    // ─── UI test harness ──────────────────────────────────────────────────
+    //
+    // Run cell text through the same pipeline `trigger_cell_play` uses, with
+    // shader compilation and print rendering mocked. Lets tests use raw multi-
+    // line strings exactly as a user would type them in the UI.
+
+    #[derive(Debug, Default)]
+    struct CellOutcome {
+        /// Generated WGSL when a `plot(...)` action was detected and built.
+        shader: Option<String>,
+        /// Concrete print result when a `print(...)` action evaluated to a value
+        /// in the interpreter. Symbolic prints (free variables → REDUCE in real
+        /// UI) leave this `None` and set `interpreter_error` instead.
+        print: Option<String>,
+        /// Error from parse / wgsl_gen / naga validation.
+        error: Option<String>,
+        /// Reason the interpreter couldn't evaluate the print expression. Often
+        /// expected (e.g. `Undefined variable: x` because x is an axis variable).
+        interpreter_error: Option<String>,
+    }
+
+    /// Strip the smallest leading indent shared by all non-empty lines and
+    /// trim outer blank lines. Lets tests use raw strings with natural Rust
+    /// indentation: `r#" f := ( ... ) plot(f) "#` parses as if unindented.
+    fn dedent(s: &str) -> String {
+        let lines: Vec<&str> = s.lines().collect();
+        let min_indent = lines
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.chars().take_while(|c| *c == ' ' || *c == '\t').count())
+            .min()
+            .unwrap_or(0);
+        let stripped: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                if l.len() >= min_indent {
+                    l[min_indent..].to_string()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect();
+        stripped.join("\n").trim_matches('\n').to_string()
+    }
+
+    /// Run a single cell's text through the full UI pipeline. Mocks shader
+    /// compilation (returns the WGSL string) and print rendering (returns the
+    /// formatted value).
+    fn run_cell(source: &str) -> CellOutcome {
+        let mut out = CellOutcome::default();
+        let dedented = dedent(source);
+
+        let ast = match crate::lang::parse(&dedented) {
+            Ok(a) => a,
+            Err(e) => {
+                out.error = Some(format!("parse: {}", e));
+                return out;
+            }
+        };
+
+        let actions = crate::lang::detect_cell_actions(&ast);
+
+        if let Some(print_idx) = actions.first_print {
+            let eval_ast = crate::lang::build_print_ast(&ast, print_idx);
+            let gpu = crate::lang::interpreter::CpuFallback;
+            match crate::lang::interpreter::eval(&eval_ast, &gpu) {
+                Ok(val) => out.print = Some(format!("{}", val)),
+                Err(e) => out.interpreter_error = Some(e),
+            }
+        }
+
+        if let Some(plot_idx) = actions.last_plot {
+            let plot_ast = crate::lang::build_plot_ast(&ast, plot_idx);
+            match crate::lang::wgsl_gen::generate(&plot_ast) {
+                Ok(wgsl) => {
+                    if let Err(e) = validate_wgsl(&wgsl) {
+                        out.error = Some(format!("naga: {}", e));
+                    }
+                    out.shader = Some(wgsl);
+                }
+                Err(e) => out.error = Some(format!("wgsl_gen: {}", e)),
+            }
+        }
+
+        out
+    }
+
+    #[test]
+    fn test_user_function_with_axis_capture() {
+        // `f(n)` has parameter `n` but body uses `x` and `y` (axis variables);
+        // they're captured implicitly. `plot(f(1))` then needs corner-checking
+        // via a `_diff_f` companion, since inlining the imperative body inside
+        // `emit_bool_with_corners` would drop the loop's side effects.
+        let outcome = run_cell(
+            r#"
+            f(n) := (
+                sum := x
+                for i in 0..n (sum := sum^x)
+                y = sum
+            )
+            plot(f(1))
+            "#,
+        );
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        let wgsl = outcome.shader.expect("plot generated");
+        // Function takes captured x, y as extra params.
+        assert!(
+            wgsl.contains("fn f(n: f32, x: f32, y: f32) -> bool"),
+            "axis variables should be captured as params; got:\n{}",
+            wgsl
+        );
+        // Companion diff function for corner-checking.
+        assert!(
+            wgsl.contains("fn _diff_f(n: f32, x: f32, y: f32) -> f32"),
+            "comparison-result functions need a `_diff_<name>` companion; got:\n{}",
+            wgsl
+        );
+        // Corner-checking calls _diff_f at the four pixel corners.
+        assert!(
+            wgsl.contains("_diff_f(1.0, x_m, y_m)") && wgsl.contains("_diff_f(1.0, x_p, y_p)"),
+            "corner-checking should call _diff_f at each corner; got:\n{}",
+            wgsl
+        );
+    }
+
+    #[test]
+    fn test_user_block_with_loop_plot() {
+        // Source is exactly what the user typed in the UI. The harness runs
+        // it through parse → detect_cell_actions → build_plot_ast → wgsl_gen.
+        let outcome = run_cell(
+            r#"
+            f := (
+                sum := 0
+                for i in 0..10 (
+                    sum := sum + x²+4*x²
+                )
+                y = sum
+            )
+            plot(f)
+            "#,
+        );
+
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        let wgsl = outcome.shader.expect("plot generated");
+
+        // pow() is ~25 GPU ops — small-int exponents must expand to mul.
+        assert!(!wgsl.contains("pow("), "got:\n{}", wgsl);
+        // Block-on-RHS-of-`:=` is lifted into a WGSL function so corner-checking
+        // re-evaluates it at each corner.
+        assert!(wgsl.contains("fn _lifted_f("), "got:\n{}", wgsl);
+        // Each corner is computed exactly once and reused across the corner-check.
+        assert!(
+            wgsl.contains("let _corner_f_mm = _lifted_f(x_m, y_m);"),
+            "got:\n{}",
+            wgsl
+        );
+        // The unused `let f = _lifted_f(x,y) <op> 0.0` binding is skipped —
+        // the bool path uses corner-checking, never the binding.
+        assert!(!wgsl.contains("let f ="), "got:\n{}", wgsl);
+    }
+
+    #[test]
+    fn test_user_print_simple_numeric() {
+        let outcome = run_cell(
+            r#"
+            print(3 + 4)
+            "#,
+        );
+        assert_eq!(outcome.print.as_deref(), Some("7"));
+        assert!(outcome.shader.is_none());
+    }
+
+    #[test]
+    fn test_user_print_symbolic_falls_to_reduce() {
+        // `f` references `x` (axis variable), so the interpreter can't produce
+        // a concrete number — in the UI this falls through to REDUCE for
+        // symbolic simplification.
+        let outcome = run_cell(
+            r#"
+            f := x + 2*x
+            print(f)
+            "#,
+        );
+        assert!(outcome.print.is_none());
+        assert!(
+            outcome
+                .interpreter_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("Undefined variable: x"),
+            "expected interpreter to fail on free `x`; got: {:?}",
+            outcome.interpreter_error
+        );
+    }
+
+    #[test]
+    fn test_user_plot_and_print_coexist() {
+        let outcome = run_cell(
+            r#"
+            f := x + 2*x
+            print(f)
+            plot(y = f)
+            "#,
+        );
+        // Print: interpreter fails on `x`, that's expected (UI then routes to REDUCE).
+        assert!(outcome.interpreter_error.is_some());
+        // Plot: should render.
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        let wgsl = outcome.shader.expect("plot generated");
+        assert!(wgsl.contains("fn fs_main"));
+    }
+
+    #[test]
+    fn test_block_binding_with_loop_lifts_to_fn() {
+        // Block on RHS of := with imperative content (var + for loop) must be
+        // lifted into a WGSL function so corner-checking can re-evaluate the
+        // loop at each pixel corner — without this, steep curves render dotted.
+        let source = "f := (\n  sum := 0\n  for i in 0..10 (\n    sum := sum + x*x+4*x*x\n  )\n  y = sum\n)\nf";
+        let shader = compile_and_validate(source);
+        assert!(
+            shader.contains("fn _lifted_f("),
+            "block-valued binding should be lifted into a WGSL function; got:\n{}",
+            shader
+        );
+        assert!(
+            shader.contains("var sum"),
+            "lifted function should declare `sum`; got:\n{}",
+            shader
+        );
+        assert!(
+            shader.contains("for ("),
+            "lifted function should emit the for-loop; got:\n{}",
+            shader
+        );
+        assert!(
+            shader.contains("let _corner_f_mm = _lifted_f(x_m, y_m);"),
+            "corner values should be hoisted to avoid duplicate calls; got:\n{}",
+            shader
+        );
+        assert!(
+            shader.contains("let _corner_f_pp = _lifted_f(x_p, y_p);"),
+            "all 4 corners should be hoisted; got:\n{}",
+            shader
+        );
+    }
+
+
+    #[test]
     fn test_bool_binding_plot_uses_corner_checking() {
         // f := x = y^2 ; f → should plot the curve via corner-checking,
         // not via direct float == (which would render nothing).
@@ -376,11 +639,11 @@ mod integration_tests {
 
     #[test]
     fn test_unicode_superscript_square() {
-        // x² + y² = 9
+        // x² + y² = 9 — should compile via repeated multiplication, not pow().
         let shader = compile_and_validate("x\u{00B2} + y\u{00B2} = 9");
         assert!(
-            shader.contains("pow(x_m, 2.0)") || shader.contains("pow(x, 2.0)"),
-            "Unicode ² should compile to pow(), got:\n{}",
+            shader.contains("(x_m) * (x_m)") || shader.contains("(x) * (x)"),
+            "x² should compile to (x * x); got:\n{}",
             shader
         );
         assert!(
@@ -391,11 +654,12 @@ mod integration_tests {
 
     #[test]
     fn test_unicode_superscript_cube() {
-        // sin(x)³ → pow(sin(x), 3.0)
+        // sin(x)³ — should compile via repeated multiplication.
         let shader = compile_and_validate("sin(x)\u{00B3}");
+        let s = shader.replace(' ', "");
         assert!(
-            shader.contains("pow(sin(x), 3.0)"),
-            "Unicode ³ should compile to pow(sin(x), 3.0), got:\n{}",
+            s.contains("(sin(x))*(sin(x))*(sin(x))"),
+            "sin(x)³ should compile to repeated multiplication; got:\n{}",
             shader
         );
     }
@@ -415,8 +679,8 @@ mod integration_tests {
             "bare 'cube' must not appear in WGSL"
         );
         assert!(
-            shader.contains("pow("),
-            "should contain pow() calls, got:\n{}",
+            !shader.contains("pow("),
+            "small-int exponents should expand to multiplication, not pow(); got:\n{}",
             shader
         );
         assert!(
