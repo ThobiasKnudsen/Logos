@@ -1,8 +1,8 @@
-/// Batched instanced rect renderer with optional rounded corners.
-///
-/// Draws N solid-color rectangles in a single instanced draw call.
-/// Used for UI backgrounds, borders, separators, and the cursor.
-/// Supports per-rect corner_radius for smooth rounded corners via SDF.
+//! Batched instanced rect renderer with optional rounded corners.
+//!
+//! Draws N solid-color rectangles in a single instanced draw call.
+//! Used for UI backgrounds, borders, separators, and the cursor.
+//! Supports per-rect corner_radius for smooth rounded corners via SDF.
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -211,6 +211,16 @@ impl RectRenderer {
         if rects.is_empty() {
             return;
         }
+        if rects.len() > MAX_RECTS {
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                log::warn!(
+                    "rect renderer: {} rects exceeds MAX_RECTS ({}), truncating (this will not be logged again)",
+                    rects.len(), MAX_RECTS
+                );
+            }
+        }
         let count = rects.len().min(MAX_RECTS);
 
         // Upload screen size
@@ -218,11 +228,7 @@ impl RectRenderer {
         queue.write_buffer(&self.screen_buf, 0, bytemuck::cast_slice(&screen_data));
 
         // Upload rect data
-        queue.write_buffer(
-            &self.storage_buf,
-            0,
-            bytemuck::cast_slice(&rects[..count]),
-        );
+        queue.write_buffer(&self.storage_buf, 0, bytemuck::cast_slice(&rects[..count]));
 
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);

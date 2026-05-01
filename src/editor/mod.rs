@@ -158,8 +158,23 @@ impl Buffer {
         true
     }
 
+    /// Replace bytes in `start..end` with `replacement`. Indices are clamped
+    /// to the text length and snapped to char boundaries; if `start > end`
+    /// after clamping, this is a no-op.
     pub fn replace_range(&mut self, start: usize, end: usize, replacement: &str) {
         self.clear_selection();
+        let len = self.text.len();
+        let mut start = start.min(len);
+        let mut end = end.min(len);
+        while start > 0 && !self.text.is_char_boundary(start) {
+            start -= 1;
+        }
+        while end < len && !self.text.is_char_boundary(end) {
+            end += 1;
+        }
+        if start > end {
+            return;
+        }
         self.text.drain(start..end);
         self.text.insert_str(start, replacement);
         self.cursor = start + replacement.len();
@@ -323,10 +338,7 @@ impl Buffer {
     }
 
     fn line_text(&self, target_line: usize) -> &str {
-        self.text
-            .split('\n')
-            .nth(target_line)
-            .unwrap_or("")
+        self.text.split('\n').nth(target_line).unwrap_or("")
     }
 
     /// Set cursor to a specific byte offset, clamping to text length and
@@ -348,5 +360,121 @@ impl Buffer {
         while self.cursor > 0 && !self.text.is_char_boundary(self.cursor) {
             self.cursor -= 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn buffer(text: &str) -> Buffer {
+        let mut b = Buffer::new();
+        b.set_text(text);
+        b
+    }
+
+    #[test]
+    fn set_text_places_cursor_at_end() {
+        let b = buffer("hello");
+        assert_eq!(b.cursor_byte_offset(), 5);
+    }
+
+    #[test]
+    fn insert_advances_cursor_by_utf8_len() {
+        let mut b = Buffer::new();
+        b.insert('π');
+        assert_eq!(b.text(), "π");
+        assert_eq!(b.cursor_byte_offset(), 'π'.len_utf8());
+    }
+
+    #[test]
+    fn backspace_deletes_full_codepoint() {
+        let mut b = buffer("aπb");
+        b.set_cursor_byte(b.text().len());
+        b.backspace(); // remove 'b'
+        assert_eq!(b.text(), "aπ");
+        b.backspace(); // remove 'π' (2 bytes) atomically
+        assert_eq!(b.text(), "a");
+    }
+
+    #[test]
+    fn move_left_right_respect_codepoint_boundaries() {
+        let mut b = buffer("πq");
+        b.set_cursor_byte(0);
+        b.move_right(false);
+        assert_eq!(b.cursor_byte_offset(), 'π'.len_utf8());
+        b.move_left(false);
+        assert_eq!(b.cursor_byte_offset(), 0);
+    }
+
+    #[test]
+    fn delete_selection_via_backspace() {
+        let mut b = buffer("hello world");
+        b.set_cursor_byte(0);
+        b.set_cursor_byte_extend(5);
+        assert_eq!(b.selected_text(), Some("hello"));
+        b.backspace(); // selection-delete path
+        assert_eq!(b.text(), " world");
+    }
+
+    #[test]
+    fn replace_range_clamps_oob_indices() {
+        let mut b = buffer("abc");
+        b.replace_range(1, 9999, "XY"); // end past length
+        assert_eq!(b.text(), "aXY");
+        b.replace_range(9999, 9999, "Z"); // both past length
+        assert_eq!(b.text(), "aXYZ");
+    }
+
+    #[test]
+    fn replace_range_snaps_to_char_boundaries() {
+        let mut b = buffer("aπb"); // 'π' is 2 bytes, so byte 1..2 is mid-codepoint
+        b.replace_range(1, 2, "X"); // start=1 (boundary), end=2 (mid-π) → snaps end to 3
+        assert_eq!(b.text(), "aXb");
+    }
+
+    #[test]
+    fn replace_range_noop_if_start_after_end() {
+        let mut b = buffer("hello");
+        b.replace_range(3, 1, "X"); // inverted indices → no-op
+        assert_eq!(b.text(), "hello");
+    }
+
+    #[test]
+    fn select_all_spans_full_buffer() {
+        let mut b = buffer("hello");
+        b.select_all();
+        assert_eq!(b.selected_text(), Some("hello"));
+    }
+
+    #[test]
+    fn move_home_goes_to_line_start() {
+        let mut b = buffer("foo\nbar");
+        b.move_end(false);
+        b.move_home(false);
+        let line_start = b.text().find('\n').unwrap() + 1;
+        assert_eq!(b.cursor_byte_offset(), line_start);
+    }
+
+    #[test]
+    fn paren_depth_for_auto_indent() {
+        // `(` and `{` both unmatched → depth 2 → two tabs of indent on newline.
+        let mut b = buffer("f({a := 1");
+        b.set_cursor_byte(b.text().len());
+        b.insert_newline_auto_indent();
+        assert!(b.text().ends_with("\n\t\t"), "got: {:?}", b.text());
+
+        // Single unmatched `(` → 1 tab.
+        let mut b = buffer("if (x > 0");
+        b.set_cursor_byte(b.text().len());
+        b.insert_newline_auto_indent();
+        assert!(b.text().ends_with("\n\t"), "got: {:?}", b.text());
+    }
+
+    #[test]
+    fn set_cursor_byte_snaps_to_char_boundary() {
+        let mut b = buffer("aπb");
+        b.set_cursor_byte(2); // mid-π → snaps to 1
+        assert_eq!(b.cursor_byte_offset(), 1);
     }
 }

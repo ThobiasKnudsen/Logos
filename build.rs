@@ -10,9 +10,9 @@ fn main() {
         .cpp(true)
         .warnings(false)
         // Include paths
-        .include("vendor/csl/include")   // config.h
-        .include("vendor/csl/cslbase")   // all CSL headers + ops/
-        .include("vendor/csl")           // for reduce_ffi.h
+        .include("vendor/csl/include") // config.h
+        .include("vendor/csl/cslbase") // all CSL headers + ops/
+        .include("vendor/csl") // for reduce_ffi.h
         // Preprocessor defines
         .define("HAVE_CONFIG_H", "1")
         .define("EMBEDDED", "1")

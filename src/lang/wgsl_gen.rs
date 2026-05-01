@@ -1,5 +1,5 @@
-use std::collections::HashSet;
 use super::ast::AstNode;
+use std::collections::HashSet;
 
 /// Maximum iterations for generated WGSL `for` loops.
 /// Prevents GPU hang from unbounded loops in user code.
@@ -27,7 +27,9 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
 
     // Check for top-level loops (for or while)
     let top_has_loops = match ast {
-        AstNode::Block(stmts) => stmts.iter().any(|s| matches!(s, AstNode::WhileLoop { .. } | AstNode::ForLoop { .. })),
+        AstNode::Block(stmts) => stmts
+            .iter()
+            .any(|s| matches!(s, AstNode::WhileLoop { .. } | AstNode::ForLoop { .. })),
         AstNode::WhileLoop { .. } | AstNode::ForLoop { .. } => true,
         _ => false,
     };
@@ -63,7 +65,7 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
             let is_const = binding_asts
                 .iter()
                 .find(|(n, _)| *n == binding.name.as_str())
-                .map_or(false, |(_, val)| is_const_expr(val, &const_names));
+                .is_some_and(|(_, val)| is_const_expr(val, &const_names));
             if is_const {
                 const_names.insert(binding.name.clone());
                 shader.push_str(&format!("const {} = {};\n", binding.name, binding.expr));
@@ -197,6 +199,9 @@ struct GenContext {
     /// AST bodies of bool functions — used for inlining during corner-checking
     /// so that comparisons go through sign-change detection, not float ==.
     bool_function_defs: std::collections::HashMap<String, BoolFunctionDef>,
+    /// AST values of bool-typed bindings — used for inlining during
+    /// corner-checking so `f := x = y^2; plot(f)` renders the curve correctly.
+    bool_binding_defs: std::collections::HashMap<String, AstNode>,
     /// For hoisted nested functions: maps function name → extra captured variables to pass.
     captured_vars: std::collections::HashMap<String, Vec<String>>,
 }
@@ -213,6 +218,7 @@ impl GenContext {
             vec_functions: HashSet::new(),
             bool_functions: HashSet::new(),
             bool_function_defs: std::collections::HashMap::new(),
+            bool_binding_defs: std::collections::HashMap::new(),
             captured_vars: std::collections::HashMap::new(),
         }
     }
@@ -242,7 +248,9 @@ impl GenContext {
                     for stmt in stmts {
                         match stmt {
                             AstNode::Binding { name, .. } => inner_scope.push(name.clone()),
-                            AstNode::TupleBinding { names, .. } => inner_scope.extend(names.iter().cloned()),
+                            AstNode::TupleBinding { names, .. } => {
+                                inner_scope.extend(names.iter().cloned())
+                            }
                             _ => {}
                         }
                     }
@@ -267,10 +275,8 @@ impl GenContext {
                 }
 
                 // Build parameter list including captured variables
-                let mut all_params: Vec<String> = params
-                    .iter()
-                    .map(|p| format!("{}: f32", p))
-                    .collect();
+                let mut all_params: Vec<String> =
+                    params.iter().map(|p| format!("{}: f32", p)).collect();
                 for cap in &captured {
                     all_params.push(format!("{}: f32", cap));
                 }
@@ -286,9 +292,13 @@ impl GenContext {
                 // Check if the body is a block with bindings or loops
                 let needs_imperative = match body.as_ref() {
                     AstNode::Block(stmts) => stmts.iter().any(|s| {
-                        matches!(s, AstNode::Binding { .. }
-                            | AstNode::WhileLoop { .. } | AstNode::ForLoop { .. }
-                            | AstNode::TupleBinding { .. })
+                        matches!(
+                            s,
+                            AstNode::Binding { .. }
+                                | AstNode::WhileLoop { .. }
+                                | AstNode::ForLoop { .. }
+                                | AstNode::TupleBinding { .. }
+                        )
                     }),
                     _ => false,
                 };
@@ -306,10 +316,13 @@ impl GenContext {
                 }
                 if returns_bool_val {
                     self.bool_functions.insert(name.clone());
-                    self.bool_function_defs.insert(name.clone(), BoolFunctionDef {
-                        params: params.clone(),
-                        body: body.as_ref().clone(),
-                    });
+                    self.bool_function_defs.insert(
+                        name.clone(),
+                        BoolFunctionDef {
+                            params: params.clone(),
+                            body: body.as_ref().clone(),
+                        },
+                    );
                 }
 
                 if needs_imperative {
@@ -322,9 +335,7 @@ impl GenContext {
                                 ret_type,
                                 body_wgsl,
                             );
-                            self.functions.push(EmittedFunction {
-                                wgsl_code,
-                            });
+                            self.functions.push(EmittedFunction { wgsl_code });
                         }
                     }
                 } else if let Ok(body_code) = self.emit_expr(body) {
@@ -335,12 +346,13 @@ impl GenContext {
                         ret_type,
                         body_code,
                     );
-                    self.functions.push(EmittedFunction {
-                        wgsl_code,
-                    });
+                    self.functions.push(EmittedFunction { wgsl_code });
                 }
             }
             AstNode::Binding { name, value } => {
+                if returns_bool(value) {
+                    self.bool_binding_defs.insert(name.clone(), (**value).clone());
+                }
                 if let Ok(expr_code) = self.emit_expr(value) {
                     self.bindings.push(EmittedBinding {
                         name: name.clone(),
@@ -370,7 +382,9 @@ impl GenContext {
     /// Emit a function body that contains bindings and/or loops.
     /// Returns the WGSL body code including the final `return` statement.
     fn emit_function_body(&self, stmts: &[AstNode]) -> Result<String, String> {
-        let has_loops = stmts.iter().any(|s| matches!(s, AstNode::WhileLoop { .. } | AstNode::ForLoop { .. }));
+        let has_loops = stmts
+            .iter()
+            .any(|s| matches!(s, AstNode::WhileLoop { .. } | AstNode::ForLoop { .. }));
         let var_keyword = if has_loops { "var" } else { "let" };
         let mut code = String::new();
         let mut declared: HashSet<String> = HashSet::new();
@@ -388,14 +402,26 @@ impl GenContext {
                     }
                 }
                 AstNode::TupleBinding { names, value } => {
-                    self.emit_tuple_binding(&mut code, names, value, "    ", var_keyword, &mut declared)?;
+                    self.emit_tuple_binding(
+                        &mut code,
+                        names,
+                        value,
+                        "    ",
+                        var_keyword,
+                        &mut declared,
+                    )?;
                 }
                 AstNode::ForLoop { var, range, body } => {
                     self.emit_for_loop(&mut code, var, range, body, "    ", &mut declared)?;
                 }
                 AstNode::WhileLoop { condition, body } => {
                     // Extract inline bindings from the condition (e.g. sq: expr inside block)
-                    self.emit_while_condition_bindings(&mut code, condition, "    ", &mut declared)?;
+                    self.emit_while_condition_bindings(
+                        &mut code,
+                        condition,
+                        "    ",
+                        &mut declared,
+                    )?;
                     // Emit loop with iteration guard
                     let cond = self.emit_expr(condition)?;
                     code += &format!(
@@ -403,7 +429,12 @@ impl GenContext {
                         MAX_LOOP_ITERATIONS
                     );
                     // Re-emit condition bindings at the top of each iteration
-                    self.emit_while_condition_bindings_inner(&mut code, condition, "        ", &mut declared)?;
+                    self.emit_while_condition_bindings_inner(
+                        &mut code,
+                        condition,
+                        "        ",
+                        &mut declared,
+                    )?;
                     code += &format!("        if (!({cond})) {{ break; }}\n");
                     // Emit body
                     self.emit_loop_body_stmts(&mut code, body, &mut declared)?;
@@ -432,9 +463,7 @@ impl GenContext {
         declared: &mut HashSet<String>,
     ) -> Result<(), String> {
         let (start_expr, end_expr) = match range {
-            AstNode::Range { start, end } => {
-                (self.emit_expr(start)?, self.emit_expr(end)?)
-            }
+            AstNode::Range { start, end } => (self.emit_expr(start)?, self.emit_expr(end)?),
             _ => return Err("for loop range must be start..end".to_string()),
         };
         // Declare or reassign the loop variable
@@ -449,7 +478,10 @@ impl GenContext {
             "{}for (var _loop_guard: u32 = 0u; _loop_guard < {}u; _loop_guard = _loop_guard + 1u) {{\n",
             indent, MAX_LOOP_ITERATIONS
         ));
-        code.push_str(&format!("{}    if (!({} < {})) {{ break; }}\n", indent, var, end_expr));
+        code.push_str(&format!(
+            "{}    if (!({} < {})) {{ break; }}\n",
+            indent, var, end_expr
+        ));
         // Body
         self.emit_loop_body_stmts(code, body, declared)?;
         // Update: var = var + 1.0
@@ -478,7 +510,9 @@ impl GenContext {
                             }
                         }
                         AstNode::TupleBinding { names, value } => {
-                            self.emit_tuple_binding(code, names, value, "        ", "var", declared)?;
+                            self.emit_tuple_binding(
+                                code, names, value, "        ", "var", declared,
+                            )?;
                         }
                         _ => {} // Non-binding expressions in loop body (side-effect free, skip)
                     }
@@ -498,7 +532,8 @@ impl GenContext {
         Ok(())
     }
 
-    /// Check if an expression produces a bool type, including user-defined bool functions.
+    /// Check if an expression produces a bool type, including user-defined bool functions
+    /// and identifiers bound to bool expressions.
     fn result_is_bool(&self, node: &AstNode) -> bool {
         match node {
             AstNode::Apply { name, .. } => {
@@ -507,10 +542,17 @@ impl GenContext {
                 }
                 returns_bool(node)
             }
-            AstNode::Block(stmts) => stmts.last().map_or(false, |s| self.result_is_bool(s)),
-            AstNode::IfExpr { then_branch, else_branch, .. } => {
+            AstNode::Identifier(name) => self.bool_binding_defs.contains_key(name),
+            AstNode::Block(stmts) => stmts.last().is_some_and(|s| self.result_is_bool(s)),
+            AstNode::IfExpr {
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 self.result_is_bool(then_branch)
-                    || else_branch.as_ref().map_or(false, |e| self.result_is_bool(e))
+                    || else_branch
+                        .as_ref()
+                        .is_some_and(|e| self.result_is_bool(e))
             }
             other => returns_bool(other),
         }
@@ -521,13 +563,17 @@ impl GenContext {
         match node {
             AstNode::Tuple(items) => items.len() >= 2,
             AstNode::Apply { name, .. } => self.vec_functions.contains(name),
-            AstNode::IfExpr { then_branch, else_branch, .. } => {
+            AstNode::IfExpr {
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 self.result_is_vec(then_branch)
-                    || else_branch.as_ref().map_or(false, |e| self.result_is_vec(e))
+                    || else_branch
+                        .as_ref()
+                        .is_some_and(|e| self.result_is_vec(e))
             }
-            AstNode::Block(stmts) => {
-                stmts.last().map_or(false, |s| self.result_is_vec(s))
-            }
+            AstNode::Block(stmts) => stmts.last().is_some_and(|s| self.result_is_vec(s)),
             _ => false,
         }
     }
@@ -667,13 +713,18 @@ impl GenContext {
                         indent, MAX_LOOP_ITERATIONS
                     );
                     let inner_indent = format!("{}    ", indent);
-                    self.emit_while_condition_bindings_inner(&mut code, condition, &inner_indent, declared)?;
+                    self.emit_while_condition_bindings_inner(
+                        &mut code,
+                        condition,
+                        &inner_indent,
+                        declared,
+                    )?;
                     code += &format!("{}    if (!({cond})) {{ break; }}\n", indent);
                     self.emit_loop_body_stmts(&mut code, body, declared)?;
                     code += &format!("{}}}\n", indent);
                 }
                 AstNode::FunctionDef { .. } => {} // Already collected
-                _ => {} // Result expression handled separately
+                _ => {}                           // Result expression handled separately
             }
         }
 
@@ -718,8 +769,10 @@ impl GenContext {
             }
             AstNode::Apply { name, args } => self.emit_apply_internal(name, args, subst),
             AstNode::Tuple(items) => {
-                let parts: Result<Vec<_>, _> =
-                    items.iter().map(|i| self.emit_expr_internal(i, subst)).collect();
+                let parts: Result<Vec<_>, _> = items
+                    .iter()
+                    .map(|i| self.emit_expr_internal(i, subst))
+                    .collect();
                 let parts = parts?;
                 match items.len() {
                     2 => Ok(format!("vec2<f32>({})", parts.join(", "))),
@@ -736,7 +789,11 @@ impl GenContext {
                 }
             }
             AstNode::Binding { .. } => Ok("0.0".to_string()),
-            AstNode::IfExpr { condition, then_branch, else_branch } => {
+            AstNode::IfExpr {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 let cond = self.emit_expr_internal(condition, subst)?;
                 let then_code = self.emit_expr_internal(then_branch, subst)?;
                 if let Some(else_b) = else_branch {
@@ -764,10 +821,12 @@ impl GenContext {
                 Ok(format!("{}.{}", obj, property))
             }
             AstNode::TupleBinding { .. } => Ok("0.0".to_string()), // Emitted imperatively
-            AstNode::ForLoop { .. } => Ok("0.0".to_string()), // Emitted imperatively
-            AstNode::WhileLoop { .. } => Ok("0.0".to_string()), // Emitted imperatively
-            AstNode::ArrayLiteral(_) | AstNode::IndexAccess { .. }
-            | AstNode::Range { .. } | AstNode::ParallelFor { .. }
+            AstNode::ForLoop { .. } => Ok("0.0".to_string()),      // Emitted imperatively
+            AstNode::WhileLoop { .. } => Ok("0.0".to_string()),    // Emitted imperatively
+            AstNode::ArrayLiteral(_)
+            | AstNode::IndexAccess { .. }
+            | AstNode::Range { .. }
+            | AstNode::ParallelFor { .. }
             | AstNode::IndexAssign { .. } => {
                 Err("Array/parallel operations are not supported in fragment shaders".to_string())
             }
@@ -780,8 +839,10 @@ impl GenContext {
         args: &[AstNode],
         subst: CornerSubst,
     ) -> Result<String, String> {
-        let emit_args: Result<Vec<_>, _> =
-            args.iter().map(|a| self.emit_expr_internal(a, subst)).collect();
+        let emit_args: Result<Vec<_>, _> = args
+            .iter()
+            .map(|a| self.emit_expr_internal(a, subst))
+            .collect();
         let emitted = emit_args?;
 
         match (name, args.len()) {
@@ -890,6 +951,13 @@ impl GenContext {
         match node {
             AstNode::BoolLit(b) => Ok(format!("{}", b)),
 
+            // Identifier bound to a bool expression: inline so the comparison
+            // goes through corner-checking instead of a direct float ==.
+            AstNode::Identifier(name) if self.bool_binding_defs.contains_key(name) => {
+                let bound = self.bool_binding_defs.get(name).unwrap().clone();
+                self.emit_bool_with_corners(&bound)
+            }
+
             AstNode::Apply { name, args } => {
                 match name.as_str() {
                     // Logical ops: recursively apply corner checking.
@@ -976,9 +1044,12 @@ impl GenContext {
             // !(c1 == c2 && c2 == c3 && c3 == c4)
             Ok(format!(
                 "(!({} == {} && {} == {} && {} == {}))",
-                corner_signs[0], corner_signs[1],
-                corner_signs[1], corner_signs[2],
-                corner_signs[2], corner_signs[3],
+                corner_signs[0],
+                corner_signs[1],
+                corner_signs[1],
+                corner_signs[2],
+                corner_signs[2],
+                corner_signs[3],
             ))
         } else {
             // Inequalities: all four corners must satisfy the condition
@@ -1013,32 +1084,56 @@ fn find_referenced_identifiers(node: &AstNode) -> HashSet<String> {
 
 fn collect_identifiers(node: &AstNode, result: &mut HashSet<String>) {
     match node {
-        AstNode::Identifier(name) => { result.insert(name.clone()); }
+        AstNode::Identifier(name) => {
+            result.insert(name.clone());
+        }
         AstNode::Apply { args, .. } => {
-            for arg in args { collect_identifiers(arg, result); }
+            for arg in args {
+                collect_identifiers(arg, result);
+            }
         }
         AstNode::Block(stmts) => {
-            for s in stmts { collect_identifiers(s, result); }
+            for s in stmts {
+                collect_identifiers(s, result);
+            }
         }
-        AstNode::Binding { value, .. } => { collect_identifiers(value, result); }
-        AstNode::TupleBinding { value, .. } => { collect_identifiers(value, result); }
+        AstNode::Binding { value, .. } => {
+            collect_identifiers(value, result);
+        }
+        AstNode::TupleBinding { value, .. } => {
+            collect_identifiers(value, result);
+        }
         AstNode::Tuple(items) => {
-            for item in items { collect_identifiers(item, result); }
+            for item in items {
+                collect_identifiers(item, result);
+            }
         }
-        AstNode::IfExpr { condition, then_branch, else_branch } => {
+        AstNode::IfExpr {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
             collect_identifiers(condition, result);
             collect_identifiers(then_branch, result);
-            if let Some(eb) = else_branch { collect_identifiers(eb, result); }
+            if let Some(eb) = else_branch {
+                collect_identifiers(eb, result);
+            }
         }
         AstNode::WhileLoop { condition, body } => {
             collect_identifiers(condition, result);
             collect_identifiers(body, result);
         }
-        AstNode::FunctionDef { body, .. } => { collect_identifiers(body, result); }
-        AstNode::PropertyAccess { object, .. } => { collect_identifiers(object, result); }
+        AstNode::FunctionDef { body, .. } => {
+            collect_identifiers(body, result);
+        }
+        AstNode::PropertyAccess { object, .. } => {
+            collect_identifiers(object, result);
+        }
         AstNode::Number(_) | AstNode::BoolLit(_) => {}
         AstNode::ArrayLiteral(elems) => {
-            for e in elems { collect_identifiers(e, result); }
+            for e in elems {
+                collect_identifiers(e, result);
+            }
         }
         AstNode::IndexAccess { array, index } => {
             collect_identifiers(array, result);
@@ -1052,7 +1147,11 @@ fn collect_identifiers(node: &AstNode, result: &mut HashSet<String>) {
             collect_identifiers(range, result);
             collect_identifiers(body, result);
         }
-        AstNode::IndexAssign { array, index, value } => {
+        AstNode::IndexAssign {
+            array,
+            index,
+            value,
+        } => {
             collect_identifiers(array, result);
             collect_identifiers(index, result);
             collect_identifiers(value, result);
@@ -1074,38 +1173,18 @@ fn is_const_expr(node: &AstNode, const_names: &HashSet<String>) -> bool {
         AstNode::Apply { args, .. } => args.iter().all(|a| is_const_expr(a, const_names)),
         AstNode::Tuple(items) => items.iter().all(|i| is_const_expr(i, const_names)),
         AstNode::Block(stmts) => stmts.iter().all(|s| is_const_expr(s, const_names)),
-        AstNode::IfExpr { condition, then_branch, else_branch } => {
+        AstNode::IfExpr {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
             is_const_expr(condition, const_names)
                 && is_const_expr(then_branch, const_names)
-                && else_branch.as_ref().map_or(true, |e| is_const_expr(e, const_names))
+                && else_branch
+                    .as_ref()
+                    .is_none_or(|e| is_const_expr(e, const_names))
         }
         AstNode::Binding { value, .. } => is_const_expr(value, const_names),
-        _ => false,
-    }
-}
-
-/// Check if a function body's result expression is a tuple (for vec return type).
-/// This is a conservative check — it only detects direct tuple literals and
-/// if/else branches that contain tuple literals.
-fn body_returns_tuple(body: &AstNode) -> bool {
-    match body {
-        AstNode::Tuple(items) => items.len() >= 2,
-        AstNode::Block(stmts) => {
-            // Check the last non-binding statement
-            for stmt in stmts.iter().rev() {
-                match stmt {
-                    AstNode::Binding { .. } | AstNode::FunctionDef { .. }
-                    | AstNode::WhileLoop { .. } | AstNode::ForLoop { .. }
-                    | AstNode::TupleBinding { .. } => continue,
-                    other => return body_returns_tuple(other),
-                }
-            }
-            false
-        }
-        AstNode::IfExpr { then_branch, else_branch, .. } => {
-            body_returns_tuple(then_branch)
-                || else_branch.as_ref().map_or(false, |e| body_returns_tuple(e))
-        }
         _ => false,
     }
 }
@@ -1123,39 +1202,52 @@ fn substitute_params(body: &AstNode, params: &[String], args: &[AstNode]) -> Ast
             }
             body.clone()
         }
-        AstNode::Apply { name, args: func_args } => {
+        AstNode::Apply {
+            name,
+            args: func_args,
+        } => {
             // Don't substitute the function name, only its arguments
-            let new_args = func_args.iter()
+            let new_args = func_args
+                .iter()
                 .map(|a| substitute_params(a, params, args))
                 .collect();
-            AstNode::Apply { name: name.clone(), args: new_args }
-        }
-        AstNode::Block(stmts) => {
-            AstNode::Block(stmts.iter().map(|s| substitute_params(s, params, args)).collect())
-        }
-        AstNode::Binding { name, value } => {
-            AstNode::Binding {
+            AstNode::Apply {
                 name: name.clone(),
-                value: Box::new(substitute_params(value, params, args)),
+                args: new_args,
             }
         }
-        AstNode::IfExpr { condition, then_branch, else_branch } => {
-            AstNode::IfExpr {
-                condition: Box::new(substitute_params(condition, params, args)),
-                then_branch: Box::new(substitute_params(then_branch, params, args)),
-                else_branch: else_branch.as_ref().map(|e| Box::new(substitute_params(e, params, args))),
-            }
-        }
-        AstNode::Tuple(items) => {
-            AstNode::Tuple(items.iter().map(|i| substitute_params(i, params, args)).collect())
-        }
+        AstNode::Block(stmts) => AstNode::Block(
+            stmts
+                .iter()
+                .map(|s| substitute_params(s, params, args))
+                .collect(),
+        ),
+        AstNode::Binding { name, value } => AstNode::Binding {
+            name: name.clone(),
+            value: Box::new(substitute_params(value, params, args)),
+        },
+        AstNode::IfExpr {
+            condition,
+            then_branch,
+            else_branch,
+        } => AstNode::IfExpr {
+            condition: Box::new(substitute_params(condition, params, args)),
+            then_branch: Box::new(substitute_params(then_branch, params, args)),
+            else_branch: else_branch
+                .as_ref()
+                .map(|e| Box::new(substitute_params(e, params, args))),
+        },
+        AstNode::Tuple(items) => AstNode::Tuple(
+            items
+                .iter()
+                .map(|i| substitute_params(i, params, args))
+                .collect(),
+        ),
         AstNode::Number(_) | AstNode::BoolLit(_) => body.clone(),
-        AstNode::PropertyAccess { object, property } => {
-            AstNode::PropertyAccess {
-                object: Box::new(substitute_params(object, params, args)),
-                property: property.clone(),
-            }
-        }
+        AstNode::PropertyAccess { object, property } => AstNode::PropertyAccess {
+            object: Box::new(substitute_params(object, params, args)),
+            property: property.clone(),
+        },
         // For remaining node types, clone as-is (loops, arrays, etc. are unlikely in bool functions)
         _ => body.clone(),
     }
@@ -1172,7 +1264,7 @@ fn returns_bool(node: &AstNode) -> bool {
             name.as_str(),
             "eq" | "neq" | "lt" | "gt" | "lte" | "gte" | "and" | "or" | "not"
         ),
-        AstNode::Block(stmts) => stmts.last().map_or(false, returns_bool),
+        AstNode::Block(stmts) => stmts.last().is_some_and(returns_bool),
         _ => false,
     }
 }
@@ -1183,8 +1275,10 @@ fn find_result_expr(ast: &AstNode) -> Result<&AstNode, String> {
         AstNode::Block(stmts) => {
             for stmt in stmts.iter().rev() {
                 match stmt {
-                    AstNode::Binding { .. } | AstNode::FunctionDef { .. }
-                    | AstNode::WhileLoop { .. } | AstNode::ForLoop { .. }
+                    AstNode::Binding { .. }
+                    | AstNode::FunctionDef { .. }
+                    | AstNode::WhileLoop { .. }
+                    | AstNode::ForLoop { .. }
                     | AstNode::TupleBinding { .. } => continue,
                     other => return Ok(other),
                 }
@@ -1269,15 +1363,19 @@ mod tests {
     #[test]
     fn test_function_returning_bool() {
         let shader = gen("f(a, b) := a = b\nf(x, y)");
-        assert!(shader.contains("fn f(a: f32, b: f32) -> bool"),
-            "bool-returning function should have -> bool, got:\n{}", shader);
+        assert!(
+            shader.contains("fn f(a: f32, b: f32) -> bool"),
+            "bool-returning function should have -> bool, got:\n{}",
+            shader
+        );
     }
 
     #[test]
     fn test_function_returning_bool_inlined_matches_inline() {
         // f(a,b) with arbitrary param names, called with axis vars, must match inline
         let inline_shader = crate::lang::compile("x\u{00B2} = y or y = x").unwrap();
-        let func_shader = crate::lang::compile("f(a, b) := a\u{00B2} = b or b = a\nf(x, y)").unwrap();
+        let func_shader =
+            crate::lang::compile("f(a, b) := a\u{00B2} = b or b = a\nf(x, y)").unwrap();
 
         // Extract just the fs_main body (after "fn fs_main")
         let inline_main = inline_shader.split("fn fs_main").nth(1).unwrap();
@@ -1293,14 +1391,20 @@ mod tests {
         // The exact user case: f(x,y) := x²=y and x=y
         let input = "f(x, y) := x\u{00B2} = y and x = y\nf(x, y)";
         let result = crate::lang::compile(input);
-        assert!(result.is_ok(), "bool function should compile, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "bool function should compile, got: {:?}",
+            result
+        );
         let shader = result.unwrap();
-        assert!(shader.contains("-> bool"),
-            "compound bool function should return bool, got:\n{}", shader);
+        assert!(
+            shader.contains("-> bool"),
+            "compound bool function should return bool, got:\n{}",
+            shader
+        );
         // Validate with naga
-        let module = naga::front::wgsl::parse_str(&shader).unwrap_or_else(|e| {
-            panic!("naga parse failed:\n{}\n\n--- WGSL ---\n{}", e, shader)
-        });
+        let module = naga::front::wgsl::parse_str(&shader)
+            .unwrap_or_else(|e| panic!("naga parse failed:\n{}\n\n--- WGSL ---\n{}", e, shader));
         let mut validator = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
@@ -1429,20 +1533,29 @@ mod tests {
     fn test_numeric_expr_still_uses_clamp() {
         let shader = gen("x * x + y * y");
         assert!(shader.contains("clamp(_result, 0.0, 1.0)"));
-        assert!(!shader.contains("x_m"), "numeric expr should NOT have corner vars");
+        assert!(
+            !shader.contains("x_m"),
+            "numeric expr should NOT have corner vars"
+        );
     }
 
     #[test]
     fn test_if_expr_is_numeric_not_bool() {
         let shader = gen("if (x > 0) 1 else 0");
         assert!(shader.contains("clamp(_result, 0.0, 1.0)"));
-        assert!(!shader.contains("x_m"), "if/else returning f32 should not use corners");
+        assert!(
+            !shader.contains("x_m"),
+            "if/else returning f32 should not use corners"
+        );
     }
 
     #[test]
     fn test_binding_then_bool_result_uses_corners() {
         let shader = gen("r := x * x + y * y\nr < 1");
-        assert!(shader.contains("x_m"), "bool result should trigger corner checking");
+        assert!(
+            shader.contains("x_m"),
+            "bool result should trigger corner checking"
+        );
         assert!(shader.contains("select(0.0, 1.0, _result)"));
     }
 
@@ -1465,8 +1578,10 @@ mod tests {
     fn test_complex_equality_sin_x_eq_y() {
         // sin(x) = y → should evaluate sin(x_m) vs y_m at corners
         let shader = gen("sin(x) = y");
-        assert!(shader.contains("sin(x_m)") || shader.contains("sin(x_p)"),
-            "sin should be evaluated at corner x values");
+        assert!(
+            shader.contains("sin(x_m)") || shader.contains("sin(x_p)"),
+            "sin should be evaluated at corner x values"
+        );
         assert!(shader.contains("y_m") && shader.contains("y_p"));
     }
 
@@ -1483,8 +1598,14 @@ mod tests {
     fn test_function_body_with_bindings_no_loops() {
         // Function body with bindings but no loops should use let
         let shader = gen("f(a) := (r := a * 2, r + 1)\nf(x)");
-        assert!(shader.contains("let r = (a * 2.0)"), "bindings without loops should use let");
-        assert!(shader.contains("return (r + 1.0)"), "should return last expression");
+        assert!(
+            shader.contains("let r = (a * 2.0)"),
+            "bindings without loops should use let"
+        );
+        assert!(
+            shader.contains("return (r + 1.0)"),
+            "should return last expression"
+        );
     }
 
     // --- New feature tests for Mandelbrot support ---
@@ -1502,7 +1623,10 @@ mod tests {
     fn test_while_loop_in_function() {
         let input = "f(n) := (i := 0, s := 0, while (i < n) (s := s + i, i := i + 1), s)\nf(x)";
         let shader = gen(input);
-        assert!(shader.contains("fn f(n: f32) -> f32"), "should define function");
+        assert!(
+            shader.contains("fn f(n: f32) -> f32"),
+            "should define function"
+        );
         assert!(shader.contains("_loop_guard"), "should have loop guard");
         assert!(shader.contains("return s"), "should return accumulator");
     }
@@ -1511,21 +1635,37 @@ mod tests {
     fn test_tuple_destructuring_binding() {
         let input = "f(a, b) := (r := a + b, r * 2)\n(p, q) := (1, 2)\nf(p, q)";
         let result = crate::lang::compile(input);
-        assert!(result.is_ok(), "tuple destructuring should compile: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "tuple destructuring should compile: {:?}",
+            result
+        );
     }
 
     #[test]
     fn test_property_access_axis_bounds() {
         let shader = gen("x.max - x.min");
-        assert!(shader.contains("u.axis_max.x"), "x.max should map to u.axis_max.x");
-        assert!(shader.contains("u.axis_min.x"), "x.min should map to u.axis_min.x");
+        assert!(
+            shader.contains("u.axis_max.x"),
+            "x.max should map to u.axis_max.x"
+        );
+        assert!(
+            shader.contains("u.axis_min.x"),
+            "x.min should map to u.axis_min.x"
+        );
     }
 
     #[test]
     fn test_property_access_y_axis() {
         let shader = gen("y.max - y.min");
-        assert!(shader.contains("u.axis_max.y"), "y.max should map to u.axis_max.y");
-        assert!(shader.contains("u.axis_min.y"), "y.min should map to u.axis_min.y");
+        assert!(
+            shader.contains("u.axis_max.y"),
+            "y.max should map to u.axis_max.y"
+        );
+        assert!(
+            shader.contains("u.axis_min.y"),
+            "y.min should map to u.axis_min.y"
+        );
     }
 
     #[test]
@@ -1538,7 +1678,10 @@ mod tests {
     fn test_function_returning_vec4() {
         let input = "f(a) := (1.0, a, 0.0, 1.0)\nf(x)";
         let shader = gen(input);
-        assert!(shader.contains("fn f(a: f32) -> vec4<f32>"), "function returning tuple should have vec4 return type");
+        assert!(
+            shader.contains("fn f(a: f32) -> vec4<f32>"),
+            "function returning tuple should have vec4 return type"
+        );
     }
 
     #[test]
@@ -1585,11 +1728,24 @@ mandelbrot(x, y) := (
 
 mandelbrot(x, y)"#;
         let result = crate::lang::compile(input);
-        assert!(result.is_ok(), "Mandelbrot should compile, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Mandelbrot should compile, got: {:?}",
+            result
+        );
         let shader = result.unwrap();
-        assert!(shader.contains("fn mandelbrot_color("), "should define mandelbrot_color");
-        assert!(shader.contains("fn mandelbrot("), "should define mandelbrot");
-        assert!(shader.contains("_loop_guard"), "should have loop guard for while");
+        assert!(
+            shader.contains("fn mandelbrot_color("),
+            "should define mandelbrot_color"
+        );
+        assert!(
+            shader.contains("fn mandelbrot("),
+            "should define mandelbrot"
+        );
+        assert!(
+            shader.contains("_loop_guard"),
+            "should have loop guard for while"
+        );
     }
 
     // --- Monte Carlo tests: simple to complex ---
@@ -1599,7 +1755,10 @@ mandelbrot(x, y)"#;
         // Simple pseudo-random hash — should compile and validate
         let input = "hash(s) := fract(sin(s * 127.1 + 311.7) * 43758.5453)\nhash(x + y * 100.0)";
         let shader = gen(input);
-        assert!(shader.contains("fn hash(s: f32) -> f32"), "should define hash function");
+        assert!(
+            shader.contains("fn hash(s: f32) -> f32"),
+            "should define hash function"
+        );
         assert!(shader.contains("fract("), "should use fract");
         assert!(shader.contains("sin("), "should use sin");
     }
@@ -1609,7 +1768,10 @@ mandelbrot(x, y)"#;
         // Branchless hit counting using step() — core Monte Carlo pattern
         let input = "d := x * x + y * y\n1.0 - step(1.0, d)";
         let shader = gen(input);
-        assert!(shader.contains("step(1.0, d)"), "should use step for branchless");
+        assert!(
+            shader.contains("step(1.0, d)"),
+            "should use step for branchless"
+        );
     }
 
     #[test]
@@ -1619,7 +1781,11 @@ mandelbrot(x, y)"#;
         // Test multiline version
         let input = "sim(seed) := (j := 0.0, s := 0.0, while (j < 10.0) (s := s + j, j := j + 1.0), s)\nsim(x)";
         let result = crate::lang::compile(input);
-        assert!(result.is_ok(), "Single-line while-in-function should compile, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Single-line while-in-function should compile, got: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1628,7 +1794,11 @@ mandelbrot(x, y)"#;
         // Note: 'z' is an AxisVar, use 'rn' instead for bindings inside loops
         let input = "hash(s) := fract(sin(s * 127.1 + 311.7) * 43758.5453)\nsim(tf, seed) := (lp := 0.0, j := 0.0, while (j < 10.0) (rn := (hash(seed + j * 17.31) - 0.5) * 3.46, lp := lp + rn * 0.01, j := j + 1.0), exp(lp))\nnx := (x - x.min) / (x.max - x.min)\nny := (y - y.min) / (y.max - y.min)\nbright := 0.0\ni := 0.0\nwhile (i < 4.0) (p := sim(nx, i * 137.0), d := abs(ny - p * 0.5), bright := bright + smoothstep(0.01, 0.0, d), i := i + 1.0)\nbright";
         let result = crate::lang::compile(input);
-        assert!(result.is_ok(), "Nested loop pattern should compile, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Nested loop pattern should compile, got: {:?}",
+            result
+        );
         let shader = result.unwrap();
         assert!(shader.contains("fn sim("), "should define sim function");
         assert!(shader.contains("fn hash("), "should define hash function");
@@ -1643,7 +1813,11 @@ curve_y := 0.5 + 0.3 * sin(nx * 6.28)
 d := abs(ny - curve_y)
 smoothstep(0.005, 0.0, d)"#;
         let result = crate::lang::compile(input);
-        assert!(result.is_ok(), "Distance-field line should compile, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Distance-field line should compile, got: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1656,7 +1830,11 @@ upper := exp(0.035 * tf + 0.588 * sqrt(tf))
 lower := exp(0.035 * tf - 0.588 * sqrt(tf))
 step(lower, ny) * step(ny, upper)"#;
         let result = crate::lang::compile(input);
-        assert!(result.is_ok(), "Confidence band should compile, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Confidence band should compile, got: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1664,12 +1842,15 @@ step(lower, ny) * step(ny, upper)"#;
         // Full Monte Carlo example as it will appear in the Examples menu
         let input = include_str!("../../examples/monte_carlo.txt");
         let result = crate::lang::compile(input);
-        assert!(result.is_ok(), "Full Monte Carlo example should compile, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Full Monte Carlo example should compile, got: {:?}",
+            result
+        );
         let shader = result.unwrap();
         // Validate with naga (same validation wgpu does)
-        let module = naga::front::wgsl::parse_str(&shader).unwrap_or_else(|e| {
-            panic!("naga parse failed:\n{}\n\n--- WGSL ---\n{}", e, shader)
-        });
+        let module = naga::front::wgsl::parse_str(&shader)
+            .unwrap_or_else(|e| panic!("naga parse failed:\n{}\n\n--- WGSL ---\n{}", e, shader));
         let mut validator = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
@@ -1680,7 +1861,13 @@ step(lower, ny) * step(ny, upper)"#;
         // Structural checks
         assert!(shader.contains("fn hash("), "should define hash");
         assert!(shader.contains("fn sim("), "should define sim");
-        assert!(shader.contains("fn monte_carlo("), "should define monte_carlo");
-        assert!(shader.contains("smoothstep("), "should use smoothstep for line rendering");
+        assert!(
+            shader.contains("fn monte_carlo("),
+            "should define monte_carlo"
+        );
+        assert!(
+            shader.contains("smoothstep("),
+            "should use smoothstep for line rendering"
+        );
     }
 }

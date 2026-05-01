@@ -113,10 +113,7 @@ impl LangService {
 }
 
 /// Worker thread main loop.
-fn worker_loop(
-    req_rx: mpsc::Receiver<LangRequest>,
-    resp_tx: mpsc::Sender<LangResponse>,
-) {
+fn worker_loop(req_rx: mpsc::Receiver<LangRequest>, resp_tx: mpsc::Sender<LangResponse>) {
     loop {
         // Block until at least one request arrives
         let first = match req_rx.recv() {
@@ -134,7 +131,18 @@ fn worker_loop(
 
         // Process each unique cell request
         for (_, req) in latest {
-            let user_symbols = extract_symbols(&req.source);
+            // Catch panics so a malformed input that exposes a parser bug
+            // doesn't kill the worker (which would silently freeze autocomplete).
+            let user_symbols = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                extract_symbols(&req.source)
+            }))
+            .unwrap_or_else(|_| {
+                log::error!(
+                    "lang-worker: extract_symbols panicked on cell {}",
+                    req.cell_index
+                );
+                Vec::new()
+            });
 
             let resp = LangResponse {
                 cell_index: req.cell_index,

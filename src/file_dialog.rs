@@ -24,20 +24,13 @@ impl FileDialog {
 
         std::thread::spawn(move || {
             let result = match kind {
-                DialogKind::Open => rfd::FileDialog::new()
-                    .set_title("Open File")
-                    .pick_file(),
-                DialogKind::Save => rfd::FileDialog::new()
-                    .set_title("Save File")
-                    .save_file(),
+                DialogKind::Open => rfd::FileDialog::new().set_title("Open File").pick_file(),
+                DialogKind::Save => rfd::FileDialog::new().set_title("Save File").save_file(),
             };
             let _ = tx.send(result);
         });
 
-        Self {
-            kind,
-            receiver: rx,
-        }
+        Self { kind, receiver: rx }
     }
 
     pub fn poll(&self) -> DialogResult {

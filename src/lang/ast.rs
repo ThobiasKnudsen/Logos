@@ -18,19 +18,13 @@ pub enum AstNode {
     /// Unified operation node: name + arguments.
     /// Covers binary ops (add, sub, mul, div, pow, mod, eq, neq, lt, gt, lte, gte, and, or),
     /// unary ops (neg, not), and function calls (sin, cos, etc.)
-    Apply {
-        name: String,
-        args: Vec<AstNode>,
-    },
+    Apply { name: String, args: Vec<AstNode> },
 
     /// Tuple literal: (a, b, c)
     Tuple(Vec<AstNode>),
 
-    /// Variable binding: `name = expr` or `name: expr`
-    Binding {
-        name: String,
-        value: Box<AstNode>,
-    },
+    /// Variable binding: `name := expr`
+    Binding { name: String, value: Box<AstNode> },
 
     /// Block: sequence of statements; last is the return value
     Block(Vec<AstNode>),
@@ -68,7 +62,7 @@ pub enum AstNode {
         property: String,
     },
 
-    /// Tuple destructuring binding: `(a, b): expr`
+    /// Tuple destructuring binding: `(a, b) := expr`
     TupleBinding {
         names: Vec<String>,
         value: Box<AstNode>,

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use super::ast::AstNode;
 
@@ -33,6 +34,7 @@ impl Value {
         }
     }
 
+    #[allow(dead_code)]
     pub fn as_array(&self) -> Result<&Vec<f64>, String> {
         match self {
             Value::Array(a) => Ok(a),
@@ -55,7 +57,9 @@ impl std::fmt::Display for Value {
             Value::Array(a) => {
                 write!(f, "[")?;
                 for (i, v) in a.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     if *v == v.floor() && v.abs() < 1e15 {
                         write!(f, "{}", *v as i64)?;
                     } else {
@@ -83,25 +87,41 @@ struct FuncDef {
 // Environment
 // ---------------------------------------------------------------------------
 
+/// Environment — variable + function bindings.
+///
+/// Functions are stored behind `Rc<HashMap>` so that creating a child scope
+/// doesn't deep-clone the function table. `Rc::make_mut` is used on insertion
+/// to give copy-on-write semantics. Vars are still cloned because most
+/// function bodies only read a handful of parent vars and inserting params
+/// would otherwise mutate the parent. (For deeply nested or hot-path calls
+/// this could be improved further with a parent-pointer scope chain.)
 #[derive(Debug, Clone)]
 pub struct Env {
     vars: HashMap<String, Value>,
-    funcs: HashMap<String, FuncDef>,
+    funcs: Rc<HashMap<String, FuncDef>>,
 }
 
 impl Env {
     fn new() -> Self {
         Self {
             vars: HashMap::new(),
-            funcs: HashMap::new(),
+            funcs: Rc::new(HashMap::new()),
         }
     }
 
     fn child(&self) -> Self {
         Self {
             vars: self.vars.clone(),
-            funcs: self.funcs.clone(),
+            funcs: Rc::clone(&self.funcs),
         }
+    }
+
+    fn insert_func(&mut self, name: String, def: FuncDef) {
+        Rc::make_mut(&mut self.funcs).insert(name, def);
+    }
+
+    fn get_func(&self, name: &str) -> Option<&FuncDef> {
+        self.funcs.get(name)
     }
 }
 
@@ -130,6 +150,7 @@ pub trait GpuDispatch {
 }
 
 /// CPU fallback: runs the parallel for on CPU (no GPU needed).
+#[allow(dead_code)]
 pub struct CpuFallback;
 
 impl GpuDispatch for CpuFallback {
@@ -148,7 +169,8 @@ impl GpuDispatch for CpuFallback {
 
         // Execute body for each index (sequentially on CPU)
         for i in request.range_start..request.range_end {
-            env.vars.insert(request.var_name.clone(), Value::F64(i as f64));
+            env.vars
+                .insert(request.var_name.clone(), Value::F64(i as f64));
             eval_node(&request.body, &mut env, &CpuFallback)?;
         }
 
@@ -183,10 +205,11 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
         AstNode::Number(n) => Ok(Value::F64(*n)),
         AstNode::BoolLit(b) => Ok(Value::Bool(*b)),
 
-        AstNode::Identifier(name) => {
-            env.vars.get(name).cloned()
-                .ok_or_else(|| format!("Undefined variable: {}", name))
-        }
+        AstNode::Identifier(name) => env
+            .vars
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("Undefined variable: {}", name)),
 
         AstNode::ArrayLiteral(elems) => {
             let mut arr = Vec::with_capacity(elems.len());
@@ -200,11 +223,11 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
             let arr = eval_node(array, env, gpu)?;
             let idx = eval_node(index, env, gpu)?.as_f64()? as usize;
             match arr {
-                Value::Array(ref a) => {
-                    a.get(idx).copied()
-                        .map(Value::F64)
-                        .ok_or_else(|| format!("Index {} out of bounds (len {})", idx, a.len()))
-                }
+                Value::Array(ref a) => a
+                    .get(idx)
+                    .copied()
+                    .map(Value::F64)
+                    .ok_or_else(|| format!("Index {} out of bounds (len {})", idx, a.len())),
                 _ => Err("Cannot index into non-array".to_string()),
             }
         }
@@ -234,10 +257,13 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
                         env.vars.insert(name.clone(), Value::F64(v));
                     }
                 }
-                _ => return Err(format!(
-                    "Tuple binding expects array of length {}, got {:?}",
-                    names.len(), val
-                )),
+                _ => {
+                    return Err(format!(
+                        "Tuple binding expects array of length {}, got {:?}",
+                        names.len(),
+                        val
+                    ))
+                }
             }
             Ok(Value::Void)
         }
@@ -259,14 +285,21 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
         }
 
         AstNode::FunctionDef { name, params, body } => {
-            env.funcs.insert(name.clone(), FuncDef {
-                params: params.clone(),
-                body: *body.clone(),
-            });
+            env.insert_func(
+                name.clone(),
+                FuncDef {
+                    params: params.clone(),
+                    body: *body.clone(),
+                },
+            );
             Ok(Value::Void)
         }
 
-        AstNode::IfExpr { condition, then_branch, else_branch } => {
+        AstNode::IfExpr {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
             let cond = eval_node(condition, env, gpu)?.as_bool()?;
             if cond {
                 eval_node(then_branch, env, gpu)
@@ -280,12 +313,28 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
         AstNode::ForLoop { var, range, body } => {
             let (start, end) = match range.as_ref() {
                 AstNode::Range { start, end } => {
-                    let s = eval_node(start, env, gpu)?.as_f64()? as usize;
-                    let e = eval_node(end, env, gpu)?.as_f64()? as usize;
-                    (s, e)
+                    let s_f = eval_node(start, env, gpu)?.as_f64()?;
+                    let e_f = eval_node(end, env, gpu)?.as_f64()?;
+                    if s_f < 0.0 || e_f < 0.0 {
+                        return Err(format!(
+                            "for loop range bounds must be non-negative ({}..{})",
+                            s_f, e_f
+                        ));
+                    }
+                    if e_f < s_f {
+                        return Err(format!("for loop range end < start ({}..{})", s_f, e_f));
+                    }
+                    (s_f as usize, e_f as usize)
                 }
                 _ => return Err("for loop range must be start..end".to_string()),
             };
+            if end - start > MAX_LOOP_ITERATIONS {
+                return Err(format!(
+                    "for loop range too large ({} iterations, max {})",
+                    end - start,
+                    MAX_LOOP_ITERATIONS
+                ));
+            }
             let mut last = Value::Void;
             for i in start..end {
                 env.vars.insert(var.clone(), Value::F64(i as f64));
@@ -295,10 +344,20 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
         }
 
         AstNode::WhileLoop { condition, body } => {
-            for _ in 0..MAX_LOOP_ITERATIONS {
+            let mut iters = 0usize;
+            loop {
                 let cond = eval_node(condition, env, gpu)?.as_bool()?;
-                if !cond { break; }
+                if !cond {
+                    break;
+                }
                 eval_node(body, env, gpu)?;
+                iters += 1;
+                if iters >= MAX_LOOP_ITERATIONS {
+                    return Err(format!(
+                        "while loop exceeded {} iterations (possible infinite loop)",
+                        MAX_LOOP_ITERATIONS
+                    ));
+                }
             }
             Ok(Value::Void)
         }
@@ -313,7 +372,11 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
 
         AstNode::Apply { name, args } => eval_apply(name, args, env, gpu),
 
-        AstNode::IndexAssign { array, index, value } => {
+        AstNode::IndexAssign {
+            array,
+            index,
+            value,
+        } => {
             let idx = eval_node(index, env, gpu)?.as_f64()? as usize;
             let val = eval_node(value, env, gpu)?.as_f64()?;
             if let AstNode::Identifier(name) = array.as_ref() {
@@ -330,9 +393,7 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
             Err("Index assignment target must be an array variable".to_string())
         }
 
-        AstNode::ParallelFor { var, range, body } => {
-            eval_parallel_for(var, range, body, env, gpu)
-        }
+        AstNode::ParallelFor { var, range, body } => eval_parallel_for(var, range, body, env, gpu),
     }
 }
 
@@ -347,11 +408,13 @@ fn eval_apply(
     gpu: &dyn GpuDispatch,
 ) -> Result<Value, String> {
     // Check user-defined functions first
-    if let Some(func) = env.funcs.get(name).cloned() {
+    if let Some(func) = env.get_func(name).cloned() {
         if args.len() != func.params.len() {
             return Err(format!(
                 "Function '{}' expects {} args, got {}",
-                name, func.params.len(), args.len()
+                name,
+                func.params.len(),
+                args.len()
             ));
         }
         let mut child = env.child();
@@ -363,7 +426,8 @@ fn eval_apply(
     }
 
     // Evaluate arguments
-    let vals: Vec<Value> = args.iter()
+    let vals: Vec<Value> = args
+        .iter()
         .map(|a| eval_node(a, env, gpu))
         .collect::<Result<_, _>>()?;
 
@@ -372,8 +436,20 @@ fn eval_apply(
         "add" => bin_f64(&vals, |a, b| a + b),
         "sub" => bin_f64(&vals, |a, b| a - b),
         "mul" => bin_f64(&vals, |a, b| a * b),
-        "div" => bin_f64(&vals, |a, b| a / b),
-        "mod" => bin_f64(&vals, |a, b| a % b),
+        "div" => {
+            let (a, b) = (vals[0].as_f64()?, vals[1].as_f64()?);
+            if b == 0.0 {
+                return Err("division by zero".to_string());
+            }
+            Ok(Value::F64(a / b))
+        }
+        "mod" => {
+            let (a, b) = (vals[0].as_f64()?, vals[1].as_f64()?);
+            if b == 0.0 {
+                return Err("modulo by zero".to_string());
+            }
+            Ok(Value::F64(a % b))
+        }
         "pow" => bin_f64(&vals, |a, b| a.powf(b)),
 
         // Comparison
@@ -436,16 +512,23 @@ fn eval_apply(
         }
 
         // Array builtins
-        "len" => {
-            match &vals[0] {
-                Value::Array(a) => Ok(Value::F64(a.len() as f64)),
-                _ => Err("len() expects an array".to_string()),
-            }
-        }
+        "len" => match &vals[0] {
+            Value::Array(a) => Ok(Value::F64(a.len() as f64)),
+            _ => Err("len() expects an array".to_string()),
+        },
 
         // Type cast
         "f32" | "f64" => Ok(Value::F64(vals[0].as_f64()?)),
         "i32" => Ok(Value::F64((vals[0].as_f64()? as i32) as f64)),
+
+        "print" => {
+            if vals.len() == 1 {
+                Ok(vals.into_iter().next().unwrap())
+            } else {
+                Err("print() expects 1 argument".to_string())
+            }
+        }
+        "plot" => Ok(Value::Void),
 
         _ => Err(format!("Unknown function: {}", name)),
     }
@@ -477,9 +560,18 @@ fn eval_parallel_for(
     // Evaluate range
     let (start, end) = match range_node {
         AstNode::Range { start, end } => {
-            let s = eval_node(start, env, gpu)?.as_f64()? as usize;
-            let e = eval_node(end, env, gpu)?.as_f64()? as usize;
-            (s, e)
+            let s_f = eval_node(start, env, gpu)?.as_f64()?;
+            let e_f = eval_node(end, env, gpu)?.as_f64()?;
+            if s_f < 0.0 || e_f < 0.0 {
+                return Err(format!(
+                    "parallel for range bounds must be non-negative ({}..{})",
+                    s_f, e_f
+                ));
+            }
+            if e_f < s_f {
+                return Err(format!("parallel for range end < start ({}..{})", s_f, e_f));
+            }
+            (s_f as usize, e_f as usize)
         }
         _ => {
             let val = eval_node(range_node, env, gpu)?;
@@ -490,13 +582,17 @@ fn eval_parallel_for(
         }
     };
 
-    // Find which arrays are written to (IndexAssign targets)
+    // Find which arrays are written to (IndexAssign targets). Vec preserves
+    // insertion order (used below for `last_written`); HashSet does dedup
+    // checks in O(1).
     let mut written_names = Vec::new();
-    collect_written_arrays(body, &mut written_names);
+    let mut written_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    collect_written_arrays(body, &mut written_names, &mut written_set);
 
     // Find all referenced identifiers
     let mut referenced = Vec::new();
-    collect_references(body, &mut referenced);
+    let mut referenced_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    collect_references(body, &mut referenced, &mut referenced_set);
 
     // Partition into readwrite, readonly, and scalars
     let mut readwrite_arrays = Vec::new();
@@ -504,11 +600,13 @@ fn eval_parallel_for(
     let mut scalars = Vec::new();
 
     for name in &referenced {
-        if name == var { continue; }
+        if name == var {
+            continue;
+        }
         if let Some(val) = env.vars.get(name) {
             match val {
                 Value::Array(a) => {
-                    if written_names.contains(name) {
+                    if written_set.contains(name) {
                         readwrite_arrays.push((name.clone(), a.clone()));
                     } else {
                         readonly_arrays.push((name.clone(), a.clone()));
@@ -542,64 +640,95 @@ fn eval_parallel_for(
 
     // Return the last written array
     if let Some(name) = last_written {
-        env.vars.get(&name).cloned().ok_or_else(|| format!("Array '{}' not found", name))
+        env.vars
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| format!("Array '{}' not found", name))
     } else {
         Ok(Value::Void)
     }
 }
 
 /// Collect array names that are targets of IndexAssign in the body.
-fn collect_written_arrays(node: &AstNode, names: &mut Vec<String>) {
+/// `names` preserves insertion order; `seen` provides O(1) dedup.
+fn collect_written_arrays(
+    node: &AstNode,
+    names: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
     match node {
         AstNode::IndexAssign { array, .. } => {
             if let AstNode::Identifier(name) = array.as_ref() {
-                if !names.contains(name) {
+                if seen.insert(name.clone()) {
                     names.push(name.clone());
                 }
             }
         }
         AstNode::Block(stmts) => {
-            for s in stmts { collect_written_arrays(s, names); }
+            for s in stmts {
+                collect_written_arrays(s, names, seen);
+            }
         }
         _ => {}
     }
 }
 
 /// Collect all identifier names referenced in an AST node.
-fn collect_references(node: &AstNode, refs: &mut Vec<String>) {
+/// `refs` preserves insertion order; `seen` provides O(1) dedup.
+fn collect_references(
+    node: &AstNode,
+    refs: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
     match node {
         AstNode::Identifier(name) => {
-            if !refs.contains(name) {
+            if seen.insert(name.clone()) {
                 refs.push(name.clone());
             }
         }
         AstNode::Apply { args, .. } => {
-            for arg in args { collect_references(arg, refs); }
+            for arg in args {
+                collect_references(arg, refs, seen);
+            }
         }
         AstNode::IndexAccess { array, index } => {
-            collect_references(array, refs);
-            collect_references(index, refs);
+            collect_references(array, refs, seen);
+            collect_references(index, refs, seen);
         }
-        AstNode::IndexAssign { array, index, value } => {
-            collect_references(array, refs);
-            collect_references(index, refs);
-            collect_references(value, refs);
+        AstNode::IndexAssign {
+            array,
+            index,
+            value,
+        } => {
+            collect_references(array, refs, seen);
+            collect_references(index, refs, seen);
+            collect_references(value, refs, seen);
         }
         AstNode::Block(stmts) => {
-            for s in stmts { collect_references(s, refs); }
+            for s in stmts {
+                collect_references(s, refs, seen);
+            }
         }
-        AstNode::IfExpr { condition, then_branch, else_branch } => {
-            collect_references(condition, refs);
-            collect_references(then_branch, refs);
-            if let Some(eb) = else_branch { collect_references(eb, refs); }
+        AstNode::IfExpr {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_references(condition, refs, seen);
+            collect_references(then_branch, refs, seen);
+            if let Some(eb) = else_branch {
+                collect_references(eb, refs, seen);
+            }
         }
-        AstNode::Binding { value, .. } => collect_references(value, refs),
+        AstNode::Binding { value, .. } => collect_references(value, refs, seen),
         AstNode::ArrayLiteral(elems) => {
-            for e in elems { collect_references(e, refs); }
+            for e in elems {
+                collect_references(e, refs, seen);
+            }
         }
         AstNode::Range { start, end } => {
-            collect_references(start, refs);
-            collect_references(end, refs);
+            collect_references(start, refs, seen);
+            collect_references(end, refs, seen);
         }
         _ => {}
     }
@@ -684,11 +813,9 @@ mod tests {
 
     #[test]
     fn test_parallel_for_inplace() {
-        let val = run(
-            "data := [1, 2, 3, 4]\n\
+        let val = run("data := [1, 2, 3, 4]\n\
              parallel for i in 0..4 ( data[i] := data[i] * 2 )\n\
-             data"
-        );
+             data");
         match val {
             Value::Array(a) => assert_eq!(a, vec![2.0, 4.0, 6.0, 8.0]),
             _ => panic!("Expected array, got {:?}", val),
@@ -697,11 +824,9 @@ mod tests {
 
     #[test]
     fn test_parallel_for_with_len() {
-        let val = run(
-            "data := [10, 20, 30]\n\
+        let val = run("data := [10, 20, 30]\n\
              parallel for i in 0..len(data) ( data[i] := data[i] + 1 )\n\
-             data"
-        );
+             data");
         match val {
             Value::Array(a) => assert_eq!(a, vec![11.0, 21.0, 31.0]),
             _ => panic!("Expected array"),
@@ -710,11 +835,9 @@ mod tests {
 
     #[test]
     fn test_parallel_for_with_scalar() {
-        let val = run(
-            "data := [1, 2, 3]\nscale := 10\n\
+        let val = run("data := [1, 2, 3]\nscale := 10\n\
              parallel for i in 0..3 ( data[i] := data[i] * scale )\n\
-             data"
-        );
+             data");
         match val {
             Value::Array(a) => assert_eq!(a, vec![10.0, 20.0, 30.0]),
             _ => panic!("Expected array"),
@@ -724,11 +847,9 @@ mod tests {
     #[test]
     fn test_parallel_for_returns_last_written() {
         // parallel for returns the last written array
-        let val = run(
-            "data := [1, 2, 3]\n\
+        let val = run("data := [1, 2, 3]\n\
              doubled := parallel for i in 0..3 ( data[i] := data[i] * 2 )\n\
-             doubled"
-        );
+             doubled");
         match val {
             Value::Array(a) => assert_eq!(a, vec![2.0, 4.0, 6.0]),
             _ => panic!("Expected array"),
@@ -737,12 +858,10 @@ mod tests {
 
     #[test]
     fn test_parallel_for_write_different_array() {
-        let val = run(
-            "a := [1, 2, 3]\n\
+        let val = run("a := [1, 2, 3]\n\
              b := [0, 0, 0]\n\
              parallel for i in 0..3 ( b[i] := a[i] + 10 )\n\
-             b"
-        );
+             b");
         match val {
             Value::Array(a) => assert_eq!(a, vec![11.0, 12.0, 13.0]),
             _ => panic!("Expected array"),
@@ -751,12 +870,10 @@ mod tests {
 
     #[test]
     fn test_chained_parallel_for() {
-        let val = run(
-            "data := [1, 2, 3]\n\
+        let val = run("data := [1, 2, 3]\n\
              parallel for i in 0..3 ( data[i] := data[i] * 2 )\n\
              parallel for i in 0..3 ( data[i] := data[i] + 1 )\n\
-             data"
-        );
+             data");
         match val {
             Value::Array(a) => assert_eq!(a, vec![3.0, 5.0, 7.0]),
             _ => panic!("Expected array"),
@@ -765,14 +882,12 @@ mod tests {
 
     #[test]
     fn test_parallel_for_multi_statement() {
-        let val = run(
-            "data := [1, 2, 3, 4]\n\
+        let val = run("data := [1, 2, 3, 4]\n\
              parallel for i in 0..4 (\n\
                  temp := data[i] * 2\n\
                  data[i] := temp + 1\n\
              )\n\
-             data"
-        );
+             data");
         match val {
             Value::Array(a) => assert_eq!(a, vec![3.0, 5.0, 7.0, 9.0]),
             _ => panic!("Expected array"),
@@ -789,11 +904,9 @@ mod tests {
 
     #[test]
     fn test_for_loop_build_array() {
-        let val = run(
-            "data := [0, 0, 0, 0, 0]\n\
+        let val = run("data := [0, 0, 0, 0, 0]\n\
              for i in 0..5 ( data[i] := i * i )\n\
-             data"
-        );
+             data");
         match val {
             Value::Array(a) => assert_eq!(a, vec![0.0, 1.0, 4.0, 9.0, 16.0]),
             _ => panic!("Expected array"),
@@ -802,12 +915,10 @@ mod tests {
 
     #[test]
     fn test_for_then_parallel_for() {
-        let val = run(
-            "data := [0, 0, 0]\n\
+        let val = run("data := [0, 0, 0]\n\
              for i in 0..3 ( data[i] := (i + 1) * 100 )\n\
              parallel for i in 0..3 ( data[i] := data[i] * 2 )\n\
-             data"
-        );
+             data");
         match val {
             Value::Array(a) => assert_eq!(a, vec![200.0, 400.0, 600.0]),
             _ => panic!("Expected array"),
@@ -819,6 +930,105 @@ mod tests {
         assert_eq!(format!("{}", Value::F64(42.0)), "42");
         assert_eq!(format!("{}", Value::F64(3.14)), "3.14");
         assert_eq!(format!("{}", Value::Bool(true)), "true");
-        assert_eq!(format!("{}", Value::Array(vec![1.0, 2.5, 3.0])), "[1, 2.5, 3]");
+        assert_eq!(
+            format!("{}", Value::Array(vec![1.0, 2.5, 3.0])),
+            "[1, 2.5, 3]"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Error-path tests
+    // -----------------------------------------------------------------------
+
+    fn try_run(source: &str) -> Result<Value, String> {
+        let mut lex = Lexer::new(source);
+        let tokens = lex.tokenize()?;
+        let mut parser = Parser::new(tokens, source.to_string());
+        let ast = parser.parse()?;
+        eval(&ast, &CpuFallback)
+    }
+
+    #[test]
+    fn err_division_by_zero() {
+        let err = try_run("1 / 0").unwrap_err();
+        assert!(err.contains("zero"), "got: {}", err);
+    }
+
+    #[test]
+    fn err_modulo_by_zero() {
+        let err = try_run("mod(5, 0)").unwrap_err();
+        assert!(err.contains("zero"), "got: {}", err);
+    }
+
+    #[test]
+    fn err_undefined_variable() {
+        let err = try_run("nonexistent_var").unwrap_err();
+        assert!(err.contains("Undefined"), "got: {}", err);
+        assert!(err.contains("nonexistent_var"), "got: {}", err);
+    }
+
+    #[test]
+    fn err_index_out_of_bounds_read() {
+        let err = try_run("a := [1, 2, 3]\na[5]").unwrap_err();
+        assert!(err.contains("out of bounds"), "got: {}", err);
+    }
+
+    #[test]
+    fn err_index_out_of_bounds_write() {
+        let err = try_run("a := [1, 2, 3]\nfor i in 0..1 ( a[10] := 99 )").unwrap_err();
+        assert!(err.contains("out of bounds"), "got: {}", err);
+    }
+
+    #[test]
+    fn err_for_loop_negative_range() {
+        let err = try_run("for i in 0..(-3) ( i )").unwrap_err();
+        assert!(
+            err.contains("non-negative") || err.contains("end < start"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn err_for_loop_inverted_range() {
+        let err = try_run("for i in 5..2 ( i )").unwrap_err();
+        assert!(err.contains("end < start"), "got: {}", err);
+    }
+
+    #[test]
+    fn err_for_loop_too_large() {
+        let err = try_run("for i in 0..1000000 ( i )").unwrap_err();
+        assert!(err.contains("too large"), "got: {}", err);
+    }
+
+    #[test]
+    fn err_unknown_function() {
+        let err = try_run("totally_made_up(3)").unwrap_err();
+        assert!(
+            err.contains("Unknown") || err.contains("Undefined"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn err_function_arity_mismatch() {
+        let err = try_run("f(x, y) := x + y\nf(1)").unwrap_err();
+        assert!(
+            err.contains("expects") && err.contains("got"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn err_index_into_non_array() {
+        // `q` (not an axis var) so it can be bound; `5` is a scalar so [0] is invalid.
+        let err = try_run("q := 5\nq[0]").unwrap_err();
+        assert!(
+            err.contains("non-array") || err.contains("not an array"),
+            "got: {}",
+            err
+        );
     }
 }

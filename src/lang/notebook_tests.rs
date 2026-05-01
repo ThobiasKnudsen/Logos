@@ -52,7 +52,10 @@ fn concat_cells(cells: &[Cell], cell_index: usize) -> String {
 /// This is the same validation wgpu performs before sending to the GPU.
 fn validate_wgsl(wgsl: &str) -> Result<(), String> {
     let module = naga::front::wgsl::parse_str(wgsl).map_err(|e| {
-        format!("naga WGSL parse error: {}\n\n--- Generated WGSL ---\n{}", e, wgsl)
+        format!(
+            "naga WGSL parse error: {}\n\n--- Generated WGSL ---\n{}",
+            e, wgsl
+        )
     })?;
 
     let mut validator = naga::valid::Validator::new(
@@ -60,7 +63,10 @@ fn validate_wgsl(wgsl: &str) -> Result<(), String> {
         naga::valid::Capabilities::all(),
     );
     validator.validate(&module).map_err(|e| {
-        format!("naga validation error: {}\n\n--- Generated WGSL ---\n{}", e, wgsl)
+        format!(
+            "naga validation error: {}\n\n--- Generated WGSL ---\n{}",
+            e, wgsl
+        )
     })?;
 
     Ok(())
@@ -97,31 +103,26 @@ fn compile_notebook(name: &str) -> String {
 fn compile_stages(source: &str) -> String {
     // Stage 1: Lex
     let mut lexer = crate::lang::lexer::Lexer::new(source);
-    let tokens = lexer.tokenize().unwrap_or_else(|e| {
-        panic!("LEXER FAILED\n  source: {:?}\n  error: {}", source, e)
-    });
+    let tokens = lexer
+        .tokenize()
+        .unwrap_or_else(|e| panic!("LEXER FAILED\n  source: {:?}\n  error: {}", source, e));
     eprintln!("  lex: {} tokens", tokens.len());
 
     // Stage 2: Parse
     let mut parser = crate::lang::parser::Parser::new(tokens, source.to_string());
-    let ast = parser.parse().unwrap_or_else(|e| {
-        panic!("PARSER FAILED\n  source: {:?}\n  error: {}", source, e)
-    });
+    let ast = parser
+        .parse()
+        .unwrap_or_else(|e| panic!("PARSER FAILED\n  source: {:?}\n  error: {}", source, e));
     eprintln!("  parse: ok (AST: {:?})", std::mem::discriminant(&ast));
 
     // Stage 3: WGSL codegen
-    let wgsl = crate::lang::wgsl_gen::generate(&ast).unwrap_or_else(|e| {
-        panic!("WGSL GEN FAILED\n  source: {:?}\n  error: {}", source, e)
-    });
+    let wgsl = crate::lang::wgsl_gen::generate(&ast)
+        .unwrap_or_else(|e| panic!("WGSL GEN FAILED\n  source: {:?}\n  error: {}", source, e));
     eprintln!("  wgsl gen: {} bytes", wgsl.len());
 
     // Stage 4: naga WGSL validation
-    validate_wgsl(&wgsl).unwrap_or_else(|e| {
-        panic!(
-            "NAGA VALIDATION FAILED\n  source: {:?}\n  {}",
-            source, e
-        )
-    });
+    validate_wgsl(&wgsl)
+        .unwrap_or_else(|e| panic!("NAGA VALIDATION FAILED\n  source: {:?}\n  {}", source, e));
     eprintln!("  naga validate: ok");
 
     wgsl
@@ -137,7 +138,10 @@ fn test_circle_equation() {
     assert!(shader.contains("x_m"), "circle should use corner checking");
     assert!(shader.contains("!("), "equality uses straddle check");
     assert!(shader.contains("select(0.0, 1.0, _result)"));
-    assert!(!shader.contains("\u{00B2}"), "Unicode ² should be compiled away");
+    assert!(
+        !shader.contains("\u{00B2}"),
+        "Unicode ² should be compiled away"
+    );
 }
 
 #[test]
@@ -145,7 +149,10 @@ fn test_simple_numeric() {
     let shader = compile_notebook("simple_numeric.json");
     assert!(shader.contains("sin(x)"));
     assert!(shader.contains("cos(y)"));
-    assert!(shader.contains("clamp(_result, 0.0, 1.0)"), "numeric → clamp");
+    assert!(
+        shader.contains("clamp(_result, 0.0, 1.0)"),
+        "numeric → clamp"
+    );
 }
 
 #[test]
@@ -221,11 +228,17 @@ fn test_func_def_then_call() {
 
     // Cell 0 alone: f(x): x² — function def compiles on its own
     let shader0 = compile_and_validate(&notebook.cells, 0);
-    assert!(shader0.contains("fn f(x: f32) -> f32"), "cell 0 should define f");
+    assert!(
+        shader0.contains("fn f(x: f32) -> f32"),
+        "cell 0 should define f"
+    );
 
     // Cell 1 with cell 0: y = f(x) — boolean equality with corner checking
     let shader1 = compile_and_validate(&notebook.cells, 1);
-    assert!(shader1.contains("fn f(x: f32) -> f32"), "f should still be defined");
+    assert!(
+        shader1.contains("fn f(x: f32) -> f32"),
+        "f should still be defined"
+    );
     assert!(shader1.contains("x_m"), "y=f(x) is boolean → corners");
     assert!(
         shader1.contains("f(x_m)") || shader1.contains("f(x_p)"),
@@ -251,7 +264,10 @@ fn test_nested_functions() {
     assert!(shader.contains("fn square(a: f32) -> f32"));
     assert!(shader.contains("fn dist(a: f32, b: f32) -> f32"));
     assert!(shader.contains("dist(x, y)"));
-    assert!(shader.contains("clamp(_result, 0.0, 1.0)"), "numeric result");
+    assert!(
+        shader.contains("clamp(_result, 0.0, 1.0)"),
+        "numeric result"
+    );
 }
 
 #[test]
@@ -305,7 +321,12 @@ fn test_incremental_nested_functions() {
         let source = concat_cells(&notebook.cells, i);
         let mut lexer = crate::lang::lexer::Lexer::new(&source);
         let tokens = lexer.tokenize();
-        assert!(tokens.is_ok(), "Lex failed at cell {}: {:?}", i, tokens.err());
+        assert!(
+            tokens.is_ok(),
+            "Lex failed at cell {}: {:?}",
+            i,
+            tokens.err()
+        );
         let mut parser = crate::lang::parser::Parser::new(tokens.unwrap(), source.clone());
         let ast = parser.parse();
         assert!(ast.is_ok(), "Parse failed at cell {}: {:?}", i, ast.err());
@@ -345,16 +366,38 @@ fn test_stages_func_compose() {
 // Catch-all: every fixture compiles and produces valid WGSL
 // ===========================================================================
 
+/// Snapshot of fixtures that are expected to compile cleanly. If you add a
+/// fixture, add it here so removals/renames are caught instead of silently
+/// passing `count >= N`.
+const EXPECTED_FIXTURES: &[&str] = &[
+    "binding_and_trig.json",
+    "circle.json",
+    "complex_multi_cell.json",
+    "conditional_coloring.json",
+    "ellipse.json",
+    "func_compose_plot.json",
+    "func_def_call.json",
+    "inequality_region.json",
+    "monte_carlo_pi.json",
+    "multi_binding_chain.json",
+    "multiple_plots.json",
+    "nested_functions.json",
+    "paraboloid.json",
+    "simple_numeric.json",
+    "time_animation.json",
+    "tuple_color_output.json",
+];
+
 #[test]
 fn test_all_fixtures_compile_and_validate() {
-    let fixtures_dir = std::fs::read_dir("tests/fixtures")
-        .expect("Failed to read tests/fixtures directory");
+    let fixtures_dir =
+        std::fs::read_dir("tests/fixtures").expect("Failed to read tests/fixtures directory");
 
-    let mut count = 0;
+    let mut found: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for entry in fixtures_dir {
         let entry = entry.unwrap();
         let path = entry.path();
-        if path.extension().map_or(false, |ext| ext == "json") {
+        if path.extension().is_some_and(|ext| ext == "json") {
             let name = path.file_name().unwrap().to_str().unwrap().to_string();
             let notebook = load_fixture(&name);
             let last = notebook.cells.len() - 1;
@@ -362,23 +405,49 @@ fn test_all_fixtures_compile_and_validate() {
             // Full pipeline: Logos compile
             let source = concat_cells(&notebook.cells, last);
             let wgsl = crate::lang::compile(&source).unwrap_or_else(|e| {
-                panic!("Fixture {} Logos compile failed:\n  source: {:?}\n  error: {}", name, source, e)
+                panic!(
+                    "Fixture {} Logos compile failed:\n  source: {:?}\n  error: {}",
+                    name, source, e
+                )
             });
 
             // Structural checks
             assert!(wgsl.contains("@fragment"), "{} missing @fragment", name);
             assert!(wgsl.contains("fn fs_main"), "{} missing fs_main", name);
-            assert!(wgsl.contains("struct Uniforms"), "{} missing Uniforms struct", name);
-            assert!(wgsl.contains("var<uniform> u: Uniforms"), "{} missing uniform binding", name);
+            assert!(
+                wgsl.contains("struct Uniforms"),
+                "{} missing Uniforms struct",
+                name
+            );
+            assert!(
+                wgsl.contains("var<uniform> u: Uniforms"),
+                "{} missing uniform binding",
+                name
+            );
 
             // naga WGSL validation — proves the shader would compile on the GPU
-            validate_wgsl(&wgsl).unwrap_or_else(|e| {
-                panic!("Fixture {} naga validation failed:\n  {}", name, e)
-            });
+            validate_wgsl(&wgsl)
+                .unwrap_or_else(|e| panic!("Fixture {} naga validation failed:\n  {}", name, e));
 
-            count += 1;
-            eprintln!("  {} ok ({} cells, {} bytes WGSL)", name, notebook.cells.len(), wgsl.len());
+            eprintln!(
+                "  {} ok ({} cells, {} bytes WGSL)",
+                name,
+                notebook.cells.len(),
+                wgsl.len()
+            );
+            found.insert(name);
         }
     }
-    assert!(count >= 15, "Expected at least 15 fixtures, found {}", count);
+
+    let expected: std::collections::BTreeSet<String> =
+        EXPECTED_FIXTURES.iter().map(|s| s.to_string()).collect();
+    let missing: Vec<&String> = expected.difference(&found).collect();
+    let extra: Vec<&String> = found.difference(&expected).collect();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "fixture set drift — missing: {:?}, extra: {:?}\n\
+         If you intentionally added/removed a fixture, update EXPECTED_FIXTURES.",
+        missing,
+        extra
+    );
 }

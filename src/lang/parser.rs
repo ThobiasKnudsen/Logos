@@ -1,24 +1,32 @@
+//! Recursive-descent parser for the Logos math language.
+//!
+//! Key differences from typical languages:
+//! - `:=` is the binding operator (like `=` in other languages)
+//! - `=` is the equality operator (like `==` in other languages)
+//! - Comma separates statements inside parenthesized blocks
+//! - Newline separates statements at top level
+//!
+//! Operator precedence (lowest to highest):
+//!
+//!   1. Logical OR
+//!   2. Logical AND
+//!   3. Comparison (=, !=, <, >, <=, >=)
+//!   4. Addition / Subtraction
+//!   5. Multiplication / Division / Modulo
+//!   6. Exponentiation (^, right-associative)
+//!   7. Unary (-, not)
+//!   8. Postfix (function call, indexing)
+//!   9. Primary (number, identifier, parenthesized expr/block, if, etc.)
+
 use super::ast::AstNode;
 use super::token::{Token, TokenType};
 
-/// Recursive-descent parser for the Logos math language.
-///
-/// Key differences from typical languages:
-/// - `:=` is the binding operator (like `=` in other languages)
-/// - `=` is the equality operator (like `==` in other languages)
-/// - Comma separates statements inside parenthesized blocks
-/// - Newline separates statements at top level
-///
-/// Operator precedence (lowest to highest):
-///   1. Logical OR
-///   2. Logical AND
-///   3. Comparison (=, !=, <, >, <=, >=)
-///   4. Addition / Subtraction
-///   5. Multiplication / Division / Modulo
-///   6. Exponentiation (^, right-associative)
-///   7. Unary (-, not)
-///   8. Postfix (function call, indexing)
-///   9. Primary (number, identifier, parenthesized expr/block, if, etc.)
+/// Maximum recursion depth for nested expressions / parentheses. Guards
+/// against stack overflow on pathological input (e.g. `((((...))))`).
+/// Each level descends through ~10 mutually recursive parse fns, so this
+/// translates to roughly 10x the stack frames.
+const MAX_RECURSION_DEPTH: u32 = 64;
+
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -27,11 +35,34 @@ pub struct Parser {
     /// calls in parse_postfix. Used to prevent the `(body)` of `parallel for`
     /// from being consumed as a call on the last range token.
     allow_ident_call: bool,
+    /// Current recursion depth (incremented on each call to parse_primary/expr).
+    depth: u32,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>, source: String) -> Self {
-        Self { tokens, pos: 0, source, allow_ident_call: true }
+        Self {
+            tokens,
+            pos: 0,
+            source,
+            allow_ident_call: true,
+            depth: 0,
+        }
+    }
+
+    fn enter(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_RECURSION_DEPTH {
+            return Err(format!(
+                "expression nested too deeply (max {} levels)",
+                MAX_RECURSION_DEPTH
+            ));
+        }
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
     }
 
     pub fn parse(&mut self) -> Result<AstNode, String> {
@@ -112,7 +143,10 @@ impl Parser {
                     params.push(p.clone());
                     self.advance();
                 }
-                _ => { self.pos = save; return Ok(None); }
+                _ => {
+                    self.pos = save;
+                    return Ok(None);
+                }
             }
             if self.peek().ty == TokenType::Comma {
                 self.advance();
@@ -172,7 +206,10 @@ impl Parser {
                 names.push(n.clone());
                 self.advance();
             }
-            _ => { self.pos = save; return Ok(None); }
+            _ => {
+                self.pos = save;
+                return Ok(None);
+            }
         }
 
         // More names separated by commas
@@ -183,7 +220,10 @@ impl Parser {
                     names.push(n.clone());
                     self.advance();
                 }
-                _ => { self.pos = save; return Ok(None); }
+                _ => {
+                    self.pos = save;
+                    return Ok(None);
+                }
             }
         }
 
@@ -381,17 +421,25 @@ impl Parser {
                 TokenType::Dot => {
                     self.advance(); // consume '.'
                     match self.peek().ty.clone() {
-                        TokenType::Identifier(prop) | TokenType::AxisVar(prop) | TokenType::Builtin(prop) => {
+                        TokenType::Identifier(prop)
+                        | TokenType::AxisVar(prop)
+                        | TokenType::Builtin(prop) => {
                             self.advance();
                             expr = AstNode::PropertyAccess {
                                 object: Box::new(expr),
                                 property: prop,
                             };
                         }
-                        _ => return Err(super::format_error_at(
-                            &self.source, self.peek().span.0,
-                            &format!("Expected property name after '.', found {}", self.peek().ty),
-                        )),
+                        _ => {
+                            return Err(super::format_error_at(
+                                &self.source,
+                                self.peek().span.0,
+                                &format!(
+                                    "Expected property name after '.', found {}",
+                                    self.peek().ty
+                                ),
+                            ))
+                        }
                     }
                 }
                 // Unicode superscript exponents (², ³, ⁰-⁹)
@@ -411,6 +459,13 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<AstNode, String> {
+        self.enter()?;
+        let result = self.parse_primary_inner();
+        self.leave();
+        result
+    }
+
+    fn parse_primary_inner(&mut self) -> Result<AstNode, String> {
         match self.peek().ty.clone() {
             TokenType::Number(n) => {
                 self.advance();
@@ -473,10 +528,13 @@ impl Parser {
                 } else {
                     // If any item is a Binding, FunctionDef, WhileLoop, IndexAssign, or TupleBinding, it's a block
                     let has_block_items = items.iter().any(|item| {
-                        matches!(item,
-                            AstNode::Binding { .. } | AstNode::FunctionDef { .. }
-                            | AstNode::WhileLoop { .. } | AstNode::IndexAssign { .. }
-                            | AstNode::TupleBinding { .. }
+                        matches!(
+                            item,
+                            AstNode::Binding { .. }
+                                | AstNode::FunctionDef { .. }
+                                | AstNode::WhileLoop { .. }
+                                | AstNode::IndexAssign { .. }
+                                | AstNode::TupleBinding { .. }
                         )
                     });
                     if has_block_items {
@@ -489,9 +547,13 @@ impl Parser {
             TokenType::If => {
                 self.advance(); // consume 'if'
                 let has_paren = self.peek().ty == TokenType::LParen;
-                if has_paren { self.advance(); }
+                if has_paren {
+                    self.advance();
+                }
                 let condition = self.parse_expr()?;
-                if has_paren { self.expect(TokenType::RParen)?; }
+                if has_paren {
+                    self.expect(TokenType::RParen)?;
+                }
 
                 self.skip_newlines();
                 let then_branch = self.parse_expr()?;
@@ -533,10 +595,16 @@ impl Parser {
                         self.advance();
                         name
                     }
-                    _ => return Err(super::format_error_at(
-                        &self.source, self.peek().span.0,
-                        &format!("Expected loop variable after 'for', found {}", self.peek().ty),
-                    )),
+                    _ => {
+                        return Err(super::format_error_at(
+                            &self.source,
+                            self.peek().span.0,
+                            &format!(
+                                "Expected loop variable after 'for', found {}",
+                                self.peek().ty
+                            ),
+                        ))
+                    }
                 };
                 self.expect(TokenType::In)?;
                 self.allow_ident_call = false;
@@ -595,10 +663,16 @@ impl Parser {
                         self.advance();
                         name
                     }
-                    _ => return Err(super::format_error_at(
-                        &self.source, self.peek().span.0,
-                        &format!("Expected loop variable after 'parallel for', found {}", self.peek().ty),
-                    )),
+                    _ => {
+                        return Err(super::format_error_at(
+                            &self.source,
+                            self.peek().span.0,
+                            &format!(
+                                "Expected loop variable after 'parallel for', found {}",
+                                self.peek().ty
+                            ),
+                        ))
+                    }
                 };
                 self.expect(TokenType::In)?;
                 // Disable identifier function calls so the body `(` isn't
@@ -632,8 +706,12 @@ impl Parser {
                 })
             }
             // Type names as cast functions: f32(expr), vec2(a, b), etc.
-            TokenType::TypeF32 | TokenType::TypeF64 | TokenType::TypeI32 |
-            TokenType::TypeVec2 | TokenType::TypeVec3 | TokenType::TypeVec4 => {
+            TokenType::TypeF32
+            | TokenType::TypeF64
+            | TokenType::TypeI32
+            | TokenType::TypeVec2
+            | TokenType::TypeVec3
+            | TokenType::TypeVec4 => {
                 let cast_name = match &self.peek().ty {
                     TokenType::TypeF32 => "f32",
                     TokenType::TypeF64 => "f64",
@@ -642,24 +720,27 @@ impl Parser {
                     TokenType::TypeVec3 => "vec3",
                     TokenType::TypeVec4 => "vec4",
                     _ => unreachable!(),
-                }.to_string();
+                }
+                .to_string();
                 self.advance();
 
                 if self.peek().ty == TokenType::LParen {
                     self.advance();
                     let args = self.parse_arg_list()?;
                     self.expect(TokenType::RParen)?;
-                    Ok(AstNode::Apply { name: cast_name, args })
+                    Ok(AstNode::Apply {
+                        name: cast_name,
+                        args,
+                    })
                 } else {
                     Ok(AstNode::Identifier(cast_name))
                 }
             }
-            _ => {
-                Err(super::format_error_at(
-                    &self.source, self.peek().span.0,
-                    &format!("Unexpected token {}", self.peek().ty),
-                ))
-            }
+            _ => Err(super::format_error_at(
+                &self.source,
+                self.peek().span.0,
+                &format!("Unexpected token {}", self.peek().ty),
+            )),
         }
     }
 
@@ -683,7 +764,11 @@ impl Parser {
 
     /// If `expr` is an IndexAccess and next token is `:=`, parse as IndexAssign.
     fn try_index_assign(&mut self, expr: AstNode) -> Result<AstNode, String> {
-        if let AstNode::IndexAccess { ref array, ref index } = expr {
+        if let AstNode::IndexAccess {
+            ref array,
+            ref index,
+        } = expr
+        {
             if self.peek().ty == TokenType::Colon {
                 self.advance(); // consume ':='
                 let value = self.parse_expr()?;
@@ -746,7 +831,8 @@ impl Parser {
             Ok(())
         } else {
             Err(super::format_error_at(
-                &self.source, self.peek().span.0,
+                &self.source,
+                self.peek().span.0,
                 &format!("Expected {}, found {}", expected, self.peek().ty),
             ))
         }
@@ -760,8 +846,10 @@ const EOF_TOKEN: Token = Token {
 
 /// Check if a Builtin token name is a Unicode superscript exponent.
 fn is_superscript_token(name: &str) -> bool {
-    matches!(name, "square" | "cube" | "pow0" | "pow1" | "pow4"
-        | "pow5" | "pow6" | "pow7" | "pow8" | "pow9")
+    matches!(
+        name,
+        "square" | "cube" | "pow0" | "pow1" | "pow4" | "pow5" | "pow6" | "pow7" | "pow8" | "pow9"
+    )
 }
 
 /// Map a superscript Builtin token name to its numeric exponent.
@@ -1020,5 +1108,50 @@ mod tests {
             AstNode::Apply { name, .. } => assert_eq!(name, "and"),
             _ => panic!("Expected and Apply"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Error-recovery tests — these inputs must NOT panic; they must return Err.
+    // -----------------------------------------------------------------------
+
+    fn try_parse(source: &str) -> Result<AstNode, String> {
+        let mut lex = crate::lang::lexer::Lexer::new(source);
+        let tokens = lex.tokenize()?;
+        let mut parser = Parser::new(tokens, source.to_string());
+        parser.parse()
+    }
+
+    #[test]
+    fn err_unclosed_paren() {
+        let err = try_parse("(1 + 2").unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn err_unexpected_extra_token() {
+        // Two consecutive numbers with no operator should fail.
+        let err = try_parse("1 2 +").unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn err_dangling_operator() {
+        let err = try_parse("3 +").unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn err_pathologically_deep_parens_does_not_overflow_stack() {
+        // 1000 nested parens — should hit MAX_RECURSION_DEPTH and return Err
+        // rather than stack-overflowing.
+        let source = format!("{}{}{}", "(".repeat(1000), "1", ")".repeat(1000));
+        let err = try_parse(&source).unwrap_err();
+        assert!(err.contains("nested too deeply"), "got: {}", err);
+    }
+
+    #[test]
+    fn err_function_def_missing_body() {
+        let err = try_parse("f(x) :=").unwrap_err();
+        assert!(!err.is_empty());
     }
 }

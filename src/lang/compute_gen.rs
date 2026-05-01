@@ -3,13 +3,17 @@ use std::collections::HashSet;
 use super::ast::AstNode;
 use super::interpreter::ParallelForRequest;
 
+/// Workgroup size used by generated compute shaders. Must match the dispatch
+/// divisor in `render::compute_pipeline::dispatch`.
+pub const WORKGROUP_SIZE: u32 = 64;
+
 /// Generate a WGSL compute shader from a parallel for request.
 ///
 /// The generated shader has:
 /// - A uniform buffer with `len` and scalar constants
 /// - Read-only storage buffers for arrays that are only read
 /// - Read-write storage buffers for arrays that are written to
-/// - A @compute @workgroup_size(64) entry point
+/// - A @compute @workgroup_size(WORKGROUP_SIZE) entry point
 pub fn generate(request: &ParallelForRequest) -> Result<String, String> {
     let mut shader = String::new();
 
@@ -45,14 +49,23 @@ pub fn generate(request: &ParallelForRequest) -> Result<String, String> {
     shader.push('\n');
 
     // Compute entry point
-    shader.push_str("@compute @workgroup_size(64)\n");
+    shader.push_str(&format!("@compute @workgroup_size({})\n", WORKGROUP_SIZE));
     shader.push_str("fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
     shader.push_str(&format!("    let {} = gid.x;\n", request.var_name));
-    shader.push_str(&format!("    if ({} >= params.len) {{ return; }}\n", request.var_name));
+    shader.push_str(&format!(
+        "    if ({} >= params.len) {{ return; }}\n",
+        request.var_name
+    ));
 
     // Emit body statements
     let mut declared: HashSet<String> = HashSet::new();
-    emit_body_statements(&request.body, &request.var_name, request, &mut shader, &mut declared)?;
+    emit_body_statements(
+        &request.body,
+        &request.var_name,
+        request,
+        &mut shader,
+        &mut declared,
+    )?;
 
     shader.push_str("}\n");
 
@@ -81,7 +94,11 @@ fn emit_body_statements(
                 emit_body_statements(stmt, loop_var, request, shader, declared)?;
             }
         }
-        AstNode::IndexAssign { array, index, value } => {
+        AstNode::IndexAssign {
+            array,
+            index,
+            value,
+        } => {
             let idx = emit_compute_index(index, loop_var, request)?;
             let val = emit_compute_expr(value, loop_var, request, declared)?;
             if let AstNode::Identifier(name) = array.as_ref() {
@@ -144,7 +161,10 @@ fn emit_compute_expr(
             } else if is_array(name, request) {
                 Err(format!("Array '{}' used without indexing", name))
             } else {
-                Err(format!("Unknown variable '{}' in compute shader body", name))
+                Err(format!(
+                    "Unknown variable '{}' in compute shader body",
+                    name
+                ))
             }
         }
 
@@ -159,7 +179,8 @@ fn emit_compute_expr(
         }
 
         AstNode::Apply { name, args } => {
-            let arg_strs: Vec<String> = args.iter()
+            let arg_strs: Vec<String> = args
+                .iter()
                 .map(|a| emit_compute_expr(a, loop_var, request, declared))
                 .collect::<Result<_, _>>()?;
 
@@ -171,30 +192,53 @@ fn emit_compute_expr(
                 "mod" => Ok(format!("({} % {})", arg_strs[0], arg_strs[1])),
                 "pow" => Ok(format!("pow({}, {})", arg_strs[0], arg_strs[1])),
 
-                "eq" => Ok(format!("select(0.0, 1.0, ({} == {}))", arg_strs[0], arg_strs[1])),
-                "neq" => Ok(format!("select(0.0, 1.0, ({} != {}))", arg_strs[0], arg_strs[1])),
-                "lt" => Ok(format!("select(0.0, 1.0, ({} < {}))", arg_strs[0], arg_strs[1])),
-                "gt" => Ok(format!("select(0.0, 1.0, ({} > {}))", arg_strs[0], arg_strs[1])),
-                "lte" => Ok(format!("select(0.0, 1.0, ({} <= {}))", arg_strs[0], arg_strs[1])),
-                "gte" => Ok(format!("select(0.0, 1.0, ({} >= {}))", arg_strs[0], arg_strs[1])),
+                "eq" => Ok(format!(
+                    "select(0.0, 1.0, ({} == {}))",
+                    arg_strs[0], arg_strs[1]
+                )),
+                "neq" => Ok(format!(
+                    "select(0.0, 1.0, ({} != {}))",
+                    arg_strs[0], arg_strs[1]
+                )),
+                "lt" => Ok(format!(
+                    "select(0.0, 1.0, ({} < {}))",
+                    arg_strs[0], arg_strs[1]
+                )),
+                "gt" => Ok(format!(
+                    "select(0.0, 1.0, ({} > {}))",
+                    arg_strs[0], arg_strs[1]
+                )),
+                "lte" => Ok(format!(
+                    "select(0.0, 1.0, ({} <= {}))",
+                    arg_strs[0], arg_strs[1]
+                )),
+                "gte" => Ok(format!(
+                    "select(0.0, 1.0, ({} >= {}))",
+                    arg_strs[0], arg_strs[1]
+                )),
 
                 "neg" => Ok(format!("(-{})", arg_strs[0])),
 
-                "sin" | "cos" | "tan" | "asin" | "acos" | "atan"
-                | "sinh" | "cosh" | "tanh"
-                | "log" | "log2" | "exp" | "exp2"
-                | "floor" | "ceil" | "round" | "fract"
-                | "abs" | "sign" | "sqrt" => {
-                    Ok(format!("{}({})", name, arg_strs[0]))
-                }
+                "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh"
+                | "log" | "log2" | "exp" | "exp2" | "floor" | "ceil" | "round" | "fract"
+                | "abs" | "sign" | "sqrt" => Ok(format!("{}({})", name, arg_strs[0])),
                 "log10" => Ok(format!("(log2({}) / log2(10.0))", arg_strs[0])),
 
                 "min" | "max" => Ok(format!("{}({}, {})", name, arg_strs[0], arg_strs[1])),
                 "step" => Ok(format!("step({}, {})", arg_strs[0], arg_strs[1])),
 
-                "clamp" => Ok(format!("clamp({}, {}, {})", arg_strs[0], arg_strs[1], arg_strs[2])),
-                "mix" => Ok(format!("mix({}, {}, {})", arg_strs[0], arg_strs[1], arg_strs[2])),
-                "smoothstep" => Ok(format!("smoothstep({}, {}, {})", arg_strs[0], arg_strs[1], arg_strs[2])),
+                "clamp" => Ok(format!(
+                    "clamp({}, {}, {})",
+                    arg_strs[0], arg_strs[1], arg_strs[2]
+                )),
+                "mix" => Ok(format!(
+                    "mix({}, {}, {})",
+                    arg_strs[0], arg_strs[1], arg_strs[2]
+                )),
+                "smoothstep" => Ok(format!(
+                    "smoothstep({}, {}, {})",
+                    arg_strs[0], arg_strs[1], arg_strs[2]
+                )),
 
                 "f32" | "f64" => Ok(arg_strs[0].clone()),
                 "i32" => Ok(format!("f32(i32({}))", arg_strs[0])),
@@ -203,7 +247,11 @@ fn emit_compute_expr(
             }
         }
 
-        AstNode::IfExpr { condition, then_branch, else_branch } => {
+        AstNode::IfExpr {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
             let cond = emit_compute_expr(condition, loop_var, request, declared)?;
             let then_val = emit_compute_expr(then_branch, loop_var, request, declared)?;
             let else_val = if let Some(eb) = else_branch {
@@ -211,10 +259,16 @@ fn emit_compute_expr(
             } else {
                 "0.0".to_string()
             };
-            Ok(format!("select({}, {}, ({} != 0.0))", else_val, then_val, cond))
+            Ok(format!(
+                "select({}, {}, ({} != 0.0))",
+                else_val, then_val, cond
+            ))
         }
 
-        _ => Err(format!("Unsupported expression in compute shader: {:?}", node)),
+        _ => Err(format!(
+            "Unsupported expression in compute shader: {:?}",
+            node
+        )),
     }
 }
 
@@ -253,9 +307,18 @@ mod tests {
             range_start: 0,
             range_end: 4,
             body,
-            readwrite_arrays: readwrite.into_iter().map(|(n, d)| (n.to_string(), d)).collect(),
-            readonly_arrays: readonly.into_iter().map(|(n, d)| (n.to_string(), d)).collect(),
-            scalars: scalars.into_iter().map(|(n, v)| (n.to_string(), v)).collect(),
+            readwrite_arrays: readwrite
+                .into_iter()
+                .map(|(n, d)| (n.to_string(), d))
+                .collect(),
+            readonly_arrays: readonly
+                .into_iter()
+                .map(|(n, d)| (n.to_string(), d))
+                .collect(),
+            scalars: scalars
+                .into_iter()
+                .map(|(n, v)| (n.to_string(), v))
+                .collect(),
         }
     }
 
@@ -267,16 +330,15 @@ mod tests {
     }
 
     fn validate_wgsl(wgsl: &str) -> Result<(), String> {
-        let module = naga::front::wgsl::parse_str(wgsl).map_err(|e| {
-            format!("naga parse error: {}\n\n--- WGSL ---\n{}", e, wgsl)
-        })?;
+        let module = naga::front::wgsl::parse_str(wgsl)
+            .map_err(|e| format!("naga parse error: {}\n\n--- WGSL ---\n{}", e, wgsl))?;
         let mut validator = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
         );
-        validator.validate(&module).map_err(|e| {
-            format!("naga validation error: {}\n\n--- WGSL ---\n{}", e, wgsl)
-        })?;
+        validator
+            .validate(&module)
+            .map_err(|e| format!("naga validation error: {}\n\n--- WGSL ---\n{}", e, wgsl))?;
         Ok(())
     }
 

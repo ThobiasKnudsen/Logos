@@ -163,14 +163,10 @@ impl ReduceService {
     pub fn clear_pending(&mut self) {
         self.latest_request.clear();
     }
-
 }
 
 /// Worker thread main loop.
-fn worker_loop(
-    req_rx: mpsc::Receiver<ReduceRequest>,
-    resp_tx: mpsc::Sender<ReduceResponse>,
-) {
+fn worker_loop(req_rx: mpsc::Receiver<ReduceRequest>, resp_tx: mpsc::Sender<ReduceResponse>) {
     // Initialize REDUCE on this thread
     let session = match ReduceSession::new() {
         Ok(s) => s,
@@ -184,7 +180,12 @@ fn worker_loop(
 
     // Process requests until the channel is closed
     while let Ok(req) = req_rx.recv() {
-        log::debug!("REDUCE worker: cell_id={} context={:?} expr={:?}", req.cell_id, req.context, req.expression);
+        log::debug!(
+            "REDUCE worker: cell_id={} context={:?} expr={:?}",
+            req.cell_id,
+            req.context,
+            req.expression
+        );
         let result = session.simplify_with_context(&req.context, &req.expression);
         match &result {
             Ok(s) => log::debug!("REDUCE worker: result={:?}", s),

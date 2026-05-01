@@ -14,7 +14,6 @@
 /// |   +-- right_pane   (flex: 1)
 /// +-- status_bar   (height: 24px)
 /// ```
-
 use crate::ui::theme::spacing;
 use taffy::prelude::*;
 
@@ -51,94 +50,115 @@ pub struct UiLayout {
 impl UiLayout {
     pub fn new() -> Self {
         let mut tree = TaffyTree::new();
+        let leaf = |tree: &mut TaffyTree, style: Style, name: &str| -> NodeId {
+            tree.new_leaf(style)
+                .unwrap_or_else(|e| panic!("taffy: failed to create {name}: {e}"))
+        };
+        let with_children =
+            |tree: &mut TaffyTree, style: Style, kids: &[NodeId], name: &str| -> NodeId {
+                tree.new_with_children(style, kids)
+                    .unwrap_or_else(|e| panic!("taffy: failed to create {name}: {e}"))
+            };
 
-        let title_bar = tree
-            .new_leaf(Style {
+        let title_bar = leaf(
+            &mut tree,
+            Style {
                 size: Size {
                     width: Dimension::Percent(1.0),
                     height: Dimension::Length(spacing::MENU_HEIGHT),
                 },
                 ..Default::default()
-            })
-            .unwrap();
+            },
+            "title_bar",
+        );
 
-        let tab_bar = tree
-            .new_leaf(Style {
+        let tab_bar = leaf(
+            &mut tree,
+            Style {
                 size: Size {
                     width: Dimension::Percent(1.0),
                     height: Dimension::Length(spacing::TAB_HEIGHT),
                 },
                 ..Default::default()
-            })
-            .unwrap();
+            },
+            "tab_bar",
+        );
 
-        let left_pane = tree
-            .new_leaf(Style {
+        let left_pane = leaf(
+            &mut tree,
+            Style {
                 size: Size {
                     width: Dimension::Length(crate::ui::theme::split::DEFAULT_LEFT_WIDTH),
                     height: auto(),
                 },
                 flex_shrink: 0.0,
                 ..Default::default()
-            })
-            .unwrap();
+            },
+            "left_pane",
+        );
 
-        let split_handle = tree
-            .new_leaf(Style {
+        let split_handle = leaf(
+            &mut tree,
+            Style {
                 size: Size {
                     width: Dimension::Length(spacing::SPLIT_HANDLE_WIDTH),
                     height: auto(),
                 },
                 flex_shrink: 0.0,
                 ..Default::default()
-            })
-            .unwrap();
+            },
+            "split_handle",
+        );
 
-        let right_pane = tree
-            .new_leaf(Style {
+        let right_pane = leaf(
+            &mut tree,
+            Style {
                 flex_grow: 1.0,
                 ..Default::default()
-            })
-            .unwrap();
+            },
+            "right_pane",
+        );
 
-        let content_area = tree
-            .new_with_children(
-                Style {
-                    flex_grow: 1.0,
-                    flex_direction: FlexDirection::Row,
-                    size: Size {
-                        width: Dimension::Percent(1.0),
-                        height: auto(),
-                    },
-                    ..Default::default()
+        let content_area = with_children(
+            &mut tree,
+            Style {
+                flex_grow: 1.0,
+                flex_direction: FlexDirection::Row,
+                size: Size {
+                    width: Dimension::Percent(1.0),
+                    height: auto(),
                 },
-                &[left_pane, split_handle, right_pane],
-            )
-            .unwrap();
+                ..Default::default()
+            },
+            &[left_pane, split_handle, right_pane],
+            "content_area",
+        );
 
-        let status_bar = tree
-            .new_leaf(Style {
+        let status_bar = leaf(
+            &mut tree,
+            Style {
                 size: Size {
                     width: Dimension::Percent(1.0),
                     height: Dimension::Length(spacing::STATUS_HEIGHT),
                 },
                 ..Default::default()
-            })
-            .unwrap();
+            },
+            "status_bar",
+        );
 
-        let root = tree
-            .new_with_children(
-                Style {
-                    flex_direction: FlexDirection::Column,
-                    size: Size {
-                        width: Dimension::Percent(1.0),
-                        height: Dimension::Percent(1.0),
-                    },
-                    ..Default::default()
+        let root = with_children(
+            &mut tree,
+            Style {
+                flex_direction: FlexDirection::Column,
+                size: Size {
+                    width: Dimension::Percent(1.0),
+                    height: Dimension::Percent(1.0),
                 },
-                &[title_bar, tab_bar, content_area, status_bar],
-            )
-            .unwrap();
+                ..Default::default()
+            },
+            &[title_bar, tab_bar, content_area, status_bar],
+            "root",
+        );
 
         Self {
             tree,
@@ -159,33 +179,49 @@ impl UiLayout {
             (self.title_bar, None, Some(spacing::menu_height())),
             (self.tab_bar, None, Some(spacing::tab_height())),
             (self.status_bar, None, Some(spacing::status_height())),
-            (self.split_handle, Some(spacing::SPLIT_HANDLE_WIDTH), None),
+            (self.split_handle, Some(spacing::split_handle_width()), None),
         ];
         for (node, w, h) in updates {
-            let mut style = self.tree.style(node).unwrap().clone();
+            let mut style = self
+                .tree
+                .style(node)
+                .expect("taffy: style lookup failed in apply_scale")
+                .clone();
             if let Some(width) = w {
                 style.size.width = Dimension::Length(width);
             }
             if let Some(height) = h {
                 style.size.height = Dimension::Length(height);
             }
-            self.tree.set_style(node, style).unwrap();
+            self.tree
+                .set_style(node, style)
+                .expect("taffy: set_style failed in apply_scale");
         }
     }
 
     /// Set the left pane to a fixed pixel width (clamped during `compute`).
     pub fn set_left_pane_width(&mut self, width: f32) {
-        let mut style = self.tree.style(self.left_pane).unwrap().clone();
+        let mut style = self
+            .tree
+            .style(self.left_pane)
+            .expect("taffy: style lookup failed for left_pane")
+            .clone();
         style.size.width = Dimension::Length(width);
-        self.tree.set_style(self.left_pane, style).unwrap();
+        self.tree
+            .set_style(self.left_pane, style)
+            .expect("taffy: set_style failed for left_pane");
     }
 
     /// Clamp the stored left-pane width so both panes respect `MIN_PANE_SIZE`
     /// for the given viewport width.  Returns the (possibly adjusted) width.
     pub fn clamp_left_width(&mut self, left_width: f32, viewport_w: f32) -> f32 {
         use crate::ui::theme::{spacing, split};
-        let handle = spacing::SPLIT_HANDLE_WIDTH;
-        let max = (viewport_w - handle - split::MIN_PANE_SIZE).max(split::MIN_PANE_SIZE);
+        let handle = spacing::split_handle_width();
+        // If the viewport is narrower than 2 * MIN_PANE_SIZE + handle, we can't
+        // satisfy the lower bound on both panes — clamp to MIN_PANE_SIZE so the
+        // left pane at least has a reasonable width and let the right pane shrink.
+        let raw_max = viewport_w - handle - split::MIN_PANE_SIZE;
+        let max = raw_max.max(split::MIN_PANE_SIZE);
         let clamped = left_width.clamp(split::MIN_PANE_SIZE, max);
         self.set_left_pane_width(clamped);
         clamped
@@ -201,14 +237,20 @@ impl UiLayout {
                     height: AvailableSpace::Definite(height),
                 },
             )
-            .unwrap();
+            .expect("taffy: compute_layout failed");
 
-        let root_layout = self.tree.layout(self.root).unwrap();
+        let root_layout = self
+            .tree
+            .layout(self.root)
+            .expect("taffy: root layout missing after compute");
         let root_x = root_layout.location.x;
         let root_y = root_layout.location.y;
 
         let resolve = |node: NodeId, parent_x: f32, parent_y: f32| -> Rect {
-            let l = self.tree.layout(node).unwrap();
+            let l = self
+                .tree
+                .layout(node)
+                .expect("taffy: child layout missing after compute");
             Rect {
                 x: parent_x + l.location.x,
                 y: parent_y + l.location.y,

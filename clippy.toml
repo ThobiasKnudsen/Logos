@@ -1,0 +1,4 @@
+# Threshold below which a function/struct doesn't trigger
+# clippy::too_many_arguments / clippy::large_enum_variant warnings.
+too-many-arguments-threshold = 10
+type-complexity-threshold = 250

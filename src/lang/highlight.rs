@@ -162,7 +162,11 @@ mod tests {
     fn test_highlight_basic() {
         let spans = highlight("x + 3.14");
         // Should have spans for: "x", " ", "+", " ", "3.14"
-        assert!(spans.len() >= 3, "Expected at least 3 spans, got {}", spans.len());
+        assert!(
+            spans.len() >= 3,
+            "Expected at least 3 spans, got {}",
+            spans.len()
+        );
 
         // Verify full coverage
         let total: usize = spans.iter().map(|s| s.end - s.start).sum();

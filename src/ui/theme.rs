@@ -59,10 +59,18 @@ impl Rgba {
 // ---------------------------------------------------------------------------
 
 const fn lighten(c: Rgba, n: u8) -> Rgba {
-    Rgba::rgb(c.r.saturating_add(n), c.g.saturating_add(n), c.b.saturating_add(n))
+    Rgba::rgb(
+        c.r.saturating_add(n),
+        c.g.saturating_add(n),
+        c.b.saturating_add(n),
+    )
 }
 const fn darken(c: Rgba, n: u8) -> Rgba {
-    Rgba::rgb(c.r.saturating_sub(n), c.g.saturating_sub(n), c.b.saturating_sub(n))
+    Rgba::rgb(
+        c.r.saturating_sub(n),
+        c.g.saturating_sub(n),
+        c.b.saturating_sub(n),
+    )
 }
 const fn mid(a: Rgba, b: Rgba) -> Rgba {
     Rgba::rgb(
@@ -174,11 +182,19 @@ pub struct JsonTheme {
 
 /// In dark themes, "hover" lightens; in light themes it darkens.
 const fn hover(c: Rgba, n: u8, is_dark: bool) -> Rgba {
-    if is_dark { lighten(c, n) } else { darken(c, n) }
+    if is_dark {
+        lighten(c, n)
+    } else {
+        darken(c, n)
+    }
 }
 /// In dark themes, "muted" darkens; in light themes it lightens.
 const fn muted(c: Rgba, n: u8, is_dark: bool) -> Rgba {
-    if is_dark { darken(c, n) } else { lighten(c, n) }
+    if is_dark {
+        darken(c, n)
+    } else {
+        lighten(c, n)
+    }
 }
 
 impl JsonTheme {
@@ -198,63 +214,63 @@ impl JsonTheme {
         let is_dark = (pb.r as u16 + pb.g as u16 + pb.b as u16) < 384;
 
         Theme {
-            bg_primary:            pb,
-            bg_secondary:          sb,
-            bg_elevated:           tb,
-            bg_hover:              hover(tb, 40, is_dark),
-            border:                b1,
-            border_focus:          ac,
-            text_primary:          pt,
-            text_secondary:        st,
-            text_muted:            muted(st, 20, is_dark),
-            accent_primary:        ac,
-            accent_secondary:      gn,
-            accent_info:           ac,
-            tab_active:            tb,
-            tab_inactive:          pb,
-            tab_hover:             mid(pb, tb),
-            editor_bg:             self.render_bg,
-            editor_gutter:         sb,
-            editor_selection:      alpha(ac, 60),
-            graph_bg:              self.render_bg,
-            graph_grid:            alpha(b1, 130),
-            graph_axis:            st,
-            axis_zone_bg:          alpha(pb, 210),
-            axis_label:            st,
-            toolbar_bg:            sb,
-            toolbar_button:        tb,
-            toolbar_button_hover:  hover(tb, 12, is_dark),
+            bg_primary: pb,
+            bg_secondary: sb,
+            bg_elevated: tb,
+            bg_hover: hover(tb, 40, is_dark),
+            border: b1,
+            border_focus: ac,
+            text_primary: pt,
+            text_secondary: st,
+            text_muted: muted(st, 20, is_dark),
+            accent_primary: ac,
+            accent_secondary: gn,
+            accent_info: ac,
+            tab_active: tb,
+            tab_inactive: pb,
+            tab_hover: mid(pb, tb),
+            editor_bg: self.render_bg,
+            editor_gutter: sb,
+            editor_selection: alpha(ac, 60),
+            graph_bg: self.render_bg,
+            graph_grid: alpha(b1, 130),
+            graph_axis: st,
+            axis_zone_bg: alpha(pb, 210),
+            axis_label: st,
+            toolbar_bg: sb,
+            toolbar_button: tb,
+            toolbar_button_hover: hover(tb, 12, is_dark),
             toolbar_button_active: gn,
-            split_handle:          b1,
-            split_handle_hover:    b2,
-            close_button_hover:    rd,
-            dropdown_bg:           sb,
-            dropdown_hover:        tb,
-            dropdown_separator:    b1,
-            menu_item_hover:       tb,
-            scrollbar_track:       alpha(sb, 120),
-            scrollbar_thumb:       alpha(b2, 190),
+            split_handle: b1,
+            split_handle_hover: b2,
+            close_button_hover: rd,
+            dropdown_bg: sb,
+            dropdown_hover: tb,
+            dropdown_separator: b1,
+            menu_item_hover: tb,
+            scrollbar_track: alpha(sb, 120),
+            scrollbar_thumb: alpha(b2, 190),
             scrollbar_thumb_hover: alpha(hover(b2, 20, is_dark), 230),
-            cursor:                pt,
-            play_button:           gn,
-            play_button_hover:     hover(gn, 25, is_dark),
-            stop_button:           rd,
-            stop_button_hover:     hover(rd, 25, is_dark),
-            tooltip_bg:            sb,
-            tooltip_border:        b1,
-            keyword:               self.keyword,
-            identifier:            self.identifier,
-            math_variable:         self.math_variable,
-            number:                self.number,
-            operator:              self.operator,
-            string:                self.string,
-            comment:               self.comment,
-            punctuation:           st,
-            whitespace:            st,
-            builtin:               self.builtin,
-            axis:                  self.axis,
-            type_name:             self.type_name,
-            unknown:               rd,
+            cursor: pt,
+            play_button: gn,
+            play_button_hover: hover(gn, 25, is_dark),
+            stop_button: rd,
+            stop_button_hover: hover(rd, 25, is_dark),
+            tooltip_bg: sb,
+            tooltip_border: b1,
+            keyword: self.keyword,
+            identifier: self.identifier,
+            math_variable: self.math_variable,
+            number: self.number,
+            operator: self.operator,
+            string: self.string,
+            comment: self.comment,
+            punctuation: st,
+            whitespace: st,
+            builtin: self.builtin,
+            axis: self.axis,
+            type_name: self.type_name,
+            unknown: rd,
         }
     }
 }
@@ -266,32 +282,54 @@ impl JsonTheme {
 const THEMES: [Theme; 2] = [
     // Dark — original UI, Catppuccin Mocha syntax
     JsonTheme {
-        primary_bg: Rgba::hex(0x0f1116), secondary_bg: Rgba::hex(0x14171e),
-        tertiary_bg: Rgba::hex(0x1e2128), primary_text: Rgba::hex(0xffffff),
-        secondary_text: Rgba::hex(0xa0a8bc), primary_border: Rgba::hex(0x3a4050),
-        secondary_border: Rgba::hex(0x505868), render_bg: Rgba::hex(0x000000),
+        primary_bg: Rgba::hex(0x0f1116),
+        secondary_bg: Rgba::hex(0x14171e),
+        tertiary_bg: Rgba::hex(0x1e2128),
+        primary_text: Rgba::hex(0xffffff),
+        secondary_text: Rgba::hex(0xa0a8bc),
+        primary_border: Rgba::hex(0x3a4050),
+        secondary_border: Rgba::hex(0x505868),
+        render_bg: Rgba::hex(0x000000),
         accent: Rgba::hex(0xffffff),
-        red: Rgba::hex(0xc43c32), green: Rgba::hex(0x4ba55f),
-        keyword: Rgba::hex(0xcba6f7), identifier: Rgba::hex(0xffffff),
-        math_variable: Rgba::hex(0xf9e2af), number: Rgba::hex(0xfab387),
-        operator: Rgba::hex(0x89dceb), string: Rgba::hex(0xa6e3a1),
-        comment: Rgba::hex(0x6c7086), builtin: Rgba::hex(0x89b4fa),
-        type_name: Rgba::hex(0xf9e2af), axis: Rgba::hex(0xfab387),
-    }.to_theme(),
+        red: Rgba::hex(0xc43c32),
+        green: Rgba::hex(0x4ba55f),
+        keyword: Rgba::hex(0xcba6f7),
+        identifier: Rgba::hex(0xcdd6f4),
+        math_variable: Rgba::hex(0xf9e2af),
+        number: Rgba::hex(0xfab387),
+        operator: Rgba::hex(0x89dceb),
+        string: Rgba::hex(0xa6e3a1),
+        comment: Rgba::hex(0x6c7086),
+        builtin: Rgba::hex(0x89b4fa),
+        type_name: Rgba::hex(0xf9e2af),
+        axis: Rgba::hex(0xfab387),
+    }
+    .to_theme(),
     // Light — original UI, Catppuccin Latte syntax
     JsonTheme {
-        primary_bg: Rgba::hex(0xffffff), secondary_bg: Rgba::hex(0xf3f4f6),
-        tertiary_bg: Rgba::hex(0xe5e7eb), primary_text: Rgba::hex(0x1f2937),
-        secondary_text: Rgba::hex(0x6b7280), primary_border: Rgba::hex(0xd1d5db),
-        secondary_border: Rgba::hex(0x9ca3af), render_bg: Rgba::hex(0xffffff),
+        primary_bg: Rgba::hex(0xffffff),
+        secondary_bg: Rgba::hex(0xf3f4f6),
+        tertiary_bg: Rgba::hex(0xe5e7eb),
+        primary_text: Rgba::hex(0x1f2937),
+        secondary_text: Rgba::hex(0x6b7280),
+        primary_border: Rgba::hex(0xd1d5db),
+        secondary_border: Rgba::hex(0x9ca3af),
+        render_bg: Rgba::hex(0xffffff),
         accent: Rgba::hex(0x2563eb),
-        red: Rgba::hex(0xdc2626), green: Rgba::hex(0x16a34a),
-        keyword: Rgba::hex(0x8839ef), identifier: Rgba::hex(0xdd7878),
-        math_variable: Rgba::hex(0xdf8e1d), number: Rgba::hex(0xfe640b),
-        operator: Rgba::hex(0x04a5e5), string: Rgba::hex(0x40a02b),
-        comment: Rgba::hex(0x9ca0b0), builtin: Rgba::hex(0x1e66f5),
-        type_name: Rgba::hex(0xdf8e1d), axis: Rgba::hex(0xfe640b),
-    }.to_theme(),
+        red: Rgba::hex(0xdc2626),
+        green: Rgba::hex(0x16a34a),
+        keyword: Rgba::hex(0x8839ef),
+        identifier: Rgba::hex(0xdd7878),
+        math_variable: Rgba::hex(0xdf8e1d),
+        number: Rgba::hex(0xfe640b),
+        operator: Rgba::hex(0x04a5e5),
+        string: Rgba::hex(0x40a02b),
+        comment: Rgba::hex(0x9ca0b0),
+        builtin: Rgba::hex(0x1e66f5),
+        type_name: Rgba::hex(0xdf8e1d),
+        axis: Rgba::hex(0xfe640b),
+    }
+    .to_theme(),
 ];
 
 const THEME_NAMES: [&str; 2] = ["Dark", "Light"];
@@ -304,8 +342,12 @@ static CURRENT_THEME: AtomicUsize = AtomicUsize::new(0);
 
 mod theme_state {
     use super::*;
-    pub fn index() -> usize { CURRENT_THEME.load(Ordering::Relaxed) }
-    pub fn set(i: usize) { CURRENT_THEME.store(i, Ordering::Relaxed); }
+    pub fn index() -> usize {
+        CURRENT_THEME.load(Ordering::Relaxed)
+    }
+    pub fn set(i: usize) {
+        CURRENT_THEME.store(i, Ordering::Relaxed);
+    }
 }
 
 pub fn theme() -> &'static Theme {
@@ -327,7 +369,9 @@ pub fn cycle_theme() -> String {
 }
 
 pub fn set_theme(idx: usize) {
-    if idx < THEMES.len() { theme_state::set(idx); }
+    if idx < THEMES.len() {
+        theme_state::set(idx);
+    }
 }
 
 pub fn theme_count() -> usize {
@@ -364,31 +408,81 @@ pub mod spacing {
     pub const HEADER_HEIGHT: f32 = 32.0;
     pub const TEXT_PADDING: f32 = 24.0;
 
-    pub fn scale() -> f32 { super::fonts::scale() }
-    pub fn xs() -> f32 { XS * scale() }
-    pub fn sm() -> f32 { SM * scale() }
-    pub fn md() -> f32 { MD * scale() }
-    pub fn lg() -> f32 { LG * scale() }
-    pub fn xl() -> f32 { XL * scale() }
-    pub fn menu_height() -> f32 { MENU_HEIGHT * scale() }
-    pub fn tab_height() -> f32 { TAB_HEIGHT * scale() }
-    pub fn status_height() -> f32 { STATUS_HEIGHT * scale() }
-    pub fn split_handle_width() -> f32 { SPLIT_HANDLE_WIDTH * scale() }
-    pub fn window_control_width() -> f32 { WINDOW_CONTROL_WIDTH * scale() }
-    pub fn dropdown_item_height() -> f32 { DROPDOWN_ITEM_HEIGHT * scale() }
-    pub fn dropdown_padding() -> f32 { DROPDOWN_PADDING * scale() }
-    pub fn dropdown_min_width() -> f32 { DROPDOWN_MIN_WIDTH * scale() }
-    pub fn scrollbar_height() -> f32 { SCROLLBAR_HEIGHT * scale() }
-    pub fn scrollbar_width() -> f32 { SCROLLBAR_WIDTH * scale() }
-    pub fn scrollbar_thumb_min_w() -> f32 { SCROLLBAR_THUMB_MIN_W * scale() }
-    pub fn scrollbar_thumb_min_h() -> f32 { SCROLLBAR_THUMB_MIN_H * scale() }
-    pub fn gutter_width() -> f32 { GUTTER_WIDTH * scale() }
-    pub fn axis_zone_size() -> f32 { AXIS_ZONE_SIZE * scale() }
-    pub fn cell_padding() -> f32 { CELL_PADDING * scale() }
-    pub fn cell_spacing() -> f32 { CELL_SPACING * scale() }
-    pub fn button_size() -> f32 { BUTTON_SIZE * scale() }
-    pub fn header_height() -> f32 { HEADER_HEIGHT * scale() }
-    pub fn text_padding() -> f32 { TEXT_PADDING * scale() }
+    pub fn scale() -> f32 {
+        super::fonts::scale()
+    }
+    pub fn xs() -> f32 {
+        XS * scale()
+    }
+    pub fn sm() -> f32 {
+        SM * scale()
+    }
+    pub fn md() -> f32 {
+        MD * scale()
+    }
+    pub fn lg() -> f32 {
+        LG * scale()
+    }
+    pub fn xl() -> f32 {
+        XL * scale()
+    }
+    pub fn menu_height() -> f32 {
+        MENU_HEIGHT * scale()
+    }
+    pub fn tab_height() -> f32 {
+        TAB_HEIGHT * scale()
+    }
+    pub fn status_height() -> f32 {
+        STATUS_HEIGHT * scale()
+    }
+    pub fn split_handle_width() -> f32 {
+        SPLIT_HANDLE_WIDTH * scale()
+    }
+    pub fn window_control_width() -> f32 {
+        WINDOW_CONTROL_WIDTH * scale()
+    }
+    pub fn dropdown_item_height() -> f32 {
+        DROPDOWN_ITEM_HEIGHT * scale()
+    }
+    pub fn dropdown_padding() -> f32 {
+        DROPDOWN_PADDING * scale()
+    }
+    pub fn dropdown_min_width() -> f32 {
+        DROPDOWN_MIN_WIDTH * scale()
+    }
+    pub fn scrollbar_height() -> f32 {
+        SCROLLBAR_HEIGHT * scale()
+    }
+    pub fn scrollbar_width() -> f32 {
+        SCROLLBAR_WIDTH * scale()
+    }
+    pub fn scrollbar_thumb_min_w() -> f32 {
+        SCROLLBAR_THUMB_MIN_W * scale()
+    }
+    pub fn scrollbar_thumb_min_h() -> f32 {
+        SCROLLBAR_THUMB_MIN_H * scale()
+    }
+    pub fn gutter_width() -> f32 {
+        GUTTER_WIDTH * scale()
+    }
+    pub fn axis_zone_size() -> f32 {
+        AXIS_ZONE_SIZE * scale()
+    }
+    pub fn cell_padding() -> f32 {
+        CELL_PADDING * scale()
+    }
+    pub fn cell_spacing() -> f32 {
+        CELL_SPACING * scale()
+    }
+    pub fn button_size() -> f32 {
+        BUTTON_SIZE * scale()
+    }
+    pub fn header_height() -> f32 {
+        HEADER_HEIGHT * scale()
+    }
+    pub fn text_padding() -> f32 {
+        TEXT_PADDING * scale()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -409,17 +503,41 @@ pub mod fonts {
     pub const LINE_HEIGHT_FACTOR: f32 = 1.4;
     pub const CURSOR_WIDTH: f32 = 2.0;
     static CURRENT_SCALE: AtomicU32 = AtomicU32::new(1.0_f32.to_bits());
-    pub fn scale() -> f32 { f32::from_bits(CURRENT_SCALE.load(Ordering::Relaxed)) }
-    pub fn zoom_in() { let n = (scale() + SCALE_STEP).min(MAX_SCALE); CURRENT_SCALE.store(n.to_bits(), Ordering::Relaxed); }
-    pub fn zoom_out() { let n = (scale() - SCALE_STEP).max(MIN_SCALE); CURRENT_SCALE.store(n.to_bits(), Ordering::Relaxed); }
-    pub fn reset_zoom() { CURRENT_SCALE.store(1.0_f32.to_bits(), Ordering::Relaxed); }
-    pub fn editor_size() -> f32 { BASE_EDITOR * scale() }
-    pub fn editor_line_height() -> f32 { editor_size() * LINE_HEIGHT_FACTOR }
-    pub fn ui_size() -> f32 { BASE_UI * scale() }
-    pub fn small_size() -> f32 { BASE_SMALL * scale() }
-    pub fn tooltip_size() -> f32 { BASE_TOOLTIP * scale() }
-    pub fn status_size() -> f32 { BASE_STATUS * scale() }
-    pub fn menu_size() -> f32 { BASE_MENU * scale() }
+    pub fn scale() -> f32 {
+        f32::from_bits(CURRENT_SCALE.load(Ordering::Relaxed))
+    }
+    pub fn zoom_in() {
+        let n = (scale() + SCALE_STEP).min(MAX_SCALE);
+        CURRENT_SCALE.store(n.to_bits(), Ordering::Relaxed);
+    }
+    pub fn zoom_out() {
+        let n = (scale() - SCALE_STEP).max(MIN_SCALE);
+        CURRENT_SCALE.store(n.to_bits(), Ordering::Relaxed);
+    }
+    pub fn reset_zoom() {
+        CURRENT_SCALE.store(1.0_f32.to_bits(), Ordering::Relaxed);
+    }
+    pub fn editor_size() -> f32 {
+        BASE_EDITOR * scale()
+    }
+    pub fn editor_line_height() -> f32 {
+        editor_size() * LINE_HEIGHT_FACTOR
+    }
+    pub fn ui_size() -> f32 {
+        BASE_UI * scale()
+    }
+    pub fn small_size() -> f32 {
+        BASE_SMALL * scale()
+    }
+    pub fn tooltip_size() -> f32 {
+        BASE_TOOLTIP * scale()
+    }
+    pub fn status_size() -> f32 {
+        BASE_STATUS * scale()
+    }
+    pub fn menu_size() -> f32 {
+        BASE_MENU * scale()
+    }
 }
 
 // ---------------------------------------------------------------------------

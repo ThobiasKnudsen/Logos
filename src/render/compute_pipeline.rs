@@ -24,13 +24,16 @@ pub fn dispatch(
     if request.scalars.len() > MAX_SCALARS {
         return Err(format!(
             "Too many scalar constants ({}, max {})",
-            request.scalars.len(), MAX_SCALARS
+            request.scalars.len(),
+            MAX_SCALARS
         ));
     }
 
     let len = request.range_end - request.range_start;
     if len == 0 {
-        return Ok(request.readwrite_arrays.iter()
+        return Ok(request
+            .readwrite_arrays
+            .iter()
             .map(|(name, _)| (name.clone(), Vec::new()))
             .collect());
     }
@@ -45,7 +48,10 @@ pub fn dispatch(
         source: wgpu::ShaderSource::Wgsl(wgsl.clone().into()),
     });
     if let Some(err) = pollster::block_on(device.pop_error_scope()) {
-        return Err(format!("Compute shader error: {}\n\n--- WGSL ---\n{}", err, wgsl));
+        return Err(format!(
+            "Compute shader error: {}\n\n--- WGSL ---\n{}",
+            err, wgsl
+        ));
     }
 
     // 3. Create buffers
@@ -107,7 +113,7 @@ pub fn dispatch(
     }
 
     // 4. Create bind group layout + pipeline
-    let total_bindings = compute_gen::binding_count(request);
+    let _total_bindings = compute_gen::binding_count(request);
     let mut layout_entries = Vec::new();
 
     // binding 0: params uniform
@@ -201,7 +207,8 @@ pub fn dispatch(
     });
 
     // 6. Dispatch compute
-    let workgroups = (len as u32 + 63) / 64;
+    let wg = compute_gen::WORKGROUP_SIZE;
+    let workgroups = (len as u32).div_ceil(wg);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("compute_encoder"),
     });
@@ -221,19 +228,27 @@ pub fn dispatch(
     }
     queue.submit(Some(encoder.finish()));
 
-    // 8. Readback all read-write arrays
-    let mut results = Vec::new();
-    for (i, (name, _)) in request.readwrite_arrays.iter().enumerate() {
-        let slice = staging_buffers[i].slice(..);
+    // 8. Readback all read-write arrays. Issue all map_async calls first,
+    //    then a single device.poll. Previously we polled per buffer, which
+    //    serialised N round trips to the driver.
+    let mut receivers = Vec::with_capacity(request.readwrite_arrays.len());
+    for staging in &staging_buffers {
+        let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        device.poll(wgpu::Maintain::Wait);
-        rx.recv()
+        receivers.push(rx);
+    }
+    device.poll(wgpu::Maintain::Wait);
+
+    let mut results = Vec::with_capacity(request.readwrite_arrays.len());
+    for (i, (name, _)) in request.readwrite_arrays.iter().enumerate() {
+        receivers[i]
+            .recv()
             .map_err(|e| format!("Readback channel error: {}", e))?
             .map_err(|e| format!("Buffer map error: {:?}", e))?;
-
+        let slice = staging_buffers[i].slice(..);
         let data = slice.get_mapped_range();
         let f32_result: &[f32] = bytemuck::cast_slice(&data);
         let result_vec: Vec<f64> = f32_result.iter().map(|&v| v as f64).collect();

@@ -1,13 +1,13 @@
-pub mod token;
-pub mod lexer;
 pub mod ast;
-pub mod parser;
-pub mod wgsl_gen;
-pub mod highlight;
-pub mod reduce;
-pub mod interpreter;
 pub mod compute_gen;
+pub mod highlight;
+pub mod interpreter;
 pub mod lang_service;
+pub mod lexer;
+pub mod parser;
+pub mod reduce;
+pub mod token;
+pub mod wgsl_gen;
 
 /// Convert a byte offset in source to (line, col) — both 1-based.
 pub(crate) fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
@@ -35,9 +35,13 @@ pub fn format_error_at(source: &str, offset: usize, message: &str) -> String {
     let pad = " ".repeat(line_str.len());
     format!(
         "Line {}, Col {}: {}\n  {} | {}\n  {} | {}^",
-        line, col, message,
-        line_str, source_line,
-        pad, " ".repeat(col.saturating_sub(1))
+        line,
+        col,
+        message,
+        line_str,
+        source_line,
+        pad,
+        " ".repeat(col.saturating_sub(1))
     )
 }
 
@@ -45,21 +49,151 @@ pub fn format_error_at(source: &str, offset: usize, message: &str) -> String {
 /// (arrays, parallel for) rather than the fragment shader path.
 pub fn needs_interpreter(ast: &ast::AstNode) -> bool {
     match ast {
-        ast::AstNode::ArrayLiteral(_) | ast::AstNode::IndexAccess { .. }
-        | ast::AstNode::ParallelFor { .. } | ast::AstNode::IndexAssign { .. } => true,
+        ast::AstNode::ArrayLiteral(_)
+        | ast::AstNode::IndexAccess { .. }
+        | ast::AstNode::ParallelFor { .. }
+        | ast::AstNode::IndexAssign { .. } => true,
         ast::AstNode::Block(stmts) => stmts.iter().any(needs_interpreter),
         ast::AstNode::Binding { value, .. } => needs_interpreter(value),
         ast::AstNode::TupleBinding { value, .. } => needs_interpreter(value),
         ast::AstNode::FunctionDef { body, .. } => needs_interpreter(body),
-        ast::AstNode::IfExpr { condition, then_branch, else_branch } => {
-            needs_interpreter(condition) || needs_interpreter(then_branch)
-                || else_branch.as_ref().map_or(false, |e| needs_interpreter(e))
+        ast::AstNode::IfExpr {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            needs_interpreter(condition)
+                || needs_interpreter(then_branch)
+                || else_branch.as_ref().is_some_and(|e| needs_interpreter(e))
         }
         ast::AstNode::Apply { args, .. } => args.iter().any(needs_interpreter),
         ast::AstNode::WhileLoop { condition, body } => {
             needs_interpreter(condition) || needs_interpreter(body)
         }
         _ => false,
+    }
+}
+
+/// Detected print/plot actions in a cell's AST.
+#[derive(Debug)]
+pub struct CellActions {
+    /// Index of the first `print(...)` statement in the block (if any).
+    pub first_print: Option<usize>,
+    /// Index of the last `plot(...)` statement in the block (if any).
+    pub last_plot: Option<usize>,
+}
+
+impl CellActions {
+    pub fn has_action(&self) -> bool {
+        self.first_print.is_some() || self.last_plot.is_some()
+    }
+}
+
+/// Walk the AST to find all print() and plot() action statements.
+pub fn detect_cell_actions(ast: &ast::AstNode) -> CellActions {
+    let stmts: &[ast::AstNode] = match ast {
+        ast::AstNode::Block(stmts) => stmts,
+        other => std::slice::from_ref(other),
+    };
+
+    let mut result = CellActions {
+        first_print: None,
+        last_plot: None,
+    };
+
+    for (i, stmt) in stmts.iter().enumerate() {
+        if let ast::AstNode::Apply { name, .. } = stmt {
+            match name.as_str() {
+                "print" if result.first_print.is_none() => {
+                    result.first_print = Some(i);
+                }
+                "plot" => {
+                    result.last_plot = Some(i);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    result
+}
+
+/// Build an AST for evaluating a print expression.
+/// Includes all non-action statements before the print index,
+/// plus the unwrapped inner expression from print().
+pub fn build_print_ast(ast: &ast::AstNode, print_index: usize) -> ast::AstNode {
+    let stmts = match ast {
+        ast::AstNode::Block(stmts) => stmts,
+        other => {
+            if let ast::AstNode::Apply { name, args } = other {
+                if name == "print" && args.len() == 1 {
+                    return args[0].clone();
+                }
+            }
+            return other.clone();
+        }
+    };
+
+    let mut result = Vec::new();
+    for (i, stmt) in stmts.iter().enumerate() {
+        if i == print_index {
+            if let ast::AstNode::Apply { name, args } = stmt {
+                if name == "print" && args.len() == 1 {
+                    result.push(args[0].clone());
+                }
+            }
+            break;
+        }
+        if let ast::AstNode::Apply { name, .. } = stmt {
+            if name == "print" || name == "plot" {
+                continue;
+            }
+        }
+        result.push(stmt.clone());
+    }
+
+    match result.len() {
+        1 => result.remove(0),
+        _ => ast::AstNode::Block(result),
+    }
+}
+
+/// Build an AST for plotting. Includes all non-action statements
+/// plus the unwrapped inner expression from plot().
+pub fn build_plot_ast(ast: &ast::AstNode, plot_index: usize) -> ast::AstNode {
+    let stmts = match ast {
+        ast::AstNode::Block(stmts) => stmts,
+        other => {
+            if let ast::AstNode::Apply { name, args } = other {
+                if name == "plot" && args.len() == 1 {
+                    return args[0].clone();
+                }
+            }
+            return other.clone();
+        }
+    };
+
+    let mut result = Vec::new();
+    for (i, stmt) in stmts.iter().enumerate() {
+        if i == plot_index {
+            if let ast::AstNode::Apply { name, args } = stmt {
+                if name == "plot" && args.len() == 1 {
+                    result.push(args[0].clone());
+                }
+            }
+            continue;
+        }
+        if let ast::AstNode::Apply { name, .. } = stmt {
+            if name == "print" || name == "plot" {
+                continue;
+            }
+        }
+        result.push(stmt.clone());
+    }
+
+    match result.len() {
+        1 => result.remove(0),
+        _ => ast::AstNode::Block(result),
     }
 }
 
@@ -92,14 +226,20 @@ mod integration_tests {
     /// wgpu performs before sending to the GPU.
     fn validate_wgsl(wgsl: &str) -> Result<(), String> {
         let module = naga::front::wgsl::parse_str(wgsl).map_err(|e| {
-            format!("naga WGSL parse error: {}\n\n--- Generated WGSL ---\n{}", e, wgsl)
+            format!(
+                "naga WGSL parse error: {}\n\n--- Generated WGSL ---\n{}",
+                e, wgsl
+            )
         })?;
         let mut validator = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
         );
         validator.validate(&module).map_err(|e| {
-            format!("naga validation error: {}\n\n--- Generated WGSL ---\n{}", e, wgsl)
+            format!(
+                "naga validation error: {}\n\n--- Generated WGSL ---\n{}",
+                e, wgsl
+            )
         })?;
         Ok(())
     }
@@ -107,12 +247,10 @@ mod integration_tests {
     /// Full pipeline: lex → parse → WGSL gen → naga validate.
     /// Matches what the real app does. Panics with diagnostics on failure.
     fn compile_and_validate(source: &str) -> String {
-        let wgsl = compile(source).unwrap_or_else(|e| {
-            panic!("compile({:?}) failed: {}", source, e)
-        });
-        validate_wgsl(&wgsl).unwrap_or_else(|e| {
-            panic!("WGSL validation failed for {:?}:\n{}", source, e)
-        });
+        let wgsl =
+            compile(source).unwrap_or_else(|e| panic!("compile({:?}) failed: {}", source, e));
+        validate_wgsl(&wgsl)
+            .unwrap_or_else(|e| panic!("WGSL validation failed for {:?}:\n{}", source, e));
         wgsl
     }
 
@@ -132,6 +270,23 @@ mod integration_tests {
     fn test_simple_math_compiles() {
         let shader = compile_and_validate("x * x + y * y");
         assert!(shader.contains("((x * x) + (y * y))"));
+    }
+
+    #[test]
+    fn test_bool_binding_plot_uses_corner_checking() {
+        // f := x = y^2 ; f → should plot the curve via corner-checking,
+        // not via direct float == (which would render nothing).
+        let shader = compile_and_validate("f := x = y^2\nf");
+        assert!(
+            shader.contains("x_m"),
+            "bool binding result should trigger corner-checking; got:\n{}",
+            shader
+        );
+        assert!(
+            shader.contains("!("),
+            "equality should use straddle check; got:\n{}",
+            shader
+        );
     }
 
     #[test]
@@ -184,8 +339,14 @@ mod integration_tests {
     #[test]
     fn test_equality_operator() {
         let shader = compile_and_validate("x = 0");
-        assert!(shader.contains("x_m"), "equality should use corner checking");
-        assert!(shader.contains("!("), "equality should negate all-same-sign");
+        assert!(
+            shader.contains("x_m"),
+            "equality should use corner checking"
+        );
+        assert!(
+            shader.contains("!("),
+            "equality should negate all-same-sign"
+        );
     }
 
     #[test]
@@ -217,18 +378,26 @@ mod integration_tests {
     fn test_unicode_superscript_square() {
         // x² + y² = 9
         let shader = compile_and_validate("x\u{00B2} + y\u{00B2} = 9");
-        assert!(shader.contains("pow(x_m, 2.0)") || shader.contains("pow(x, 2.0)"),
-            "Unicode ² should compile to pow(), got:\n{}", shader);
-        assert!(!shader.contains("\u{00B2}"),
-            "Unicode ² should NOT appear in WGSL output");
+        assert!(
+            shader.contains("pow(x_m, 2.0)") || shader.contains("pow(x, 2.0)"),
+            "Unicode ² should compile to pow(), got:\n{}",
+            shader
+        );
+        assert!(
+            !shader.contains("\u{00B2}"),
+            "Unicode ² should NOT appear in WGSL output"
+        );
     }
 
     #[test]
     fn test_unicode_superscript_cube() {
         // sin(x)³ → pow(sin(x), 3.0)
         let shader = compile_and_validate("sin(x)\u{00B3}");
-        assert!(shader.contains("pow(sin(x), 3.0)"),
-            "Unicode ³ should compile to pow(sin(x), 3.0), got:\n{}", shader);
+        assert!(
+            shader.contains("pow(sin(x), 3.0)"),
+            "Unicode ³ should compile to pow(sin(x), 3.0), got:\n{}",
+            shader
+        );
     }
 
     #[test]
@@ -237,14 +406,29 @@ mod integration_tests {
         let input = "x\u{00B2}*y\u{00B2}+sin(x)\u{00B3}-sin(y\u{00B2})\u{00B2}=9";
         let shader = compile_and_validate(input);
 
-        assert!(!shader.contains("square"), "bare 'square' must not appear in WGSL");
-        assert!(!shader.contains("cube"), "bare 'cube' must not appear in WGSL");
-        assert!(shader.contains("pow("),
-            "should contain pow() calls, got:\n{}", shader);
-        assert!(shader.contains("sin("),
-            "should contain sin() calls, got:\n{}", shader);
-        assert!(shader.contains("x_m") || shader.contains("x_p"),
-            "=9 should trigger corner-checking, got:\n{}", shader);
+        assert!(
+            !shader.contains("square"),
+            "bare 'square' must not appear in WGSL"
+        );
+        assert!(
+            !shader.contains("cube"),
+            "bare 'cube' must not appear in WGSL"
+        );
+        assert!(
+            shader.contains("pow("),
+            "should contain pow() calls, got:\n{}",
+            shader
+        );
+        assert!(
+            shader.contains("sin("),
+            "should contain sin() calls, got:\n{}",
+            shader
+        );
+        assert!(
+            shader.contains("x_m") || shader.contains("x_p"),
+            "=9 should trigger corner-checking, got:\n{}",
+            shader
+        );
     }
 
     #[test]
@@ -253,8 +437,10 @@ mod integration_tests {
         // They should not panic — they may compile (if WGSL gen handles them)
         // or fail with an error, but never crash.
         for &(sym, name) in &[
-            ("\u{222B}", "∫"), ("\u{2202}", "∂"),
-            ("\u{2211}", "∑"), ("\u{220F}", "∏"),
+            ("\u{222B}", "∫"),
+            ("\u{2202}", "∂"),
+            ("\u{2211}", "∑"),
+            ("\u{220F}", "∏"),
         ] {
             let result = compile(sym);
             // If compile succeeds, validate the WGSL too
@@ -262,7 +448,11 @@ mod integration_tests {
                 if let Err(e) = validate_wgsl(wgsl) {
                     // Expected: naga rejects undeclared identifiers.
                     // This is acceptable — the symbol has no shader meaning.
-                    eprintln!("{} produces invalid WGSL (expected): {}", name, e.lines().next().unwrap_or(""));
+                    eprintln!(
+                        "{} produces invalid WGSL (expected): {}",
+                        name,
+                        e.lines().next().unwrap_or("")
+                    );
                 }
             }
             // The key assertion: no panic occurred
@@ -277,5 +467,76 @@ mod integration_tests {
             let _ = validate_wgsl(wgsl); // may fail, that's fine
         }
         // No panic = success
+    }
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::*;
+
+    #[test]
+    fn test_detect_print() {
+        let ast = parse("print(3+9)").unwrap();
+        let actions = detect_cell_actions(&ast);
+        assert!(actions.first_print.is_some());
+        assert!(actions.last_plot.is_none());
+    }
+
+    #[test]
+    fn test_detect_plot() {
+        let ast = parse("plot(x+y)").unwrap();
+        let actions = detect_cell_actions(&ast);
+        assert!(actions.first_print.is_none());
+        assert!(actions.last_plot.is_some());
+    }
+
+    #[test]
+    fn test_detect_none() {
+        let ast = parse("3+9").unwrap();
+        let actions = detect_cell_actions(&ast);
+        assert!(!actions.has_action());
+    }
+
+    #[test]
+    fn test_detect_both_print_and_plot() {
+        let ast = parse("f := x+2*x\nprint(f)\nplot(y=f)").unwrap();
+        let actions = detect_cell_actions(&ast);
+        assert!(actions.first_print.is_some());
+        assert!(actions.last_plot.is_some());
+    }
+
+    #[test]
+    fn test_build_print_ast_single() {
+        let ast = parse("print(3+9)").unwrap();
+        let print_ast = build_print_ast(&ast, 0);
+        assert!(matches!(print_ast, ast::AstNode::Apply { ref name, .. } if name == "add"));
+    }
+
+    #[test]
+    fn test_build_print_ast_with_bindings() {
+        let ast = parse("f := 5\nprint(f)").unwrap();
+        let actions = detect_cell_actions(&ast);
+        let print_ast = build_print_ast(&ast, actions.first_print.unwrap());
+        if let ast::AstNode::Block(stmts) = &print_ast {
+            assert_eq!(stmts.len(), 2);
+            assert!(matches!(&stmts[0], ast::AstNode::Binding { .. }));
+            assert!(matches!(&stmts[1], ast::AstNode::Identifier(_)));
+        } else {
+            panic!("Expected Block, got {:?}", print_ast);
+        }
+    }
+
+    #[test]
+    fn test_build_plot_ast_strips_print() {
+        let ast = parse("f := x\nprint(f)\nplot(y=f)").unwrap();
+        let actions = detect_cell_actions(&ast);
+        let plot_ast = build_plot_ast(&ast, actions.last_plot.unwrap());
+        if let ast::AstNode::Block(stmts) = &plot_ast {
+            for stmt in stmts {
+                if let ast::AstNode::Apply { name, .. } = stmt {
+                    assert_ne!(name, "print", "print should be stripped from plot AST");
+                }
+            }
+        }
     }
 }

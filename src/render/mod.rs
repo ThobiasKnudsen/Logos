@@ -1,14 +1,13 @@
+pub mod compute_pipeline;
 pub mod rects;
 pub mod shader_pipeline;
-pub mod compute_pipeline;
 
 use std::sync::Arc;
 
 use glyphon::{
-    Attrs, AttrsList, Buffer as TextBuffer, BufferLine, Cache, Color as GlyphonColor, Family,
-    FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds,
-    TextRenderer, Viewport,
-    cosmic_text::LineEnding,
+    cosmic_text::LineEnding, Attrs, AttrsList, Buffer as TextBuffer, BufferLine, Cache,
+    Color as GlyphonColor, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea,
+    TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use wgpu::{
     CommandEncoderDescriptor, DeviceDescriptor, Extent3d, Instance, InstanceDescriptor, LoadOp,
@@ -205,15 +204,33 @@ const BASE_CELL_HEADER_HEIGHT: f32 = 28.0;
 const BASE_CELL_DELETE_SIZE: f32 = 22.0;
 const BASE_OUTPUT_TOGGLE_HEIGHT: f32 = 20.0;
 
-fn tab_pad_h() -> f32 { BASE_TAB_PAD_H * fonts::scale() }
-fn tab_close_size() -> f32 { BASE_TAB_CLOSE_SIZE * fonts::scale() }
-fn tab_close_pad() -> f32 { BASE_TAB_CLOSE_PAD * fonts::scale() }
-fn tab_gap() -> f32 { BASE_TAB_GAP * fonts::scale() }
-fn tab_dot_pad() -> f32 { BASE_TAB_DOT_PAD * fonts::scale() }
-fn menu_item_pad() -> f32 { BASE_MENU_ITEM_PAD * fonts::scale() }
-fn cell_header_height() -> f32 { BASE_CELL_HEADER_HEIGHT * fonts::scale() }
-fn cell_delete_size() -> f32 { BASE_CELL_DELETE_SIZE * fonts::scale() }
-fn output_toggle_height() -> f32 { BASE_OUTPUT_TOGGLE_HEIGHT * fonts::scale() }
+fn tab_pad_h() -> f32 {
+    BASE_TAB_PAD_H * fonts::scale()
+}
+fn tab_close_size() -> f32 {
+    BASE_TAB_CLOSE_SIZE * fonts::scale()
+}
+fn tab_close_pad() -> f32 {
+    BASE_TAB_CLOSE_PAD * fonts::scale()
+}
+fn tab_gap() -> f32 {
+    BASE_TAB_GAP * fonts::scale()
+}
+fn tab_dot_pad() -> f32 {
+    BASE_TAB_DOT_PAD * fonts::scale()
+}
+fn menu_item_pad() -> f32 {
+    BASE_MENU_ITEM_PAD * fonts::scale()
+}
+fn cell_header_height() -> f32 {
+    BASE_CELL_HEADER_HEIGHT * fonts::scale()
+}
+fn cell_delete_size() -> f32 {
+    BASE_CELL_DELETE_SIZE * fonts::scale()
+}
+fn output_toggle_height() -> f32 {
+    BASE_OUTPUT_TOGGLE_HEIGHT * fonts::scale()
+}
 
 /// Handles all GPU rendering: wgpu setup, text via glyphon, rects via instanced draw.
 pub struct Renderer {
@@ -388,7 +405,8 @@ impl Renderer {
             .iter()
             .find(|f| !f.is_srgb())
             .copied()
-            .unwrap_or(caps.formats[0]);
+            .or_else(|| caps.formats.first().copied())
+            .expect("adapter returned no surface formats");
         let present_mode = if caps.present_modes.contains(&PresentMode::Immediate) {
             PresentMode::Immediate
         } else {
@@ -450,15 +468,27 @@ impl Renderer {
         let cursor_text_cache = Cache::new(&device);
         let mut cursor_text_atlas =
             TextAtlas::new(&device, &queue, &cursor_text_cache, swapchain_format);
-        let cursor_text_renderer =
-            TextRenderer::new(&mut cursor_text_atlas, &device, MultisampleState::default(), None);
+        let cursor_text_renderer = TextRenderer::new(
+            &mut cursor_text_atlas,
+            &device,
+            MultisampleState::default(),
+            None,
+        );
 
         // Inverted-overlay compositing resources
         let (scene_texture, scene_view) = Self::create_offscreen_texture(
-            &device, physical_size.width, physical_size.height, swapchain_format, "scene_texture",
+            &device,
+            physical_size.width,
+            physical_size.height,
+            swapchain_format,
+            "scene_texture",
         );
         let (overlay_texture, overlay_view) = Self::create_offscreen_texture(
-            &device, physical_size.width, physical_size.height, swapchain_format, "overlay_texture",
+            &device,
+            physical_size.width,
+            physical_size.height,
+            swapchain_format,
+            "overlay_texture",
         );
         let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("composite_sampler"),
@@ -508,37 +538,40 @@ impl Renderer {
                 bind_group_layouts: &[&composite_bind_group_layout],
                 push_constant_ranges: &[],
             });
-        let composite_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("composite_pipeline"),
-                layout: Some(&composite_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &composite_shader,
-                    entry_point: "vs_main",
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &composite_shader,
-                    entry_point: "fs_main",
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: swapchain_format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: MultisampleState::default(),
-                multiview: None,
-                cache: None,
-            });
+        let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("composite_pipeline"),
+            layout: Some(&composite_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: "vs_main",
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: swapchain_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
         let composite_bind_group = Self::create_composite_bind_group(
-            &device, &composite_bind_group_layout, &scene_view, &overlay_view, &composite_sampler,
+            &device,
+            &composite_bind_group_layout,
+            &scene_view,
+            &overlay_view,
+            &composite_sampler,
         );
 
         let add_cell_label = Self::create_label(&mut font_system, fonts::ui_size(), "+");
@@ -546,12 +579,19 @@ impl Renderer {
         let cell_copy_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{2398}");
         let cell_play_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25B6}");
         let cell_stop_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25A0}");
-        let cell_chevron_right = Self::create_label(&mut font_system, fonts::small_size(), "\u{25B6}");
-        let cell_chevron_down = Self::create_label(&mut font_system, fonts::small_size(), "\u{25BC}");
+        let cell_chevron_right =
+            Self::create_label(&mut font_system, fonts::small_size(), "\u{25B6}");
+        let cell_chevron_down =
+            Self::create_label(&mut font_system, fonts::small_size(), "\u{25BC}");
         let output_label = Self::create_label(&mut font_system, fonts::small_size(), "Output");
         let tooltip_label = Self::create_label(&mut font_system, fonts::small_size(), "Ctrl+Enter");
 
-        let zero_rect = Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+        let zero_rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+        };
 
         Self {
             device,
@@ -787,8 +827,7 @@ impl Renderer {
             buf.shape_until_scroll(&mut self.font_system, false);
         }
 
-        self.add_cell_label =
-            Self::create_label(&mut self.font_system, fonts::ui_size(), "+");
+        self.add_cell_label = Self::create_label(&mut self.font_system, fonts::ui_size(), "+");
         self.cell_delete_label =
             Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{2715}");
         self.cell_copy_label =
@@ -921,7 +960,12 @@ impl Renderer {
                     attrs_list.add_span(local_start..local_end, a);
                 }
             }
-            replacement.push(BufferLine::new(line_text, ending, attrs_list, Shaping::Advanced));
+            replacement.push(BufferLine::new(
+                line_text,
+                ending,
+                attrs_list,
+                Shaping::Advanced,
+            ));
         }
 
         let lines_updated = replacement.len();
@@ -1008,6 +1052,9 @@ impl Renderer {
         let mut max_label_w = 0.0_f32;
         let mut max_shortcut_w = 0.0_f32;
 
+        // Index-based loop because the theme branch uses a different lookup
+        // (`app::theme_menu_label(i)`) than slice indexing.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..item_count {
             let (item_label, item_shortcut) = if is_theme_menu {
                 (app::theme_menu_label(i), "")
@@ -1020,8 +1067,7 @@ impl Renderer {
             } else {
                 format!("   {}", item_label)
             };
-            let label =
-                Self::create_label(&mut self.font_system, fonts::menu_size(), &label_text);
+            let label = Self::create_label(&mut self.font_system, fonts::menu_size(), &label_text);
             let shortcut =
                 Self::create_label(&mut self.font_system, fonts::small_size(), item_shortcut);
             max_label_w = max_label_w.max(Self::measure_label_width(&label));
@@ -1095,7 +1141,8 @@ impl Renderer {
 
         for (label, kind) in candidates {
             let lbl = Self::create_label(&mut self.font_system, fonts::editor_size(), label);
-            let badge = Self::create_label(&mut self.font_system, fonts::small_size(), kind.badge());
+            let badge =
+                Self::create_label(&mut self.font_system, fonts::small_size(), kind.badge());
             max_label_w = max_label_w.max(Self::measure_label_width(&lbl));
             max_kind_w = max_kind_w.max(Self::measure_label_width(&badge));
             self.ac_item_labels.push(lbl);
@@ -1179,7 +1226,8 @@ impl Renderer {
     // ----- Shader pipeline public API -----
 
     pub fn compile_cell_shader(&mut self, cell_id: usize, wgsl_source: &str) -> Result<(), String> {
-        self.shader_pipeline.compile_and_add(&self.device, cell_id, wgsl_source)
+        self.shader_pipeline
+            .compile_and_add(&self.device, cell_id, wgsl_source)
     }
 
     pub fn remove_cell_shader(&mut self, cell_id: usize) {
@@ -1280,12 +1328,17 @@ impl Renderer {
             return;
         }
         let content_w = Self::measure_editor_content_width(&self.cell_buffers[cell_index]);
-        let cl = self.cell_layouts.iter().find(|cl| cl.cell_index == cell_index);
+        let cl = self
+            .cell_layouts
+            .iter()
+            .find(|cl| cl.cell_index == cell_index);
         let v_sb_inset = cl
-            .map(|cl| if cl.editor_v_scrollbar_track.h > 0.0 {
-                cl.editor.x + cl.editor.w - cl.editor_v_scrollbar_track.x
-            } else {
-                0.0
+            .map(|cl| {
+                if cl.editor_v_scrollbar_track.h > 0.0 {
+                    cl.editor.x + cl.editor.w - cl.editor_v_scrollbar_track.x
+                } else {
+                    0.0
+                }
             })
             .unwrap_or(0.0);
         let visible_w = cl
@@ -1302,7 +1355,11 @@ impl Renderer {
         if cell_index >= self.cell_editor_scroll_y.len() {
             return delta;
         }
-        let content_h = self.cell_content_heights.get(cell_index).copied().unwrap_or(0.0);
+        let content_h = self
+            .cell_content_heights
+            .get(cell_index)
+            .copied()
+            .unwrap_or(0.0);
         let visible_h = self
             .cell_layouts
             .iter()
@@ -1328,7 +1385,11 @@ impl Renderer {
         mouse_x: f32,
         drag_offset: f32,
     ) {
-        let cl = match self.cell_layouts.iter().find(|c| c.cell_index == cell_index) {
+        let cl = match self
+            .cell_layouts
+            .iter()
+            .find(|c| c.cell_index == cell_index)
+        {
             Some(c) => *c,
             None => return,
         };
@@ -1363,7 +1424,11 @@ impl Renderer {
         mouse_y: f32,
         drag_offset: f32,
     ) {
-        let cl = match self.cell_layouts.iter().find(|c| c.cell_index == cell_index) {
+        let cl = match self
+            .cell_layouts
+            .iter()
+            .find(|c| c.cell_index == cell_index)
+        {
             Some(c) => *c,
             None => return,
         };
@@ -1375,7 +1440,11 @@ impl Renderer {
         if cell_index >= self.cell_editor_scroll_y.len() {
             return;
         }
-        let content_h = self.cell_content_heights.get(cell_index).copied().unwrap_or(0.0);
+        let content_h = self
+            .cell_content_heights
+            .get(cell_index)
+            .copied()
+            .unwrap_or(0.0);
         let visible_h = cl.editor.h - spacing::sm() * 2.0;
         let max_scroll = (content_h - visible_h).max(0.0);
         let new_thumb_y = mouse_y - drag_offset;
@@ -1388,7 +1457,11 @@ impl Renderer {
 
     /// Check if a cell is contracted (has vertical scroll capacity).
     pub fn cell_is_contracted(&self, cell_index: usize) -> bool {
-        let content_h = self.cell_content_heights.get(cell_index).copied().unwrap_or(0.0);
+        let content_h = self
+            .cell_content_heights
+            .get(cell_index)
+            .copied()
+            .unwrap_or(0.0);
         let visible_h = self
             .cell_layouts
             .iter()
@@ -1425,7 +1498,10 @@ impl Renderer {
     /// byte offset into the cell's text. Returns `None` if the cell index is
     /// out of range or has no layout.
     pub fn hit_test_cell(&self, cell_index: usize, screen_x: f32, screen_y: f32) -> Option<usize> {
-        let cl = self.cell_layouts.iter().find(|c| c.cell_index == cell_index)?;
+        let cl = self
+            .cell_layouts
+            .iter()
+            .find(|c| c.cell_index == cell_index)?;
         if cell_index >= self.cell_buffers.len() {
             return None;
         }
@@ -1433,8 +1509,16 @@ impl Renderer {
         let text_pad = crate::ui::theme::spacing::sm();
 
         // Convert screen coords to content-relative coords (accounting for scroll)
-        let scroll_x = self.cell_editor_scroll_x.get(cell_index).copied().unwrap_or(0.0);
-        let scroll_y = self.cell_editor_scroll_y.get(cell_index).copied().unwrap_or(0.0);
+        let scroll_x = self
+            .cell_editor_scroll_x
+            .get(cell_index)
+            .copied()
+            .unwrap_or(0.0);
+        let scroll_y = self
+            .cell_editor_scroll_y
+            .get(cell_index)
+            .copied()
+            .unwrap_or(0.0);
         let cx = screen_x - cl.editor.x - text_pad + scroll_x;
         let cy = screen_y - cl.editor.y - text_pad + scroll_y;
 
@@ -1512,7 +1596,6 @@ impl Renderer {
         }
     }
 
-
     /// Returns the add-cell button rect for hit-testing.
     pub fn add_cell_button_rect(&self) -> Rect {
         self.add_cell_rect
@@ -1530,7 +1613,12 @@ impl Renderer {
             let sb_gap = 4.0; // gap between scrollbar and split handle
             let track_h = pane.h;
             let sb_x = pane.x + pane.w - sb_w - sb_gap;
-            self.v_track_rect = Some(Rect { x: sb_x, y: pane.y, w: sb_w, h: track_h });
+            self.v_track_rect = Some(Rect {
+                x: sb_x,
+                y: pane.y,
+                w: sb_w,
+                h: track_h,
+            });
 
             let ratio = visible_h / self.cells_total_height;
             let thumb_h = (track_h * ratio).max(spacing::scrollbar_thumb_min_h());
@@ -1540,7 +1628,12 @@ impl Renderer {
             } else {
                 pane.y
             };
-            self.v_thumb_rect = Some(Rect { x: sb_x, y: thumb_y, w: sb_w, h: thumb_h });
+            self.v_thumb_rect = Some(Rect {
+                x: sb_x,
+                y: thumb_y,
+                w: sb_w,
+                h: thumb_h,
+            });
         } else {
             self.v_track_rect = None;
             self.v_thumb_rect = None;
@@ -1620,7 +1713,7 @@ impl Renderer {
 
         let mut layouts = Vec::with_capacity(cells.len());
         let mut y_offset = cell_pad; // accumulates from top of cell container
-        let mut perf_reshape_us: u128 = 0;
+        let mut _perf_reshape_us: u128 = 0;
         let mut perf_set_rich_text_us: u128 = 0;
         let mut perf_shape_us: u128 = 0;
         let mut perf_measure_us: u128 = 0;
@@ -1632,7 +1725,10 @@ impl Renderer {
 
         for (i, cell_info) in cells.iter().enumerate() {
             // Only reshape if text actually changed (cosmic-text shaping is expensive)
-            let text_changed = self.cell_texts.get(i).map_or(true, |prev| *prev != cell_info.text);
+            let text_changed = self
+                .cell_texts
+                .get(i)
+                .is_none_or(|prev| *prev != cell_info.text);
             if text_changed {
                 let rs = std::time::Instant::now();
 
@@ -1663,7 +1759,7 @@ impl Renderer {
                 } else {
                     self.cell_texts.push(cell_info.text.clone());
                 }
-                perf_reshape_us += rs.elapsed().as_micros();
+                _perf_reshape_us += rs.elapsed().as_micros();
             }
 
             // Measure content height
@@ -1693,7 +1789,7 @@ impl Renderer {
             let output_changed = self
                 .cell_output_texts
                 .get(i)
-                .map_or(true, |prev| prev != output_text_ref);
+                .is_none_or(|prev| prev != output_text_ref);
             self.cell_output_is_error[i] = cell_info.is_error;
             if output_changed {
                 if has_output {
@@ -1705,8 +1801,7 @@ impl Renderer {
                         Attrs::new().family(Family::Monospace),
                         Shaping::Advanced,
                     );
-                    self.cell_output_buffers[i]
-                        .shape_until_scroll(&mut self.font_system, false);
+                    self.cell_output_buffers[i].shape_until_scroll(&mut self.font_system, false);
                 }
                 if i < self.cell_output_texts.len() {
                     self.cell_output_texts[i] = output_text_ref.to_string();
@@ -1722,11 +1817,15 @@ impl Renderer {
             perf_output_us += os.elapsed().as_micros();
             // Output toolbar row height (visible when output exists)
             let ls = std::time::Instant::now();
-            let output_toggle_h = if has_output { output_toggle_height() } else { 0.0 };
+            let output_toggle_h = if has_output {
+                output_toggle_height()
+            } else {
+                0.0
+            };
 
             // Output height: dynamic based on line count when expanded, 0 when collapsed
             let output_h = if has_output && !cell_info.output_collapsed {
-                let line_count = output_text_ref.lines().count().max(1).min(10) as f32;
+                let line_count = output_text_ref.lines().count().clamp(1, 10) as f32;
                 fonts::editor_line_height() * line_count + text_pad * 2.0
             } else {
                 0.0
@@ -1790,20 +1889,31 @@ impl Renderer {
                 h: editor_h,
             };
             let inner_w = effective_width - container_pad * 2.0;
-            let zero_rect = Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+            let zero_rect = Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            };
 
             // Scrollbar geometry — positioned at cell container edges
             let sb_w = spacing::scrollbar_width();
             let sb_margin = 2.0; // breathing room from cell border
 
             // Vertical scrollbar for contracted cells (right edge of cell container)
-            let is_contracted = cell_info.contracted_editor_h.is_some() && content_h > (editor_h - text_pad * 2.0) + 1.0;
+            let is_contracted = cell_info.contracted_editor_h.is_some()
+                && content_h > (editor_h - text_pad * 2.0) + 1.0;
             let (editor_v_scrollbar_track, editor_v_scrollbar_thumb) = if is_contracted {
                 let visible_h = editor_h - text_pad * 2.0;
                 let track_x = container.x + container.w - sb_w - sb_margin;
                 let track_y = editor.y;
                 let track_h = editor.h;
-                let track = Rect { x: track_x, y: track_y, w: sb_w, h: track_h };
+                let track = Rect {
+                    x: track_x,
+                    y: track_y,
+                    w: sb_w,
+                    h: track_h,
+                };
 
                 let ratio = visible_h / content_h;
                 let thumb_h = (track_h * ratio).max(spacing::scrollbar_thumb_min_h());
@@ -1814,7 +1924,12 @@ impl Renderer {
                 } else {
                     track.y
                 };
-                let thumb = Rect { x: track_x, y: thumb_y, w: sb_w, h: thumb_h };
+                let thumb = Rect {
+                    x: track_x,
+                    y: thumb_y,
+                    w: sb_w,
+                    h: thumb_h,
+                };
                 (track, thumb)
             } else {
                 (zero_rect, zero_rect)
@@ -1830,7 +1945,12 @@ impl Renderer {
                     let track_x = container.x + sb_margin;
                     let track_w = container.w - sb_margin * 2.0 - v_sb_inset;
                     let track_y = editor.y + editor.h + container_pad - sb_w - sb_margin;
-                    let track = Rect { x: track_x, y: track_y, w: track_w, h: sb_w };
+                    let track = Rect {
+                        x: track_x,
+                        y: track_y,
+                        w: track_w,
+                        h: sb_w,
+                    };
 
                     let ratio = editor_visible_w / editor_content_w;
                     let thumb_w = (track.w * ratio).max(spacing::scrollbar_thumb_min_h());
@@ -1841,7 +1961,12 @@ impl Renderer {
                     } else {
                         track.x
                     };
-                    let thumb = Rect { x: thumb_x, y: track.y, w: thumb_w, h: sb_w };
+                    let thumb = Rect {
+                        x: thumb_x,
+                        y: track.y,
+                        w: thumb_w,
+                        h: sb_w,
+                    };
                     (track, thumb)
                 } else {
                     // Reset h-scroll when content fits
@@ -1865,7 +1990,8 @@ impl Renderer {
                 let visible_h = editor_h - text_pad * 2.0;
                 let max_scroll_y = (content_h - visible_h).max(0.0);
                 if i < self.cell_editor_scroll_y.len() {
-                    self.cell_editor_scroll_y[i] = self.cell_editor_scroll_y[i].clamp(0.0, max_scroll_y);
+                    self.cell_editor_scroll_y[i] =
+                        self.cell_editor_scroll_y[i].clamp(0.0, max_scroll_y);
                 }
             } else if i < self.cell_editor_scroll_y.len() {
                 self.cell_editor_scroll_y[i] = 0.0;
@@ -1952,7 +2078,7 @@ impl Renderer {
 
         let uc_total = uc_start.elapsed().as_micros();
         if reshape_count > 0 || uc_total > 500 {
-            log::warn!(
+            log::debug!(
                 "[perf] update_cells: {}us total | reshapes={} set_rich_text={}us shape={}us measure={}us output={}us layout={}us | reasons=[{}]",
                 uc_total, reshape_count, perf_set_rich_text_us, perf_shape_us, perf_measure_us, perf_output_us, perf_layout_us,
                 reshape_reasons.join(", ")
@@ -1983,18 +2109,17 @@ impl Renderer {
             self.cursor_content_pos = (cx, cy, ch);
 
             // Compute selection highlight rects
-            self.selection_content_rects = if let Some((sel_start, sel_end)) =
-                cells[active_cell_index].selection
-            {
-                Self::compute_selection_rects(
-                    &self.cell_buffers[active_cell_index],
-                    &cells[active_cell_index].text,
-                    sel_start,
-                    sel_end,
-                )
-            } else {
-                Vec::new()
-            };
+            self.selection_content_rects =
+                if let Some((sel_start, sel_end)) = cells[active_cell_index].selection {
+                    Self::compute_selection_rects(
+                        &self.cell_buffers[active_cell_index],
+                        &cells[active_cell_index].text,
+                        sel_start,
+                        sel_end,
+                    )
+                } else {
+                    Vec::new()
+                };
 
             // Auto-scroll to keep active cell cursor visible, but only when
             // the cursor or active cell actually changed (e.g. typing,
@@ -2002,18 +2127,23 @@ impl Renderer {
             // every sync_active_tab() call (play button, copy, etc.) would
             // force-scroll to the cursor at the bottom of a long cell.
             let cursor_byte = cells[active_cell_index].cursor_byte;
-            let cursor_moved = active_cell_index != self.prev_active_cell
-                || cursor_byte != self.prev_cursor_byte;
+            let cursor_moved =
+                active_cell_index != self.prev_active_cell || cursor_byte != self.prev_cursor_byte;
             self.prev_active_cell = active_cell_index;
             self.prev_cursor_byte = cursor_byte;
 
             if cursor_moved {
                 // Auto-scroll within contracted cell (vertical)
                 if cells[active_cell_index].contracted_editor_h.is_some() {
-                    let visible_h = layouts.get(active_cell_index)
+                    let visible_h = layouts
+                        .get(active_cell_index)
                         .map(|l| l.editor.h - text_pad * 2.0)
                         .unwrap_or(0.0);
-                    let content_h_total = self.cell_content_heights.get(active_cell_index).copied().unwrap_or(0.0);
+                    let content_h_total = self
+                        .cell_content_heights
+                        .get(active_cell_index)
+                        .copied()
+                        .unwrap_or(0.0);
                     if content_h_total > visible_h {
                         let scroll_y = &mut self.cell_editor_scroll_y[active_cell_index];
                         if cy < *scroll_y {
@@ -2028,7 +2158,8 @@ impl Renderer {
 
                 // Auto-scroll within cell (horizontal)
                 {
-                    let visible_w = layouts.get(active_cell_index)
+                    let visible_w = layouts
+                        .get(active_cell_index)
                         .map(|l| l.editor.w - text_pad * 2.0)
                         .unwrap_or(0.0);
                     let scroll_x = &mut self.cell_editor_scroll_x[active_cell_index];
@@ -2042,8 +2173,13 @@ impl Renderer {
 
                 // Notebook-level auto-scroll to keep cursor on screen
                 if let Some(active_layout) = layouts.get(active_cell_index) {
-                    let cell_scroll_y_offset = self.cell_editor_scroll_y.get(active_cell_index).copied().unwrap_or(0.0);
-                    let cursor_screen_y = active_layout.editor.y + text_pad + cy - cell_scroll_y_offset;
+                    let cell_scroll_y_offset = self
+                        .cell_editor_scroll_y
+                        .get(active_cell_index)
+                        .copied()
+                        .unwrap_or(0.0);
+                    let cursor_screen_y =
+                        active_layout.editor.y + text_pad + cy - cell_scroll_y_offset;
                     let cursor_bottom = cursor_screen_y + ch;
 
                     let old_scroll = self.cell_scroll_y;
@@ -2090,11 +2226,7 @@ impl Renderer {
                         return (glyph.x, run.line_top, run.line_height);
                     }
                 }
-                let x = run
-                    .glyphs
-                    .last()
-                    .map(|g| g.x + g.w)
-                    .unwrap_or(0.0);
+                let x = run.glyphs.last().map(|g| g.x + g.w).unwrap_or(0.0);
                 return (x, run.line_top, run.line_height);
             }
         }
@@ -2163,11 +2295,7 @@ impl Renderer {
             let x_start = if col_start == 0 {
                 0.0
             } else {
-                let mut x = run
-                    .glyphs
-                    .last()
-                    .map(|g| g.x + g.w)
-                    .unwrap_or(0.0);
+                let mut x = run.glyphs.last().map(|g| g.x + g.w).unwrap_or(0.0);
                 for glyph in run.glyphs.iter() {
                     if glyph.start >= col_start {
                         x = glyph.x;
@@ -2179,17 +2307,10 @@ impl Renderer {
 
             // Find x position of col_end
             let x_end = if col_end == usize::MAX {
-                run.glyphs
-                    .last()
-                    .map(|g| g.x + g.w)
-                    .unwrap_or(0.0)
-                    + min_sel_width // extend past line end for visibility
+                run.glyphs.last().map(|g| g.x + g.w).unwrap_or(0.0) + min_sel_width
+            // extend past line end for visibility
             } else {
-                let mut x = run
-                    .glyphs
-                    .last()
-                    .map(|g| g.x + g.w)
-                    .unwrap_or(0.0);
+                let mut x = run.glyphs.last().map(|g| g.x + g.w).unwrap_or(0.0);
                 for glyph in run.glyphs.iter() {
                     if glyph.start >= col_end {
                         x = glyph.x;
@@ -2269,9 +2390,18 @@ impl Renderer {
             let text_w = Self::measure_label_width(&label);
             let close_label =
                 Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{2715}");
-            let left_pad = if tab.is_modified { dot_area } else { tab_pad_h() };
+            let left_pad = if tab.is_modified {
+                dot_area
+            } else {
+                tab_pad_h()
+            };
             let tab_w = left_pad + text_w + tab_close_pad() + tab_close_size() + tab_pad_h();
-            let tab_rect = Rect { x, y, w: tab_w, h: tab_h };
+            let tab_rect = Rect {
+                x,
+                y,
+                w: tab_w,
+                h: tab_h,
+            };
             let close_rect = Rect {
                 x: x + tab_w - tab_pad_h() - tab_close_size(),
                 y: y + (tab_h - tab_close_size()) / 2.0,
@@ -2284,12 +2414,20 @@ impl Renderer {
             self.tab_labels.push(label);
             self.tab_close_labels.push(close_label);
             self.tab_modified.push(tab.is_modified);
-            hit_rects.push(TabHitRect { full: tab_rect, close: close_rect });
+            hit_rects.push(TabHitRect {
+                full: tab_rect,
+                close: close_rect,
+            });
             x += tab_w + tab_gap();
         }
 
         let plus_w = tab_pad_h() * 2.0 + Self::measure_label_width(&self.plus_label);
-        self.plus_rect = Rect { x, y, w: plus_w, h: tab_h };
+        self.plus_rect = Rect {
+            x,
+            y,
+            w: plus_w,
+            h: tab_h,
+        };
         Some((hit_rects, self.plus_rect))
     }
 
@@ -2374,21 +2512,41 @@ impl Renderer {
                 let is_playing = i < self.cell_playing.len() && self.cell_playing[i];
                 let is_hovered = hover == HoverTarget::CellPlayButton(i);
                 let btn_color = if is_playing {
-                    if is_hovered { t.stop_button_hover } else { t.stop_button }
+                    if is_hovered {
+                        t.stop_button_hover
+                    } else {
+                        t.stop_button
+                    }
                 } else {
-                    if is_hovered { t.play_button_hover } else { t.play_button }
+                    if is_hovered {
+                        t.play_button_hover
+                    } else {
+                        t.play_button
+                    }
                 };
-                ui_rects.push(rect_rounded(cl.play_button, btn_color, 4.0 * fonts::scale()));
+                ui_rects.push(rect_rounded(
+                    cl.play_button,
+                    btn_color,
+                    4.0 * fonts::scale(),
+                ));
             }
 
             // Copy button hover (round)
             if hover == HoverTarget::CellCopyButton(i) {
-                ui_rects.push(rect_rounded(cl.copy_button, t.bg_hover, cl.copy_button.w / 2.0));
+                ui_rects.push(rect_rounded(
+                    cl.copy_button,
+                    t.bg_hover,
+                    cl.copy_button.w / 2.0,
+                ));
             }
 
             // Delete button hover (round)
             if hover == HoverTarget::CellDeleteButton(i) {
-                ui_rects.push(rect_rounded(cl.delete_button, t.bg_hover, cl.delete_button.w / 2.0));
+                ui_rects.push(rect_rounded(
+                    cl.delete_button,
+                    t.bg_hover,
+                    cl.delete_button.w / 2.0,
+                ));
             }
 
             // Separator line
@@ -2401,12 +2559,20 @@ impl Renderer {
 
                 // Chevron toggle button hover (round)
                 if hover == HoverTarget::CellOutputToggle(i) {
-                    ui_rects.push(rect_rounded(cl.output_toggle, t.bg_hover, cl.output_toggle.w / 2.0));
+                    ui_rects.push(rect_rounded(
+                        cl.output_toggle,
+                        t.bg_hover,
+                        cl.output_toggle.w / 2.0,
+                    ));
                 }
 
                 // Copy button hover (round)
                 if hover == HoverTarget::CellOutputCopyButton(i) {
-                    ui_rects.push(rect_rounded(cl.output_copy_button, t.bg_hover, cl.output_copy_button.w / 2.0));
+                    ui_rects.push(rect_rounded(
+                        cl.output_copy_button,
+                        t.bg_hover,
+                        cl.output_copy_button.w / 2.0,
+                    ));
                 }
             }
 
@@ -2435,8 +2601,16 @@ impl Renderer {
 
         // Selection highlight in active cell (clipped to editor bounds, excluding scrollbar areas)
         if let Some(cl) = self.cell_layouts.get(self.active_cell_index) {
-            let sel_scroll_x = self.cell_editor_scroll_x.get(self.active_cell_index).copied().unwrap_or(0.0);
-            let sel_scroll_y = self.cell_editor_scroll_y.get(self.active_cell_index).copied().unwrap_or(0.0);
+            let sel_scroll_x = self
+                .cell_editor_scroll_x
+                .get(self.active_cell_index)
+                .copied()
+                .unwrap_or(0.0);
+            let sel_scroll_y = self
+                .cell_editor_scroll_y
+                .get(self.active_cell_index)
+                .copied()
+                .unwrap_or(0.0);
             let editor_right = if cl.editor_v_scrollbar_track.h > 0.0 {
                 cl.editor_v_scrollbar_track.x
             } else {
@@ -2477,8 +2651,16 @@ impl Renderer {
 
         // Cursor in active cell
         if let Some(cl) = self.cell_layouts.get(self.active_cell_index) {
-            let cur_scroll_x = self.cell_editor_scroll_x.get(self.active_cell_index).copied().unwrap_or(0.0);
-            let cur_scroll_y = self.cell_editor_scroll_y.get(self.active_cell_index).copied().unwrap_or(0.0);
+            let cur_scroll_x = self
+                .cell_editor_scroll_x
+                .get(self.active_cell_index)
+                .copied()
+                .unwrap_or(0.0);
+            let cur_scroll_y = self
+                .cell_editor_scroll_y
+                .get(self.active_cell_index)
+                .copied()
+                .unwrap_or(0.0);
             let cursor_screen_x = cl.editor.x + text_pad + self.cursor_content_pos.0 - cur_scroll_x;
             let cursor_screen_y = cl.editor.y + text_pad + self.cursor_content_pos.1 - cur_scroll_y;
             let ch = self.cursor_content_pos.2;
@@ -2516,15 +2698,18 @@ impl Renderer {
         }
 
         // Add cell button (round)
-        if self.add_cell_rect.y + self.add_cell_rect.h > lp.y
-            && self.add_cell_rect.y < lp.y + lp.h
+        if self.add_cell_rect.y + self.add_cell_rect.h > lp.y && self.add_cell_rect.y < lp.y + lp.h
         {
             let add_color = if hover == HoverTarget::AddCellButton {
                 t.bg_hover
             } else {
                 t.bg_elevated
             };
-            ui_rects.push(rect_rounded(self.add_cell_rect, add_color, self.add_cell_rect.w / 2.0));
+            ui_rects.push(rect_rounded(
+                self.add_cell_rect,
+                add_color,
+                self.add_cell_rect.w / 2.0,
+            ));
         }
 
         // Scrollbars
@@ -2579,7 +2764,12 @@ impl Renderer {
             let size = tab_close_size();
             let cx = self.plus_rect.x + self.plus_rect.w / 2.0;
             let cy = self.plus_rect.y + self.plus_rect.h / 2.0;
-            let r = Rect { x: cx - size / 2.0, y: cy - size / 2.0, w: size, h: size };
+            let r = Rect {
+                x: cx - size / 2.0,
+                y: cy - size / 2.0,
+                w: size,
+                h: size,
+            };
             ui_rects.push(rect_rounded(r, t.bg_hover, size / 2.0));
         }
 
@@ -2643,24 +2833,40 @@ impl Renderer {
             ui_rects.push(rect_from(self.dropdown_bg, t.dropdown_bg));
             let db = self.dropdown_bg;
             ui_rects.push(RectInstance {
-                x: db.x, y: db.y, w: db.w, h: 1.0,
+                x: db.x,
+                y: db.y,
+                w: db.w,
+                h: 1.0,
                 color: t.dropdown_separator.to_f32_array(),
-                corner_radius: 0.0, _padding: [0.0; 3],
+                corner_radius: 0.0,
+                _padding: [0.0; 3],
             });
             ui_rects.push(RectInstance {
-                x: db.x, y: db.y + db.h - 1.0, w: db.w, h: 1.0,
+                x: db.x,
+                y: db.y + db.h - 1.0,
+                w: db.w,
+                h: 1.0,
                 color: t.dropdown_separator.to_f32_array(),
-                corner_radius: 0.0, _padding: [0.0; 3],
+                corner_radius: 0.0,
+                _padding: [0.0; 3],
             });
             ui_rects.push(RectInstance {
-                x: db.x, y: db.y, w: 1.0, h: db.h,
+                x: db.x,
+                y: db.y,
+                w: 1.0,
+                h: db.h,
                 color: t.dropdown_separator.to_f32_array(),
-                corner_radius: 0.0, _padding: [0.0; 3],
+                corner_radius: 0.0,
+                _padding: [0.0; 3],
             });
             ui_rects.push(RectInstance {
-                x: db.x + db.w - 1.0, y: db.y, w: 1.0, h: db.h,
+                x: db.x + db.w - 1.0,
+                y: db.y,
+                w: 1.0,
+                h: db.h,
                 color: t.dropdown_separator.to_f32_array(),
-                corner_radius: 0.0, _padding: [0.0; 3],
+                corner_radius: 0.0,
+                _padding: [0.0; 3],
             });
 
             for (idx, rect) in self.dropdown_item_rects.iter().enumerate() {
@@ -2738,7 +2944,8 @@ impl Renderer {
                 } else {
                     0
                 };
-                let clip_bottom = ((cl.editor.y + cl.editor.h) as i32 - h_sb_adjust).min(pane_bottom);
+                let clip_bottom =
+                    ((cl.editor.y + cl.editor.h) as i32 - h_sb_adjust).min(pane_bottom);
 
                 let bounds = TextBounds {
                     left: clip_left,
@@ -2790,13 +2997,12 @@ impl Renderer {
                     let mut chev_bounds = TextBounds {
                         left: (cl.output_toggle.x as i32).max(pane_left),
                         top: tb_clip_top,
-                        right: ((cl.output_toggle.x + cl.output_toggle.w) as i32)
-                            .min(pane_right),
+                        right: ((cl.output_toggle.x + cl.output_toggle.w) as i32).min(pane_right),
                         bottom: tb_clip_bottom,
                     };
                     let chev_visible = dd_clip
                         .as_ref()
-                        .map_or(true, |dd| clip_bounds_under_dropdown(&mut chev_bounds, dd));
+                        .is_none_or(|dd| clip_bounds_under_dropdown(&mut chev_bounds, dd));
                     if chev_visible {
                         text_areas.push(TextArea {
                             buffer: chevron_buf,
@@ -2815,13 +3021,12 @@ impl Renderer {
                     let mut label_bounds = TextBounds {
                         left: (label_x as i32).max(pane_left),
                         top: tb_clip_top,
-                        right: ((cl.output_toolbar.x + cl.output_toolbar.w) as i32)
-                            .min(pane_right),
+                        right: ((cl.output_toolbar.x + cl.output_toolbar.w) as i32).min(pane_right),
                         bottom: tb_clip_bottom,
                     };
                     let label_visible = dd_clip
                         .as_ref()
-                        .map_or(true, |dd| clip_bounds_under_dropdown(&mut label_bounds, dd));
+                        .is_none_or(|dd| clip_bounds_under_dropdown(&mut label_bounds, dd));
                     if label_visible {
                         text_areas.push(TextArea {
                             buffer: &self.output_label,
@@ -2844,7 +3049,7 @@ impl Renderer {
                     };
                     let ocb_visible = dd_clip
                         .as_ref()
-                        .map_or(true, |dd| clip_bounds_under_dropdown(&mut ocb_bounds, dd));
+                        .is_none_or(|dd| clip_bounds_under_dropdown(&mut ocb_bounds, dd));
                     if ocb_visible {
                         let copy_w = Self::measure_label_width(&self.cell_copy_label);
                         let copy_line_h = fonts::ui_size() * 1.4;
@@ -2865,11 +3070,7 @@ impl Renderer {
 
             // Output text (REDUCE result or error) below the toolbar
             if cl.output.h > 0.0 && i < self.cell_output_buffers.len() {
-                let scroll_x = self
-                    .cell_output_scroll_x
-                    .get(i)
-                    .copied()
-                    .unwrap_or(0.0);
+                let scroll_x = self.cell_output_scroll_x.get(i).copied().unwrap_or(0.0);
                 let clip_left = (cl.output.x as i32).max(pane_left);
                 let clip_top = (cl.output.y as i32).max(pane_top);
                 let clip_right = ((cl.output.x + cl.output.w) as i32).min(pane_right);
@@ -2909,11 +3110,15 @@ impl Renderer {
                 };
                 let visible = dd_clip
                     .as_ref()
-                    .map_or(true, |dd| clip_bounds_under_dropdown(&mut bounds, dd));
+                    .is_none_or(|dd| clip_bounds_under_dropdown(&mut bounds, dd));
 
                 if visible {
                     let is_playing = i < self.cell_playing.len() && self.cell_playing[i];
-                    let play_buf = if is_playing { &self.cell_stop_label } else { &self.cell_play_label };
+                    let play_buf = if is_playing {
+                        &self.cell_stop_label
+                    } else {
+                        &self.cell_play_label
+                    };
                     let label_w = Self::measure_label_width(play_buf);
                     let line_h = fonts::ui_size() * 1.4;
                     let cx = play.x + (play.w - label_w) / 2.0;
@@ -2944,7 +3149,7 @@ impl Renderer {
                     };
                     let visible = dd_clip
                         .as_ref()
-                        .map_or(true, |dd| clip_bounds_under_dropdown(&mut bounds, dd));
+                        .is_none_or(|dd| clip_bounds_under_dropdown(&mut bounds, dd));
 
                     if visible {
                         let label_w = Self::measure_label_width(&self.cell_copy_label);
@@ -2957,7 +3162,7 @@ impl Renderer {
                             top: cy,
                             scale: 1.0,
                             bounds,
-                            default_color: GlyphonColor::rgb(255, 255, 255),
+                            default_color: t.text_secondary.to_glyphon(),
                             custom_glyphs: &[],
                         });
                     }
@@ -2977,7 +3182,7 @@ impl Renderer {
                 };
                 let visible = dd_clip
                     .as_ref()
-                    .map_or(true, |dd| clip_bounds_under_dropdown(&mut bounds, dd));
+                    .is_none_or(|dd| clip_bounds_under_dropdown(&mut bounds, dd));
 
                 if visible {
                     let label_w = Self::measure_label_width(&self.cell_delete_label);
@@ -2990,7 +3195,7 @@ impl Renderer {
                         top: cy,
                         scale: 1.0,
                         bounds,
-                        default_color: GlyphonColor::rgb(255, 255, 255),
+                        default_color: t.text_secondary.to_glyphon(),
                         custom_glyphs: &[],
                     });
                 }
@@ -3007,11 +3212,21 @@ impl Renderer {
             let tip_h = fonts::small_size() * 1.4 + spacing::xs() * 2.0;
             let tip_x = cl.play_button.x + cl.play_button.w / 2.0 - tip_w / 2.0;
             let tip_y = cl.play_button.y + cl.play_button.h + spacing::xs();
-            let tip_rect = Rect { x: tip_x, y: tip_y, w: tip_w, h: tip_h };
+            let tip_rect = Rect {
+                x: tip_x,
+                y: tip_y,
+                w: tip_w,
+                h: tip_h,
+            };
 
             // Tooltip background + border
             ui_rects.push(rect_rounded(
-                Rect { x: tip_rect.x - 1.0, y: tip_rect.y - 1.0, w: tip_rect.w + 2.0, h: tip_rect.h + 2.0 },
+                Rect {
+                    x: tip_rect.x - 1.0,
+                    y: tip_rect.y - 1.0,
+                    w: tip_rect.w + 2.0,
+                    h: tip_rect.h + 2.0,
+                },
                 t.tooltip_border,
                 4.0 * fonts::scale(),
             ));
@@ -3035,11 +3250,11 @@ impl Renderer {
         }
 
         // Add cell button label (centered "+" icon)
-        if self.add_cell_rect.y + self.add_cell_rect.h > lp.y
-            && self.add_cell_rect.y < lp.y + lp.h
+        if self.add_cell_rect.y + self.add_cell_rect.h > lp.y && self.add_cell_rect.y < lp.y + lp.h
         {
             let clip_top = (self.add_cell_rect.y as i32).max(pane_top);
-            let clip_bottom = ((self.add_cell_rect.y + self.add_cell_rect.h) as i32).min(pane_bottom);
+            let clip_bottom =
+                ((self.add_cell_rect.y + self.add_cell_rect.h) as i32).min(pane_bottom);
             let mut bounds = TextBounds {
                 left: self.add_cell_rect.x as i32,
                 top: clip_top,
@@ -3048,7 +3263,7 @@ impl Renderer {
             };
             let visible = dd_clip
                 .as_ref()
-                .map_or(true, |dd| clip_bounds_under_dropdown(&mut bounds, dd));
+                .is_none_or(|dd| clip_bounds_under_dropdown(&mut bounds, dd));
 
             if visible && bounds.top < bounds.bottom {
                 let label_w = Self::measure_label_width(&self.add_cell_label);
@@ -3061,7 +3276,7 @@ impl Renderer {
                     top: cy,
                     scale: 1.0,
                     bounds,
-                    default_color: GlyphonColor::rgb(255, 255, 255),
+                    default_color: t.text_secondary.to_glyphon(),
                     custom_glyphs: &[],
                 });
             }
@@ -3126,13 +3341,17 @@ impl Renderer {
 
         for (i, label) in self.tab_labels.iter().enumerate() {
             let (tab_rect, _) = &self.tab_bg_rects[i];
-            let Some(bounds) = clip_bounds_for_dropdown(tab_rect, &tab_bar, dropdown_clip.as_ref()) else {
+            let Some(bounds) = clip_bounds_for_dropdown(tab_rect, &tab_bar, dropdown_clip.as_ref())
+            else {
                 continue;
             };
 
             let is_modified = i < self.tab_modified.len() && self.tab_modified[i];
             let text_left = if is_modified {
-                tab_rect.x + tab_dot_pad() + Self::measure_label_width(&self.dot_label) + tab_dot_pad()
+                tab_rect.x
+                    + tab_dot_pad()
+                    + Self::measure_label_width(&self.dot_label)
+                    + tab_dot_pad()
             } else {
                 tab_rect.x + tab_pad_h()
             };
@@ -3150,7 +3369,9 @@ impl Renderer {
         // Modified dot indicators (text-based \u{25CF} for round dot)
         for (i, (tab_rect, _)) in self.tab_bg_rects.iter().enumerate() {
             if i < self.tab_modified.len() && self.tab_modified[i] {
-                let Some(bounds) = clip_bounds_for_dropdown(tab_rect, &tab_bar, dropdown_clip.as_ref()) else {
+                let Some(bounds) =
+                    clip_bounds_for_dropdown(tab_rect, &tab_bar, dropdown_clip.as_ref())
+                else {
                     continue;
                 };
 
@@ -3173,7 +3394,9 @@ impl Renderer {
         // Tab close labels — centered in close rect
         for (i, close_label) in self.tab_close_labels.iter().enumerate() {
             let close_rect = &self.tab_close_rects[i];
-            let Some(mut bounds) = clip_bounds_for_dropdown(close_rect, &tab_bar, dropdown_clip.as_ref()) else {
+            let Some(mut bounds) =
+                clip_bounds_for_dropdown(close_rect, &tab_bar, dropdown_clip.as_ref())
+            else {
                 continue;
             };
             // Tighten bounds to close rect itself
@@ -3200,7 +3423,9 @@ impl Renderer {
         }
 
         // Plus button label
-        if let Some(bounds) = clip_bounds_for_dropdown(&self.plus_rect, &tab_bar, dropdown_clip.as_ref()) {
+        if let Some(bounds) =
+            clip_bounds_for_dropdown(&self.plus_rect, &tab_bar, dropdown_clip.as_ref())
+        {
             text_areas.push(TextArea {
                 buffer: &self.plus_label,
                 left: self.plus_rect.x + tab_pad_h(),
@@ -3343,12 +3568,16 @@ impl Renderer {
         // Bump step if generate_ticks overshoots MAX_AXIS_LABELS due to boundary rounding.
         let x_ticks = loop {
             let xt = generate_ticks(render_area.axis_x_min, render_area.axis_x_max, x_step);
-            if xt.len() <= MAX_AXIS_LABELS { break xt; }
+            if xt.len() <= MAX_AXIS_LABELS {
+                break xt;
+            }
             x_step *= 2.0;
         };
         let y_ticks = loop {
             let yt = generate_ticks(render_area.axis_y_min, render_area.axis_y_max, y_step);
-            if yt.len() <= MAX_AXIS_LABELS { break yt; }
+            if yt.len() <= MAX_AXIS_LABELS {
+                break yt;
+            }
             y_step *= 2.0;
         };
 
@@ -3391,7 +3620,8 @@ impl Renderer {
                         w: if is_zero { 2.0 } else { 1.0 },
                         h: rp.h,
                         color: if is_zero { zero_color } else { grid_color },
-                        corner_radius: 0.0, _padding: [0.0; 3],
+                        corner_radius: 0.0,
+                        _padding: [0.0; 3],
                     });
                 }
             }
@@ -3408,7 +3638,8 @@ impl Renderer {
                         w: rp.w,
                         h: if is_zero { 2.0 } else { 1.0 },
                         color: if is_zero { zero_color } else { grid_color },
-                        corner_radius: 0.0, _padding: [0.0; 3],
+                        corner_radius: 0.0,
+                        _padding: [0.0; 3],
                     });
                 }
             }
@@ -3435,7 +3666,9 @@ impl Renderer {
                 let ly = rp.y + rp.h - label_h - label_pad;
                 axis_text_areas.push(TextArea {
                     buffer: &self.axis_label_buffers[i],
-                    left: lx, top: ly, scale: 1.0,
+                    left: lx,
+                    top: ly,
+                    scale: 1.0,
                     bounds: rp_bounds,
                     default_color: label_color,
                     custom_glyphs: &[],
@@ -3452,7 +3685,9 @@ impl Renderer {
                 let ly = (sy - label_h - 1.0).max(rp.y + label_pad);
                 axis_text_areas.push(TextArea {
                     buffer: &self.axis_label_buffers[MAX_AXIS_LABELS + i],
-                    left: lx, top: ly, scale: 1.0,
+                    left: lx,
+                    top: ly,
+                    scale: 1.0,
                     bounds: rp_bounds,
                     default_color: label_color,
                     custom_glyphs: &[],
@@ -3472,14 +3707,22 @@ impl Renderer {
 
             // Crosshair lines (rendered in overlay → inverted)
             axis_rects.push(RectInstance {
-                x: cx - line_thickness / 2.0, y: rp.y, w: line_thickness, h: rp.h,
+                x: cx - line_thickness / 2.0,
+                y: rp.y,
+                w: line_thickness,
+                h: rp.h,
                 color: cursor_color,
-                corner_radius: 0.0, _padding: [0.0; 3],
+                corner_radius: 0.0,
+                _padding: [0.0; 3],
             });
             axis_rects.push(RectInstance {
-                x: rp.x, y: cy - line_thickness / 2.0, w: rp.w, h: line_thickness,
+                x: rp.x,
+                y: cy - line_thickness / 2.0,
+                w: rp.w,
+                h: line_thickness,
                 color: cursor_color,
-                corner_radius: 0.0, _padding: [0.0; 3],
+                corner_radius: 0.0,
+                _padding: [0.0; 3],
             });
 
             // Cursor world coordinates — precision based on axis range
@@ -3497,7 +3740,8 @@ impl Renderer {
                 Attrs::new().family(Family::Monospace),
                 Shaping::Advanced,
             );
-            self.cursor_x_label.shape_until_scroll(&mut self.font_system, false);
+            self.cursor_x_label
+                .shape_until_scroll(&mut self.font_system, false);
             let cx_lw = Self::measure_label_width(&self.cursor_x_label);
             let cx_lx = (cx - cx_lw / 2.0).clamp(rp.x + label_pad, rp.x + rp.w - cx_lw - label_pad);
             let cx_ly = rp.y + rp.h - cursor_label_h - label_pad;
@@ -3509,37 +3753,49 @@ impl Renderer {
                 Attrs::new().family(Family::Monospace),
                 Shaping::Advanced,
             );
-            self.cursor_y_label.shape_until_scroll(&mut self.font_system, false);
+            self.cursor_y_label
+                .shape_until_scroll(&mut self.font_system, false);
             let cy_lw = Self::measure_label_width(&self.cursor_y_label);
-            let cy_ly = (cy - cursor_label_h - 1.0).clamp(rp.y + label_pad, rp.y + rp.h - cursor_label_h - label_pad);
+            let cy_ly = (cy - cursor_label_h - 1.0)
+                .clamp(rp.y + label_pad, rp.y + rp.h - cursor_label_h - label_pad);
             let cy_lx = rp.x + label_pad;
 
             // Bg rects + text rendered directly to surface in Pass 5 (no inversion)
             let bg_pad = 3.0_f32 * scale;
             let bg_color = [0.0_f32, 0.0, 0.0, 0.9];
             cursor_bg_rects.push(RectInstance {
-                x: cx_lx - bg_pad, y: cx_ly - bg_pad,
-                w: cx_lw + bg_pad * 2.0, h: cursor_label_h + bg_pad * 2.0,
+                x: cx_lx - bg_pad,
+                y: cx_ly - bg_pad,
+                w: cx_lw + bg_pad * 2.0,
+                h: cursor_label_h + bg_pad * 2.0,
                 color: bg_color,
-                corner_radius: 3.0, _padding: [0.0; 3],
+                corner_radius: 3.0,
+                _padding: [0.0; 3],
             });
             cursor_bg_rects.push(RectInstance {
-                x: cy_lx - bg_pad, y: cy_ly - bg_pad,
-                w: cy_lw + bg_pad * 2.0, h: cursor_label_h + bg_pad * 2.0,
+                x: cy_lx - bg_pad,
+                y: cy_ly - bg_pad,
+                w: cy_lw + bg_pad * 2.0,
+                h: cursor_label_h + bg_pad * 2.0,
                 color: bg_color,
-                corner_radius: 3.0, _padding: [0.0; 3],
+                corner_radius: 3.0,
+                _padding: [0.0; 3],
             });
 
             cursor_text_areas.push(TextArea {
                 buffer: &self.cursor_x_label,
-                left: cx_lx, top: cx_ly, scale: 1.0,
+                left: cx_lx,
+                top: cx_ly,
+                scale: 1.0,
                 bounds: rp_bounds,
                 default_color: cursor_text_color,
                 custom_glyphs: &[],
             });
             cursor_text_areas.push(TextArea {
                 buffer: &self.cursor_y_label,
-                left: cy_lx, top: cy_ly, scale: 1.0,
+                left: cy_lx,
+                top: cy_ly,
+                scale: 1.0,
                 bounds: rp_bounds,
                 default_color: cursor_text_color,
                 custom_glyphs: &[],
@@ -3572,9 +3828,7 @@ impl Renderer {
             .unwrap();
 
         let frame = self.surface.get_current_texture().unwrap();
-        let view = frame
-            .texture
-            .create_view(&TextureViewDescriptor::default());
+        let view = frame.texture.create_view(&TextureViewDescriptor::default());
         let mut encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor { label: None });
@@ -3888,5 +4142,10 @@ fn clip_bounds_for_dropdown(
         }
     }
 
-    Some(TextBounds { left, top, right, bottom })
+    Some(TextBounds {
+        left,
+        top,
+        right,
+        bottom,
+    })
 }

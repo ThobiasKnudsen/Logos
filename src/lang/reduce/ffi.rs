@@ -17,11 +17,7 @@ pub type CharacterWriter = Option<extern "C" fn(c_int) -> c_int>;
 extern "C" {
     // --- All calls go through try/catch wrappers in reduce_ffi.cpp ---
 
-    pub fn reduce_ffi_cslstart(
-        argc: c_int,
-        argv: *const *const c_char,
-        w: CharacterWriter,
-    );
+    pub fn reduce_ffi_cslstart(argc: c_int, argv: *const *const c_char, w: CharacterWriter);
 
     pub fn reduce_ffi_cslfinish(w: CharacterWriter) -> c_int;
 
@@ -41,10 +37,7 @@ extern "C" {
 
     pub fn reduce_ffi_prepare_for_top_level_loop() -> c_int;
 
-    pub fn reduce_ffi_set_callbacks(
-        r: CharacterReader,
-        w: CharacterWriter,
-    ) -> c_int;
+    pub fn reduce_ffi_set_callbacks(r: CharacterReader, w: CharacterWriter) -> c_int;
 
     // --- PROC_* functions kept for stack-based API (already extern "C") ---
 

@@ -1,5 +1,5 @@
-mod tab;
 mod manager;
+mod tab;
 
-pub use tab::Tab;
 pub use manager::TabManager;
+pub use tab::Tab;

@@ -1,13 +1,42 @@
 use super::token::{Token, TokenType};
 
 pub(crate) const BUILTINS: &[&str] = &[
-    "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh",
-    "log", "log2", "log10", "exp", "exp2",
-    "floor", "ceil", "round", "fract",
-    "abs", "sign", "pow", "sqrt", "mod", "min", "max",
-    "clamp", "mix", "step", "smoothstep",
-    "length", "normalize", "dot", "cross",
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "sinh",
+    "cosh",
+    "tanh",
+    "log",
+    "log2",
+    "log10",
+    "exp",
+    "exp2",
+    "floor",
+    "ceil",
+    "round",
+    "fract",
+    "abs",
+    "sign",
+    "pow",
+    "sqrt",
+    "mod",
+    "min",
+    "max",
+    "clamp",
+    "mix",
+    "step",
+    "smoothstep",
+    "length",
+    "normalize",
+    "dot",
+    "cross",
     "len",
+    "print",
+    "plot",
 ];
 
 pub(crate) const AXIS_VARS: &[&str] = &["x", "y", "z", "t"];
@@ -21,6 +50,10 @@ pub(crate) const TYPE_NAMES: &[(&str, TokenType)] = &[
     ("vec4", TokenType::TypeVec4),
     ("bool", TokenType::TypeBool),
 ];
+
+/// Identifiers longer than this are rejected as malformed (defensive cap;
+/// real identifiers in math/code never approach this length).
+const MAX_IDENT_LEN: usize = 1024;
 
 pub struct Lexer<'a> {
     input: &'a str,
@@ -37,7 +70,10 @@ impl<'a> Lexer<'a> {
         loop {
             self.skip_spaces_and_comments();
             if self.pos >= self.input.len() {
-                tokens.push(Token { ty: TokenType::Eof, span: (self.pos, self.pos) });
+                tokens.push(Token {
+                    ty: TokenType::Eof,
+                    span: (self.pos, self.pos),
+                });
                 break;
             }
             // Newlines are statement separators
@@ -51,7 +87,10 @@ impl<'a> Lexer<'a> {
                 // Only emit newline if there are already tokens (skip leading newlines)
                 // and we're not at EOF
                 if !tokens.is_empty() && self.pos < self.input.len() {
-                    tokens.push(Token { ty: TokenType::Newline, span: (start, self.pos) });
+                    tokens.push(Token {
+                        ty: TokenType::Newline,
+                        span: (start, self.pos),
+                    });
                 }
                 continue;
             }
@@ -90,121 +129,296 @@ impl<'a> Lexer<'a> {
 
         // Two-character operators (must check before single-char)
         if let Some(ty) = self.try_two_char_op() {
-            return Ok(Token { ty, span: (start, self.pos) });
+            return Ok(Token {
+                ty,
+                span: (start, self.pos),
+            });
         }
 
         // Single-character tokens
         match ch {
-            '+' => { self.advance(); return Ok(Token { ty: TokenType::Plus, span: (start, self.pos) }); }
-            '-' => { self.advance(); return Ok(Token { ty: TokenType::Minus, span: (start, self.pos) }); }
-            '*' => { self.advance(); return Ok(Token { ty: TokenType::Star, span: (start, self.pos) }); }
-            '/' => { self.advance(); return Ok(Token { ty: TokenType::Slash, span: (start, self.pos) }); }
-            '%' => { self.advance(); return Ok(Token { ty: TokenType::Percent, span: (start, self.pos) }); }
-            '^' => { self.advance(); return Ok(Token { ty: TokenType::Caret, span: (start, self.pos) }); }
-            '<' => { self.advance(); return Ok(Token { ty: TokenType::Lt, span: (start, self.pos) }); }
-            '>' => { self.advance(); return Ok(Token { ty: TokenType::Gt, span: (start, self.pos) }); }
+            '+' => {
+                self.advance();
+                return Ok(Token {
+                    ty: TokenType::Plus,
+                    span: (start, self.pos),
+                });
+            }
+            '-' => {
+                self.advance();
+                return Ok(Token {
+                    ty: TokenType::Minus,
+                    span: (start, self.pos),
+                });
+            }
+            '*' => {
+                self.advance();
+                return Ok(Token {
+                    ty: TokenType::Star,
+                    span: (start, self.pos),
+                });
+            }
+            '/' => {
+                self.advance();
+                return Ok(Token {
+                    ty: TokenType::Slash,
+                    span: (start, self.pos),
+                });
+            }
+            '%' => {
+                self.advance();
+                return Ok(Token {
+                    ty: TokenType::Percent,
+                    span: (start, self.pos),
+                });
+            }
+            '^' => {
+                self.advance();
+                return Ok(Token {
+                    ty: TokenType::Caret,
+                    span: (start, self.pos),
+                });
+            }
+            '<' => {
+                self.advance();
+                return Ok(Token {
+                    ty: TokenType::Lt,
+                    span: (start, self.pos),
+                });
+            }
+            '>' => {
+                self.advance();
+                return Ok(Token {
+                    ty: TokenType::Gt,
+                    span: (start, self.pos),
+                });
+            }
             // `=` is equality in Logos (not assignment)
-            '=' => { self.advance(); return Ok(Token { ty: TokenType::Eq, span: (start, self.pos) }); }
+            '=' => {
+                self.advance();
+                return Ok(Token {
+                    ty: TokenType::Eq,
+                    span: (start, self.pos),
+                });
+            }
             // `:=` is handled in try_two_char_op; bare `:` is not a token
-            '(' => { self.advance(); return Ok(Token { ty: TokenType::LParen, span: (start, self.pos) }); }
-            ')' => { self.advance(); return Ok(Token { ty: TokenType::RParen, span: (start, self.pos) }); }
-            '[' => { self.advance(); return Ok(Token { ty: TokenType::LBracket, span: (start, self.pos) }); }
-            ']' => { self.advance(); return Ok(Token { ty: TokenType::RBracket, span: (start, self.pos) }); }
-            ',' => { self.advance(); return Ok(Token { ty: TokenType::Comma, span: (start, self.pos) }); }
-            '.' => { self.advance(); return Ok(Token { ty: TokenType::Dot, span: (start, self.pos) }); }
+            '(' => {
+                self.advance();
+                return Ok(Token {
+                    ty: TokenType::LParen,
+                    span: (start, self.pos),
+                });
+            }
+            ')' => {
+                self.advance();
+                return Ok(Token {
+                    ty: TokenType::RParen,
+                    span: (start, self.pos),
+                });
+            }
+            '[' => {
+                self.advance();
+                return Ok(Token {
+                    ty: TokenType::LBracket,
+                    span: (start, self.pos),
+                });
+            }
+            ']' => {
+                self.advance();
+                return Ok(Token {
+                    ty: TokenType::RBracket,
+                    span: (start, self.pos),
+                });
+            }
+            ',' => {
+                self.advance();
+                return Ok(Token {
+                    ty: TokenType::Comma,
+                    span: (start, self.pos),
+                });
+            }
+            '.' => {
+                self.advance();
+                return Ok(Token {
+                    ty: TokenType::Dot,
+                    span: (start, self.pos),
+                });
+            }
             _ => {}
         }
 
         // Numbers
-        if ch.is_ascii_digit() || (ch == '.' && self.peek_at(1).map_or(false, |c| c.is_ascii_digit())) {
+        if ch.is_ascii_digit()
+            || (ch == '.' && self.peek_at(1).is_some_and(|c| c.is_ascii_digit()))
+        {
             return self.lex_number(start);
         }
 
         // Unicode math symbols — must check BEFORE identifiers since some
         // (like π, τ) are alphabetic in Unicode but should be their own tokens.
-        if ch == '\u{00B2}' { // ² superscript
+        if ch == '\u{00B2}' {
+            // ² superscript
             self.advance();
-            return Ok(Token { ty: TokenType::Builtin("square".to_string()), span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Builtin("square".to_string()),
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{00B3}' { // ³ superscript
+        if ch == '\u{00B3}' {
+            // ³ superscript
             self.advance();
-            return Ok(Token { ty: TokenType::Builtin("cube".to_string()), span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Builtin("cube".to_string()),
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{03C0}' { // π
+        if ch == '\u{03C0}' {
+            // π
             self.advance();
-            return Ok(Token { ty: TokenType::Number(std::f64::consts::PI), span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Number(std::f64::consts::PI),
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{03C4}' { // τ (tau)
+        if ch == '\u{03C4}' {
+            // τ (tau)
             self.advance();
-            return Ok(Token { ty: TokenType::Number(std::f64::consts::TAU), span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Number(std::f64::consts::TAU),
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{2212}' { // − (unicode minus)
+        if ch == '\u{2212}' {
+            // − (unicode minus)
             self.advance();
-            return Ok(Token { ty: TokenType::Minus, span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Minus,
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{00D7}' { // × (multiplication sign)
+        if ch == '\u{00D7}' {
+            // × (multiplication sign)
             self.advance();
-            return Ok(Token { ty: TokenType::Star, span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Star,
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{00F7}' { // ÷ (division sign)
+        if ch == '\u{00F7}' {
+            // ÷ (division sign)
             self.advance();
-            return Ok(Token { ty: TokenType::Slash, span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Slash,
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{222B}' { // ∫ (integral) — CAS-only, not a WGSL builtin
+        if ch == '\u{222B}' {
+            // ∫ (integral) — CAS-only, not a WGSL builtin
             self.advance();
             // Use "integral" not "int" to avoid collision with WGSL's `int` keyword
-            return Ok(Token { ty: TokenType::Identifier("integral".to_string()), span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Identifier("integral".to_string()),
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{2202}' { // ∂ (partial derivative) — CAS-only, not a WGSL builtin
+        if ch == '\u{2202}' {
+            // ∂ (partial derivative) — CAS-only, not a WGSL builtin
             self.advance();
-            return Ok(Token { ty: TokenType::Identifier("partial".to_string()), span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Identifier("partial".to_string()),
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{2146}' { // ⅆ (derivative) — CAS-only
+        if ch == '\u{2146}' {
+            // ⅆ (derivative) — CAS-only
             self.advance();
-            return Ok(Token { ty: TokenType::Identifier("derivative".to_string()), span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Identifier("derivative".to_string()),
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{2207}' { // ∇ (nabla/gradient)
+        if ch == '\u{2207}' {
+            // ∇ (nabla/gradient)
             self.advance();
-            return Ok(Token { ty: TokenType::Identifier("nabla".to_string()), span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Identifier("nabla".to_string()),
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{221A}' { // √ (square root)
+        if ch == '\u{221A}' {
+            // √ (square root)
             self.advance();
-            return Ok(Token { ty: TokenType::Builtin("sqrt".to_string()), span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Builtin("sqrt".to_string()),
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{221E}' { // ∞ (infinity)
+        if ch == '\u{221E}' {
+            // ∞ (infinity)
             self.advance();
-            return Ok(Token { ty: TokenType::Identifier("infinity".to_string()), span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Identifier("infinity".to_string()),
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{2211}' { // ∑ (summation) — CAS-only, not a WGSL builtin
+        if ch == '\u{2211}' {
+            // ∑ (summation) — CAS-only, not a WGSL builtin
             self.advance();
-            return Ok(Token { ty: TokenType::Identifier("sum".to_string()), span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Identifier("sum".to_string()),
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{212F}' { // ℯ (Euler's number)
+        if ch == '\u{212F}' {
+            // ℯ (Euler's number)
             self.advance();
-            return Ok(Token { ty: TokenType::Number(std::f64::consts::E), span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Number(std::f64::consts::E),
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{220F}' { // ∏ (product) — CAS-only, not a WGSL builtin
+        if ch == '\u{220F}' {
+            // ∏ (product) — CAS-only, not a WGSL builtin
             self.advance();
-            return Ok(Token { ty: TokenType::Identifier("prod".to_string()), span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Identifier("prod".to_string()),
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{2264}' { // ≤
+        if ch == '\u{2264}' {
+            // ≤
             self.advance();
-            return Ok(Token { ty: TokenType::Lte, span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Lte,
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{2265}' { // ≥
+        if ch == '\u{2265}' {
+            // ≥
             self.advance();
-            return Ok(Token { ty: TokenType::Gte, span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Gte,
+                span: (start, self.pos),
+            });
         }
-        if ch == '\u{2260}' { // ≠
+        if ch == '\u{2260}' {
+            // ≠
             self.advance();
-            return Ok(Token { ty: TokenType::Neq, span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Neq,
+                span: (start, self.pos),
+            });
         }
         // Superscript digits 0,1,4-9
         if let Some(exp) = match ch {
-            '\u{2070}' => Some("0"), '\u{00B9}' => Some("1"),
-            '\u{2074}' => Some("4"), '\u{2075}' => Some("5"),
-            '\u{2076}' => Some("6"), '\u{2077}' => Some("7"),
-            '\u{2078}' => Some("8"), '\u{2079}' => Some("9"),
+            '\u{2070}' => Some("0"),
+            '\u{00B9}' => Some("1"),
+            '\u{2074}' => Some("4"),
+            '\u{2075}' => Some("5"),
+            '\u{2076}' => Some("6"),
+            '\u{2077}' => Some("7"),
+            '\u{2078}' => Some("8"),
+            '\u{2079}' => Some("9"),
             _ => None,
         } {
             self.advance();
@@ -222,56 +436,115 @@ impl<'a> Lexer<'a> {
         // Backslash: skip it gracefully (user typing LaTeX before autocomplete accepts)
         if ch == '\\' {
             self.advance();
-            return Ok(Token { ty: TokenType::Identifier("\\".to_string()), span: (start, self.pos) });
+            return Ok(Token {
+                ty: TokenType::Identifier("\\".to_string()),
+                span: (start, self.pos),
+            });
         }
 
-        Err(super::format_error_at(self.input, start, &format!("Unexpected character '{}'", ch)))
+        Err(super::format_error_at(
+            self.input,
+            start,
+            &format!("Unexpected character '{}'", ch),
+        ))
     }
 
     fn try_two_char_op(&mut self) -> Option<TokenType> {
         // `==` is also equality (same as `=` in Logos, for backward compat)
-        if self.starts_with("==") { self.pos += 2; return Some(TokenType::Eq); }
-        if self.starts_with("!=") { self.pos += 2; return Some(TokenType::Neq); }
-        if self.starts_with("<=") { self.pos += 2; return Some(TokenType::Lte); }
-        if self.starts_with(">=") { self.pos += 2; return Some(TokenType::Gte); }
-        if self.starts_with("..") { self.pos += 2; return Some(TokenType::DotDot); }
-        if self.starts_with(":=") { self.pos += 2; return Some(TokenType::Colon); }
+        if self.starts_with("==") {
+            self.pos += 2;
+            return Some(TokenType::Eq);
+        }
+        if self.starts_with("!=") {
+            self.pos += 2;
+            return Some(TokenType::Neq);
+        }
+        if self.starts_with("<=") {
+            self.pos += 2;
+            return Some(TokenType::Lte);
+        }
+        if self.starts_with(">=") {
+            self.pos += 2;
+            return Some(TokenType::Gte);
+        }
+        if self.starts_with("..") {
+            self.pos += 2;
+            return Some(TokenType::DotDot);
+        }
+        if self.starts_with(":=") {
+            self.pos += 2;
+            return Some(TokenType::Colon);
+        }
         None
     }
 
     fn lex_number(&mut self, start: usize) -> Result<Token, String> {
         // Integer part
-        while self.pos < self.input.len() && self.peek().map_or(false, |c| c.is_ascii_digit()) {
+        while self.pos < self.input.len() && self.peek().is_some_and(|c| c.is_ascii_digit()) {
             self.advance();
         }
         // Decimal part
-        if self.peek() == Some('.') && self.peek_at(1).map_or(false, |c| c.is_ascii_digit()) {
+        if self.peek() == Some('.') && self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) {
             self.advance(); // consume '.'
-            while self.pos < self.input.len() && self.peek().map_or(false, |c| c.is_ascii_digit()) {
+            while self.pos < self.input.len() && self.peek().is_some_and(|c| c.is_ascii_digit()) {
                 self.advance();
             }
         }
         // Scientific notation
-        if self.peek().map_or(false, |c| c == 'e' || c == 'E') {
+        if self.peek().is_some_and(|c| c == 'e' || c == 'E') {
+            let exp_start = self.pos;
             self.advance();
             if self.peek() == Some('+') || self.peek() == Some('-') {
                 self.advance();
             }
-            while self.pos < self.input.len() && self.peek().map_or(false, |c| c.is_ascii_digit()) {
+            let digits_start = self.pos;
+            while self.pos < self.input.len() && self.peek().is_some_and(|c| c.is_ascii_digit()) {
                 self.advance();
+            }
+            if self.pos == digits_start {
+                return Err(super::format_error_at(
+                    self.input,
+                    exp_start,
+                    "Exponent has no digits (e.g. write `1e5`, not `1e`)",
+                ));
             }
         }
 
         let text = &self.input[start..self.pos];
-        let value: f64 = text.parse().map_err(|e| format!("Invalid number '{}': {}", text, e))?;
-        Ok(Token { ty: TokenType::Number(value), span: (start, self.pos) })
+        let value: f64 = text
+            .parse()
+            .map_err(|e| format!("Invalid number '{}': {}", text, e))?;
+        Ok(Token {
+            ty: TokenType::Number(value),
+            span: (start, self.pos),
+        })
     }
 
     fn lex_identifier(&mut self, start: usize) -> Token {
-        while self.pos < self.input.len() && self.peek().map_or(false, |c| {
-            (c.is_alphanumeric() || c == '_') && !is_unicode_math_symbol(c)
-        }) {
+        while self.pos < self.input.len()
+            && self.peek().is_some_and(|c| {
+                (c.is_alphanumeric() || c == '_') && !is_unicode_math_symbol(c)
+            })
+        {
             self.advance();
+            // Defensive: stop runaway identifiers. We continue advancing past
+            // the cap so the caller can decide what to do, but cap the span
+            // so we don't allocate an unbounded String.
+            if self.pos - start > MAX_IDENT_LEN {
+                // Skip remaining word characters without recording them.
+                while self.pos < self.input.len()
+                    && self.peek().is_some_and(|c| {
+                        (c.is_alphanumeric() || c == '_') && !is_unicode_math_symbol(c)
+                    })
+                {
+                    self.advance();
+                }
+                let truncated = &self.input[start..start + MAX_IDENT_LEN];
+                return Token {
+                    ty: TokenType::Identifier(truncated.to_string()),
+                    span: (start, self.pos),
+                };
+            }
         }
         let text = &self.input[start..self.pos];
 
@@ -292,7 +565,10 @@ impl<'a> Lexer<'a> {
                 // Type names
                 for &(name, ref tok) in TYPE_NAMES {
                     if text == name {
-                        return Token { ty: tok.clone(), span: (start, self.pos) };
+                        return Token {
+                            ty: tok.clone(),
+                            span: (start, self.pos),
+                        };
                     }
                 }
                 // Builtins
@@ -310,7 +586,10 @@ impl<'a> Lexer<'a> {
             }
         };
 
-        Token { ty, span: (start, self.pos) }
+        Token {
+            ty,
+            span: (start, self.pos),
+        }
     }
 
     fn peek(&self) -> Option<char> {
@@ -335,7 +614,8 @@ impl<'a> Lexer<'a> {
 /// Unicode math symbols that look alphanumeric but should be separate tokens.
 /// These must NOT be consumed as part of identifiers.
 fn is_unicode_math_symbol(c: char) -> bool {
-    matches!(c,
+    matches!(
+        c,
         '\u{00B2}'   // ² superscript 2
         | '\u{00B3}' // ³ superscript 3
         | '\u{03C0}' // π pi
@@ -485,10 +765,16 @@ mod tests {
         // ² is alphanumeric in Unicode but must be a separate token, not part of "x"
         let mut lexer = Lexer::new("x\u{00B2}");
         let tokens = lexer.tokenize().unwrap();
-        assert!(matches!(tokens[0].ty, TokenType::AxisVar(ref s) if s == "x"),
-            "x should be AxisVar, got {:?}", tokens[0].ty);
-        assert!(matches!(tokens[1].ty, TokenType::Builtin(ref s) if s == "square"),
-            "² should be Builtin(square), got {:?}", tokens[1].ty);
+        assert!(
+            matches!(tokens[0].ty, TokenType::AxisVar(ref s) if s == "x"),
+            "x should be AxisVar, got {:?}",
+            tokens[0].ty
+        );
+        assert!(
+            matches!(tokens[1].ty, TokenType::Builtin(ref s) if s == "square"),
+            "² should be Builtin(square), got {:?}",
+            tokens[1].ty
+        );
     }
 
     #[test]
@@ -509,17 +795,39 @@ mod tests {
 
         // Expected: x ² * y ² + sin ( x ) ³ - sin ( y ² ) ² = 9 EOF
         let expected: Vec<&str> = vec![
-            "AxisVar(x)", "Builtin(square)", "Star",
-            "AxisVar(y)", "Builtin(square)", "Plus",
-            "Builtin(sin)", "LParen", "AxisVar(x)", "RParen", "Builtin(cube)", "Minus",
-            "Builtin(sin)", "LParen", "AxisVar(y)", "Builtin(square)", "RParen", "Builtin(square)",
-            "Eq", "Number(9)", "Eof",
+            "AxisVar(x)",
+            "Builtin(square)",
+            "Star",
+            "AxisVar(y)",
+            "Builtin(square)",
+            "Plus",
+            "Builtin(sin)",
+            "LParen",
+            "AxisVar(x)",
+            "RParen",
+            "Builtin(cube)",
+            "Minus",
+            "Builtin(sin)",
+            "LParen",
+            "AxisVar(y)",
+            "Builtin(square)",
+            "RParen",
+            "Builtin(square)",
+            "Eq",
+            "Number(9)",
+            "Eof",
         ];
 
         assert_eq!(
-            tokens.len(), expected.len(),
-            "Expected {} tokens, got {}: {:?}", expected.len(), tokens.len(),
-            tokens.iter().map(|t| format!("{:?}", t.ty)).collect::<Vec<_>>()
+            tokens.len(),
+            expected.len(),
+            "Expected {} tokens, got {}: {:?}",
+            expected.len(),
+            tokens.len(),
+            tokens
+                .iter()
+                .map(|t| format!("{:?}", t.ty))
+                .collect::<Vec<_>>()
         );
 
         // Verify key tokens

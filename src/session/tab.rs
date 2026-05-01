@@ -3,6 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::editor::CodeCell;
+use crate::lang::ast::AstNode;
 
 pub struct Tab {
     pub name: String,
@@ -117,5 +118,24 @@ impl Tab {
             .map(|c| c.buffer.text())
             .collect::<Vec<_>>()
             .join("\n\n")
+    }
+
+    /// Combine the parsed ASTs of cells `[0..=cell_index]` into a single Block.
+    /// Reuses each cell's cached AST when its source hasn't changed.
+    pub fn combined_ast_up_to(&self, cell_index: usize) -> Result<AstNode, String> {
+        let mut all_stmts = Vec::new();
+        for (i, cell) in self.cells.iter().enumerate() {
+            if i > cell_index {
+                break;
+            }
+            let cell_ast = cell
+                .cached_ast()
+                .map_err(|e| format!("Cell {}: {}", i + 1, e))?;
+            match cell_ast {
+                AstNode::Block(stmts) => all_stmts.extend(stmts),
+                other => all_stmts.push(other),
+            }
+        }
+        Ok(AstNode::Block(all_stmts))
     }
 }

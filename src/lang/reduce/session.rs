@@ -15,8 +15,8 @@ use super::ffi;
 // storage so that the static `extern "C"` callback functions can access
 // the input/output buffers without any synchronization.
 thread_local! {
-    static INPUT_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::new());
-    static INPUT_POS: RefCell<usize> = RefCell::new(0);
+    static INPUT_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static INPUT_POS: RefCell<usize> = const { RefCell::new(0) };
     static OUTPUT_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(4096));
 }
 
@@ -97,12 +97,20 @@ impl ReduceSession {
         let init_stmts = [
             // Define recursive infix printer for prepsq prefix forms
             concat!(
+                "symbolic procedure logos_print_sq(u); ",
+                "if eqcar(u, '!*sq) then logos_infix prepsq cadr u ",
+                "else if atom u then prin2 u ",
+                "else logos_infix u;",
+            ),
+            concat!(
                 "symbolic procedure logos_infix(u); ",
                 "if numberp u then prin2 u ",
                 "else if atom u then prin2 u ",
                 "else begin scalar op; ",
                 "op := car u; ",
-                "if op eq 'plus then ",
+                "if op eq 'equal then ",
+                "<< logos_infix cadr u; prin2 \" = \"; logos_infix caddr u >> ",
+                "else if op eq 'plus then ",
                 "<< logos_infix cadr u; ",
                 "for each x in cddr u do << prin2 \" + \"; logos_infix x >> >> ",
                 "else if op eq 'minus then ",
@@ -123,11 +131,17 @@ impl ReduceSession {
                 "prin2 \")\" >> ",
                 "end;",
             ),
-            // Redefine assgnpri to use our infix printer
             concat!(
                 "symbolic procedure logos_assgnpri(u, v, w); ",
                 "if atom u then << prin2 u; terpri() >> ",
                 "else if eqcar(u, '!*sq) then << logos_infix prepsq cadr u; terpri() >> ",
+                "else if eqcar(u, 'equal) then << ",
+                "logos_print_sq(cadr u); prin2 \" = \"; logos_print_sq(caddr u); terpri() >> ",
+                "else if eqcar(u, 'list) then << ",
+                "prin2 \"{\"; ",
+                "if cdr u then << logos_print_sq cadr u; ",
+                "for each x in cddr u do << prin2 \",\"; logos_print_sq x >> >>; ",
+                "prin2 \"}\"; terpri() >> ",
                 "else << print u; terpri() >>;",
             ),
             "copyd('assgnpri, 'logos_assgnpri);",
@@ -148,9 +162,7 @@ impl ReduceSession {
             OUTPUT_BUF.with(|buf| buf.borrow_mut().clear());
             let stmt = CString::new(format!("load_package({});", pkg)).unwrap();
             let rc = unsafe { ffi::reduce_ffi_process_statement(stmt.as_ptr()) };
-            let output = OUTPUT_BUF.with(|buf| {
-                String::from_utf8_lossy(&buf.borrow()).to_string()
-            });
+            let output = OUTPUT_BUF.with(|buf| String::from_utf8_lossy(&buf.borrow()).to_string());
             if rc != 0 || output.contains("not found") || output.contains("*****") {
                 log::error!("Failed to load REDUCE package '{}': {}", pkg, output.trim());
             } else {
@@ -193,16 +205,10 @@ impl ReduceSession {
 
         let rc = unsafe { ffi::reduce_ffi_process_statement(c_stmt.as_ptr()) };
 
-        let output = OUTPUT_BUF.with(|buf| {
-            String::from_utf8_lossy(&buf.borrow()).to_string()
-        });
+        let output = OUTPUT_BUF.with(|buf| String::from_utf8_lossy(&buf.borrow()).to_string());
 
         if rc != 0 {
-            return Err(format!(
-                "REDUCE error (code {}): {}",
-                rc,
-                output.trim()
-            ));
+            return Err(format!("REDUCE error (code {}): {}", rc, output.trim()));
         }
 
         // Clean up: the bootstrap output printer wraps results as:
@@ -269,8 +275,8 @@ impl ReduceSession {
         } else {
             format!("{}$", statement) // $ suppresses output in REDUCE
         };
-        let c_stmt = CString::new(stmt)
-            .map_err(|e| format!("Invalid statement (contains null): {}", e))?;
+        let c_stmt =
+            CString::new(stmt).map_err(|e| format!("Invalid statement (contains null): {}", e))?;
         OUTPUT_BUF.with(|buf| buf.borrow_mut().clear());
         let rc = unsafe { ffi::reduce_ffi_process_statement(c_stmt.as_ptr()) };
         OUTPUT_BUF.with(|buf| buf.borrow_mut().clear());
@@ -283,11 +289,7 @@ impl ReduceSession {
     /// Simplify an expression after evaluating context statements.
     /// Context statements (e.g. variable assignments) are evaluated silently first,
     /// then the expression is simplified and its result returned.
-    pub fn simplify_with_context(
-        &self,
-        context: &[String],
-        expr: &str,
-    ) -> Result<String, String> {
+    pub fn simplify_with_context(&self, context: &[String], expr: &str) -> Result<String, String> {
         for stmt in context {
             self.eval_silent(stmt)?;
         }
@@ -308,21 +310,22 @@ impl ReduceSession {
         self.eval(&stmt)
     }
 
-    /// Toggle a REDUCE switch (e.g., "factor", "echo").
+    #[allow(dead_code)]
     pub fn set_switch(&self, name: &str, on: bool) -> Result<(), String> {
-        let c_name = CString::new(name)
-            .map_err(|e| format!("Invalid switch name: {}", e))?;
+        let c_name = CString::new(name).map_err(|e| format!("Invalid switch name: {}", e))?;
         let val = if on { 1 } else { 0 };
         let rc = unsafe { ffi::reduce_ffi_set_switch(c_name.as_ptr(), val) };
         if rc != 0 && rc != -1 {
             return Err(format!("set_switch({}, {}) failed: {}", name, on, rc));
         }
         if rc == -1 {
-            return Err(format!("set_switch({}, {}): C++ exception caught", name, on));
+            return Err(format!(
+                "set_switch({}, {}): C++ exception caught",
+                name, on
+            ));
         }
         Ok(())
     }
-
 }
 
 impl Drop for ReduceSession {
@@ -434,15 +437,21 @@ mod tests {
         // ── Expansion ───────────────────────────────────────────
         {
             let r = session.simplify("(x+1)**2").unwrap();
-            assert!(r.contains("x^2") && r.contains("2*x") && r.contains("1"),
-                "(x+1)**2 expansion: {}", r);
+            assert!(
+                r.contains("x^2") && r.contains("2*x") && r.contains("1"),
+                "(x+1)**2 expansion: {}",
+                r
+            );
         }
 
         // ── Distribution ────────────────────────────────────────
         {
             let r = session.simplify("x*(y+z)").unwrap();
-            assert!(r.contains("x*y") && r.contains("x*z"),
-                "distribution x*(y+z): {}", r);
+            assert!(
+                r.contains("x*y") && r.contains("x*z"),
+                "distribution x*(y+z): {}",
+                r
+            );
         }
 
         // ── Power laws ──────────────────────────────────────────
@@ -453,8 +462,11 @@ mod tests {
         assert_simplify_eq(&session, "x/x", "1");
         {
             let r = session.simplify("(x**2 - y**2)/(x - y)").unwrap();
-            assert!(r.contains("x") && r.contains("y"),
-                "(x²-y²)/(x-y) cancellation: {}", r);
+            assert!(
+                r.contains("x") && r.contains("y"),
+                "(x²-y²)/(x-y) cancellation: {}",
+                r
+            );
         }
 
         // ── No simplification when already simplified ───────────
@@ -487,55 +499,79 @@ mod tests {
         // ── Polynomial differentiation ──────────────────────────
         {
             let r = session.simplify("df(x**2 + 3*x + 1, x)").unwrap();
-            assert!(r.contains("2*x") && r.contains("3"),
-                "df(x²+3x+1, x): {}", r);
+            assert!(
+                r.contains("2*x") && r.contains("3"),
+                "df(x²+3x+1, x): {}",
+                r
+            );
         }
 
         // ── Reciprocal: d/dx(1/x) = -1/x² ─────────────────────
         {
             let r = session.simplify("df(1/x, x)").unwrap();
-            assert!(r.contains("1/x^2"),
-                "df(1/x, x): expected -1/x^2, got: {}", r);
+            assert!(
+                r.contains("1/x^2"),
+                "df(1/x, x): expected -1/x^2, got: {}",
+                r
+            );
         }
 
         // ── Product rule: d/dx(x·sin(x)) ───────────────────────
         {
             let r = session.simplify("df(x*sin(x), x)").unwrap();
-            assert!(r.contains("cos(x)") && r.contains("sin(x)"),
-                "product rule df(x*sin(x),x): {}", r);
+            assert!(
+                r.contains("cos(x)") && r.contains("sin(x)"),
+                "product rule df(x*sin(x),x): {}",
+                r
+            );
         }
 
         // ── Chain rule: d/dx(sin(x²)) = 2x·cos(x²) ────────────
         {
             let r = session.simplify("df(sin(x**2), x)").unwrap();
-            assert!(r.contains("cos(x^2)") && r.contains("2"),
-                "chain rule df(sin(x²),x): {}", r);
+            assert!(
+                r.contains("cos(x^2)") && r.contains("2"),
+                "chain rule df(sin(x²),x): {}",
+                r
+            );
         }
 
         // ── Partial derivatives ─────────────────────────────────
         {
             let r = session.simplify("df(x**3 * y**2, x)").unwrap();
-            assert!(r.contains("3") && r.contains("x^2") && r.contains("y^2"),
-                "∂/∂x(x³y²): {}", r);
+            assert!(
+                r.contains("3") && r.contains("x^2") && r.contains("y^2"),
+                "∂/∂x(x³y²): {}",
+                r
+            );
         }
         {
             let r = session.simplify("df(x**3 * y**2, y)").unwrap();
-            assert!(r.contains("2") && r.contains("x^3") && r.contains("y"),
-                "∂/∂y(x³y²): {}", r);
+            assert!(
+                r.contains("2") && r.contains("x^3") && r.contains("y"),
+                "∂/∂y(x³y²): {}",
+                r
+            );
         }
 
         // ── Trig chain: d/dx(sin²(x)) = 2sin(x)cos(x) ────────
         {
             let r = session.simplify("df(sin(x)**2, x)").unwrap();
-            assert!(r.contains("sin(x)") && r.contains("cos(x)"),
-                "df(sin²(x),x): {}", r);
+            assert!(
+                r.contains("sin(x)") && r.contains("cos(x)"),
+                "df(sin²(x),x): {}",
+                r
+            );
         }
 
         // ── 2nd derivative of log: d²/dx²(log(x)) = -1/x² ────
         {
             let r = session.simplify("df(log(x), x, 2)").unwrap();
-            assert!(r.contains("1/x^2"),
-                "df(log(x),x,2): expected -1/x², got: {}", r);
+            assert!(
+                r.contains("1/x^2"),
+                "df(log(x),x,2): expected -1/x², got: {}",
+                r
+            );
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -550,8 +586,11 @@ mod tests {
         assert_simplify_eq(&session, "x + y", "x + y");
         {
             let r = session.simplify("x + y + z").unwrap();
-            assert!(r.contains("x") && r.contains("y") && r.contains("z")
-                && r.contains("+"), "n-ary sum: {}", r);
+            assert!(
+                r.contains("x") && r.contains("y") && r.contains("z") && r.contains("+"),
+                "n-ary sum: {}",
+                r
+            );
         }
 
         // ── Times ───────────────────────────────────────────────
@@ -721,8 +760,11 @@ mod tests {
         assert_simplify_eq(&session, "sub(x=0, sin(x))", "0");
         {
             let r = session.simplify("sub(x=y+1, x**2)").unwrap();
-            assert!(r.contains("y^2") && r.contains("2*y") && r.contains("1"),
-                "sub(x=y+1, x²): {}", r);
+            assert!(
+                r.contains("y^2") && r.contains("2*y") && r.contains("1"),
+                "sub(x=y+1, x²): {}",
+                r
+            );
         }
 
         // ── GCD ─────────────────────────────────────────────────
@@ -737,8 +779,7 @@ mod tests {
         assert_simplify_eq(&session, "num(x/(x+1))", "x");
         {
             let r = session.simplify("den(x/(x+1))").unwrap();
-            assert!(r.contains("x") && r.contains("1"),
-                "den(x/(x+1)): {}", r);
+            assert!(r.contains("x") && r.contains("1"), "den(x/(x+1)): {}", r);
         }
 
         // ── Remainder (polynomial division) ─────────────────────
@@ -754,8 +795,7 @@ mod tests {
         {
             let r = session.simplify("exp(log(x))").unwrap();
             // May simplify to x, or stay as exp(log(x))
-            assert!(r == "x" || r.contains("exp"),
-                "exp(log(x)): {}", r);
+            assert!(r == "x" || r.contains("exp"), "exp(log(x)): {}", r);
         }
 
         // ── Additional trig functions ───────────────────────────
@@ -763,33 +803,32 @@ mod tests {
         {
             // atan, asin, acos may or may not simplify at special values
             let r = session.simplify("asin(0)").unwrap();
-            assert!(r == "0" || r.contains("asin"),
-                "asin(0): {}", r);
+            assert!(r == "0" || r.contains("asin"), "asin(0): {}", r);
         }
         {
             let r = session.simplify("acos(1)").unwrap();
-            assert!(r == "0" || r.contains("acos"),
-                "acos(1): {}", r);
+            assert!(r == "0" || r.contains("acos"), "acos(1): {}", r);
         }
 
         // ── Hyperbolic functions ────────────────────────────────
         {
             let r = session.simplify("sinh(0)").unwrap();
-            assert!(r == "0" || r.contains("sinh"),
-                "sinh(0): {}", r);
+            assert!(r == "0" || r.contains("sinh"), "sinh(0): {}", r);
         }
         {
             let r = session.simplify("cosh(0)").unwrap();
-            assert!(r == "1" || r.contains("cosh"),
-                "cosh(0): {}", r);
+            assert!(r == "1" || r.contains("cosh"), "cosh(0): {}", r);
         }
 
         // ── Symbolic sqrt ───────────────────────────────────────
         {
             let r = session.simplify("sqrt(x**2)").unwrap();
             // REDUCE simplifies to abs(x), x, or leaves as sqrt(x**2)
-            assert!(r == "x" || r.contains("abs") || r.contains("sqrt"),
-                "sqrt(x²): {}", r);
+            assert!(
+                r == "x" || r.contains("abs") || r.contains("sqrt"),
+                "sqrt(x²): {}",
+                r
+            );
         }
 
         // ── For-sum loop ────────────────────────────────────────
@@ -822,41 +861,44 @@ mod tests {
 
         // ── Trig identities ─────────────────────────────────────
         {
-            let r = session.simplify("sin(x)**2 + cos(x)**2")
+            let r = session
+                .simplify("sin(x)**2 + cos(x)**2")
                 .expect("trig identity eval failed");
             assert!(
                 r == "1" || r.contains("sin") && r.contains("cos"),
-                "trig identity: {}", r
+                "trig identity: {}",
+                r
             );
         }
 
         // ── Integration ─────────────────────────────────────────
         {
-            let r = session.simplify("int(x**2, x)")
-                .expect("int(x²,x) failed");
+            let r = session.simplify("int(x**2, x)").expect("int(x²,x) failed");
             assert!(r.contains("x^3"), "int(x²,x): {}", r);
         }
         {
-            let r = session.eval("int(sin(x), x);")
+            let r = session
+                .eval("int(sin(x), x);")
                 .expect("int(sin(x),x) failed");
             assert!(r.contains("cos"), "int(sin(x),x): {}", r);
         }
         {
-            let r = session.eval("int(1/x, x);")
-                .expect("int(1/x,x) failed");
+            let r = session.eval("int(1/x, x);").expect("int(1/x,x) failed");
             assert!(r.contains("log"), "int(1/x,x): {}", r);
         }
 
         // ── Solve ───────────────────────────────────────────────
         {
-            let r = session.eval("solve(x**2 - 1, x);")
+            let r = session
+                .eval("solve(x**2 - 1, x);")
                 .expect("solve(x²-1,x) failed");
             assert!(r.contains("1"), "solve(x²-1,x): {}", r);
         }
 
         // ── Taylor series ───────────────────────────────────────
         {
-            let r = session.eval("taylor(sin(x), x, 0, 5);")
+            let r = session
+                .eval("taylor(sin(x), x, 0, 5);")
                 .expect("taylor(sin(x),x,0,5) failed");
             assert!(r.contains("x"), "taylor(sin(x),x,0,5): {}", r);
         }
@@ -867,7 +909,8 @@ mod tests {
 
         session.set_switch("factor", true).expect("factor on");
         {
-            let r = session.simplify("x**2 - 1")
+            let r = session
+                .simplify("x**2 - 1")
                 .expect("factor mode x²-1 failed");
             assert!(r.contains("x"), "factor mode x²-1: {}", r);
             session.set_switch("factor", false).expect("factor off");
@@ -889,19 +932,61 @@ mod tests {
             // Evaluate in REDUCE — should return with the same terms
             let result = session.simplify(&ascii).unwrap();
             // REDUCE may reorder but key subexpressions must survive
-            assert!(result.contains("sin(x)"),
-                "complex expr: expected sin(x) in: {}", result);
-            assert!(result.contains("sin(y^2)") || result.contains("sin(y^"),
-                "complex expr: expected sin(y^2) in: {}", result);
-            assert!(result.contains("x^2") || result.contains("x*y"),
-                "complex expr: expected x^2 or x*y in: {}", result);
+            assert!(
+                result.contains("sin(x)"),
+                "complex expr: expected sin(x) in: {}",
+                result
+            );
+            assert!(
+                result.contains("sin(y^2)") || result.contains("sin(y^"),
+                "complex expr: expected sin(y^2) in: {}",
+                result
+            );
+            assert!(
+                result.contains("x^2") || result.contains("x*y"),
+                "complex expr: expected x^2 or x*y in: {}",
+                result
+            );
 
             // Round-trip back via from_reduce (** → ^)
             let back = translate::from_reduce(&result);
-            assert!(back.contains("sin(x)"),
-                "round-trip: expected sin(x) in: {}", back);
-            assert!(back.contains("^"),
-                "round-trip: expected ^ in: {}", back);
+            assert!(
+                back.contains("sin(x)"),
+                "round-trip: expected sin(x) in: {}",
+                back
+            );
+            assert!(back.contains("^"), "round-trip: expected ^ in: {}", back);
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        // 10c. EQUATION OUTPUT (equal nodes)
+        // ═══════════════════════════════════════════════════════════
+
+        // ── Equation simplification ────────────────────────────────
+        {
+            let r = session.simplify("x**2 + y**2 = y**2").unwrap();
+            assert!(r.contains("="), "equation should contain =, got: {}", r);
+            assert!(
+                r.contains("x^2"),
+                "equation should simplify to x^2 = 0, got: {}",
+                r
+            );
+        }
+
+        // ── Simple equation ────────────────────────────────────────
+        {
+            let r = session.simplify("x + 1 = 2").unwrap();
+            assert!(r.contains("="), "equation should contain =, got: {}", r);
+        }
+
+        // ── Equation normalization via (lhs)-(rhs) ──────────────
+        {
+            let r = session.simplify("(x + y) - (y)").unwrap();
+            assert_eq!(r, "x", "(x+y)-(y) should give x, got: {}", r);
+        }
+        {
+            let r = session.simplify("(x**2 + y**2) - (y**2)").unwrap();
+            assert_eq!(r, "x^2", "(x²+y²)-(y²) should give x^2, got: {}", r);
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -912,8 +997,11 @@ mod tests {
         {
             session.eval("myvar := x + 1;").expect("assignment failed");
             let r = session.simplify("myvar**2").unwrap();
-            assert!(r.contains("x^2") && r.contains("2*x") && r.contains("1"),
-                "myvar**2 = (x+1)²: {}", r);
+            assert!(
+                r.contains("x^2") && r.contains("2*x") && r.contains("1"),
+                "myvar**2 = (x+1)²: {}",
+                r
+            );
             // Clean up
             session.eval("clear myvar;").expect("clear failed");
         }
@@ -926,6 +1014,5 @@ mod tests {
             assert!(r.contains("7"), "aa+bb=7: {}", r);
             session.eval("clear aa, bb;").expect("clear aa,bb");
         }
-
     }
 }

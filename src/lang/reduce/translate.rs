@@ -4,10 +4,7 @@
 //! (pi, **2, sqrt(), etc.). This module converts between the two.
 
 /// Word-level replacements: Logos keyword → REDUCE keyword.
-const WORD_REPLACEMENTS: &[(&str, &str)] = &[
-    ("integral", "int"),
-    ("derivative", "df"),
-];
+const WORD_REPLACEMENTS: &[(&str, &str)] = &[("integral", "int"), ("derivative", "df")];
 
 /// Convert Logos Unicode math notation to REDUCE-compatible ASCII.
 pub fn to_reduce(input: &str) -> String {
@@ -19,9 +16,9 @@ pub fn to_reduce(input: &str) -> String {
 
     // Second pass: character-level Unicode → ASCII
     let mut output = String::with_capacity(working.len() * 2);
-    let mut chars = working.chars().peekable();
+    let chars = working.chars().peekable();
 
-    while let Some(ch) = chars.next() {
+    for ch in chars {
         match ch {
             // Greek letters
             '\u{03B1}' => output.push_str("alpha"),
@@ -35,7 +32,7 @@ pub fn to_reduce(input: &str) -> String {
             '\u{03C0}' => output.push_str("pi"),
             '\u{03C3}' => output.push_str("sigma"),
             '\u{03C6}' => output.push_str("phi"),
-            '\u{03C4}' => output.push_str("tau"),     // τ
+            '\u{03C4}' => output.push_str("tau"), // τ
             '\u{03C9}' => output.push_str("omega"),
 
             // Superscript digits → **N (REDUCE exponentiation)
@@ -54,18 +51,18 @@ pub fn to_reduce(input: &str) -> String {
             '^' => output.push_str("**"),
 
             // Euler's number
-            '\u{212F}' => output.push('e'),   // ℯ
+            '\u{212F}' => output.push('e'), // ℯ
 
             // Math operators
-            '\u{00D7}' => output.push('*'),   // ×
-            '\u{00F7}' => output.push('/'),   // ÷
-            '\u{2212}' => output.push('-'),   // − (minus sign)
+            '\u{00D7}' => output.push('*'),        // ×
+            '\u{00F7}' => output.push('/'),        // ÷
+            '\u{2212}' => output.push('-'),        // − (minus sign)
             '\u{221A}' => output.push_str("sqrt"), // √
 
             // Math functions / operators
-            '\u{222B}' => output.push_str("int"),   // ∫ (integral)
-            '\u{2202}' => output.push_str("df"),    // ∂ (partial derivative)
-            '\u{2146}' => output.push_str("df"),    // ⅆ (derivative)
+            '\u{222B}' => output.push_str("int"), // ∫ (integral)
+            '\u{2202}' => output.push_str("df"),  // ∂ (partial derivative)
+            '\u{2146}' => output.push_str("df"),  // ⅆ (derivative)
             '\u{2207}' => output.push_str("nabla"), // ∇ (nabla/gradient)
 
             // Summation / product (these need context, basic stubs)
@@ -76,16 +73,16 @@ pub fn to_reduce(input: &str) -> String {
             '\u{221E}' => output.push_str("infinity"),
 
             // Additional Greek letters (uppercase)
-            '\u{0393}' => output.push_str("Gamma"),   // Γ
-            '\u{0394}' => output.push_str("Delta"),   // Δ
-            '\u{0398}' => output.push_str("Theta"),   // Θ
-            '\u{039B}' => output.push_str("Lambda"),  // Λ
-            '\u{039E}' => output.push_str("Xi"),      // Ξ
-            '\u{03A0}' => output.push_str("Pi"),      // Π (uppercase Pi)
-            '\u{03A3}' => output.push_str("Sigma"),   // Σ
-            '\u{03A6}' => output.push_str("Phi"),     // Φ
-            '\u{03A8}' => output.push_str("Psi"),     // Ψ
-            '\u{03A9}' => output.push_str("Omega"),   // Ω
+            '\u{0393}' => output.push_str("Gamma"),  // Γ
+            '\u{0394}' => output.push_str("Delta"),  // Δ
+            '\u{0398}' => output.push_str("Theta"),  // Θ
+            '\u{039B}' => output.push_str("Lambda"), // Λ
+            '\u{039E}' => output.push_str("Xi"),     // Ξ
+            '\u{03A0}' => output.push_str("Pi"),     // Π (uppercase Pi)
+            '\u{03A3}' => output.push_str("Sigma"),  // Σ
+            '\u{03A6}' => output.push_str("Phi"),    // Φ
+            '\u{03A8}' => output.push_str("Psi"),    // Ψ
+            '\u{03A9}' => output.push_str("Omega"),  // Ω
 
             // Additional lowercase Greek letters
             '\u{03B6}' => output.push_str("zeta"),    // ζ
@@ -100,9 +97,9 @@ pub fn to_reduce(input: &str) -> String {
             '\u{03C8}' => output.push_str("psi"),     // ψ
 
             // Relation symbols
-            '\u{2264}' => output.push_str("<="),  // ≤
-            '\u{2265}' => output.push_str(">="),  // ≥
-            '\u{2260}' => output.push_str("!="),  // ≠
+            '\u{2264}' => output.push_str("<="), // ≤
+            '\u{2265}' => output.push_str(">="), // ≥
+            '\u{2260}' => output.push_str("!="), // ≠
 
             // Arrows (pass as identifiers for now)
             '\u{2192}' => output.push_str("arrow_right"), // →
@@ -112,10 +109,30 @@ pub fn to_reduce(input: &str) -> String {
             // Strip backslashes and unmapped non-ASCII to prevent C++ exceptions.
             _ => {
                 if ch.is_ascii_alphanumeric()
-                    || matches!(ch,
-                        ' ' | '+' | '-' | '*' | '/' | '^' | '(' | ')' | ','
-                        | '.' | ';' | '$' | ':' | '=' | '<' | '>' | '!'
-                        | '_' | '\'' | '"' | '\n' | '\t')
+                    || matches!(
+                        ch,
+                        ' ' | '+'
+                            | '-'
+                            | '*'
+                            | '/'
+                            | '^'
+                            | '('
+                            | ')'
+                            | ','
+                            | '.'
+                            | ';'
+                            | '$'
+                            | ':'
+                            | '='
+                            | '<'
+                            | '>'
+                            | '!'
+                            | '_'
+                            | '\''
+                            | '"'
+                            | '\n'
+                            | '\t'
+                    )
                 {
                     output.push(ch);
                 }
@@ -132,7 +149,7 @@ pub fn to_reduce(input: &str) -> String {
 fn is_word_char(s: &str, byte_pos: usize) -> bool {
     s.as_bytes()
         .get(byte_pos)
-        .map_or(false, |&b| b.is_ascii_alphanumeric() || b == b'_')
+        .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// Replace `word` with `replacement` only at word boundaries (not inside
@@ -205,10 +222,7 @@ const SPECIAL_FUNCTIONS: &[(&str, &str)] = &[
 
 /// Unevaluated CAS operations that REDUCE returns when it cannot solve
 /// a problem. Each entry is (REDUCE keyword, human-readable operation).
-const UNEVALUATED_OPS: &[(&str, &str)] = &[
-    ("int", "integral"),
-    ("df", "derivative"),
-];
+const UNEVALUATED_OPS: &[(&str, &str)] = &[("int", "integral"), ("df", "derivative")];
 
 /// Check whether REDUCE returned an unevaluated CAS operation (meaning
 /// it could not solve the problem). Returns the human-readable name of
@@ -273,12 +287,67 @@ pub fn from_reduce(input: &str) -> String {
     // ** → ^ (REDUCE exponentiation → Logos caret)
     output = output.replace("**", "^");
 
+    // REDUCE's infix printer emits "a + -b" / "a +  - b" for "a - b".
+    // Collapse "+ <whitespace> -" into "-" so output reads naturally.
+    output = collapse_plus_minus(&output);
+
     output
+}
+
+/// REDUCE's printer always emits "+" before the next operand; when that operand
+/// is negative we get clunky "a + -b" or "a +  - b" sequences. Rewrite them as
+/// "a - b" while preserving everything else.
+fn collapse_plus_minus(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '+' {
+            let mut j = i + 1;
+            while j < chars.len() && (chars[j] == ' ' || chars[j] == '\t') {
+                j += 1;
+            }
+            if j < chars.len() && chars[j] == '-' {
+                if !out.is_empty() && !out.ends_with(' ') {
+                    out.push(' ');
+                }
+                out.push('-');
+                let mut k = j + 1;
+                while k < chars.len() && (chars[k] == ' ' || chars[k] == '\t') {
+                    k += 1;
+                }
+                if k < chars.len() {
+                    out.push(' ');
+                }
+                i = k;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_collapse_plus_minus_basic() {
+        assert_eq!(collapse_plus_minus("a + -b"), "a - b");
+        assert_eq!(collapse_plus_minus("a +  - b"), "a - b");
+        assert_eq!(collapse_plus_minus("3*x +  - y^2"), "3*x - y^2");
+        assert_eq!(collapse_plus_minus("a + b"), "a + b"); // unchanged
+        assert_eq!(collapse_plus_minus("a - b"), "a - b"); // unchanged
+    }
+
+    #[test]
+    fn test_from_reduce_collapses_plus_minus() {
+        let out = from_reduce("3*x +  - y**2");
+        assert_eq!(out, "3*x - y^2");
+    }
 
     // ── to_reduce: Greek letters ─────────────────────────────────
 
@@ -318,18 +387,18 @@ mod tests {
 
     #[test]
     fn test_operators_to_reduce() {
-        assert_eq!(to_reduce("x \u{00D7} y"), "x * y");   // ×
-        assert_eq!(to_reduce("x \u{00F7} y"), "x / y");   // ÷
-        assert_eq!(to_reduce("x \u{2212} y"), "x - y");   // − (minus sign)
-        assert_eq!(to_reduce("\u{221A}(x)"), "sqrt(x)");   // √
+        assert_eq!(to_reduce("x \u{00D7} y"), "x * y"); // ×
+        assert_eq!(to_reduce("x \u{00F7} y"), "x / y"); // ÷
+        assert_eq!(to_reduce("x \u{2212} y"), "x - y"); // − (minus sign)
+        assert_eq!(to_reduce("\u{221A}(x)"), "sqrt(x)"); // √
     }
 
     // ── to_reduce: Special symbols ───────────────────────────────
 
     #[test]
     fn test_special_symbols_to_reduce() {
-        assert_eq!(to_reduce("\u{2211}"), "sum");    // ∑
-        assert_eq!(to_reduce("\u{220F}"), "prod");   // ∏
+        assert_eq!(to_reduce("\u{2211}"), "sum"); // ∑
+        assert_eq!(to_reduce("\u{220F}"), "prod"); // ∏
         assert_eq!(to_reduce("\u{221E}"), "infinity");
     }
 
@@ -355,10 +424,7 @@ mod tests {
     #[test]
     fn test_combined_expression_to_reduce() {
         // π × r²
-        assert_eq!(
-            to_reduce("\u{03C0} \u{00D7} r\u{00B2}"),
-            "pi * r**2"
-        );
+        assert_eq!(to_reduce("\u{03C0} \u{00D7} r\u{00B2}"), "pi * r**2");
         // α + β × γ
         assert_eq!(
             to_reduce("\u{03B1} + \u{03B2} \u{00D7} \u{03B3}"),
@@ -394,10 +460,7 @@ mod tests {
 
     #[test]
     fn test_from_reduce_combined() {
-        assert_eq!(
-            from_reduce("3*x**2 + pi"),
-            "3*x^2 + \u{03C0}"
-        );
+        assert_eq!(from_reduce("3*x**2 + pi"), "3*x^2 + \u{03C0}");
     }
 
     // ── Round-trip tests ─────────────────────────────────────────
@@ -536,19 +599,13 @@ mod tests {
 
     #[test]
     fn test_detect_unevaluated_df() {
-        assert_eq!(
-            detect_unevaluated_cas("df(foo(x),x)"),
-            Some("derivative"),
-        );
+        assert_eq!(detect_unevaluated_cas("df(foo(x),x)"), Some("derivative"),);
     }
 
     #[test]
     fn test_detect_unevaluated_none_for_solved() {
         // Normal result with no leftover int/df
-        assert_eq!(
-            detect_unevaluated_cas("sin(x)^2 + cos(x)"),
-            None,
-        );
+        assert_eq!(detect_unevaluated_cas("sin(x)^2 + cos(x)"), None,);
     }
 
     #[test]

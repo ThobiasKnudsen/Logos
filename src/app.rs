@@ -14,10 +14,10 @@ use crate::lang;
 use crate::lang::lang_service::LangService;
 use crate::lang::reduce::service::ReduceService;
 use crate::lang::reduce::translate;
+use crate::render::RenderAreaParams;
 use crate::render::{CellInfo, CellLayout, Renderer, TabHitRect, TabInfo};
 use crate::session::TabManager;
 use crate::ui::layout::{LayoutResult, Rect, UiLayout};
-use crate::render::RenderAreaParams;
 use crate::ui::theme::{self, fonts, spacing, split};
 
 // ---------------------------------------------------------------------------
@@ -31,13 +31,23 @@ struct WgpuGpuDispatch<'a> {
 }
 
 impl<'a> lang::interpreter::GpuDispatch for WgpuGpuDispatch<'a> {
-    fn dispatch(&self, request: &lang::interpreter::ParallelForRequest) -> Result<Vec<(String, Vec<f64>)>, String> {
+    fn dispatch(
+        &self,
+        request: &lang::interpreter::ParallelForRequest,
+    ) -> Result<Vec<(String, Vec<f64>)>, String> {
         crate::render::compute_pipeline::dispatch(self.device, self.queue, request)
     }
 }
 
 /// CAS function names that REDUCE handles but WGSL doesn't.
-const CAS_FUNCTIONS: &[&str] = &["\u{222B}(", "\u{2202}(", "\u{2146}(", "solve(", "integral(", "derivative("];
+const CAS_FUNCTIONS: &[&str] = &[
+    "\u{222B}(",
+    "\u{2202}(",
+    "\u{2146}(",
+    "solve(",
+    "integral(",
+    "derivative(",
+];
 
 /// Find the first CAS function call in `text` and return its byte range.
 ///
@@ -94,8 +104,7 @@ fn find_ident_offset(source: &str, name: &str) -> Option<usize> {
                 && source.as_bytes()[abs - 1] != b'_';
         let end = abs + name.len();
         let after_ok = end >= source.len()
-            || !source.as_bytes()[end].is_ascii_alphanumeric()
-                && source.as_bytes()[end] != b'_';
+            || !source.as_bytes()[end].is_ascii_alphanumeric() && source.as_bytes()[end] != b'_';
         if before_ok && after_ok {
             return Some(abs);
         }
@@ -223,9 +232,9 @@ fn substitute_reduce_result(cell_text: &str, reduce_result: &str, embedded_cas: 
 /// Collect name→body bindings from preceding cells and lines within the
 /// current cell that appear before the CAS call.
 ///
-/// The `:` operator is treated as textual substitution: `a(x): x^2` means
+/// The `:=` operator is treated as textual substitution: `a(x) := x^2` means
 /// "wherever `a` appears, substitute `x^2`". This allows nested expansion:
-/// `ⅆ(v,x)` where `v: ⅆ(a,x)` and `a: x^2` → `ⅆ(ⅆ(x^2,x),x)`.
+/// `ⅆ(v,x)` where `v := ⅆ(a,x)` and `a := x^2` → `ⅆ(ⅆ(x^2,x),x)`.
 fn collect_bindings(
     cells: &[crate::editor::cell::CodeCell],
     up_to: usize,
@@ -235,54 +244,103 @@ fn collect_bindings(
 
     let mut bindings = Vec::new();
 
-    // From preceding cells
+    // From preceding cells, processed line-by-line so multi-binding cells
+    // contribute every binding (extract_binding only matches the first `:=`).
     for cell in cells.iter().take(up_to) {
         let src = match &cell.output {
-            CellOutput::Simplified(s) | CellOutput::Computed(s) => s.as_str(),
+            CellOutput::Simplified(s) => s.as_str(),
             _ => cell.buffer.text(),
         };
-        extract_binding(src.trim(), &mut bindings);
-    }
-
-    // From lines within the current cell before the first CAS call
-    if let Some((cas_start, _)) = find_cas_call(cell_text) {
-        for line in cell_text[..cas_start].lines() {
+        for line in src.trim().lines() {
             extract_binding(line.trim(), &mut bindings);
         }
+    }
+
+    // From lines within the current cell, up to the first action call
+    // (CAS function, print(), or plot()). Without this, a cell like
+    //   f := x+2*x
+    //   print(f)
+    // would not see its own binding when falling back to REDUCE.
+    let stop = [
+        find_cas_call(cell_text).map(|(s, _)| s),
+        cell_text.find("print("),
+        cell_text.find("plot("),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .unwrap_or(cell_text.len());
+
+    for line in cell_text[..stop].lines() {
+        extract_binding(line.trim(), &mut bindings);
     }
 
     bindings
 }
 
-/// Extract a single binding from a line like `name(args): body` or `name: body`.
+/// Extract a single binding from a line like `name := body` or `name(args) := body`.
 fn extract_binding(text: &str, bindings: &mut Vec<(String, String)>) {
     if text.is_empty() {
         return;
     }
-    // Find `:` not followed by `=`
-    let colon_pos = text.char_indices().find_map(|(i, c)| {
-        if c == ':' && text.get(i + 1..i + 2) != Some("=") {
-            Some(i)
-        } else {
-            None
+    let Some(colon_pos) = text.find(":=") else {
+        return;
+    };
+    let lhs = text[..colon_pos].trim();
+    let rhs = text[colon_pos + 2..].trim();
+    if lhs.is_empty() || rhs.is_empty() {
+        return;
+    }
+    let name = if let Some(paren) = lhs.find('(') {
+        lhs[..paren].trim()
+    } else {
+        lhs
+    };
+    if !name.is_empty() {
+        bindings.push((name.to_string(), rhs.to_string()));
+    }
+}
+
+/// Combine the effective source of cells `[0..=cell_index]` into a single string,
+/// using each cell's simplified output when available, otherwise the buffer text.
+/// Used for error reporting (line/col lookup in user source).
+fn build_combined_source(tab: &crate::session::Tab, cell_index: usize) -> String {
+    use crate::editor::cell::CellOutput;
+    let mut s = String::new();
+    for (i, cell) in tab.cells.iter().enumerate() {
+        if i > cell_index {
+            break;
         }
-    });
-    if let Some(pos) = colon_pos {
-        let lhs = text[..pos].trim();
-        let rhs = text[pos + 1..].trim();
-        if lhs.is_empty() || rhs.is_empty() {
-            return;
+        if !s.is_empty() {
+            s.push('\n');
         }
-        // Strip function params: a(x) → a
-        let name = if let Some(paren) = lhs.find('(') {
-            lhs[..paren].trim()
-        } else {
-            lhs
-        };
-        if !name.is_empty() {
-            bindings.push((name.to_string(), rhs.to_string()));
+        match &cell.output {
+            CellOutput::Simplified(out) => s.push_str(out),
+            _ => s.push_str(cell.buffer.text()),
         }
     }
+    s
+}
+
+/// Extract the argument text from a function call like `print(expr)` or `plot(y=expr)`.
+fn extract_call_arg(text: &str, fn_name: &str) -> Option<String> {
+    let prefix = format!("{}(", fn_name);
+    let start = text.find(&prefix)?;
+    let after = &text[start + prefix.len()..];
+    let mut depth = 1;
+    for (i, c) in after.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(after[..i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Expand all bindings in an expression by textual substitution.
@@ -315,13 +373,13 @@ fn replace_at_word_boundaries(input: &str, word: &str, replacement: &str) -> Str
             || !input[..abs]
                 .chars()
                 .last()
-                .map_or(false, |c| c.is_alphanumeric() || c == '_');
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
         let after_pos = abs + word.len();
         let after_ok = after_pos >= input.len()
             || !input[after_pos..]
                 .chars()
                 .next()
-                .map_or(false, |c| c.is_alphanumeric() || c == '_');
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
         if before_ok && after_ok {
             result.push_str(&input[start..abs]);
             result.push_str(replacement);
@@ -346,33 +404,87 @@ pub(crate) struct MenuItemDef {
 pub(crate) const MENU_NAMES: &[&str] = &["File", "Edit", "View", "Examples", "Theme", "Help"];
 
 const MENU_FILE_ITEMS: &[MenuItemDef] = &[
-    MenuItemDef { label: "New Tab", shortcut: "Ctrl+N" },
-    MenuItemDef { label: "Open...", shortcut: "Ctrl+O" },
-    MenuItemDef { label: "Save", shortcut: "Ctrl+S" },
-    MenuItemDef { label: "Save As...", shortcut: "Ctrl+Shift+S" },
-    MenuItemDef { label: "Close Tab", shortcut: "Ctrl+W" },
-    MenuItemDef { label: "Quit", shortcut: "Ctrl+Q" },
+    MenuItemDef {
+        label: "New Tab",
+        shortcut: "Ctrl+N",
+    },
+    MenuItemDef {
+        label: "Open...",
+        shortcut: "Ctrl+O",
+    },
+    MenuItemDef {
+        label: "Save",
+        shortcut: "Ctrl+S",
+    },
+    MenuItemDef {
+        label: "Save As...",
+        shortcut: "Ctrl+Shift+S",
+    },
+    MenuItemDef {
+        label: "Close Tab",
+        shortcut: "Ctrl+W",
+    },
+    MenuItemDef {
+        label: "Quit",
+        shortcut: "Ctrl+Q",
+    },
 ];
 
 const MENU_EDIT_ITEMS: &[MenuItemDef] = &[
-    MenuItemDef { label: "Cut", shortcut: "Ctrl+X" },
-    MenuItemDef { label: "Copy", shortcut: "Ctrl+C" },
-    MenuItemDef { label: "Paste", shortcut: "Ctrl+V" },
-    MenuItemDef { label: "Select All", shortcut: "Ctrl+A" },
+    MenuItemDef {
+        label: "Cut",
+        shortcut: "Ctrl+X",
+    },
+    MenuItemDef {
+        label: "Copy",
+        shortcut: "Ctrl+C",
+    },
+    MenuItemDef {
+        label: "Paste",
+        shortcut: "Ctrl+V",
+    },
+    MenuItemDef {
+        label: "Select All",
+        shortcut: "Ctrl+A",
+    },
 ];
 
 const MENU_VIEW_ITEMS: &[MenuItemDef] = &[
-    MenuItemDef { label: "Zoom In", shortcut: "Ctrl+=" },
-    MenuItemDef { label: "Zoom Out", shortcut: "Ctrl+-" },
-    MenuItemDef { label: "Reset Zoom", shortcut: "Ctrl+0" },
+    MenuItemDef {
+        label: "Zoom In",
+        shortcut: "Ctrl+=",
+    },
+    MenuItemDef {
+        label: "Zoom Out",
+        shortcut: "Ctrl+-",
+    },
+    MenuItemDef {
+        label: "Reset Zoom",
+        shortcut: "Ctrl+0",
+    },
 ];
 
 const MENU_EXAMPLES_ITEMS: &[MenuItemDef] = &[
-    MenuItemDef { label: "Gradient", shortcut: "" },
-    MenuItemDef { label: "Ripple", shortcut: "" },
-    MenuItemDef { label: "Mandelbrot", shortcut: "" },
-    MenuItemDef { label: "Warp", shortcut: "" },
-    MenuItemDef { label: "Monte Carlo", shortcut: "" },
+    MenuItemDef {
+        label: "Gradient",
+        shortcut: "",
+    },
+    MenuItemDef {
+        label: "Ripple",
+        shortcut: "",
+    },
+    MenuItemDef {
+        label: "Mandelbrot",
+        shortcut: "",
+    },
+    MenuItemDef {
+        label: "Warp",
+        shortcut: "",
+    },
+    MenuItemDef {
+        label: "Monte Carlo",
+        shortcut: "",
+    },
 ];
 
 const EXAMPLE_SOURCES: &[&str] = &[
@@ -386,7 +498,6 @@ const EXAMPLE_SOURCES: &[&str] = &[
 /// Dynamic theme menu items built from themes.json at runtime.
 pub(crate) struct DynMenuItemDef {
     pub label: String,
-    pub shortcut: &'static str,
 }
 
 static THEME_MENU_CACHE: std::sync::OnceLock<std::sync::Mutex<Vec<DynMenuItemDef>>> =
@@ -397,20 +508,10 @@ fn theme_menu_items() -> &'static std::sync::Mutex<Vec<DynMenuItemDef>> {
         let names = theme::theme_names();
         let items = names
             .into_iter()
-            .map(|n| DynMenuItemDef { label: n, shortcut: "" })
+            .map(|n| DynMenuItemDef { label: n })
             .collect();
         std::sync::Mutex::new(items)
     })
-}
-
-/// Rebuild theme menu cache (call after reload_themes).
-pub(crate) fn rebuild_theme_menu() {
-    let names = theme::theme_names();
-    let items: Vec<DynMenuItemDef> = names
-        .into_iter()
-        .map(|n| DynMenuItemDef { label: n, shortcut: "" })
-        .collect();
-    *theme_menu_items().lock().unwrap() = items;
 }
 
 pub(crate) fn menu_items(index: usize) -> &'static [MenuItemDef] {
@@ -533,15 +634,28 @@ impl RenderAreaState {
     ///
     /// On the very first call (`prev_pane` is `None`), initialises `world_per_pixel`
     /// from the default axis range and enforces equal X/Y scaling.
-    fn adjust_for_pane_change(&mut self, new_pane: &Rect, win_pos: (f32, f32), win_size: (u32, u32)) {
+    fn adjust_for_pane_change(
+        &mut self,
+        new_pane: &Rect,
+        win_pos: (f32, f32),
+        win_size: (u32, u32),
+    ) {
         if new_pane.w <= 0.0 || new_pane.h <= 0.0 {
             return;
         }
 
         if let Some(old) = self.prev_pane {
             // Per-axis world-per-pixel (may differ after per-axis zoom)
-            let wpp_x = if old.w > 0.0 { (self.axis_x_max - self.axis_x_min) / old.w } else { self.world_per_pixel };
-            let wpp_y = if old.h > 0.0 { (self.axis_y_max - self.axis_y_min) / old.h } else { self.world_per_pixel };
+            let wpp_x = if old.w > 0.0 {
+                (self.axis_x_max - self.axis_x_min) / old.w
+            } else {
+                self.world_per_pixel
+            };
+            let wpp_y = if old.h > 0.0 {
+                (self.axis_y_max - self.axis_y_min) / old.h
+            } else {
+                self.world_per_pixel
+            };
 
             // X: shift axis_x_min by screen-left delta, recompute axis_x_max from new pane width
             let old_screen_left = self.prev_win_pos.0 + old.x;
@@ -636,8 +750,17 @@ pub(crate) struct WindowControlRects {
 
 impl Default for WindowControlRects {
     fn default() -> Self {
-        let z = Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
-        Self { minimize: z, maximize: z, close: z }
+        let z = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+        };
+        Self {
+            minimize: z,
+            maximize: z,
+            close: z,
+        }
     }
 }
 
@@ -779,11 +902,9 @@ impl AppState {
         let build_cell_infos_us = t0.elapsed().as_micros();
 
         let t1 = Instant::now();
-        self.cell_layouts = self.renderer.update_cells(
-            &cell_infos,
-            tab.active_cell_index,
-            lp,
-        );
+        self.cell_layouts = self
+            .renderer
+            .update_cells(&cell_infos, tab.active_cell_index, lp);
         let update_cells_us = t1.elapsed().as_micros();
 
         // Update tab bar
@@ -812,9 +933,10 @@ impl AppState {
         self.win_control_rects = compute_win_control_rects(&self.cached_layout.title_bar);
 
         // Update menu item rects
-        self.menu_item_rects = self
-            .renderer
-            .update_menu_items(self.cached_layout.title_bar, self.win_control_rects.minimize.x);
+        self.menu_item_rects = self.renderer.update_menu_items(
+            self.cached_layout.title_bar,
+            self.win_control_rects.minimize.x,
+        );
         let ui_chrome_us = t2.elapsed().as_micros();
 
         // Update status bar
@@ -842,7 +964,7 @@ impl AppState {
         let status_bar_us = t3.elapsed().as_micros();
 
         let total_us = sync_start.elapsed().as_micros();
-        log::warn!(
+        log::debug!(
             "[perf] sync_active_tab[#{}]: {}us total | build_cell_infos={}us update_cells={}us ui_chrome={}us status_bar={}us",
             seq, total_us, build_cell_infos_us, update_cells_us, ui_chrome_us, status_bar_us
         );
@@ -858,7 +980,8 @@ impl AppState {
         // Window edge resize (highest priority — only for undecorated windows)
         if !self.is_maximized {
             let size = self.window.inner_size();
-            if let Some(dir) = edge_resize_direction(mx, my, size.width as f32, size.height as f32) {
+            if let Some(dir) = edge_resize_direction(mx, my, size.width as f32, size.height as f32)
+            {
                 self.set_hover(HoverTarget::WindowEdge(dir));
                 return;
             }
@@ -1032,8 +1155,8 @@ impl AppState {
 
     fn set_hover(&mut self, target: HoverTarget) {
         // For RenderArea, also check if the zone changed
-        let zone_changed = target == HoverTarget::RenderArea
-            && self.hover_target == HoverTarget::RenderArea;
+        let zone_changed =
+            target == HoverTarget::RenderArea && self.hover_target == HoverTarget::RenderArea;
 
         if self.hover_target != target || zone_changed {
             self.hover_target = target;
@@ -1041,7 +1164,8 @@ impl AppState {
                 HoverTarget::SplitHandle => CursorIcon::ColResize,
                 HoverTarget::CellResizeHandle(_) => CursorIcon::NsResize,
                 HoverTarget::CellEditor(_) => CursorIcon::Text,
-                HoverTarget::CellPlayButton(_) | HoverTarget::CellCopyButton(_)
+                HoverTarget::CellPlayButton(_)
+                | HoverTarget::CellCopyButton(_)
                 | HoverTarget::CellOutputCopyButton(_)
                 | HoverTarget::CellOutputToggle(_)
                 | HoverTarget::AutocompleteItem(_) => CursorIcon::Pointer,
@@ -1164,7 +1288,9 @@ impl AppState {
                     let pane = self.cached_layout.left_pane;
 
                     let candidates: Vec<(String, crate::editor::autocomplete::CandidateKind)> =
-                        self.autocomplete.candidates.iter()
+                        self.autocomplete
+                            .candidates
+                            .iter()
                             .map(|c| {
                                 let text = c.display.as_deref().unwrap_or(&c.label);
                                 (text.to_string(), c.kind)
@@ -1192,8 +1318,16 @@ impl AppState {
     fn accept_autocomplete(&mut self) {
         if let Some((label, prefix_start)) = self.autocomplete.accept() {
             let label = label.to_string();
-            let cursor = self.tab_manager.active_tab().active_cell().buffer.cursor_byte_offset();
-            self.tab_manager.active_tab_mut().active_cell_mut().buffer
+            let cursor = self
+                .tab_manager
+                .active_tab()
+                .active_cell()
+                .buffer
+                .cursor_byte_offset();
+            self.tab_manager
+                .active_tab_mut()
+                .active_cell_mut()
+                .buffer
                 .replace_range(prefix_start, cursor, &label);
             self.tab_manager.active_tab_mut().mark_modified();
         }
@@ -1201,7 +1335,12 @@ impl AppState {
         self.sync_active_tab();
     }
 
-    fn handle_menu_action(&mut self, event_loop: &ActiveEventLoop, menu_idx: usize, item_idx: usize) {
+    fn handle_menu_action(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        menu_idx: usize,
+        item_idx: usize,
+    ) {
         self.close_menu();
         match (menu_idx, item_idx) {
             // File menu
@@ -1248,55 +1387,104 @@ impl AppState {
                 }
                 self.sync_active_tab();
             }
-            (0, 5) => { event_loop.exit(); }
+            (0, 5) => {
+                event_loop.exit();
+            }
             // Edit menu: Cut, Copy, Paste, Select All
-            (1, 0) => { self.do_cut(); }
-            (1, 1) => { self.do_copy(); }
-            (1, 2) => { self.do_paste(); }
-            (1, 3) => { self.do_select_all(); }
+            (1, 0) => {
+                self.do_cut();
+            }
+            (1, 1) => {
+                self.do_copy();
+            }
+            (1, 2) => {
+                self.do_paste();
+            }
+            (1, 3) => {
+                self.do_select_all();
+            }
             // View menu
-            (2, 0) => { self.do_zoom(|_| fonts::zoom_in()); }
-            (2, 1) => { self.do_zoom(|_| fonts::zoom_out()); }
-            (2, 2) => { self.do_zoom(|_| fonts::reset_zoom()); }
+            (2, 0) => {
+                self.do_zoom(|_| fonts::zoom_in());
+            }
+            (2, 1) => {
+                self.do_zoom(|_| fonts::zoom_out());
+            }
+            (2, 2) => {
+                self.do_zoom(|_| fonts::reset_zoom());
+            }
             // Examples menu — load built-in example into a new tab
             (3, i) => {
                 if let Some(&src) = EXAMPLE_SOURCES.get(i) {
-                    let name = MENU_EXAMPLES_ITEMS.get(i).map(|m| m.label).unwrap_or("Example");
+                    let name = MENU_EXAMPLES_ITEMS
+                        .get(i)
+                        .map(|m| m.label)
+                        .unwrap_or("Example");
                     let old = self.tab_manager.active_index;
                     self.renderer.stash_tab_shaders(old);
                     let new_idx = self.tab_manager.new_tab();
                     self.switch_tab_axis(old, new_idx);
                     self.tab_manager.active_tab_mut().name = name.to_string();
-                    self.tab_manager.active_tab_mut().active_cell_mut().buffer.set_text(src);
+                    self.tab_manager
+                        .active_tab_mut()
+                        .active_cell_mut()
+                        .buffer
+                        .set_text(src);
                     self.sync_active_tab();
                 }
             }
             // Theme menu — each item selects a theme by index
-            (4, i) => { self.select_theme(i); }
+            (4, i) => {
+                self.select_theme(i);
+            }
             _ => {}
         }
     }
 
     fn do_cut(&mut self) {
-        if let Some(text) = self.tab_manager.active_tab().active_cell().buffer.selected_text() {
+        if let Some(text) = self
+            .tab_manager
+            .active_tab()
+            .active_cell()
+            .buffer
+            .selected_text()
+        {
             let owned = text.to_string();
-            if let Some(cb) = self.clipboard.as_mut() { let _ = cb.set_text(&owned); }
-            self.tab_manager.active_tab_mut().active_cell_mut().buffer.backspace();
+            if let Some(cb) = self.clipboard.as_mut() {
+                let _ = cb.set_text(&owned);
+            }
+            self.tab_manager
+                .active_tab_mut()
+                .active_cell_mut()
+                .buffer
+                .backspace();
             self.tab_manager.active_tab_mut().mark_modified();
             self.sync_active_tab();
         }
     }
 
     fn do_copy(&mut self) {
-        if let Some(text) = self.tab_manager.active_tab().active_cell().buffer.selected_text() {
-            if let Some(cb) = self.clipboard.as_mut() { let _ = cb.set_text(text); }
+        if let Some(text) = self
+            .tab_manager
+            .active_tab()
+            .active_cell()
+            .buffer
+            .selected_text()
+        {
+            if let Some(cb) = self.clipboard.as_mut() {
+                let _ = cb.set_text(text);
+            }
         }
     }
 
     fn do_paste(&mut self) {
         if let Some(cb) = self.clipboard.as_mut() {
             if let Ok(text) = cb.get_text() {
-                self.tab_manager.active_tab_mut().active_cell_mut().buffer.insert_text(&text);
+                self.tab_manager
+                    .active_tab_mut()
+                    .active_cell_mut()
+                    .buffer
+                    .insert_text(&text);
                 self.tab_manager.active_tab_mut().mark_modified();
                 self.sync_active_tab();
             }
@@ -1304,7 +1492,11 @@ impl AppState {
     }
 
     fn do_select_all(&mut self) {
-        self.tab_manager.active_tab_mut().active_cell_mut().buffer.select_all();
+        self.tab_manager
+            .active_tab_mut()
+            .active_cell_mut()
+            .buffer
+            .select_all();
         self.sync_active_tab();
     }
 
@@ -1315,7 +1507,8 @@ impl AppState {
         let size = self.window.inner_size();
         self.cached_layout = self.layout.compute(size.width as f32, size.height as f32);
         let wp = win_pos(&self.window);
-        self.render_area.adjust_for_pane_change(&self.cached_layout.right_pane, wp, size.into());
+        self.render_area
+            .adjust_for_pane_change(&self.cached_layout.right_pane, wp, size.into());
         self.sync_active_tab();
     }
 
@@ -1490,22 +1683,15 @@ impl AppState {
     /// - If CAS functions present → REDUCE first, then shader
     /// - Otherwise → fragment shader (continuous rendering)
     fn trigger_cell_play(&mut self, cell_index: usize) {
-        let tab = self.tab_manager.active_tab();
-        let cell_text = tab.cells[cell_index].buffer.text().trim().to_string();
-
-        // Gather source from all cells up to this one
-        let mut source = String::new();
-        for (i, cell) in tab.cells.iter().enumerate() {
-            if i > cell_index { break; }
-            if !source.is_empty() { source.push('\n'); }
-            match &cell.output {
-                CellOutput::Simplified(s) | CellOutput::Computed(s) => source.push_str(s),
-                _ => source.push_str(cell.buffer.text()),
-            }
+        let cell_text;
+        let ast_result;
+        {
+            let tab = self.tab_manager.active_tab();
+            cell_text = tab.cells[cell_index].buffer.text().trim().to_string();
+            ast_result = tab.combined_ast_up_to(cell_index);
         }
 
-        // Parse first to determine which path to take
-        let ast = match lang::parse(&source) {
+        let ast = match ast_result {
             Ok(ast) => ast,
             Err(e) => {
                 log::error!("Parse error: {}", e);
@@ -1516,6 +1702,104 @@ impl AppState {
                 return;
             }
         };
+
+        // Detect all print()/plot() actions in the AST
+        let actions = lang::detect_cell_actions(&ast);
+
+        // ── Handle print ────────────────────────────────────
+        if let Some(print_idx) = actions.first_print {
+            let eval_ast = lang::build_print_ast(&ast, print_idx);
+            let (device, queue) = self.renderer.gpu_refs();
+            let gpu = WgpuGpuDispatch { device, queue };
+            match lang::interpreter::eval(&eval_ast, &gpu) {
+                Ok(val) => {
+                    let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+                    cell.output = CellOutput::Computed(format!("{}", val));
+                    cell.output_collapsed = false;
+                }
+                Err(_) => {
+                    let inner =
+                        extract_call_arg(&cell_text, "print").unwrap_or_else(|| cell_text.clone());
+
+                    let tab = self.tab_manager.active_tab();
+                    let bindings = collect_bindings(&tab.cells, cell_index, &cell_text);
+                    let expanded = expand_bindings(&inner, &bindings);
+
+                    let reduce_expr = translate::to_reduce(&expanded);
+                    let reduce_expr = if let Some(eq_pos) = reduce_expr.find('=') {
+                        if !reduce_expr[..eq_pos].ends_with(':')
+                            && !reduce_expr[..eq_pos].ends_with('<')
+                            && !reduce_expr[..eq_pos].ends_with('>')
+                            && !reduce_expr[..eq_pos].ends_with('!')
+                        {
+                            let lhs = &reduce_expr[..eq_pos];
+                            let rhs = &reduce_expr[eq_pos + 1..];
+                            format!("({}) - ({})", lhs.trim(), rhs.trim())
+                        } else {
+                            reduce_expr
+                        }
+                    } else {
+                        reduce_expr
+                    };
+                    let is_equation = reduce_expr.starts_with('(') && reduce_expr.contains(") - (");
+                    let cell_id;
+                    {
+                        let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+                        cell_id = cell.id;
+                        cell.output = CellOutput::Computed("…".to_string());
+                        cell.output_collapsed = false;
+                        cell.print_pending = true;
+                        cell.print_is_equation = is_equation;
+                    }
+                    self.reduce_service.submit(cell_id, Vec::new(), reduce_expr);
+                }
+            }
+
+            if actions.last_plot.is_none() {
+                self.sync_active_tab();
+                return;
+            }
+        }
+
+        // ── Handle plot ─────────────────────────────────────
+        if let Some(plot_idx) = actions.last_plot {
+            let plot_ast = lang::build_plot_ast(&ast, plot_idx);
+            let wgsl = match lang::wgsl_gen::generate(&plot_ast) {
+                Ok(w) => w,
+                Err(e) => {
+                    log::error!("Language pipeline error: {}", e);
+                    let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+                    cell.output = CellOutput::Error(e);
+                    cell.output_collapsed = false;
+                    self.sync_active_tab();
+                    return;
+                }
+            };
+            let cell_id = self.tab_manager.active_tab().cells[cell_index].id;
+            match self.renderer.compile_cell_shader(cell_id, &wgsl) {
+                Ok(()) => {
+                    let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+                    cell.is_playing = true;
+                    if actions.first_print.is_none() {
+                        cell.output = CellOutput::None;
+                    }
+                }
+                Err(e) => {
+                    log::error!("Shader compilation failed: {}", e);
+                    let source = build_combined_source(self.tab_manager.active_tab(), cell_index);
+                    let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+                    cell.output = CellOutput::Error(format_shader_error(&e.to_string(), &source));
+                    cell.output_collapsed = false;
+                }
+            }
+            self.sync_active_tab();
+            return;
+        }
+
+        if actions.has_action() {
+            self.sync_active_tab();
+            return;
+        }
 
         // Route: interpreter path for array/parallel-for code
         if lang::needs_interpreter(&ast) {
@@ -1541,51 +1825,18 @@ impl AppState {
         // CAS path: submit to REDUCE if CAS functions present
         let has_cas = find_cas_call(&cell_text).is_some();
         if has_cas && !cell_text.is_empty() {
+            let tab = self.tab_manager.active_tab();
             let cell_id = tab.cells[cell_index].id;
             let (reduce_input, _) = extract_reduce_expr(&cell_text);
-
             let bindings = collect_bindings(&tab.cells, cell_index, &cell_text);
             let expanded = expand_bindings(reduce_input, &bindings);
             let reduce_expr = translate::to_reduce(&expanded);
             self.reduce_service.submit(cell_id, Vec::new(), reduce_expr);
+            self.sync_active_tab();
+            return;
         }
 
-        // Fragment shader path
-        let any_unresolved_cas = tab.cells.iter().take(cell_index + 1).any(|c| {
-            !matches!(c.output, CellOutput::Simplified(_)) && find_cas_call(c.buffer.text()).is_some()
-        });
-        if !has_cas && !any_unresolved_cas {
-            match lang::compile(&source) {
-                Ok(wgsl) => {
-                    let cell_id = tab.cells[cell_index].id;
-                    match self.renderer.compile_cell_shader(cell_id, &wgsl) {
-                        Ok(()) => {
-                            let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
-                            cell.is_playing = true;
-                            cell.output = CellOutput::None;
-                        }
-                        Err(e) => {
-                            log::error!("Shader compilation failed: {}", e);
-                            let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
-                            cell.output = CellOutput::Error(format_shader_error(&e.to_string(), &source));
-                            cell.output_collapsed = false;
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::error!("Language pipeline error: {}", e);
-                    let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
-                    cell.output = CellOutput::Error(e);
-                    cell.output_collapsed = false;
-                }
-            }
-        } else if any_unresolved_cas && !has_cas {
-            let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
-            cell.output = CellOutput::Error(
-                "Play cells with ⅆ/∫/∂ first to evaluate them".to_string(),
-            );
-            cell.output_collapsed = false;
-        }
+        // No action and no special path — nothing to do
         self.sync_active_tab();
     }
 
@@ -1628,7 +1879,12 @@ impl ApplicationHandler for App {
             pending_dialog: None,
             cursor_position: (0.0, 0.0),
             tab_hit_rects: Vec::new(),
-            plus_button_rect: Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+            plus_button_rect: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            },
             cell_layouts: Vec::new(),
             hover_target: HoverTarget::None,
             mouse_press_target: HoverTarget::None,
@@ -1667,7 +1923,9 @@ impl ApplicationHandler for App {
 
         let wp = win_pos(&state.window);
         let ws = state.window.inner_size();
-        state.render_area.adjust_for_pane_change(&state.cached_layout.right_pane, wp, ws.into());
+        state
+            .render_area
+            .adjust_for_pane_change(&state.cached_layout.right_pane, wp, ws.into());
         state.sync_active_tab();
         self.state = Some(state);
     }
@@ -1707,11 +1965,14 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 state.renderer.resize(size);
                 let (w, h) = (size.width as f32, size.height as f32);
-                state.split_left_width =
-                    state.layout.clamp_left_width(state.split_left_width, w);
+                state.split_left_width = state.layout.clamp_left_width(state.split_left_width, w);
                 state.cached_layout = state.layout.compute(w, h);
                 let wp = win_pos(&state.window);
-                state.render_area.adjust_for_pane_change(&state.cached_layout.right_pane, wp, (size.width, size.height));
+                state.render_area.adjust_for_pane_change(
+                    &state.cached_layout.right_pane,
+                    wp,
+                    (size.width, size.height),
+                );
                 state.recompute_hover();
                 state.sync_active_tab();
                 state.dismiss_autocomplete();
@@ -1721,10 +1982,9 @@ impl ApplicationHandler for App {
                 state.cursor_position = (position.x as f32, position.y as f32);
 
                 if state.is_dragging_v_scroll {
-                    state.renderer.set_v_scroll_from_drag(
-                        state.cursor_position.1,
-                        state.scroll_drag_offset,
-                    );
+                    state
+                        .renderer
+                        .set_v_scroll_from_drag(state.cursor_position.1, state.scroll_drag_offset);
                     state.sync_active_tab();
                     state.dismiss_autocomplete();
                     state.window.request_redraw();
@@ -1734,11 +1994,14 @@ impl ApplicationHandler for App {
 
                     let size = state.window.inner_size();
                     let (w, h) = (size.width as f32, size.height as f32);
-                    state.split_left_width =
-                        state.layout.clamp_left_width(desired_width, w);
+                    state.split_left_width = state.layout.clamp_left_width(desired_width, w);
                     state.cached_layout = state.layout.compute(w, h);
                     let wp = win_pos(&state.window);
-                    state.render_area.adjust_for_pane_change(&state.cached_layout.right_pane, wp, (size.width, size.height));
+                    state.render_area.adjust_for_pane_change(
+                        &state.cached_layout.right_pane,
+                        wp,
+                        (size.width, size.height),
+                    );
                     state.sync_active_tab();
                     // Dismiss autocomplete — pane layout changed
                     state.dismiss_autocomplete();
@@ -1749,8 +2012,16 @@ impl ApplicationHandler for App {
                     let dy = my - state.render_area.last_drag_pos.1;
 
                     let rp = state.cached_layout.right_pane;
-                    let wpp_x = if rp.w > 0.0 { (state.render_area.axis_x_max - state.render_area.axis_x_min) / rp.w } else { state.render_area.world_per_pixel };
-                    let wpp_y = if rp.h > 0.0 { (state.render_area.axis_y_max - state.render_area.axis_y_min) / rp.h } else { state.render_area.world_per_pixel };
+                    let wpp_x = if rp.w > 0.0 {
+                        (state.render_area.axis_x_max - state.render_area.axis_x_min) / rp.w
+                    } else {
+                        state.render_area.world_per_pixel
+                    };
+                    let wpp_y = if rp.h > 0.0 {
+                        (state.render_area.axis_y_max - state.render_area.axis_y_min) / rp.h
+                    } else {
+                        state.render_area.world_per_pixel
+                    };
 
                     match state.render_area.mouse_zone {
                         MouseZone::Center => {
@@ -1781,7 +2052,9 @@ impl ApplicationHandler for App {
                         let new_h = state.cell_resize_start_h + delta_y;
                         let text_pad = spacing::sm();
                         let min_h = fonts::editor_line_height() + text_pad * 2.0;
-                        let content_h = state.cell_layouts.iter()
+                        let content_h = state
+                            .cell_layouts
+                            .iter()
                             .find(|cl| cl.cell_index == idx)
                             .map(|cl| cl.content_height)
                             .unwrap_or(new_h);
@@ -1840,9 +2113,7 @@ impl ApplicationHandler for App {
                     winit::event::MouseScrollDelta::LineDelta(x, y) => {
                         (x * SCROLL_LINE_PIXELS, y * SCROLL_LINE_PIXELS)
                     }
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => {
-                        (pos.x as f32, pos.y as f32)
-                    }
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
                 };
 
                 let (mx, my) = state.cursor_position;
@@ -2039,7 +2310,9 @@ impl ApplicationHandler for App {
                         state.is_dragging_cell_resize = true;
                         state.cell_resize_index = Some(i);
                         state.cell_resize_start_y = state.cursor_position.1;
-                        let editor_h = state.cell_layouts.iter()
+                        let editor_h = state
+                            .cell_layouts
+                            .iter()
                             .find(|cl| cl.cell_index == i)
                             .map(|cl| cl.editor.h)
                             .unwrap_or(100.0);
@@ -2051,7 +2324,9 @@ impl ApplicationHandler for App {
                         state.close_menu();
                         state.is_dragging_cell_h_scroll = true;
                         state.cell_h_scroll_index = Some(i);
-                        let thumb_x = state.cell_layouts.iter()
+                        let thumb_x = state
+                            .cell_layouts
+                            .iter()
                             .find(|cl| cl.cell_index == i)
                             .map(|cl| cl.editor_h_scrollbar_thumb.x)
                             .unwrap_or(0.0);
@@ -2062,7 +2337,9 @@ impl ApplicationHandler for App {
                         state.close_menu();
                         state.is_dragging_cell_v_scroll = true;
                         state.cell_v_scroll_index = Some(i);
-                        let thumb_y = state.cell_layouts.iter()
+                        let thumb_y = state
+                            .cell_layouts
+                            .iter()
                             .find(|cl| cl.cell_index == i)
                             .map(|cl| cl.editor_v_scrollbar_thumb.y)
                             .unwrap_or(0.0);
@@ -2132,7 +2409,10 @@ impl ApplicationHandler for App {
                 }
 
                 // Menu/dropdown clicks handled in Pressed
-                if matches!(state.hover_target, HoverTarget::MenuItem(_) | HoverTarget::DropdownItem(_)) {
+                if matches!(
+                    state.hover_target,
+                    HoverTarget::MenuItem(_) | HoverTarget::DropdownItem(_)
+                ) {
                     return;
                 }
 
@@ -2221,7 +2501,10 @@ impl ApplicationHandler for App {
                         // Handled on press (drag-to-select); release is a no-op.
                     }
                     HoverTarget::CellCopyButton(i) => {
-                        let text = state.tab_manager.active_tab().cells[i].buffer.text().to_string();
+                        let text = state.tab_manager.active_tab().cells[i]
+                            .buffer
+                            .text()
+                            .to_string();
                         if let Some(cb) = state.clipboard.as_mut() {
                             let _ = cb.set_text(&text);
                         }
@@ -2261,8 +2544,7 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::KeyboardInput {
-                event: key_event,
-                ..
+                event: key_event, ..
             } => {
                 if key_event.state != ElementState::Pressed {
                     return;
@@ -2286,17 +2568,17 @@ impl ApplicationHandler for App {
                     match &key_event.logical_key {
                         Key::Named(NamedKey::ArrowUp) => {
                             state.autocomplete.select_prev();
-                            state.renderer.update_autocomplete_selection(
-                                state.autocomplete.selected_index,
-                            );
+                            state
+                                .renderer
+                                .update_autocomplete_selection(state.autocomplete.selected_index);
                             state.window.request_redraw();
                             return;
                         }
                         Key::Named(NamedKey::ArrowDown) => {
                             state.autocomplete.select_next();
-                            state.renderer.update_autocomplete_selection(
-                                state.autocomplete.selected_index,
-                            );
+                            state
+                                .renderer
+                                .update_autocomplete_selection(state.autocomplete.selected_index);
                             state.window.request_redraw();
                             return;
                         }
@@ -2326,38 +2608,72 @@ impl ApplicationHandler for App {
 
                 let shift = state.modifiers.shift_key();
                 let changed = match key_event.logical_key {
-                    Key::Named(NamedKey::Backspace) => {
-                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.backspace()
-                    }
-                    Key::Named(NamedKey::Delete) => {
-                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.delete()
-                    }
+                    Key::Named(NamedKey::Backspace) => state
+                        .tab_manager
+                        .active_tab_mut()
+                        .active_cell_mut()
+                        .buffer
+                        .backspace(),
+                    Key::Named(NamedKey::Delete) => state
+                        .tab_manager
+                        .active_tab_mut()
+                        .active_cell_mut()
+                        .buffer
+                        .delete(),
                     Key::Named(NamedKey::Enter) => {
-                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.insert_newline_auto_indent();
+                        state
+                            .tab_manager
+                            .active_tab_mut()
+                            .active_cell_mut()
+                            .buffer
+                            .insert_newline_auto_indent();
                         true
                     }
                     Key::Named(NamedKey::Tab) => {
-                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.insert_tab();
+                        state
+                            .tab_manager
+                            .active_tab_mut()
+                            .active_cell_mut()
+                            .buffer
+                            .insert_tab();
                         true
                     }
-                    Key::Named(NamedKey::ArrowLeft) => {
-                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_left(shift)
-                    }
-                    Key::Named(NamedKey::ArrowRight) => {
-                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_right(shift)
-                    }
-                    Key::Named(NamedKey::ArrowUp) => {
-                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_up(shift)
-                    }
-                    Key::Named(NamedKey::ArrowDown) => {
-                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_down(shift)
-                    }
-                    Key::Named(NamedKey::Home) => {
-                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_home(shift)
-                    }
-                    Key::Named(NamedKey::End) => {
-                        state.tab_manager.active_tab_mut().active_cell_mut().buffer.move_end(shift)
-                    }
+                    Key::Named(NamedKey::ArrowLeft) => state
+                        .tab_manager
+                        .active_tab_mut()
+                        .active_cell_mut()
+                        .buffer
+                        .move_left(shift),
+                    Key::Named(NamedKey::ArrowRight) => state
+                        .tab_manager
+                        .active_tab_mut()
+                        .active_cell_mut()
+                        .buffer
+                        .move_right(shift),
+                    Key::Named(NamedKey::ArrowUp) => state
+                        .tab_manager
+                        .active_tab_mut()
+                        .active_cell_mut()
+                        .buffer
+                        .move_up(shift),
+                    Key::Named(NamedKey::ArrowDown) => state
+                        .tab_manager
+                        .active_tab_mut()
+                        .active_cell_mut()
+                        .buffer
+                        .move_down(shift),
+                    Key::Named(NamedKey::Home) => state
+                        .tab_manager
+                        .active_tab_mut()
+                        .active_cell_mut()
+                        .buffer
+                        .move_home(shift),
+                    Key::Named(NamedKey::End) => state
+                        .tab_manager
+                        .active_tab_mut()
+                        .active_cell_mut()
+                        .buffer
+                        .move_end(shift),
                     _ => {
                         if state.modifiers.control_key() {
                             return;
@@ -2365,7 +2681,12 @@ impl ApplicationHandler for App {
                         if let Some(ref text) = key_event.text {
                             for c in text.chars() {
                                 if !c.is_control() {
-                                    state.tab_manager.active_tab_mut().active_cell_mut().buffer.insert(c);
+                                    state
+                                        .tab_manager
+                                        .active_tab_mut()
+                                        .active_cell_mut()
+                                        .buffer
+                                        .insert(c);
                                 }
                             }
                             true
@@ -2378,16 +2699,20 @@ impl ApplicationHandler for App {
                 if changed {
                     let key_start = Instant::now();
                     state.tab_manager.active_tab_mut().mark_modified();
-                    log::warn!("[perf] --- KEYSTROKE --- (1st sync: text changed, no highlight spans yet)");
+                    log::debug!(
+                        "[perf] --- KEYSTROKE --- (1st sync: text changed, no highlight spans yet)"
+                    );
                     state.sync_active_tab();
                     let t_sync = key_start.elapsed().as_micros();
                     let ac_start = Instant::now();
                     state.update_autocomplete();
                     let t_ac = ac_start.elapsed().as_micros();
                     let t_total = key_start.elapsed().as_micros();
-                    log::warn!(
+                    log::debug!(
                         "[perf] keystroke done: {}us total | sync={}us autocomplete={}us",
-                        t_total, t_sync, t_ac
+                        t_total,
+                        t_sync,
+                        t_ac
                     );
                     state.window.request_redraw();
                 } else {
@@ -2476,23 +2801,34 @@ impl ApplicationHandler for App {
                 // Use previous Simplified output if available (for iterative
                 // CAS resolution), otherwise use the original cell text.
                 if let Some(result) = simplified {
+                    if tab.cells[cell_idx].print_pending {
+                        let display = if tab.cells[cell_idx].print_is_equation {
+                            format!("{} = 0", result)
+                        } else {
+                            result
+                        };
+                        tab.cells[cell_idx].output = CellOutput::Computed(display);
+                        tab.cells[cell_idx].output_collapsed = false;
+                        tab.cells[cell_idx].print_pending = false;
+                        tab.cells[cell_idx].print_is_equation = false;
+                        needs_redraw = true;
+                        continue;
+                    }
+
                     let working_text = match &tab.cells[cell_idx].output {
                         CellOutput::Simplified(s) => s.clone(),
                         _ => tab.cells[cell_idx].buffer.text().to_string(),
                     };
                     let (_, embedded) = extract_reduce_expr(&working_text);
-                    let substituted =
-                        substitute_reduce_result(&working_text, &result, embedded);
-                    tab.cells[cell_idx].output =
-                        CellOutput::Simplified(substituted.clone());
+                    let substituted = substitute_reduce_result(&working_text, &result, embedded);
+                    tab.cells[cell_idx].output = CellOutput::Simplified(substituted.clone());
                     tab.cells[cell_idx].output_collapsed = false;
 
                     // If there are still more CAS calls, expand bindings and
                     // resubmit to REDUCE (iterative resolution).
                     if find_cas_call(&substituted).is_some() {
                         let (next_input, _) = extract_reduce_expr(&substituted);
-                        let bindings =
-                            collect_bindings(&tab.cells, cell_idx, &substituted);
+                        let bindings = collect_bindings(&tab.cells, cell_idx, &substituted);
                         let expanded = expand_bindings(next_input, &bindings);
                         let reduce_expr = translate::to_reduce(&expanded);
                         let cell_id = resp.cell_id;
@@ -2505,90 +2841,72 @@ impl ApplicationHandler for App {
 
                         // 1) REDUCE returned the operation unevaluated
                         //    (e.g. int(sin(cos(x)),x) — couldn't solve).
-                        if let Some(op) = translate::detect_unevaluated_cas(
-                            &substituted,
-                        ) {
+                        if let Some(op) = translate::detect_unevaluated_cas(&substituted) {
                             let msg = format!(
                                 "This {} cannot be computed symbolically. \
                                  Consider using a numerical method instead.",
                                 op,
                             );
-                            tab.cells[cell_idx].output =
-                                CellOutput::Error(msg);
+                            tab.cells[cell_idx].output = CellOutput::Error(msg);
                             tab.cells[cell_idx].output_collapsed = false;
                         }
                         // 2) Result involves special functions Logos
                         //    can't evaluate (e.g. fresnel_s, erf).
                         else {
-                            let special = translate::detect_special_functions(
-                                &substituted,
-                            );
+                            let special = translate::detect_special_functions(&substituted);
                             if !special.is_empty() {
-                            let names: Vec<&str> =
-                                special.iter().map(|(_, desc)| *desc).collect();
-                            let msg = format!(
-                                "No closed-form solution \u{2014} result requires {}. \
+                                let names: Vec<&str> =
+                                    special.iter().map(|(_, desc)| *desc).collect();
+                                let msg = format!(
+                                    "No closed-form solution \u{2014} result requires {}. \
                                  Consider using a numerical method instead.",
-                                names.join(", "),
-                            );
-                            tab.cells[cell_idx].output =
-                                CellOutput::Error(msg);
-                            tab.cells[cell_idx].output_collapsed = false;
-                        } else {
-                        let mut source = String::new();
-                        for (i, cell) in tab.cells.iter().enumerate() {
-                            if i > cell_idx {
-                                break;
-                            }
-                            if !source.is_empty() {
-                                source.push('\n');
-                            }
-                            if i == cell_idx {
-                                source.push_str(&substituted);
-                            } else if let CellOutput::Simplified(ref s) = cell.output {
-                                source.push_str(s);
+                                    names.join(", "),
+                                );
+                                tab.cells[cell_idx].output = CellOutput::Error(msg);
+                                tab.cells[cell_idx].output_collapsed = false;
                             } else {
-                                source.push_str(cell.buffer.text());
-                            }
-                        }
-                        match lang::compile(&source) {
-                            Ok(wgsl) => {
-                                let cell_id = tab.cells[cell_idx].id;
-                                match state
-                                    .renderer
-                                    .compile_cell_shader(cell_id, &wgsl)
-                                {
-                                    Ok(()) => {
-                                        tab.cells[cell_idx].is_playing = true;
-                                        tab.cells[cell_idx].output = CellOutput::None;
+                                let mut source = String::new();
+                                for (i, cell) in tab.cells.iter().enumerate() {
+                                    if i > cell_idx {
+                                        break;
+                                    }
+                                    if !source.is_empty() {
+                                        source.push('\n');
+                                    }
+                                    if i == cell_idx {
+                                        source.push_str(&substituted);
+                                    } else if let CellOutput::Simplified(ref s) = cell.output {
+                                        source.push_str(s);
+                                    } else {
+                                        source.push_str(cell.buffer.text());
+                                    }
+                                }
+                                match lang::compile(&source) {
+                                    Ok(wgsl) => {
+                                        let cell_id = tab.cells[cell_idx].id;
+                                        match state.renderer.compile_cell_shader(cell_id, &wgsl) {
+                                            Ok(()) => {
+                                                tab.cells[cell_idx].is_playing = true;
+                                                tab.cells[cell_idx].output = CellOutput::None;
+                                            }
+                                            Err(e) => {
+                                                log::error!("Shader compilation failed: {}", e);
+                                                tab.cells[cell_idx].output = CellOutput::Error(
+                                                    format_shader_error(&e.to_string(), &source),
+                                                );
+                                                tab.cells[cell_idx].output_collapsed = false;
+                                            }
+                                        }
                                     }
                                     Err(e) => {
-                                        log::error!(
-                                            "Shader compilation failed: {}",
-                                            e
-                                        );
-                                        tab.cells[cell_idx].output =
-                                            CellOutput::Error(
-                                                format_shader_error(&e.to_string(), &source)
-                                            );
-                                        tab.cells[cell_idx].output_collapsed =
-                                            false;
+                                        if !e.contains("No result expression") {
+                                            log::error!("Language pipeline error: {}", e);
+                                            tab.cells[cell_idx].output = CellOutput::Error(e);
+                                            tab.cells[cell_idx].output_collapsed = false;
+                                        }
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                if !e.contains("No result expression") {
-                                    log::error!(
-                                        "Language pipeline error: {}",
-                                        e
-                                    );
-                                    tab.cells[cell_idx].output =
-                                        CellOutput::Error(e);
-                                    tab.cells[cell_idx].output_collapsed = false;
-                                }
-                            }
-                        }
-                        } // else: no special functions
+                            } // else: no special functions
                         } // else: no unevaluated CAS ops
                     }
                 }
@@ -2603,6 +2921,7 @@ impl ApplicationHandler for App {
             if state.autocomplete.active {
                 state.update_autocomplete();
             }
+            state.window.request_redraw();
         }
 
         // Continuous animation when shaders are active, or polling for REDUCE
@@ -2616,9 +2935,7 @@ impl ApplicationHandler for App {
                 let wait_until = Instant::now() + (TARGET_FRAME_TIME - elapsed);
                 event_loop.set_control_flow(ControlFlow::WaitUntil(wait_until));
             }
-        } else if !state.is_any_drag_active()
-            && state.pending_dialog.is_none()
-        {
+        } else if !state.is_any_drag_active() && state.pending_dialog.is_none() {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
 
@@ -2662,9 +2979,10 @@ impl ApplicationHandler for App {
     }
 }
 
-pub fn run() {
-    let event_loop = EventLoop::new().unwrap();
-    event_loop.run_app(&mut App { state: None }).unwrap();
+pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let event_loop = EventLoop::new()?;
+    event_loop.run_app(&mut App { state: None })?;
+    Ok(())
 }
 
 fn compute_win_control_rects(title_bar: &Rect) -> WindowControlRects {
@@ -2674,9 +2992,24 @@ fn compute_win_control_rects(title_bar: &Rect) -> WindowControlRects {
     let y = title_bar.y;
 
     WindowControlRects {
-        close: Rect { x: right - w, y, w, h },
-        maximize: Rect { x: right - w * 2.0, y, w, h },
-        minimize: Rect { x: right - w * 3.0, y, w, h },
+        close: Rect {
+            x: right - w,
+            y,
+            w,
+            h,
+        },
+        maximize: Rect {
+            x: right - w * 2.0,
+            y,
+            w,
+            h,
+        },
+        minimize: Rect {
+            x: right - w * 3.0,
+            y,
+            w,
+            h,
+        },
     }
 }
 
@@ -2738,4 +3071,3 @@ fn detect_mouse_zone(mx: f32, my: f32, pane: &Rect) -> MouseZone {
         MouseZone::Center
     }
 }
-

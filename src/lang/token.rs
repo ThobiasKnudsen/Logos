@@ -39,16 +39,16 @@ pub enum TokenType {
     Star,
     Slash,
     Percent,
-    Caret,      // ^ (power)
-    Eq,         // = (equality in Logos, not assignment)
-    Neq,        // !=
-    Lt,         // <
-    Gt,         // >
-    Lte,        // <=
-    Gte,        // >=
+    Caret, // ^ (power)
+    Eq,    // = (equality in Logos, not assignment)
+    Neq,   // !=
+    Lt,    // <
+    Gt,    // >
+    Lte,   // <=
+    Gte,   // >=
 
     // Binding
-    Colon,      // := (binding/definition operator)
+    Colon, // := (binding/definition operator)
 
     // Punctuation
     LParen,
@@ -57,8 +57,8 @@ pub enum TokenType {
     RBracket,
     Comma,
     Dot,
-    DotDot,     // .. (range)
-    Newline,    // Statement separator at top level
+    DotDot,  // .. (range)
+    Newline, // Statement separator at top level
 
     // Special
     Eof,
