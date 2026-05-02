@@ -195,16 +195,16 @@ pub fn eval(ast: &AstNode, gpu: &dyn GpuDispatch) -> Result<Value, String> {
 
 fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Value, String> {
     match node {
-        AstNode::Number(n) => Ok(Value::F64(*n)),
-        AstNode::BoolLit(b) => Ok(Value::Bool(*b)),
+        AstNode::Number { value, .. } => Ok(Value::F64(*value)),
+        AstNode::BoolLit { value, .. } => Ok(Value::Bool(*value)),
 
-        AstNode::Identifier(name) => env
+        AstNode::Identifier { name, .. } => env
             .vars
             .get(name)
             .cloned()
             .ok_or_else(|| format!("Undefined variable: {}", name)),
 
-        AstNode::ArrayLiteral(elems) => {
+        AstNode::ArrayLiteral { items: elems, .. } => {
             let mut arr = Vec::with_capacity(elems.len());
             for e in elems {
                 arr.push(eval_node(e, env, gpu)?.as_f64()?);
@@ -212,7 +212,7 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
             Ok(Value::Array(arr))
         }
 
-        AstNode::IndexAccess { array, index } => {
+        AstNode::IndexAccess { array, index, .. } => {
             let arr = eval_node(array, env, gpu)?;
             let idx = eval_node(index, env, gpu)?.as_f64()? as usize;
             match arr {
@@ -225,7 +225,7 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
             }
         }
 
-        AstNode::Range { start, end } => {
+        AstNode::Range { start, end, .. } => {
             // Ranges aren't values themselves — they're only valid inside parallel for.
             // If we reach here, the user wrote a range outside that context.
             let s = eval_node(start, env, gpu)?.as_f64()?;
@@ -236,13 +236,13 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
             Ok(Value::Array(arr))
         }
 
-        AstNode::Binding { name, value } => {
+        AstNode::Binding { name, value, .. } => {
             let val = eval_node(value, env, gpu)?;
             env.vars.insert(name.clone(), val);
             Ok(Value::Void)
         }
 
-        AstNode::TupleBinding { names, value } => {
+        AstNode::TupleBinding { names, value, .. } => {
             let val = eval_node(value, env, gpu)?;
             match val {
                 Value::Array(ref a) if a.len() == names.len() => {
@@ -261,7 +261,7 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
             Ok(Value::Void)
         }
 
-        AstNode::Block(stmts) => {
+        AstNode::Block { items: stmts, .. } => {
             let mut last = Value::Void;
             for stmt in stmts {
                 last = eval_node(stmt, env, gpu)?;
@@ -269,7 +269,7 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
             Ok(last)
         }
 
-        AstNode::Tuple(elems) => {
+        AstNode::Tuple { items: elems, .. } => {
             let mut arr = Vec::with_capacity(elems.len());
             for e in elems {
                 arr.push(eval_node(e, env, gpu)?.as_f64()?);
@@ -277,7 +277,9 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
             Ok(Value::Array(arr))
         }
 
-        AstNode::FunctionDef { name, params, body } => {
+        AstNode::FunctionDef {
+            name, params, body, ..
+        } => {
             env.insert_func(
                 name.clone(),
                 FuncDef {
@@ -292,6 +294,7 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
             condition,
             then_branch,
             else_branch,
+            ..
         } => {
             let cond = eval_node(condition, env, gpu)?.as_bool()?;
             if cond {
@@ -303,9 +306,11 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
             }
         }
 
-        AstNode::ForLoop { var, range, body } => {
+        AstNode::ForLoop {
+            var, range, body, ..
+        } => {
             let (start, end) = match range.as_ref() {
-                AstNode::Range { start, end } => {
+                AstNode::Range { start, end, .. } => {
                     let s_f = eval_node(start, env, gpu)?.as_f64()?;
                     let e_f = eval_node(end, env, gpu)?.as_f64()?;
                     if s_f < 0.0 || e_f < 0.0 {
@@ -336,7 +341,9 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
             Ok(last)
         }
 
-        AstNode::WhileLoop { condition, body } => {
+        AstNode::WhileLoop {
+            condition, body, ..
+        } => {
             let mut iters = 0usize;
             loop {
                 let cond = eval_node(condition, env, gpu)?.as_bool()?;
@@ -355,7 +362,9 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
             Ok(Value::Void)
         }
 
-        AstNode::PropertyAccess { object, property } => {
+        AstNode::PropertyAccess {
+            object, property, ..
+        } => {
             let val = eval_node(object, env, gpu)?;
             match (&val, property.as_str()) {
                 (Value::Array(a), "len") => Ok(Value::F64(a.len() as f64)),
@@ -363,16 +372,17 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
             }
         }
 
-        AstNode::Apply { name, args } => eval_apply(name, args, env, gpu),
+        AstNode::Apply { name, args, .. } => eval_apply(name, args, env, gpu),
 
         AstNode::IndexAssign {
             array,
             index,
             value,
+            ..
         } => {
             let idx = eval_node(index, env, gpu)?.as_f64()? as usize;
             let val = eval_node(value, env, gpu)?.as_f64()?;
-            if let AstNode::Identifier(name) = array.as_ref() {
+            if let AstNode::Identifier { name, .. } = array.as_ref() {
                 if let Some(Value::Array(ref mut arr)) = env.vars.get_mut(name) {
                     if idx < arr.len() {
                         arr[idx] = val;
@@ -386,7 +396,9 @@ fn eval_node(node: &AstNode, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Val
             Err("Index assignment target must be an array variable".to_string())
         }
 
-        AstNode::ParallelFor { var, range, body } => eval_parallel_for(var, range, body, env, gpu),
+        AstNode::ParallelFor {
+            var, range, body, ..
+        } => eval_parallel_for(var, range, body, env, gpu),
     }
 }
 
@@ -552,7 +564,7 @@ fn eval_parallel_for(
 ) -> Result<Value, String> {
     // Evaluate range
     let (start, end) = match range_node {
-        AstNode::Range { start, end } => {
+        AstNode::Range { start, end, .. } => {
             let s_f = eval_node(start, env, gpu)?.as_f64()?;
             let e_f = eval_node(end, env, gpu)?.as_f64()?;
             if s_f < 0.0 || e_f < 0.0 {
@@ -651,13 +663,13 @@ fn collect_written_arrays(
 ) {
     match node {
         AstNode::IndexAssign { array, .. } => {
-            if let AstNode::Identifier(name) = array.as_ref() {
+            if let AstNode::Identifier { name, .. } = array.as_ref() {
                 if seen.insert(name.clone()) {
                     names.push(name.clone());
                 }
             }
         }
-        AstNode::Block(stmts) => {
+        AstNode::Block { items: stmts, .. } => {
             for s in stmts {
                 collect_written_arrays(s, names, seen);
             }
@@ -674,7 +686,7 @@ fn collect_references(
     seen: &mut std::collections::HashSet<String>,
 ) {
     match node {
-        AstNode::Identifier(name) => {
+        AstNode::Identifier { name, .. } => {
             if seen.insert(name.clone()) {
                 refs.push(name.clone());
             }
@@ -684,7 +696,7 @@ fn collect_references(
                 collect_references(arg, refs, seen);
             }
         }
-        AstNode::IndexAccess { array, index } => {
+        AstNode::IndexAccess { array, index, .. } => {
             collect_references(array, refs, seen);
             collect_references(index, refs, seen);
         }
@@ -692,12 +704,13 @@ fn collect_references(
             array,
             index,
             value,
+            ..
         } => {
             collect_references(array, refs, seen);
             collect_references(index, refs, seen);
             collect_references(value, refs, seen);
         }
-        AstNode::Block(stmts) => {
+        AstNode::Block { items: stmts, .. } => {
             for s in stmts {
                 collect_references(s, refs, seen);
             }
@@ -706,6 +719,7 @@ fn collect_references(
             condition,
             then_branch,
             else_branch,
+            ..
         } => {
             collect_references(condition, refs, seen);
             collect_references(then_branch, refs, seen);
@@ -714,12 +728,12 @@ fn collect_references(
             }
         }
         AstNode::Binding { value, .. } => collect_references(value, refs, seen),
-        AstNode::ArrayLiteral(elems) => {
+        AstNode::ArrayLiteral { items: elems, .. } => {
             for e in elems {
                 collect_references(e, refs, seen);
             }
         }
-        AstNode::Range { start, end } => {
+        AstNode::Range { start, end, .. } => {
             collect_references(start, refs, seen);
             collect_references(end, refs, seen);
         }

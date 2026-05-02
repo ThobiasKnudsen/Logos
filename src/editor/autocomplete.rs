@@ -430,7 +430,7 @@ fn walk_ast(node: &AstNode, result: &mut Vec<Candidate>, seen: &mut HashSet<Stri
                 }
             }
         }
-        AstNode::Block(stmts) => {
+        AstNode::Block { items: stmts, .. } => {
             for s in stmts {
                 walk_ast(s, result, seen);
             }

@@ -262,11 +262,22 @@ impl Notebook {
             }
             .map_err(|e| format!("Cell {}: {}", i + 1, e))?;
             match parsed {
-                AstNode::Block(stmts) => all_stmts.extend(stmts),
+                AstNode::Block { items, .. } => all_stmts.extend(items),
                 other => all_stmts.push(other),
             }
         }
-        Ok(AstNode::Block(all_stmts))
+        let span = if all_stmts.is_empty() {
+            (0, 0)
+        } else {
+            (
+                all_stmts.first().unwrap().span().0,
+                all_stmts.last().unwrap().span().1,
+            )
+        };
+        Ok(AstNode::Block {
+            items: all_stmts,
+            span,
+        })
     }
 
     fn run_cell(&mut self, idx: usize) {

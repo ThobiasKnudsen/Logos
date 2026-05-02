@@ -18,8 +18,13 @@
 //!   8. Postfix (function call, indexing)
 //!   9. Primary (number, identifier, parenthesized expr/block, if, etc.)
 
-use super::ast::AstNode;
+use super::ast::{AstNode, Span};
 use super::token::{Token, TokenType};
+
+/// Combine two spans into one covering both. Assumes `start <= end`.
+fn join(start: Span, end: Span) -> Span {
+    (start.0, end.1)
+}
 
 /// Maximum recursion depth for nested expressions / parentheses. Guards
 /// against stack overflow on pathological input (e.g. `((((...))))`).
@@ -69,7 +74,10 @@ impl Parser {
         self.skip_newlines();
         if self.at_end() {
             // Empty input — return a default zero
-            return Ok(AstNode::Number(0.0));
+            return Ok(AstNode::Number {
+                value: 0.0,
+                span: (0, 0),
+            });
         }
 
         let mut stmts = Vec::new();
@@ -88,11 +96,15 @@ impl Parser {
         }
 
         if stmts.is_empty() {
-            Ok(AstNode::Number(0.0))
+            Ok(AstNode::Number {
+                value: 0.0,
+                span: (0, 0),
+            })
         } else if stmts.len() == 1 {
             Ok(stmts.pop().unwrap())
         } else {
-            Ok(AstNode::Block(stmts))
+            let span = join(stmts.first().unwrap().span(), stmts.last().unwrap().span());
+            Ok(AstNode::Block { items: stmts, span })
         }
     }
 
@@ -120,8 +132,8 @@ impl Parser {
         let save = self.pos;
 
         // name(params) := body  OR  name(params) = body (for backward compat)
-        let name = match &self.peek().ty {
-            TokenType::Identifier(name) => name.clone(),
+        let (name, name_span) = match &self.peek().ty {
+            TokenType::Identifier(name) => (name.clone(), self.peek().span),
             _ => return Ok(None),
         };
 
@@ -158,10 +170,12 @@ impl Parser {
         if self.peek().ty == TokenType::Colon {
             self.advance();
             let body = self.parse_expr()?;
+            let span = join(name_span, body.span());
             return Ok(Some(AstNode::FunctionDef {
                 name,
                 params,
                 body: Box::new(body),
+                span,
             }));
         }
 
@@ -172,8 +186,8 @@ impl Parser {
 
     fn try_parse_binding(&mut self) -> Result<Option<AstNode>, String> {
         // name := expr (using := for binding)
-        let name = match &self.peek().ty {
-            TokenType::Identifier(name) => name.clone(),
+        let (name, name_span) = match &self.peek().ty {
+            TokenType::Identifier(name) => (name.clone(), self.peek().span),
             _ => return Ok(None),
         };
 
@@ -184,9 +198,11 @@ impl Parser {
         self.advance(); // consume identifier
         self.advance(); // consume ':='
         let value = self.parse_expr()?;
+        let span = join(name_span, value.span());
         Ok(Some(AstNode::Binding {
             name,
             value: Box::new(value),
+            span,
         }))
     }
 
@@ -197,6 +213,7 @@ impl Parser {
         }
 
         let save = self.pos;
+        let lparen_span = self.peek().span;
         self.advance(); // consume '('
 
         let mut names = Vec::new();
@@ -241,9 +258,11 @@ impl Parser {
         self.advance(); // consume ':='
 
         let value = self.parse_expr()?;
+        let span = join(lparen_span, value.span());
         Ok(Some(AstNode::TupleBinding {
             names,
             value: Box::new(value),
+            span,
         }))
     }
 
@@ -258,9 +277,11 @@ impl Parser {
         while self.peek().ty == TokenType::Or {
             self.advance();
             let right = self.parse_and()?;
+            let span = join(left.span(), right.span());
             left = AstNode::Apply {
                 name: "or".to_string(),
                 args: vec![left, right],
+                span,
             };
         }
         Ok(left)
@@ -271,9 +292,11 @@ impl Parser {
         while self.peek().ty == TokenType::And {
             self.advance();
             let right = self.parse_comparison()?;
+            let span = join(left.span(), right.span());
             left = AstNode::Apply {
                 name: "and".to_string(),
                 args: vec![left, right],
+                span,
             };
         }
         Ok(left)
@@ -293,9 +316,11 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_addition()?;
+            let span = join(left.span(), right.span());
             left = AstNode::Apply {
                 name: op.to_string(),
                 args: vec![left, right],
+                span,
             };
         }
         Ok(left)
@@ -306,9 +331,11 @@ impl Parser {
         if self.peek().ty == TokenType::DotDot {
             self.advance();
             let right = self.parse_addition()?;
+            let span = join(left.span(), right.span());
             Ok(AstNode::Range {
                 start: Box::new(left),
                 end: Box::new(right),
+                span,
             })
         } else {
             Ok(left)
@@ -325,9 +352,11 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_multiplication()?;
+            let span = join(left.span(), right.span());
             left = AstNode::Apply {
                 name: op.to_string(),
                 args: vec![left, right],
+                span,
             };
         }
         Ok(left)
@@ -344,9 +373,11 @@ impl Parser {
             };
             self.advance();
             let right = self.parse_exponent()?;
+            let span = join(left.span(), right.span());
             left = AstNode::Apply {
                 name: op.to_string(),
                 args: vec![left, right],
+                span,
             };
         }
         Ok(left)
@@ -358,9 +389,11 @@ impl Parser {
             self.advance();
             // Right-associative: recurse into parse_exponent
             let exp = self.parse_exponent()?;
+            let span = join(base.span(), exp.span());
             Ok(AstNode::Apply {
                 name: "pow".to_string(),
                 args: vec![base, exp],
+                span,
             })
         } else {
             Ok(base)
@@ -369,19 +402,25 @@ impl Parser {
 
     fn parse_unary(&mut self) -> Result<AstNode, String> {
         if self.peek().ty == TokenType::Minus {
+            let op_span = self.peek().span;
             self.advance();
             let operand = self.parse_unary()?;
+            let span = join(op_span, operand.span());
             return Ok(AstNode::Apply {
                 name: "neg".to_string(),
                 args: vec![operand],
+                span,
             });
         }
         if self.peek().ty == TokenType::Not {
+            let op_span = self.peek().span;
             self.advance();
             let operand = self.parse_unary()?;
+            let span = join(op_span, operand.span());
             return Ok(AstNode::Apply {
                 name: "not".to_string(),
                 args: vec![operand],
+                span,
             });
         }
         self.parse_postfix()
@@ -397,30 +436,41 @@ impl Parser {
                     if !self.allow_ident_call {
                         break;
                     }
-                    if let AstNode::Identifier(ref name) = expr {
+                    if let AstNode::Identifier { ref name, .. } = expr {
                         let name = name.clone();
+                        let start_span = expr.span();
                         self.advance(); // consume '('
                         let args = self.parse_arg_list()?;
+                        let rparen_span = self.peek().span;
                         self.expect(TokenType::RParen)?;
-                        expr = AstNode::Apply { name, args };
+                        expr = AstNode::Apply {
+                            name,
+                            args,
+                            span: join(start_span, rparen_span),
+                        };
                     } else {
                         break;
                     }
                 }
                 // Indexing: expr[index]
                 TokenType::LBracket => {
+                    let start_span = expr.span();
                     self.advance(); // consume '['
                     let index = self.parse_expr()?;
+                    let rbracket_span = self.peek().span;
                     self.expect(TokenType::RBracket)?;
                     expr = AstNode::IndexAccess {
                         array: Box::new(expr),
                         index: Box::new(index),
+                        span: join(start_span, rbracket_span),
                     };
                 }
                 // Property access: expr.prop
                 TokenType::Dot => {
+                    let start_span = expr.span();
                     self.advance(); // consume '.'
-                    match self.peek().ty.clone() {
+                    let prop_tok = self.peek().clone();
+                    match prop_tok.ty {
                         TokenType::Identifier(prop)
                         | TokenType::AxisVar(prop)
                         | TokenType::Builtin(prop) => {
@@ -428,6 +478,7 @@ impl Parser {
                             expr = AstNode::PropertyAccess {
                                 object: Box::new(expr),
                                 property: prop,
+                                span: join(start_span, prop_tok.span),
                             };
                         }
                         _ => {
@@ -445,10 +496,19 @@ impl Parser {
                 // Unicode superscript exponents (², ³, ⁰-⁹)
                 TokenType::Builtin(ref s) if is_superscript_token(s) => {
                     let exp = superscript_exponent(s);
+                    let sup_span = self.peek().span;
                     self.advance();
+                    let span = join(expr.span(), sup_span);
                     expr = AstNode::Apply {
                         name: "pow".to_string(),
-                        args: vec![expr, AstNode::Number(exp)],
+                        args: vec![
+                            expr,
+                            AstNode::Number {
+                                value: exp,
+                                span: sup_span,
+                            },
+                        ],
+                        span,
                     };
                 }
                 _ => break,
@@ -466,40 +526,66 @@ impl Parser {
     }
 
     fn parse_primary_inner(&mut self) -> Result<AstNode, String> {
+        let tok_span = self.peek().span;
         match self.peek().ty.clone() {
             TokenType::Number(n) => {
                 self.advance();
-                Ok(AstNode::Number(n))
+                Ok(AstNode::Number {
+                    value: n,
+                    span: tok_span,
+                })
             }
             TokenType::BoolLit(b) => {
                 self.advance();
-                Ok(AstNode::BoolLit(b))
+                Ok(AstNode::BoolLit {
+                    value: b,
+                    span: tok_span,
+                })
             }
             TokenType::Identifier(name) => {
                 self.advance();
-                Ok(AstNode::Identifier(name))
+                Ok(AstNode::Identifier {
+                    name,
+                    span: tok_span,
+                })
             }
             TokenType::AxisVar(name) => {
                 self.advance();
-                Ok(AstNode::Identifier(name))
+                Ok(AstNode::Identifier {
+                    name,
+                    span: tok_span,
+                })
             }
             TokenType::Builtin(name) => {
                 self.advance();
                 if self.peek().ty == TokenType::LParen {
                     self.advance(); // consume '('
                     let args = self.parse_arg_list()?;
+                    let rparen_span = self.peek().span;
                     self.expect(TokenType::RParen)?;
-                    Ok(AstNode::Apply { name, args })
+                    Ok(AstNode::Apply {
+                        name,
+                        args,
+                        span: join(tok_span, rparen_span),
+                    })
                 } else {
-                    Ok(AstNode::Identifier(name))
+                    Ok(AstNode::Identifier {
+                        name,
+                        span: tok_span,
+                    })
                 }
             }
             TokenType::LParen => {
+                let lparen_span = tok_span;
                 self.advance(); // consume '('
                 self.skip_newlines();
                 if self.peek().ty == TokenType::RParen {
+                    let rparen_span = self.peek().span;
                     self.advance();
-                    return Ok(AstNode::Tuple(Vec::new()));
+                    return Ok(AstNode::Tuple {
+                        items: Vec::new(),
+                        span: join(lparen_span, rparen_span),
+                    });
                 }
 
                 // Parse a block: comma or newline separated statements inside parens.
@@ -520,7 +606,9 @@ impl Parser {
                     items.push(self.parse_block_item()?);
                     self.skip_newlines();
                 }
+                let rparen_span = self.peek().span;
                 self.expect(TokenType::RParen)?;
+                let span = join(lparen_span, rparen_span);
 
                 if items.len() == 1 {
                     // Single parenthesized expression
@@ -538,13 +626,14 @@ impl Parser {
                         )
                     });
                     if has_block_items {
-                        Ok(AstNode::Block(items))
+                        Ok(AstNode::Block { items, span })
                     } else {
-                        Ok(AstNode::Tuple(items))
+                        Ok(AstNode::Tuple { items, span })
                     }
                 }
             }
             TokenType::If => {
+                let if_span = tok_span;
                 self.advance(); // consume 'if'
                 let has_paren = self.peek().ty == TokenType::LParen;
                 if has_paren {
@@ -567,27 +656,36 @@ impl Parser {
                     None
                 };
 
+                let end_span = else_branch
+                    .as_deref()
+                    .map(|n| n.span())
+                    .unwrap_or_else(|| then_branch.span());
                 Ok(AstNode::IfExpr {
                     condition: Box::new(condition),
                     then_branch: Box::new(then_branch),
                     else_branch,
+                    span: join(if_span, end_span),
                 })
             }
             // While loop: while(condition) body
             TokenType::While => {
+                let while_span = tok_span;
                 self.advance(); // consume 'while'
                 self.expect(TokenType::LParen)?;
                 let condition = self.parse_expr()?;
                 self.expect(TokenType::RParen)?;
                 self.skip_newlines();
                 let body = self.parse_expr()?;
+                let span = join(while_span, body.span());
                 Ok(AstNode::WhileLoop {
                     condition: Box::new(condition),
                     body: Box::new(body),
+                    span,
                 })
             }
             // For loop: for var in range (body) — sequential CPU
             TokenType::For => {
+                let for_span = tok_span;
                 self.advance(); // consume 'for'
                 let var = match &self.peek().ty {
                     TokenType::Identifier(name) | TokenType::AxisVar(name) => {
@@ -611,6 +709,7 @@ impl Parser {
                 let range = self.parse_expr()?;
                 self.allow_ident_call = true;
                 self.skip_newlines();
+                let body_lparen_span = self.peek().span;
                 self.expect(TokenType::LParen)?;
                 self.skip_newlines();
                 let mut stmts = Vec::new();
@@ -622,20 +721,27 @@ impl Parser {
                     }
                     self.skip_newlines();
                 }
+                let body_rparen_span = self.peek().span;
                 self.expect(TokenType::RParen)?;
                 let body = if stmts.len() == 1 {
                     stmts.pop().unwrap()
                 } else {
-                    AstNode::Block(stmts)
+                    AstNode::Block {
+                        items: stmts,
+                        span: join(body_lparen_span, body_rparen_span),
+                    }
                 };
+                let span = join(for_span, body_rparen_span);
                 Ok(AstNode::ForLoop {
                     var,
                     range: Box::new(range),
                     body: Box::new(body),
+                    span,
                 })
             }
             // Array literal: [expr, expr, ...]
             TokenType::LBracket => {
+                let lbracket_span = tok_span;
                 self.advance(); // consume '['
                 let mut elements = Vec::new();
                 self.skip_newlines();
@@ -650,11 +756,16 @@ impl Parser {
                         elements.push(self.parse_expr()?);
                     }
                 }
+                let rbracket_span = self.peek().span;
                 self.expect(TokenType::RBracket)?;
-                Ok(AstNode::ArrayLiteral(elements))
+                Ok(AstNode::ArrayLiteral {
+                    items: elements,
+                    span: join(lbracket_span, rbracket_span),
+                })
             }
             // Parallel for: parallel for var in range (body)
             TokenType::Parallel => {
+                let parallel_span = tok_span;
                 self.advance(); // consume 'parallel'
                 self.expect(TokenType::For)?;
                 let var = match &self.peek().ty {
@@ -682,6 +793,7 @@ impl Parser {
                 self.allow_ident_call = true;
                 self.skip_newlines();
                 // Body is a parenthesized block of statements
+                let body_lparen_span = self.peek().span;
                 self.expect(TokenType::LParen)?;
                 self.skip_newlines();
                 let mut stmts = Vec::new();
@@ -693,16 +805,22 @@ impl Parser {
                     }
                     self.skip_newlines();
                 }
+                let body_rparen_span = self.peek().span;
                 self.expect(TokenType::RParen)?;
                 let body = if stmts.len() == 1 {
                     stmts.pop().unwrap()
                 } else {
-                    AstNode::Block(stmts)
+                    AstNode::Block {
+                        items: stmts,
+                        span: join(body_lparen_span, body_rparen_span),
+                    }
                 };
+                let span = join(parallel_span, body_rparen_span);
                 Ok(AstNode::ParallelFor {
                     var,
                     range: Box::new(range),
                     body: Box::new(body),
+                    span,
                 })
             }
             // Type names as cast functions: f32(expr), vec2(a, b), etc.
@@ -722,18 +840,24 @@ impl Parser {
                     _ => unreachable!(),
                 }
                 .to_string();
+                let cast_span = tok_span;
                 self.advance();
 
                 if self.peek().ty == TokenType::LParen {
                     self.advance();
                     let args = self.parse_arg_list()?;
+                    let rparen_span = self.peek().span;
                     self.expect(TokenType::RParen)?;
                     Ok(AstNode::Apply {
                         name: cast_name,
                         args,
+                        span: join(cast_span, rparen_span),
                     })
                 } else {
-                    Ok(AstNode::Identifier(cast_name))
+                    Ok(AstNode::Identifier {
+                        name: cast_name,
+                        span: cast_span,
+                    })
                 }
             }
             _ => Err(super::format_error_at(
@@ -767,15 +891,19 @@ impl Parser {
         if let AstNode::IndexAccess {
             ref array,
             ref index,
+            ..
         } = expr
         {
             if self.peek().ty == TokenType::Colon {
+                let start_span = expr.span();
                 self.advance(); // consume ':='
                 let value = self.parse_expr()?;
+                let span = join(start_span, value.span());
                 return Ok(AstNode::IndexAssign {
                     array: array.clone(),
                     index: index.clone(),
                     value: Box::new(value),
+                    span,
                 });
             }
         }
@@ -884,32 +1012,32 @@ mod tests {
     #[test]
     fn test_empty_input() {
         let ast = parse("");
-        assert!(matches!(ast, AstNode::Number(n) if n == 0.0));
+        assert!(matches!(ast, AstNode::Number { value, .. } if value == 0.0));
     }
 
     #[test]
     fn test_whitespace_only() {
         let ast = parse("   \t  ");
-        assert!(matches!(ast, AstNode::Number(n) if n == 0.0));
+        assert!(matches!(ast, AstNode::Number { value, .. } if value == 0.0));
     }
 
     #[test]
     fn test_single_number() {
         let ast = parse("42");
-        assert!(matches!(ast, AstNode::Number(n) if n == 42.0));
+        assert!(matches!(ast, AstNode::Number { value, .. } if value == 42.0));
     }
 
     #[test]
     fn test_single_variable() {
         let ast = parse("x");
-        assert!(matches!(ast, AstNode::Identifier(ref s) if s == "x"));
+        assert!(matches!(ast, AstNode::Identifier { ref name, .. } if name == "x"));
     }
 
     #[test]
     fn test_simple_addition() {
         let ast = parse("x + y");
         match ast {
-            AstNode::Apply { name, args } => {
+            AstNode::Apply { name, args, .. } => {
                 assert_eq!(name, "add");
                 assert_eq!(args.len(), 2);
             }
@@ -922,7 +1050,7 @@ mod tests {
         // x + y * z  should parse as  x + (y * z)
         let ast = parse("x + y * z");
         match ast {
-            AstNode::Apply { name, ref args } => {
+            AstNode::Apply { name, ref args, .. } => {
                 assert_eq!(name, "add");
                 match &args[1] {
                     AstNode::Apply { name, .. } => assert_eq!(name, "mul"),
@@ -937,7 +1065,7 @@ mod tests {
     fn test_function_call() {
         let ast = parse("sin(x)");
         match ast {
-            AstNode::Apply { name, args } => {
+            AstNode::Apply { name, args, .. } => {
                 assert_eq!(name, "sin");
                 assert_eq!(args.len(), 1);
             }
@@ -949,7 +1077,7 @@ mod tests {
     fn test_negation() {
         let ast = parse("-x");
         match ast {
-            AstNode::Apply { name, args } => {
+            AstNode::Apply { name, args, .. } => {
                 assert_eq!(name, "neg");
                 assert_eq!(args.len(), 1);
             }
@@ -962,7 +1090,7 @@ mod tests {
         // x ^ y ^ z should parse as x ^ (y ^ z)
         let ast = parse("x ^ y ^ z");
         match ast {
-            AstNode::Apply { name, ref args } => {
+            AstNode::Apply { name, ref args, .. } => {
                 assert_eq!(name, "pow");
                 match &args[1] {
                     AstNode::Apply { name, .. } => assert_eq!(name, "pow"),
@@ -988,7 +1116,7 @@ mod tests {
         // `=` is equality in Logos (not assignment)
         let ast = parse("x = 5");
         match ast {
-            AstNode::Apply { name, args } => {
+            AstNode::Apply { name, args, .. } => {
                 assert_eq!(name, "eq");
                 assert_eq!(args.len(), 2);
             }
@@ -1023,7 +1151,7 @@ mod tests {
     fn test_multi_arg_builtin() {
         let ast = parse("clamp(x, 0, 1)");
         match ast {
-            AstNode::Apply { name, args } => {
+            AstNode::Apply { name, args, .. } => {
                 assert_eq!(name, "clamp");
                 assert_eq!(args.len(), 3);
             }
@@ -1036,7 +1164,7 @@ mod tests {
         // Newline-separated statements
         let ast = parse("a := 5\nb := 10\na + b");
         match ast {
-            AstNode::Block(stmts) => {
+            AstNode::Block { items: stmts, .. } => {
                 assert_eq!(stmts.len(), 3);
                 assert!(matches!(&stmts[0], AstNode::Binding { name, .. } if name == "a"));
                 assert!(matches!(&stmts[1], AstNode::Binding { name, .. } if name == "b"));
@@ -1050,7 +1178,7 @@ mod tests {
         // Comma-separated block inside parens
         let ast = parse("(a := 5, b := 10, a + b)");
         match ast {
-            AstNode::Block(stmts) => {
+            AstNode::Block { items: stmts, .. } => {
                 assert_eq!(stmts.len(), 3);
             }
             _ => panic!("Expected Block, got {:?}", ast),
@@ -1061,7 +1189,7 @@ mod tests {
     fn test_tuple() {
         let ast = parse("(1, 2, 3)");
         match ast {
-            AstNode::Tuple(items) => {
+            AstNode::Tuple { items, .. } => {
                 assert_eq!(items.len(), 3);
             }
             _ => panic!("Expected Tuple"),
@@ -1083,10 +1211,12 @@ mod tests {
         // Function with block body (comma-separated bindings)
         let ast = parse("f(a, b) := (r := a + b, r * 2)");
         match ast {
-            AstNode::FunctionDef { name, params, body } => {
+            AstNode::FunctionDef {
+                name, params, body, ..
+            } => {
                 assert_eq!(name, "f");
                 assert_eq!(params, vec!["a", "b"]);
-                assert!(matches!(*body, AstNode::Block(_)));
+                assert!(matches!(*body, AstNode::Block { .. }));
             }
             _ => panic!("Expected FunctionDef, got {:?}", ast),
         }

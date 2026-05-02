@@ -89,7 +89,7 @@ fn emit_body_statements(
     declared: &mut HashSet<String>,
 ) -> Result<(), String> {
     match node {
-        AstNode::Block(stmts) => {
+        AstNode::Block { items: stmts, .. } => {
             for stmt in stmts {
                 emit_body_statements(stmt, loop_var, request, shader, declared)?;
             }
@@ -98,16 +98,17 @@ fn emit_body_statements(
             array,
             index,
             value,
+            ..
         } => {
             let idx = emit_compute_index(index, loop_var, request)?;
             let val = emit_compute_expr(value, loop_var, request, declared)?;
-            if let AstNode::Identifier(name) = array.as_ref() {
+            if let AstNode::Identifier { name, .. } = array.as_ref() {
                 shader.push_str(&format!("    arr_{}[{}] = {};\n", name, idx, val));
             } else {
                 return Err("IndexAssign target must be an identifier".to_string());
             }
         }
-        AstNode::Binding { name, value } => {
+        AstNode::Binding { name, value, .. } => {
             let val = emit_compute_expr(value, loop_var, request, declared)?;
             if declared.contains(name) {
                 shader.push_str(&format!("    {} = {};\n", name, val));
@@ -141,7 +142,7 @@ fn emit_compute_expr(
     declared: &HashSet<String>,
 ) -> Result<String, String> {
     match node {
-        AstNode::Number(n) => {
+        AstNode::Number { value: n, .. } => {
             if *n == n.floor() && n.abs() < 1e15 {
                 Ok(format!("{:.1}", n))
             } else {
@@ -149,9 +150,9 @@ fn emit_compute_expr(
             }
         }
 
-        AstNode::BoolLit(b) => Ok(format!("{}", b)),
+        AstNode::BoolLit { value: b, .. } => Ok(format!("{}", b)),
 
-        AstNode::Identifier(name) => {
+        AstNode::Identifier { name, .. } => {
             if name == loop_var {
                 Ok(format!("f32({})", name))
             } else if declared.contains(name) {
@@ -168,9 +169,9 @@ fn emit_compute_expr(
             }
         }
 
-        AstNode::IndexAccess { array, index } => {
+        AstNode::IndexAccess { array, index, .. } => {
             let idx = emit_compute_index(index, loop_var, request)?;
-            if let AstNode::Identifier(name) = array.as_ref() {
+            if let AstNode::Identifier { name, .. } = array.as_ref() {
                 if is_array(name, request) {
                     return Ok(format!("arr_{}[{}]", name, idx));
                 }
@@ -178,7 +179,7 @@ fn emit_compute_expr(
             Err("Index access only supported on known arrays".to_string())
         }
 
-        AstNode::Apply { name, args } => {
+        AstNode::Apply { name, args, .. } => {
             let arg_strs: Vec<String> = args
                 .iter()
                 .map(|a| emit_compute_expr(a, loop_var, request, declared))
@@ -251,6 +252,7 @@ fn emit_compute_expr(
             condition,
             then_branch,
             else_branch,
+            ..
         } => {
             let cond = emit_compute_expr(condition, loop_var, request, declared)?;
             let then_val = emit_compute_expr(then_branch, loop_var, request, declared)?;
@@ -279,7 +281,7 @@ fn emit_compute_index(
     request: &ParallelForRequest,
 ) -> Result<String, String> {
     match node {
-        AstNode::Identifier(name) if name == loop_var => Ok(name.clone()),
+        AstNode::Identifier { name, .. } if name == loop_var => Ok(name.clone()),
         _ => {
             let declared = HashSet::new();
             let expr = emit_compute_expr(node, loop_var, request, &declared)?;

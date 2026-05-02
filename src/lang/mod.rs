@@ -49,11 +49,11 @@ pub fn format_error_at(source: &str, offset: usize, message: &str) -> String {
 /// (arrays, parallel for) rather than the fragment shader path.
 pub fn needs_interpreter(ast: &ast::AstNode) -> bool {
     match ast {
-        ast::AstNode::ArrayLiteral(_)
+        ast::AstNode::ArrayLiteral { .. }
         | ast::AstNode::IndexAccess { .. }
         | ast::AstNode::ParallelFor { .. }
         | ast::AstNode::IndexAssign { .. } => true,
-        ast::AstNode::Block(stmts) => stmts.iter().any(needs_interpreter),
+        ast::AstNode::Block { items: stmts, .. } => stmts.iter().any(needs_interpreter),
         ast::AstNode::Binding { value, .. } => needs_interpreter(value),
         ast::AstNode::TupleBinding { value, .. } => needs_interpreter(value),
         ast::AstNode::FunctionDef { body, .. } => needs_interpreter(body),
@@ -61,15 +61,16 @@ pub fn needs_interpreter(ast: &ast::AstNode) -> bool {
             condition,
             then_branch,
             else_branch,
+            ..
         } => {
             needs_interpreter(condition)
                 || needs_interpreter(then_branch)
                 || else_branch.as_ref().is_some_and(|e| needs_interpreter(e))
         }
         ast::AstNode::Apply { args, .. } => args.iter().any(needs_interpreter),
-        ast::AstNode::WhileLoop { condition, body } => {
-            needs_interpreter(condition) || needs_interpreter(body)
-        }
+        ast::AstNode::WhileLoop {
+            condition, body, ..
+        } => needs_interpreter(condition) || needs_interpreter(body),
         _ => false,
     }
 }
@@ -92,7 +93,7 @@ impl CellActions {
 /// Walk the AST to find all print() and plot() action statements.
 pub fn detect_cell_actions(ast: &ast::AstNode) -> CellActions {
     let stmts: &[ast::AstNode] = match ast {
-        ast::AstNode::Block(stmts) => stmts,
+        ast::AstNode::Block { items: stmts, .. } => stmts,
         other => std::slice::from_ref(other),
     };
 
@@ -123,9 +124,9 @@ pub fn detect_cell_actions(ast: &ast::AstNode) -> CellActions {
 /// plus the unwrapped inner expression from print().
 pub fn build_print_ast(ast: &ast::AstNode, print_index: usize) -> ast::AstNode {
     let stmts = match ast {
-        ast::AstNode::Block(stmts) => stmts,
+        ast::AstNode::Block { items: stmts, .. } => stmts,
         other => {
-            if let ast::AstNode::Apply { name, args } = other {
+            if let ast::AstNode::Apply { name, args, .. } = other {
                 if name == "print" && args.len() == 1 {
                     return args[0].clone();
                 }
@@ -137,7 +138,7 @@ pub fn build_print_ast(ast: &ast::AstNode, print_index: usize) -> ast::AstNode {
     let mut result = Vec::new();
     for (i, stmt) in stmts.iter().enumerate() {
         if i == print_index {
-            if let ast::AstNode::Apply { name, args } = stmt {
+            if let ast::AstNode::Apply { name, args, .. } = stmt {
                 if name == "print" && args.len() == 1 {
                     result.push(args[0].clone());
                 }
@@ -154,7 +155,20 @@ pub fn build_print_ast(ast: &ast::AstNode, print_index: usize) -> ast::AstNode {
 
     match result.len() {
         1 => result.remove(0),
-        _ => ast::AstNode::Block(result),
+        _ => {
+            let span = if result.is_empty() {
+                ast.span()
+            } else {
+                (
+                    result.first().unwrap().span().0,
+                    result.last().unwrap().span().1,
+                )
+            };
+            ast::AstNode::Block {
+                items: result,
+                span,
+            }
+        }
     }
 }
 
@@ -162,9 +176,9 @@ pub fn build_print_ast(ast: &ast::AstNode, print_index: usize) -> ast::AstNode {
 /// plus the unwrapped inner expression from plot().
 pub fn build_plot_ast(ast: &ast::AstNode, plot_index: usize) -> ast::AstNode {
     let stmts = match ast {
-        ast::AstNode::Block(stmts) => stmts,
+        ast::AstNode::Block { items: stmts, .. } => stmts,
         other => {
-            if let ast::AstNode::Apply { name, args } = other {
+            if let ast::AstNode::Apply { name, args, .. } = other {
                 if name == "plot" && args.len() == 1 {
                     return args[0].clone();
                 }
@@ -176,7 +190,7 @@ pub fn build_plot_ast(ast: &ast::AstNode, plot_index: usize) -> ast::AstNode {
     let mut result = Vec::new();
     for (i, stmt) in stmts.iter().enumerate() {
         if i == plot_index {
-            if let ast::AstNode::Apply { name, args } = stmt {
+            if let ast::AstNode::Apply { name, args, .. } = stmt {
                 if name == "plot" && args.len() == 1 {
                     result.push(args[0].clone());
                 }
@@ -193,7 +207,20 @@ pub fn build_plot_ast(ast: &ast::AstNode, plot_index: usize) -> ast::AstNode {
 
     match result.len() {
         1 => result.remove(0),
-        _ => ast::AstNode::Block(result),
+        _ => {
+            let span = if result.is_empty() {
+                ast.span()
+            } else {
+                (
+                    result.first().unwrap().span().0,
+                    result.last().unwrap().span().1,
+                )
+            };
+            ast::AstNode::Block {
+                items: result,
+                span,
+            }
+        }
     }
 }
 
@@ -575,10 +602,10 @@ mod action_tests {
         let ast = parse("f := 5\nprint(f)").unwrap();
         let actions = detect_cell_actions(&ast);
         let print_ast = build_print_ast(&ast, actions.first_print.unwrap());
-        if let ast::AstNode::Block(stmts) = &print_ast {
+        if let ast::AstNode::Block { items: stmts, .. } = &print_ast {
             assert_eq!(stmts.len(), 2);
             assert!(matches!(&stmts[0], ast::AstNode::Binding { .. }));
-            assert!(matches!(&stmts[1], ast::AstNode::Identifier(_)));
+            assert!(matches!(&stmts[1], ast::AstNode::Identifier { .. }));
         } else {
             panic!("Expected Block, got {:?}", print_ast);
         }
@@ -589,7 +616,7 @@ mod action_tests {
         let ast = parse("f := x\nprint(f)\nplot(y=f)").unwrap();
         let actions = detect_cell_actions(&ast);
         let plot_ast = build_plot_ast(&ast, actions.last_plot.unwrap());
-        if let ast::AstNode::Block(stmts) = &plot_ast {
+        if let ast::AstNode::Block { items: stmts, .. } = &plot_ast {
             for stmt in stmts {
                 if let ast::AstNode::Apply { name, .. } = stmt {
                     assert_ne!(name, "print", "print should be stripped from plot AST");

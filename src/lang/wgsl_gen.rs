@@ -27,7 +27,7 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
 
     // Check for top-level loops (for or while)
     let top_has_loops = match ast {
-        AstNode::Block(stmts) => stmts
+        AstNode::Block { items: stmts, .. } => stmts
             .iter()
             .any(|s| matches!(s, AstNode::WhileLoop { .. } | AstNode::ForLoop { .. })),
         AstNode::WhileLoop { .. } | AstNode::ForLoop { .. } => true,
@@ -48,17 +48,17 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
     let mut fs_main_bindings = Vec::new();
     {
         let binding_asts: Vec<(&str, &AstNode)> = match ast {
-            AstNode::Block(stmts) => stmts
+            AstNode::Block { items: stmts, .. } => stmts
                 .iter()
                 .filter_map(|s| {
-                    if let AstNode::Binding { name, value } = s {
+                    if let AstNode::Binding { name, value, .. } = s {
                         Some((name.as_str(), value.as_ref()))
                     } else {
                         None
                     }
                 })
                 .collect(),
-            AstNode::Binding { name, value } => vec![(name.as_str(), value.as_ref())],
+            AstNode::Binding { name, value, .. } => vec![(name.as_str(), value.as_ref())],
             _ => Vec::new(),
         };
         for binding in &ctx.bindings {
@@ -97,7 +97,7 @@ pub fn generate(ast: &AstNode) -> Result<String, String> {
     if top_has_loops {
         // Imperative emission for top-level code with loops
         let top_stmts = match ast {
-            AstNode::Block(stmts) => stmts.as_slice(),
+            AstNode::Block { items: stmts, .. } => stmts.as_slice(),
             _ => std::slice::from_ref(ast),
         };
         let mut declared: HashSet<String> = HashSet::new();
@@ -304,17 +304,19 @@ impl GenContext {
     /// (used to detect captured variables for nested function hoisting).
     fn collect_functions_with_scope(&mut self, ast: &AstNode, scope_bindings: &[String]) {
         match ast {
-            AstNode::Block(stmts) => {
+            AstNode::Block { items: stmts, .. } => {
                 for stmt in stmts {
                     self.collect_functions_with_scope(stmt, scope_bindings);
                 }
             }
-            AstNode::FunctionDef { name, params, body } => {
+            AstNode::FunctionDef {
+                name, params, body, ..
+            } => {
                 // Collect nested function defs from the body first
                 // Build the scope for nested functions: parent scope + this function's params + body bindings
                 let mut inner_scope: Vec<String> = scope_bindings.to_vec();
                 inner_scope.extend(params.iter().cloned());
-                if let AstNode::Block(stmts) = body.as_ref() {
+                if let AstNode::Block { items: stmts, .. } = body.as_ref() {
                     // Add binding names from the body to the inner scope
                     for stmt in stmts {
                         match stmt {
@@ -372,7 +374,7 @@ impl GenContext {
 
                 // Check if the body is a block with bindings or loops
                 let needs_imperative = match body.as_ref() {
-                    AstNode::Block(stmts) => stmts.iter().any(|s| {
+                    AstNode::Block { items: stmts, .. } => stmts.iter().any(|s| {
                         matches!(
                             s,
                             AstNode::Binding { .. }
@@ -412,9 +414,9 @@ impl GenContext {
                 // the function at each pixel corner without re-inlining the
                 // imperative body (which `emit_bool_with_corners` can't handle).
                 if returns_bool_val && needs_imperative {
-                    if let AstNode::Block(stmts) = body.as_ref() {
+                    if let AstNode::Block { items: stmts, .. } = body.as_ref() {
                         if let Some(result) = block_result_expr_from_stmts(stmts) {
-                            if let AstNode::Apply { name: op, args: cmp_args } = result {
+                            if let AstNode::Apply { name: op, args: cmp_args, .. } = result {
                                 if cmp_args.len() == 2
                                     && matches!(
                                         op.as_str(),
@@ -458,7 +460,7 @@ impl GenContext {
                 }
 
                 if needs_imperative {
-                    if let AstNode::Block(stmts) = body.as_ref() {
+                    if let AstNode::Block { items: stmts, .. } = body.as_ref() {
                         if let Ok(body_wgsl) = self.emit_function_body(stmts) {
                             let wgsl_code = format!(
                                 "fn {}({}) -> {} {{\n{}}}\n",
@@ -481,13 +483,15 @@ impl GenContext {
                     self.functions.push(EmittedFunction { wgsl_code });
                 }
             }
-            AstNode::Binding { name, value } => {
+            AstNode::Binding { name, value, .. } => {
                 // Block-valued bindings with imperative content (var/loop) are lifted
                 // into WGSL functions so corner-checking can re-evaluate the block at
                 // each corner of a pixel — without this, e.g. `sum` is computed once
                 // at pixel-center x and the curve renders dotted on steep parts.
                 let imperative_block_stmts = match value.as_ref() {
-                    AstNode::Block(stmts) if has_imperative_stmt(stmts) => Some(stmts.clone()),
+                    AstNode::Block { items: stmts, .. } if has_imperative_stmt(stmts) => {
+                        Some(stmts.clone())
+                    }
                     _ => None,
                 };
 
@@ -531,9 +535,9 @@ impl GenContext {
                     });
                 }
             }
-            AstNode::TupleBinding { names, value } => {
+            AstNode::TupleBinding { names, value, .. } => {
                 // For tuple bindings at top level, emit individual bindings
-                if let AstNode::Tuple(items) = value.as_ref() {
+                if let AstNode::Tuple { items, .. } = value.as_ref() {
                     for (i, name) in names.iter().enumerate() {
                         if let Some(item) = items.get(i) {
                             if let Ok(expr_code) = self.emit_expr(item) {
@@ -565,7 +569,7 @@ impl GenContext {
             .ok_or_else(|| format!("block-valued binding `{}` has no result", binding_name))?;
 
         let comparison_op = match result {
-            AstNode::Apply { name, args }
+            AstNode::Apply { name, args, .. }
                 if args.len() == 2
                     && matches!(
                         name.as_str(),
@@ -630,7 +634,7 @@ impl GenContext {
 
         for stmt in stmts {
             match stmt {
-                AstNode::Binding { name, value } => {
+                AstNode::Binding { name, value, .. } => {
                     let val = self.emit_expr(value)?;
                     if declared.contains(name.as_str()) {
                         code += &format!("    {} = {};\n", name, val);
@@ -639,7 +643,7 @@ impl GenContext {
                         declared.insert(name.clone());
                     }
                 }
-                AstNode::TupleBinding { names, value } => {
+                AstNode::TupleBinding { names, value, .. } => {
                     self.emit_tuple_binding(
                         &mut code,
                         names,
@@ -649,10 +653,14 @@ impl GenContext {
                         &mut declared,
                     )?;
                 }
-                AstNode::ForLoop { var, range, body } => {
+                AstNode::ForLoop {
+                    var, range, body, ..
+                } => {
                     self.emit_for_loop(&mut code, var, range, body, "    ", &mut declared)?;
                 }
-                AstNode::WhileLoop { condition, body } => {
+                AstNode::WhileLoop {
+                    condition, body, ..
+                } => {
                     self.emit_while_condition_bindings(
                         &mut code,
                         condition,
@@ -705,7 +713,7 @@ impl GenContext {
 
         for stmt in stmts {
             match stmt {
-                AstNode::Binding { name, value } => {
+                AstNode::Binding { name, value, .. } => {
                     let val = self.emit_expr(value)?;
                     if declared.contains(name.as_str()) {
                         code += &format!("    {} = {};\n", name, val);
@@ -714,7 +722,7 @@ impl GenContext {
                         declared.insert(name.clone());
                     }
                 }
-                AstNode::TupleBinding { names, value } => {
+                AstNode::TupleBinding { names, value, .. } => {
                     self.emit_tuple_binding(
                         &mut code,
                         names,
@@ -724,10 +732,14 @@ impl GenContext {
                         &mut declared,
                     )?;
                 }
-                AstNode::ForLoop { var, range, body } => {
+                AstNode::ForLoop {
+                    var, range, body, ..
+                } => {
                     self.emit_for_loop(&mut code, var, range, body, "    ", &mut declared)?;
                 }
-                AstNode::WhileLoop { condition, body } => {
+                AstNode::WhileLoop {
+                    condition, body, ..
+                } => {
                     // Extract inline bindings from the condition (e.g. sq: expr inside block)
                     self.emit_while_condition_bindings(
                         &mut code,
@@ -776,7 +788,7 @@ impl GenContext {
         declared: &mut HashSet<String>,
     ) -> Result<(), String> {
         let (start_expr, end_expr) = match range {
-            AstNode::Range { start, end } => (self.emit_expr(start)?, self.emit_expr(end)?),
+            AstNode::Range { start, end, .. } => (self.emit_expr(start)?, self.emit_expr(end)?),
             _ => return Err("for loop range must be start..end".to_string()),
         };
         // Declare or reassign the loop variable
@@ -810,10 +822,10 @@ impl GenContext {
         declared: &mut HashSet<String>,
     ) -> Result<(), String> {
         match body {
-            AstNode::Block(stmts) => {
+            AstNode::Block { items: stmts, .. } => {
                 for stmt in stmts {
                     match stmt {
-                        AstNode::Binding { name, value } => {
+                        AstNode::Binding { name, value, .. } => {
                             let val = self.emit_expr(value)?;
                             if declared.contains(name.as_str()) {
                                 code.push_str(&format!("        {} = {};\n", name, val));
@@ -822,7 +834,7 @@ impl GenContext {
                                 declared.insert(name.clone());
                             }
                         }
-                        AstNode::TupleBinding { names, value } => {
+                        AstNode::TupleBinding { names, value, .. } => {
                             self.emit_tuple_binding(
                                 code, names, value, "        ", "var", declared,
                             )?;
@@ -831,7 +843,7 @@ impl GenContext {
                     }
                 }
             }
-            AstNode::Binding { name, value } => {
+            AstNode::Binding { name, value, .. } => {
                 let val = self.emit_expr(value)?;
                 if declared.contains(name.as_str()) {
                     code.push_str(&format!("        {} = {};\n", name, val));
@@ -855,14 +867,16 @@ impl GenContext {
                 }
                 returns_bool(node)
             }
-            AstNode::Identifier(name) => {
+            AstNode::Identifier { name, .. } => {
                 self.bool_binding_defs.contains_key(name)
                     || self
                         .lifted_block_defs
                         .get(name)
                         .is_some_and(|d| d.comparison_op.is_some())
             }
-            AstNode::Block(stmts) => stmts.last().is_some_and(|s| self.result_is_bool(s)),
+            AstNode::Block { items: stmts, .. } => {
+                stmts.last().is_some_and(|s| self.result_is_bool(s))
+            }
             AstNode::IfExpr {
                 then_branch,
                 else_branch,
@@ -880,7 +894,7 @@ impl GenContext {
     /// Check if an expression produces a vec type (for shader output detection).
     fn result_is_vec(&self, node: &AstNode) -> bool {
         match node {
-            AstNode::Tuple(items) => items.len() >= 2,
+            AstNode::Tuple { items, .. } => items.len() >= 2,
             AstNode::Apply { name, .. } => self.vec_functions.contains(name),
             AstNode::IfExpr {
                 then_branch,
@@ -892,7 +906,9 @@ impl GenContext {
                         .as_ref()
                         .is_some_and(|e| self.result_is_vec(e))
             }
-            AstNode::Block(stmts) => stmts.last().is_some_and(|s| self.result_is_vec(s)),
+            AstNode::Block { items: stmts, .. } => {
+                stmts.last().is_some_and(|s| self.result_is_vec(s))
+            }
             _ => false,
         }
     }
@@ -900,8 +916,10 @@ impl GenContext {
     /// Return the tuple size of the result expression, if it's a direct tuple literal.
     fn result_tuple_size(&self, node: &AstNode) -> Option<usize> {
         match node {
-            AstNode::Tuple(items) => Some(items.len()),
-            AstNode::Block(stmts) => stmts.last().and_then(|s| self.result_tuple_size(s)),
+            AstNode::Tuple { items, .. } => Some(items.len()),
+            AstNode::Block { items: stmts, .. } => {
+                stmts.last().and_then(|s| self.result_tuple_size(s))
+            }
             _ => None,
         }
     }
@@ -916,7 +934,7 @@ impl GenContext {
         var_keyword: &str,
         declared: &mut HashSet<String>,
     ) -> Result<(), String> {
-        if let AstNode::Tuple(items) = value {
+        if let AstNode::Tuple { items, .. } = value {
             for (i, name) in names.iter().enumerate() {
                 if let Some(item) = items.get(i) {
                     let val = self.emit_expr(item)?;
@@ -942,9 +960,9 @@ impl GenContext {
         declared: &mut HashSet<String>,
     ) -> Result<(), String> {
         match condition {
-            AstNode::Block(stmts) => {
+            AstNode::Block { items: stmts, .. } => {
                 for stmt in stmts {
-                    if let AstNode::Binding { name, value } = stmt {
+                    if let AstNode::Binding { name, value, .. } = stmt {
                         let val = self.emit_expr(value)?;
                         if !declared.contains(name.as_str()) {
                             *code += &format!("{}var {} = {};\n", indent, name, val);
@@ -973,9 +991,9 @@ impl GenContext {
         declared: &mut HashSet<String>,
     ) -> Result<(), String> {
         match condition {
-            AstNode::Block(stmts) => {
+            AstNode::Block { items: stmts, .. } => {
                 for stmt in stmts {
-                    if let AstNode::Binding { name, value } = stmt {
+                    if let AstNode::Binding { name, value, .. } = stmt {
                         let val = self.emit_expr(value)?;
                         if declared.contains(name.as_str()) {
                             *code += &format!("{}{} = {};\n", indent, name, val);
@@ -1008,7 +1026,7 @@ impl GenContext {
 
         for stmt in stmts {
             match stmt {
-                AstNode::Binding { name, value } => {
+                AstNode::Binding { name, value, .. } => {
                     let val = self.emit_expr(value)?;
                     if declared.contains(name.as_str()) {
                         code += &format!("{}{} = {};\n", indent, name, val);
@@ -1017,13 +1035,17 @@ impl GenContext {
                         declared.insert(name.clone());
                     }
                 }
-                AstNode::TupleBinding { names, value } => {
+                AstNode::TupleBinding { names, value, .. } => {
                     self.emit_tuple_binding(&mut code, names, value, indent, "var", declared)?;
                 }
-                AstNode::ForLoop { var, range, body } => {
+                AstNode::ForLoop {
+                    var, range, body, ..
+                } => {
                     self.emit_for_loop(&mut code, var, range, body, indent, declared)?;
                 }
-                AstNode::WhileLoop { condition, body } => {
+                AstNode::WhileLoop {
+                    condition, body, ..
+                } => {
                     // Pre-declare condition bindings
                     self.emit_while_condition_bindings(&mut code, condition, indent, declared)?;
                     let cond = self.emit_expr(condition)?;
@@ -1062,7 +1084,7 @@ impl GenContext {
     /// identifiers "x" and "y" are replaced with the corner variable names.
     fn emit_expr_internal(&self, node: &AstNode, subst: CornerSubst) -> Result<String, String> {
         match node {
-            AstNode::Number(n) => {
+            AstNode::Number { value: n, .. } => {
                 let s = if n.fract() == 0.0 && !n.is_nan() && !n.is_infinite() {
                     format!("{:.1}", n)
                 } else {
@@ -1070,8 +1092,8 @@ impl GenContext {
                 };
                 Ok(s)
             }
-            AstNode::BoolLit(b) => Ok(format!("{}", b)),
-            AstNode::Identifier(name) => {
+            AstNode::BoolLit { value: b, .. } => Ok(format!("{}", b)),
+            AstNode::Identifier { name, .. } => {
                 if let Some((x_var, y_var)) = subst {
                     if name == "x" {
                         return Ok(x_var.to_string());
@@ -1086,8 +1108,8 @@ impl GenContext {
                 }
                 Ok(name.clone())
             }
-            AstNode::Apply { name, args } => self.emit_apply_internal(name, args, subst),
-            AstNode::Tuple(items) => {
+            AstNode::Apply { name, args, .. } => self.emit_apply_internal(name, args, subst),
+            AstNode::Tuple { items, .. } => {
                 let parts: Result<Vec<_>, _> = items
                     .iter()
                     .map(|i| self.emit_expr_internal(i, subst))
@@ -1100,7 +1122,7 @@ impl GenContext {
                     _ => Err(format!("Unsupported tuple size: {}", items.len())),
                 }
             }
-            AstNode::Block(stmts) => {
+            AstNode::Block { items: stmts, .. } => {
                 if let Some(last) = stmts.last() {
                     self.emit_expr_internal(last, subst)
                 } else {
@@ -1112,6 +1134,7 @@ impl GenContext {
                 condition,
                 then_branch,
                 else_branch,
+                ..
             } => {
                 let cond = self.emit_expr_internal(condition, subst)?;
                 let then_code = self.emit_expr_internal(then_branch, subst)?;
@@ -1123,9 +1146,11 @@ impl GenContext {
                 }
             }
             AstNode::FunctionDef { .. } => Ok("0.0".to_string()),
-            AstNode::PropertyAccess { object, property } => {
+            AstNode::PropertyAccess {
+                object, property, ..
+            } => {
                 // Map x.min → u.axis_min.x, x.max → u.axis_max.x, etc.
-                if let AstNode::Identifier(ref base) = **object {
+                if let AstNode::Identifier { name: base, .. } = object.as_ref() {
                     match (base.as_str(), property.as_str()) {
                         ("x", "min") => return Ok("u.axis_min.x".to_string()),
                         ("x", "max") => return Ok("u.axis_max.x".to_string()),
@@ -1142,7 +1167,7 @@ impl GenContext {
             AstNode::TupleBinding { .. } => Ok("0.0".to_string()), // Emitted imperatively
             AstNode::ForLoop { .. } => Ok("0.0".to_string()),      // Emitted imperatively
             AstNode::WhileLoop { .. } => Ok("0.0".to_string()),    // Emitted imperatively
-            AstNode::ArrayLiteral(_)
+            AstNode::ArrayLiteral { .. }
             | AstNode::IndexAccess { .. }
             | AstNode::Range { .. }
             | AstNode::ParallelFor { .. }
@@ -1218,7 +1243,7 @@ impl GenContext {
                 // pow(x, n) for small non-negative integer n is much cheaper as
                 // repeated multiplication — pow() costs ~20+ GPU ops via exp2/log2,
                 // and `x²` (very common in plotting) shouldn't pay that.
-                if let AstNode::Number(n) = &args[1] {
+                if let AstNode::Number { value: n, .. } = &args[1] {
                     if *n >= 0.0 && n.fract() == 0.0 && *n <= 8.0 {
                         let times = *n as u32;
                         if times == 0 {
@@ -1292,7 +1317,7 @@ impl GenContext {
     /// Assumes x_m, x_p, y_m, y_p variables are available in scope.
     fn emit_bool_with_corners(&self, node: &AstNode) -> Result<String, String> {
         match node {
-            AstNode::BoolLit(b) => Ok(format!("{}", b)),
+            AstNode::BoolLit { value: b, .. } => Ok(format!("{}", b)),
 
             // Lifted block-valued binding: call the synthesized WGSL function at
             // each pixel corner so the loop/local state re-runs for x_m/x_p/y_m/y_p
@@ -1300,7 +1325,7 @@ impl GenContext {
             // The four corner calls are hoisted into `__lifted_<name>_mm/mp/pm/pp`
             // by the caller so we only invoke the function 4 times per pixel,
             // not 6+ (the corner expression below references each corner twice).
-            AstNode::Identifier(name) if self.lifted_block_defs.contains_key(name) => {
+            AstNode::Identifier { name, .. } if self.lifted_block_defs.contains_key(name) => {
                 let def = self.lifted_block_defs.get(name).unwrap();
                 let calls: Vec<String> = vec![
                     format!("_corner_{}_mm", name),
@@ -1374,12 +1399,12 @@ impl GenContext {
 
             // Identifier bound to a bool expression: inline so the comparison
             // goes through corner-checking instead of a direct float ==.
-            AstNode::Identifier(name) if self.bool_binding_defs.contains_key(name) => {
+            AstNode::Identifier { name, .. } if self.bool_binding_defs.contains_key(name) => {
                 let bound = self.bool_binding_defs.get(name).unwrap().clone();
                 self.emit_bool_with_corners(&bound)
             }
 
-            AstNode::Apply { name, args } => {
+            AstNode::Apply { name, args, .. } => {
                 match name.as_str() {
                     // Logical ops: recursively apply corner checking.
                     // Operands may be bool (comparisons) or float (implicit curves).
@@ -1514,7 +1539,10 @@ impl GenContext {
             self.emit_bool_with_corners(node)
         } else {
             // Float expression used as implicit curve: treat as expr = 0
-            let zero = AstNode::Number(0.0);
+            let zero = AstNode::Number {
+                value: 0.0,
+                span: node.span(),
+            };
             self.emit_comparison_with_corners("eq", node, &zero)
         }
     }
@@ -1593,7 +1621,7 @@ fn find_referenced_identifiers(node: &AstNode) -> HashSet<String> {
 
 fn collect_identifiers(node: &AstNode, result: &mut HashSet<String>) {
     match node {
-        AstNode::Identifier(name) => {
+        AstNode::Identifier { name, .. } => {
             result.insert(name.clone());
         }
         AstNode::Apply { args, .. } => {
@@ -1601,7 +1629,7 @@ fn collect_identifiers(node: &AstNode, result: &mut HashSet<String>) {
                 collect_identifiers(arg, result);
             }
         }
-        AstNode::Block(stmts) => {
+        AstNode::Block { items: stmts, .. } => {
             for s in stmts {
                 collect_identifiers(s, result);
             }
@@ -1612,7 +1640,7 @@ fn collect_identifiers(node: &AstNode, result: &mut HashSet<String>) {
         AstNode::TupleBinding { value, .. } => {
             collect_identifiers(value, result);
         }
-        AstNode::Tuple(items) => {
+        AstNode::Tuple { items, .. } => {
             for item in items {
                 collect_identifiers(item, result);
             }
@@ -1621,6 +1649,7 @@ fn collect_identifiers(node: &AstNode, result: &mut HashSet<String>) {
             condition,
             then_branch,
             else_branch,
+            ..
         } => {
             collect_identifiers(condition, result);
             collect_identifiers(then_branch, result);
@@ -1628,7 +1657,9 @@ fn collect_identifiers(node: &AstNode, result: &mut HashSet<String>) {
                 collect_identifiers(eb, result);
             }
         }
-        AstNode::WhileLoop { condition, body } => {
+        AstNode::WhileLoop {
+            condition, body, ..
+        } => {
             collect_identifiers(condition, result);
             collect_identifiers(body, result);
         }
@@ -1638,17 +1669,17 @@ fn collect_identifiers(node: &AstNode, result: &mut HashSet<String>) {
         AstNode::PropertyAccess { object, .. } => {
             collect_identifiers(object, result);
         }
-        AstNode::Number(_) | AstNode::BoolLit(_) => {}
-        AstNode::ArrayLiteral(elems) => {
+        AstNode::Number { .. } | AstNode::BoolLit { .. } => {}
+        AstNode::ArrayLiteral { items: elems, .. } => {
             for e in elems {
                 collect_identifiers(e, result);
             }
         }
-        AstNode::IndexAccess { array, index } => {
+        AstNode::IndexAccess { array, index, .. } => {
             collect_identifiers(array, result);
             collect_identifiers(index, result);
         }
-        AstNode::Range { start, end } => {
+        AstNode::Range { start, end, .. } => {
             collect_identifiers(start, result);
             collect_identifiers(end, result);
         }
@@ -1660,6 +1691,7 @@ fn collect_identifiers(node: &AstNode, result: &mut HashSet<String>) {
             array,
             index,
             value,
+            ..
         } => {
             collect_identifiers(array, result);
             collect_identifiers(index, result);
@@ -1672,20 +1704,23 @@ fn collect_identifiers(node: &AstNode, result: &mut HashSet<String>) {
 /// `const_names` tracks bindings already known to be constant.
 fn is_const_expr(node: &AstNode, const_names: &HashSet<String>) -> bool {
     match node {
-        AstNode::Number(_) | AstNode::BoolLit(_) => true,
-        AstNode::Identifier(name) => {
+        AstNode::Number { .. } | AstNode::BoolLit { .. } => true,
+        AstNode::Identifier { name, .. } => {
             if matches!(name.as_str(), "x" | "y" | "z" | "t") {
                 return false;
             }
             const_names.contains(name)
         }
         AstNode::Apply { args, .. } => args.iter().all(|a| is_const_expr(a, const_names)),
-        AstNode::Tuple(items) => items.iter().all(|i| is_const_expr(i, const_names)),
-        AstNode::Block(stmts) => stmts.iter().all(|s| is_const_expr(s, const_names)),
+        AstNode::Tuple { items, .. } => items.iter().all(|i| is_const_expr(i, const_names)),
+        AstNode::Block { items: stmts, .. } => {
+            stmts.iter().all(|s| is_const_expr(s, const_names))
+        }
         AstNode::IfExpr {
             condition,
             then_branch,
             else_branch,
+            ..
         } => {
             is_const_expr(condition, const_names)
                 && is_const_expr(then_branch, const_names)
@@ -1703,7 +1738,7 @@ fn is_const_expr(node: &AstNode, const_names: &HashSet<String>) -> bool {
 /// comparisons go through sign-change detection rather than float `==`.
 fn substitute_params(body: &AstNode, params: &[String], args: &[AstNode]) -> AstNode {
     match body {
-        AstNode::Identifier(name) => {
+        AstNode::Identifier { name, .. } => {
             if let Some(i) = params.iter().position(|p| p == name) {
                 if i < args.len() {
                     return args[i].clone();
@@ -1714,6 +1749,7 @@ fn substitute_params(body: &AstNode, params: &[String], args: &[AstNode]) -> Ast
         AstNode::Apply {
             name,
             args: func_args,
+            span,
         } => {
             // Don't substitute the function name, only its arguments
             let new_args = func_args
@@ -1723,39 +1759,50 @@ fn substitute_params(body: &AstNode, params: &[String], args: &[AstNode]) -> Ast
             AstNode::Apply {
                 name: name.clone(),
                 args: new_args,
+                span: *span,
             }
         }
-        AstNode::Block(stmts) => AstNode::Block(
-            stmts
+        AstNode::Block { items: stmts, span } => AstNode::Block {
+            items: stmts
                 .iter()
                 .map(|s| substitute_params(s, params, args))
                 .collect(),
-        ),
-        AstNode::Binding { name, value } => AstNode::Binding {
+            span: *span,
+        },
+        AstNode::Binding { name, value, span } => AstNode::Binding {
             name: name.clone(),
             value: Box::new(substitute_params(value, params, args)),
+            span: *span,
         },
         AstNode::IfExpr {
             condition,
             then_branch,
             else_branch,
+            span,
         } => AstNode::IfExpr {
             condition: Box::new(substitute_params(condition, params, args)),
             then_branch: Box::new(substitute_params(then_branch, params, args)),
             else_branch: else_branch
                 .as_ref()
                 .map(|e| Box::new(substitute_params(e, params, args))),
+            span: *span,
         },
-        AstNode::Tuple(items) => AstNode::Tuple(
-            items
+        AstNode::Tuple { items, span } => AstNode::Tuple {
+            items: items
                 .iter()
                 .map(|i| substitute_params(i, params, args))
                 .collect(),
-        ),
-        AstNode::Number(_) | AstNode::BoolLit(_) => body.clone(),
-        AstNode::PropertyAccess { object, property } => AstNode::PropertyAccess {
+            span: *span,
+        },
+        AstNode::Number { .. } | AstNode::BoolLit { .. } => body.clone(),
+        AstNode::PropertyAccess {
+            object,
+            property,
+            span,
+        } => AstNode::PropertyAccess {
             object: Box::new(substitute_params(object, params, args)),
             property: property.clone(),
+            span: *span,
         },
         // For remaining node types, clone as-is (loops, arrays, etc. are unlikely in bool functions)
         _ => body.clone(),
@@ -1783,7 +1830,7 @@ fn has_imperative_stmt(stmts: &[AstNode]) -> bool {
 /// If `node` is a Block, return its result expression (the last non-imperative
 /// statement). Otherwise return `node` itself.
 fn block_result_expr(node: &AstNode) -> &AstNode {
-    if let AstNode::Block(stmts) = node {
+    if let AstNode::Block { items: stmts, .. } = node {
         if let Some(r) = block_result_expr_from_stmts(stmts) {
             return r;
         }
@@ -1808,12 +1855,12 @@ fn block_result_expr_from_stmts(stmts: &[AstNode]) -> Option<&AstNode> {
 
 fn returns_bool(node: &AstNode) -> bool {
     match node {
-        AstNode::BoolLit(_) => true,
+        AstNode::BoolLit { .. } => true,
         AstNode::Apply { name, .. } => matches!(
             name.as_str(),
             "eq" | "neq" | "lt" | "gt" | "lte" | "gte" | "and" | "or" | "not"
         ),
-        AstNode::Block(stmts) => stmts.last().is_some_and(returns_bool),
+        AstNode::Block { items: stmts, .. } => stmts.last().is_some_and(returns_bool),
         _ => false,
     }
 }
@@ -1821,7 +1868,7 @@ fn returns_bool(node: &AstNode) -> bool {
 /// Find the result expression in the AST (last non-binding, non-function-def, non-loop node).
 fn find_result_expr(ast: &AstNode) -> Result<&AstNode, String> {
     match ast {
-        AstNode::Block(stmts) => {
+        AstNode::Block { items: stmts, .. } => {
             for stmt in stmts.iter().rev() {
                 match stmt {
                     AstNode::Binding { .. }
