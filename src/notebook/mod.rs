@@ -29,7 +29,7 @@ pub use shader::{DispatchKind, ShaderSpec};
 // actually wants them.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 /// Process-global cell ID counter. Multiple notebooks may share a single
 /// REDUCE service, so cell IDs must be unique across all notebooks for
@@ -38,6 +38,64 @@ static NEXT_CELL_ID: AtomicUsize = AtomicUsize::new(0);
 
 fn alloc_cell_id() -> usize {
     NEXT_CELL_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Process-global plot-color seed. Each new cell takes one — the resulting
+/// color is deterministic in the seed (see `color_from_seed`), so two cells
+/// created back-to-back are always different.
+static NEXT_COLOR_SEED: AtomicU32 = AtomicU32::new(0);
+
+pub fn alloc_color_seed() -> u32 {
+    NEXT_COLOR_SEED.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Deterministic seed → color mapping. Uses golden-ratio hue rotation so
+/// nearby seeds land on distinct, well-spread hues; saturation/lightness are
+/// fixed for plot-friendly contrast against both dark and light backgrounds.
+pub fn color_from_seed(seed: u32) -> crate::ui::theme::Rgba {
+    // Golden-ratio conjugate (≈ 0.618) — classic technique for low-discrepancy
+    // hue selection. Multiply the seed by it, take the fractional part as hue.
+    const PHI: f32 = 0.618_034;
+    let hue = (seed as f32 * PHI).fract();
+    let s = 0.65;
+    let l = 0.62;
+    let (r, g, b) = hsl_to_rgb(hue, s, l);
+    crate::ui::theme::Rgba::rgb(
+        (r * 255.0).round() as u8,
+        (g * 255.0).round() as u8,
+        (b * 255.0).round() as u8,
+    )
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    if s <= f32::EPSILON {
+        return (l, l, l);
+    }
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    let hue_to_rgb = |p: f32, q: f32, mut t: f32| -> f32 {
+        if t < 0.0 {
+            t += 1.0;
+        }
+        if t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            return p + (q - p) * 6.0 * t;
+        }
+        if t < 0.5 {
+            return q;
+        }
+        if t < 2.0 / 3.0 {
+            return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+        }
+        p
+    };
+    (
+        hue_to_rgb(p, q, h + 1.0 / 3.0),
+        hue_to_rgb(p, q, h),
+        hue_to_rgb(p, q, h - 1.0 / 3.0),
+    )
 }
 
 use crate::lang::ast::AstNode;
@@ -118,9 +176,26 @@ impl Notebook {
         &self.cells
     }
 
-    pub fn add_cell(&mut self, text: &str, plot_color: Rgba) -> usize {
+    /// Append a cell with a freshly-allocated color seed. Use this for
+    /// new (untitled) cells; loaders that already know the color should
+    /// call `add_cell_with_color` instead so the saved color round-trips.
+    pub fn add_cell(&mut self, text: &str) -> usize {
+        let seed = alloc_color_seed();
+        let color = color_from_seed(seed);
+        self.add_cell_with_color(text, seed, color)
+    }
+
+    /// Append a cell with an explicit color (and seed). Used by the JSON
+    /// loader so saved colors round-trip exactly.
+    pub fn add_cell_with_color(
+        &mut self,
+        text: &str,
+        color_seed: u32,
+        plot_color: Rgba,
+    ) -> usize {
         let id = alloc_cell_id();
-        self.cells.push(NotebookCell::new(id, text, plot_color));
+        self.cells
+            .push(NotebookCell::new(id, text, color_seed, plot_color));
         self.cells.len() - 1
     }
 
@@ -250,6 +325,34 @@ impl Notebook {
     /// because (a) caching a key for "simplified" form would mean two cache
     /// entries per cell, and (b) the simplified form is short-lived and
     /// re-parsed at most once per REDUCE round-trip resolution.
+    /// `(start, end)` half-open range of statement indices in
+    /// `combined_ast_up_to(cell_index)` that come from cell `cell_index`
+    /// itself. Used by `handle_plot` to filter plots to "this cell's plots
+    /// only" — earlier cells' plots already had their shaders compiled when
+    /// those cells ran.
+    fn cell_stmt_range(&self, cell_index: usize) -> Result<(usize, usize), String> {
+        let mut offset = 0;
+        let stmt_count = |cell: &NotebookCell| -> Result<usize, String> {
+            let parsed = match &cell.outcome.message {
+                Some(CellMessage::Simplified(s)) => crate::lang::parse(s)?,
+                _ => cell.cached_ast()?,
+            };
+            Ok(match parsed {
+                AstNode::Block { items, .. } => items.len(),
+                _ => 1,
+            })
+        };
+        for (i, cell) in self.cells.iter().enumerate() {
+            if i >= cell_index {
+                break;
+            }
+            offset += stmt_count(cell).map_err(|e| format!("Cell {}: {}", i + 1, e))?;
+        }
+        let own = stmt_count(&self.cells[cell_index])
+            .map_err(|e| format!("Cell {}: {}", cell_index + 1, e))?;
+        Ok((offset, offset + own))
+    }
+
     fn combined_ast_up_to(&self, cell_index: usize) -> Result<AstNode, String> {
         let mut all_stmts = Vec::new();
         for (i, cell) in self.cells.iter().enumerate() {
@@ -302,17 +405,29 @@ impl Notebook {
 
         let actions = lang::detect_cell_actions(&combined);
 
+        // Restrict plots to those originating in *this* cell — earlier
+        // cells' plots already produced shaders when those cells ran.
+        let own_plots: Vec<usize> = match self.cell_stmt_range(idx) {
+            Ok((start, end)) => actions
+                .plots
+                .iter()
+                .copied()
+                .filter(|i| (start..end).contains(i))
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+
         let cell_text = self.cells[idx].buffer.text().trim().to_string();
 
         if let Some(print_idx) = actions.first_print {
             self.handle_print(idx, print_idx, &combined, &cell_text);
-            if actions.last_plot.is_none() {
+            if own_plots.is_empty() {
                 return;
             }
         }
 
-        if let Some(plot_idx) = actions.last_plot {
-            self.handle_plot(idx, plot_idx, &combined, &snapshot);
+        if !own_plots.is_empty() {
+            self.handle_plots(idx, &own_plots, &combined, &snapshot);
             return;
         }
 
@@ -396,23 +511,36 @@ impl Notebook {
         }
     }
 
-    fn handle_plot(&mut self, idx: usize, plot_idx: usize, combined: &AstNode, snapshot: &str) {
-        let plot_ast = lang::build_plot_ast(combined, plot_idx);
-        match crate::lang::wgsl_gen::generate(&plot_ast) {
-            Ok(wgsl) => {
-                self.cells[idx].outcome.shader = Some(ShaderSpec {
-                    wgsl,
-                    dispatch: DispatchKind::Fragment,
-                    bindings: Vec::new(),
-                });
-                self.cells[idx].outcome.cpu_program = Some(plot_ast);
-                self.cells[idx].state = CellState::Playing;
-                self.cells[idx].last_played_text = Some(snapshot.to_string());
-            }
-            Err(e) => {
-                self.set_runtime_error(idx, e, snapshot);
+    fn handle_plots(
+        &mut self,
+        idx: usize,
+        plot_indices: &[usize],
+        combined: &AstNode,
+        snapshot: &str,
+    ) {
+        let mut shaders = Vec::with_capacity(plot_indices.len());
+        let mut last_ast: Option<AstNode> = None;
+        for &plot_idx in plot_indices {
+            let plot_ast = lang::build_plot_ast(combined, plot_idx);
+            match crate::lang::wgsl_gen::generate(&plot_ast) {
+                Ok(wgsl) => {
+                    shaders.push(ShaderSpec {
+                        wgsl,
+                        dispatch: DispatchKind::Fragment,
+                        bindings: Vec::new(),
+                    });
+                    last_ast = Some(plot_ast);
+                }
+                Err(e) => {
+                    self.set_runtime_error(idx, e, snapshot);
+                    return;
+                }
             }
         }
+        self.cells[idx].outcome.shaders = shaders;
+        self.cells[idx].outcome.cpu_program = last_ast;
+        self.cells[idx].state = CellState::Playing;
+        self.cells[idx].last_played_text = Some(snapshot.to_string());
     }
 
     fn handle_reduce_response(
@@ -502,6 +630,31 @@ impl Notebook {
     }
 
     fn compile_after_simplify(&mut self, idx: usize, substituted: &str) {
+        // Cell's effective text is already the Simplified message at this point
+        // (the caller set it before calling us), so combined_ast_up_to and
+        // cell_stmt_range reflect the substituted form.
+        let combined_result = self.combined_ast_up_to(idx);
+        if let Ok(combined) = combined_result {
+            let actions = lang::detect_cell_actions(&combined);
+            let own_plots: Vec<usize> = match self.cell_stmt_range(idx) {
+                Ok((start, end)) => actions
+                    .plots
+                    .iter()
+                    .copied()
+                    .filter(|i| (start..end).contains(i))
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            if !own_plots.is_empty() {
+                let snapshot = self.cells[idx].buffer.text().to_string();
+                self.handle_plots(idx, &own_plots, &combined, &snapshot);
+                return;
+            }
+        }
+
+        // No plot calls — fall back to whole-source compile so cells like
+        // `int(x²,x)` that simplify to a raw expression still render as a
+        // grayscale fragment shader.
         let mut source = String::new();
         for (i, cell) in self.cells.iter().enumerate() {
             if i > idx {
@@ -520,11 +673,11 @@ impl Notebook {
         }
         match crate::lang::compile(&source) {
             Ok(wgsl) => {
-                self.cells[idx].outcome.shader = Some(ShaderSpec {
+                self.cells[idx].outcome.shaders = vec![ShaderSpec {
                     wgsl,
                     dispatch: DispatchKind::Fragment,
                     bindings: Vec::new(),
-                });
+                }];
                 self.cells[idx].state = CellState::Playing;
                 self.cells[idx].last_played_text = Some(self.cells[idx].buffer.text().to_string());
             }

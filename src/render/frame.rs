@@ -109,6 +109,26 @@ impl Renderer {
                 ));
             }
 
+            // Color button: a filled swatch using the cell's plot color.
+            // Hover ring is drawn underneath for feedback.
+            {
+                if hover == HoverTarget::CellColorButton(i) {
+                    ui_rects.push(rect_rounded(
+                        cl.color_button,
+                        t.bg_hover,
+                        cl.color_button.w / 2.0,
+                    ));
+                }
+                let inset = 4.0 * fonts::scale();
+                let swatch = Rect {
+                    x: cl.color_button.x + inset,
+                    y: cl.color_button.y + inset,
+                    w: (cl.color_button.w - inset * 2.0).max(0.0),
+                    h: (cl.color_button.h - inset * 2.0).max(0.0),
+                };
+                ui_rects.push(rect_rounded(swatch, cl.plot_color, swatch.w / 2.0));
+            }
+
             if hover == HoverTarget::CellCopyButton(i) {
                 ui_rects.push(rect_rounded(
                     cl.copy_button,

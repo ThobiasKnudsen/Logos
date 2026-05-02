@@ -41,6 +41,7 @@ pub(crate) enum HoverTarget {
     VScrollThumb,
     CellEditor(usize),
     CellPlayButton(usize),
+    CellColorButton(usize),
     CellCopyButton(usize),
     CellOutputCopyButton(usize),
     CellOutputToggle(usize),

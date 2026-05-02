@@ -13,7 +13,14 @@ use crate::ui::layout::Rect;
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct ShaderUniforms {
     pub time: f32,
-    pub _pad0: f32,
+    /// Upper bound on the WGSL loop guard. Set to `MAX_LOOP_ITERATIONS` at
+    /// render time. We pass it as a uniform — rather than a literal in the
+    /// generated WGSL — to prevent driver shader compilers (notably NVIDIA's)
+    /// from fully unrolling for-loops at compile time. With the literal, a
+    /// loop body like `sum = sum * x` starting at 0 made the NVIDIA shader
+    /// compiler hang for many seconds (or indefinitely) trying to symbolic-
+    /// fold a constant-zero unrolled chain.
+    pub max_loop_iter: u32,
     pub resolution: [f32; 2],
     pub mouse: [f32; 2],
     pub zoom: f32,
@@ -27,11 +34,15 @@ pub struct ShaderUniforms {
     pub background_color: [f32; 4],
 }
 
+/// Matches `MAX_LOOP_ITERATIONS` in `lang::wgsl_gen`. Written into the
+/// `max_loop_iter` uniform every frame.
+pub const MAX_LOOP_ITERATIONS: u32 = 10_000;
+
 impl Default for ShaderUniforms {
     fn default() -> Self {
         Self {
             time: 0.0,
-            _pad0: 0.0,
+            max_loop_iter: MAX_LOOP_ITERATIONS,
             resolution: [800.0, 600.0],
             mouse: [0.0, 0.0],
             zoom: 1.0,
@@ -56,6 +67,10 @@ struct CellPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniform_buffer: wgpu::Buffer,
+    /// Color the shader writes for "the cell's plot color" — one per
+    /// pipeline so the renderer can use a different `primary_color` for each
+    /// cell. Updating this doesn't require recompilation.
+    primary_color: [f32; 4],
 }
 
 // ---------------------------------------------------------------------------
@@ -137,18 +152,34 @@ impl ShaderPipelineManager {
         }
     }
 
-    /// Compile a WGSL fragment shader and add a pipeline for the given cell.
-    /// The `wgsl_source` should contain the full fragment shader module including
-    /// the uniform struct and `fs_main` entry point.
-    pub fn compile_and_add(
+    /// Replace every pipeline for `cell_id` with one pipeline per
+    /// `(primary_color, wgsl_source)` pair. A cell with multiple `plot(...)`
+    /// calls produces several entries — they all render into the same scissor
+    /// rect and overlay via alpha blending.
+    pub fn set_cell_shaders(
         &mut self,
         device: &wgpu::Device,
         cell_id: usize,
-        wgsl_source: &str,
+        sources: &[([f32; 4], &str)],
     ) -> Result<(), String> {
-        // Remove any existing pipeline for this cell
+        // Remove any existing pipelines for this cell first so a partial
+        // failure below leaves the cell with no pipelines (rather than a mix
+        // of old and new).
         self.remove(cell_id);
 
+        for (primary_color, wgsl_source) in sources {
+            self.add_one(device, cell_id, *primary_color, wgsl_source)?;
+        }
+        Ok(())
+    }
+
+    fn add_one(
+        &mut self,
+        device: &wgpu::Device,
+        cell_id: usize,
+        primary_color: [f32; 4],
+        wgsl_source: &str,
+    ) -> Result<(), String> {
         // Push an error scope so wgpu returns errors instead of panicking.
         device.push_error_scope(wgpu::ErrorFilter::Validation);
 
@@ -219,12 +250,30 @@ impl ShaderPipelineManager {
             pipeline,
             bind_group,
             uniform_buffer,
+            primary_color,
         });
 
         Ok(())
     }
 
-    /// Remove the pipeline for a given cell_id.
+    /// Update the primary color used by every pipeline belonging to
+    /// `cell_id`. Cheap — no recompile, just a uniform write next frame.
+    pub fn set_cell_primary_color(&mut self, cell_id: usize, primary_color: [f32; 4]) {
+        for cp in self.pipelines.iter_mut() {
+            if cp.cell_id == cell_id {
+                cp.primary_color = primary_color;
+            }
+        }
+        for pipelines in self.stashed.values_mut() {
+            for cp in pipelines.iter_mut() {
+                if cp.cell_id == cell_id {
+                    cp.primary_color = primary_color;
+                }
+            }
+        }
+    }
+
+    /// Remove every pipeline for the given `cell_id`.
     pub fn remove(&mut self, cell_id: usize) {
         self.pipelines.retain(|p| p.cell_id != cell_id);
     }
@@ -282,10 +331,12 @@ impl ShaderPipelineManager {
             // Update uniforms with actual axis bounds from user interaction
             let uniforms = ShaderUniforms {
                 time: elapsed,
+                max_loop_iter: MAX_LOOP_ITERATIONS,
                 resolution: [right_pane.w, right_pane.h],
                 mouse: mouse_uv,
                 axis_min: [axis_bounds[0], axis_bounds[1]],
                 axis_max: [axis_bounds[2], axis_bounds[3]],
+                primary_color: cp.primary_color,
                 ..Default::default()
             };
             queue.write_buffer(&cp.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));

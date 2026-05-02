@@ -61,12 +61,14 @@ impl CellMessage {
 }
 
 /// Everything the last play produced for this cell. None of these fields
-/// reach for the GPU — the renderer reads `shader.wgsl` and the printer
+/// reach for the GPU — the renderer reads `shaders[*].wgsl` and the printer
 /// reads `message`.
 #[derive(Debug, Clone, Default)]
 pub struct CellOutcome {
     pub message: Option<CellMessage>,
-    pub shader: Option<ShaderSpec>,
+    /// One shader per `plot(...)` call in the cell, in source order.
+    /// Empty when the cell produced no plots.
+    pub shaders: Vec<ShaderSpec>,
     /// CPU-side program (currently the AST itself; future home for JIT IR).
     pub cpu_program: Option<AstNode>,
     /// Per-token color spans for syntax highlighting. Recomputed on every
@@ -81,11 +83,15 @@ pub struct NotebookCell {
     /// here directly; mutations from keystrokes / paste go straight in
     /// (no separate mirror to keep in sync).
     pub buffer: Buffer,
-    /// Color for non-RGBA plots produced by this cell. Mutable via
-    /// `Notebook::set_plot_color`. The renderer doesn't read this yet —
-    /// every plot uses the theme's primary color today.
-    #[allow(dead_code)]
+    /// Color used by every plot this cell produces. The cell-color button
+    /// cycles by stepping `color_seed`; `plot_color` is the cached result of
+    /// `color_from_seed(color_seed)` so JSON serialization can save the
+    /// concrete color directly.
     pub plot_color: Rgba,
+    /// Source-of-truth for the plot color. Click forward → `+= 1`, click
+    /// back → `-= 1`. New cells take a fresh seed from a process-global
+    /// counter so back-to-back cells differ.
+    pub color_seed: u32,
     pub state: CellState,
     pub outcome: CellOutcome,
     /// Whether the cell's output area is collapsed in the UI.
@@ -102,13 +108,14 @@ pub struct NotebookCell {
 }
 
 impl NotebookCell {
-    pub(super) fn new(id: usize, text: &str, plot_color: Rgba) -> Self {
+    pub(super) fn new(id: usize, text: &str, color_seed: u32, plot_color: Rgba) -> Self {
         let mut buffer = Buffer::new();
         buffer.set_text(text);
         Self {
             id,
             buffer,
             plot_color,
+            color_seed,
             state: CellState::Idle,
             outcome: CellOutcome::default(),
             output_collapsed: false,
@@ -116,6 +123,14 @@ impl NotebookCell {
             last_played_text: None,
             ast_cache: RefCell::new(None),
         }
+    }
+
+    /// Advance the color seed and recompute `plot_color`. Positive `delta`
+    /// goes forward through the deterministic sequence; negative goes back.
+    /// Wraps around `u32`.
+    pub fn step_color(&mut self, delta: i32) {
+        self.color_seed = self.color_seed.wrapping_add(delta as u32);
+        self.plot_color = super::color_from_seed(self.color_seed);
     }
 
     /// True iff the cell has been played and its text has changed since.

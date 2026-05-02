@@ -79,6 +79,7 @@ pub struct CellLayout {
     pub container: Rect,
     pub header: Rect,
     pub play_button: Rect,
+    pub color_button: Rect,
     pub copy_button: Rect,
     pub delete_button: Rect,
     pub separator: Rect,
@@ -105,6 +106,8 @@ pub struct CellLayout {
     pub resize_handle: Rect,
     /// The full (unconstrained) content height of this cell's editor text.
     pub content_height: f32,
+    /// Cell's plot color — used to draw the swatch on the color button.
+    pub plot_color: Rgba,
 }
 
 /// Info about a single cell, passed from AppState to the renderer.
@@ -122,6 +125,8 @@ pub struct CellInfo {
     pub output_collapsed: bool,
     /// Contracted editor height override (None = auto-fit).
     pub contracted_editor_h: Option<f32>,
+    /// Color used by this cell's plot shaders (and the color-button swatch).
+    pub plot_color: Rgba,
 }
 
 /// Parameters for the render area (right pane) passed from AppState.
@@ -351,6 +356,7 @@ pub(crate) fn shift_cell_layouts(layouts: &mut [CellLayout], add_cell_rect: &mut
         cl.container.y -= delta;
         cl.header.y -= delta;
         cl.play_button.y -= delta;
+        cl.color_button.y -= delta;
         cl.copy_button.y -= delta;
         cl.delete_button.y -= delta;
         cl.separator.y -= delta;
