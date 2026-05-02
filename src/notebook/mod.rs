@@ -109,15 +109,35 @@ use crate::ui::theme::Rgba;
 /// Why a particular simplifier round-trip is in flight. Lets `tick()` route
 /// the response to the right cell-update path.
 enum SimplifyPurpose {
-    /// `print(f)` fell through because the interpreter couldn't evaluate.
-    /// On response, format the simplified expression as the cell's print
-    /// output (with optional `= 0` suffix for equations).
-    Print { is_equation: bool },
+    /// One or more `print(...)` calls in the cell where at least the
+    /// currently-in-flight one needed the simplifier. Carries the partial
+    /// state of the cell's print batch so subsequent prints can be driven
+    /// after this response lands.
+    Print(PrintBatch),
     /// CAS function (`int`, `df`, etc.) embedded in source. On response,
     /// splice the simplified IR back into the cell's `effective_ir` at
     /// `path` and, if more CAS subtrees remain, resubmit; otherwise
     /// regenerate WGSL from the resolved IR.
     InlineCas { path: Vec<usize> },
+}
+
+/// Per-cell state for a multi-print run. Each `print(...)` call produces
+/// one line of output; `completed` holds the lines already produced and
+/// `remaining` holds the print indices yet to be evaluated. When the
+/// in-flight simplifier response lands, we append its formatted result to
+/// `completed`, then drive `remaining` until either we exhaust them
+/// (publishing the joined output) or we hit another print that needs the
+/// simplifier (re-parking on `Pending` with the updated batch).
+struct PrintBatch {
+    completed: Vec<String>,
+    remaining: Vec<usize>,
+    /// Whether the currently-in-flight (just-submitted) print expression
+    /// was an equation, so we re-attach `= 0` to the response result.
+    current_is_equation: bool,
+    /// Snapshot of the combined IR captured when `run_cell` started. Used
+    /// to look up bindings and rebuild print expressions for the queued
+    /// prints as the batch advances.
+    combined: Ir,
 }
 
 struct PendingSimplify {
@@ -482,20 +502,23 @@ impl Notebook {
 
         let actions = lang::detect_cell_actions(&combined);
 
-        // Restrict plots to those originating in *this* cell — earlier
-        // cells' plots already produced shaders when those cells ran.
-        let own_plots: Vec<usize> = match self.cell_stmt_range(idx) {
-            Ok((start, end)) => actions
-                .plots
-                .iter()
-                .copied()
-                .filter(|i| (start..end).contains(i))
-                .collect(),
-            Err(_) => Vec::new(),
+        // Restrict plots/prints to those originating in *this* cell —
+        // earlier cells' plots already produced shaders when those cells
+        // ran, and re-running their prints would clobber this cell's
+        // output with output from a different cell.
+        let (own_prints, own_plots): (Vec<usize>, Vec<usize>) = match self.cell_stmt_range(idx) {
+            Ok((start, end)) => {
+                let in_range = |i: &usize| (start..end).contains(i);
+                (
+                    actions.prints.iter().copied().filter(in_range).collect(),
+                    actions.plots.iter().copied().filter(in_range).collect(),
+                )
+            }
+            Err(_) => (Vec::new(), Vec::new()),
         };
 
-        if let Some(print_idx) = actions.first_print {
-            self.handle_print(idx, print_idx, &combined);
+        if !own_prints.is_empty() {
+            self.handle_prints(idx, &own_prints, &combined);
             if own_plots.is_empty() {
                 return;
             }
@@ -608,48 +631,72 @@ impl Notebook {
         self.cells[idx].outcome.message = Some(CellMessage::Pending);
     }
 
-    fn handle_print(&mut self, idx: usize, print_idx: usize, combined: &Ir) {
-        let eval_ir = lang::build_print_ir(combined, print_idx);
-        match interpreter::eval(&eval_ir, self.gpu.as_ref()) {
-            Ok(val) => {
-                self.cells[idx].outcome.message =
-                    Some(CellMessage::Computed(format!("{}", val)));
-                self.cells[idx].outcome.program_ir = Some(eval_ir);
-            }
-            Err(_) => {
-                // Interpreter couldn't evaluate (e.g. expression references
-                // axis variable `x`). Fall through to symbolic simplification.
-                let arg = match action_arg(combined, print_idx, BuiltinOp::Print) {
-                    Some(a) => a.clone(),
-                    None => {
-                        self.set_runtime_error(
-                            idx,
-                            "internal error: print arg not found in IR".to_string(),
-                            "",
-                        );
-                        return;
-                    }
-                };
-                // Bindings come from every top-level `Binding` in `combined`
-                // before the print statement.
-                let bindings = collect_top_bindings(combined, Some(print_idx));
-                let expanded = arg.substitute_idents(&bindings);
-                // Equations (`lhs = rhs`) get folded into `lhs - rhs` so the
-                // simplifier reduces them to a single value (the residual).
-                // The `is_equation` flag is plumbed back through the response
-                // so we can re-attach the trailing `= 0` when displaying.
-                let (submit_ir, is_equation) = fold_equation(expanded);
-                let cell_id = self.cells[idx].id;
-                self.simplifier.submit(cell_id, &submit_ir);
-                self.pending_simplify.insert(
-                    cell_id,
-                    PendingSimplify {
-                        purpose: SimplifyPurpose::Print { is_equation },
-                    },
-                );
-                self.cells[idx].outcome.message = Some(CellMessage::Pending);
+    fn handle_prints(&mut self, idx: usize, prints: &[usize], combined: &Ir) {
+        let batch = PrintBatch {
+            completed: Vec::new(),
+            remaining: prints.to_vec(),
+            current_is_equation: false,
+            combined: combined.clone(),
+        };
+        self.advance_print_batch(idx, batch);
+    }
+
+    /// Drive a print batch as far as the synchronous interpreter can take
+    /// it. For each remaining print: try the interpreter, and on success
+    /// append the formatted value to `completed`. The first print the
+    /// interpreter can't evaluate gets submitted to the symbolic
+    /// simplifier; the batch (with the survivors of the queue) is parked
+    /// on `pending_simplify` and the cell shows `Pending`. If the queue
+    /// drains entirely, publish the joined output as `Computed`.
+    fn advance_print_batch(&mut self, idx: usize, mut batch: PrintBatch) {
+        while let Some(print_idx) = batch.remaining.first().copied() {
+            batch.remaining.remove(0);
+            let eval_ir = lang::build_print_ir(&batch.combined, print_idx);
+            match interpreter::eval(&eval_ir, self.gpu.as_ref()) {
+                Ok(val) => {
+                    batch.completed.push(format!("{}", val));
+                    // Track the most recent IR; on the all-sync path this
+                    // ends up being the last print's IR.
+                    self.cells[idx].outcome.program_ir = Some(eval_ir);
+                }
+                Err(_) => {
+                    // Interpreter couldn't evaluate (e.g. expression
+                    // references axis variable `x`). Fall through to
+                    // symbolic simplification for this print, parking the
+                    // remaining queue on the pending entry so the response
+                    // handler can resume.
+                    let arg = match action_arg(&batch.combined, print_idx, BuiltinOp::Print) {
+                        Some(a) => a.clone(),
+                        None => {
+                            self.set_runtime_error(
+                                idx,
+                                "internal error: print arg not found in IR".to_string(),
+                                "",
+                            );
+                            return;
+                        }
+                    };
+                    let bindings = collect_top_bindings(&batch.combined, Some(print_idx));
+                    let expanded = arg.substitute_idents(&bindings);
+                    let (submit_ir, is_equation) = fold_equation(expanded);
+                    batch.current_is_equation = is_equation;
+                    let cell_id = self.cells[idx].id;
+                    self.simplifier.submit(cell_id, &submit_ir);
+                    self.pending_simplify.insert(
+                        cell_id,
+                        PendingSimplify {
+                            purpose: SimplifyPurpose::Print(batch),
+                        },
+                    );
+                    self.cells[idx].outcome.message = Some(CellMessage::Pending);
+                    return;
+                }
             }
         }
+
+        // Queue drained — publish the joined results.
+        let display = batch.completed.join("\n");
+        self.cells[idx].outcome.message = Some(CellMessage::Computed(display));
     }
 
     fn handle_plots(
@@ -704,14 +751,19 @@ impl Notebook {
         };
 
         match pending.purpose {
-            SimplifyPurpose::Print { is_equation } => {
+            SimplifyPurpose::Print(mut batch) => {
                 let result = result_ir.to_source();
-                let display = if is_equation {
+                let formatted = if batch.current_is_equation {
                     format!("{} = 0", result)
                 } else {
                     result
                 };
-                self.cells[idx].outcome.message = Some(CellMessage::Computed(display));
+                batch.completed.push(formatted);
+                batch.current_is_equation = false;
+                // Continue with the remaining prints — any that the
+                // interpreter can handle finish synchronously; the next
+                // symbolic one re-parks the cell on `Pending`.
+                self.advance_print_batch(idx, batch);
             }
             SimplifyPurpose::InlineCas { path } => {
                 // Splice the simplified IR into the cell's working IR at

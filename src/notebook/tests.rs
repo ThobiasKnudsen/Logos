@@ -400,6 +400,89 @@ fn print_simple_numeric_evaluates_via_interpreter() {
 }
 
 #[test]
+fn multiple_prints_in_same_cell_all_appear_in_output() {
+    let mut nb = null_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        print(3 + 4)
+        print(5 * 2)
+        print(7)
+        "#,
+    );
+    let m = nb.cell(i).outcome.message.as_ref().expect("message set");
+    match m {
+        CellMessage::Computed(s) => assert_eq!(s, "7\n10\n7"),
+        other => panic!("expected Computed, got {:?}", other),
+    }
+}
+
+#[test]
+fn multiple_symbolic_prints_resolve_in_order() {
+    // Two prints that both need REDUCE. The notebook serializes them: it
+    // submits the first, parks on Pending, and only after that response
+    // lands submits the second. The final Computed message joins both
+    // results with a newline, in source order.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        f := x + 2*x
+        g := x * x
+        print(f)
+        print(g)
+        "#,
+    );
+    let cell_id = nb.cell(i).id;
+
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Pending)
+    ));
+
+    mock.respond_to(cell_id, Ok("3*x".to_string()));
+    nb.tick();
+    // Still pending — second print is now in-flight.
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Pending)
+    ));
+
+    mock.respond_to(cell_id, Ok("x^2".to_string()));
+    nb.tick();
+    let m = nb.cell(i).outcome.message.as_ref().expect("final message");
+    match m {
+        CellMessage::Computed(s) => assert_eq!(s, "3*x\nx^2"),
+        other => panic!("expected Computed, got {:?}", other),
+    }
+}
+
+#[test]
+fn numeric_and_symbolic_prints_combine_in_order() {
+    // Mixed batch with no preceding bindings — numeric prints stay on
+    // the interpreter path while the symbolic print routes through
+    // REDUCE. The final joined output must keep source order regardless
+    // of which path each print took.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        print(3 + 4)
+        print(x + 2*x)
+        print(5 * 2)
+        "#,
+    );
+    let cell_id = nb.cell(i).id;
+    mock.respond_to(cell_id, Ok("3*x".to_string()));
+    nb.tick();
+    let m = nb.cell(i).outcome.message.as_ref().expect("final message");
+    match m {
+        CellMessage::Computed(s) => assert_eq!(s, "7\n3*x\n10"),
+        other => panic!("expected Computed, got {:?}", other),
+    }
+}
+
+#[test]
 fn print_symbolic_falls_to_reduce_and_resolves_via_tick() {
     // The interpreter can't evaluate `print(f)` because `f` references the
     // axis variable `x`. Notebook submits to REDUCE and parks the cell on

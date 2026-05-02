@@ -82,8 +82,9 @@ pub fn needs_interpreter(ir: &Ir) -> bool {
 /// Detected print/plot actions in a cell's IR.
 #[derive(Debug)]
 pub struct CellActions {
-    /// Index of the first `print(...)` statement in the block (if any).
-    pub first_print: Option<usize>,
+    /// Indices of every `print(...)` statement in the block, in source order.
+    /// One output line is emitted per index.
+    pub prints: Vec<usize>,
     /// Indices of every `plot(...)` statement in the block, in source order.
     /// One shader is emitted per index.
     pub plots: Vec<usize>,
@@ -91,7 +92,7 @@ pub struct CellActions {
 
 impl CellActions {
     pub fn has_action(&self) -> bool {
-        self.first_print.is_some() || !self.plots.is_empty()
+        !self.prints.is_empty() || !self.plots.is_empty()
     }
 }
 
@@ -103,7 +104,7 @@ pub fn detect_cell_actions(ir: &Ir) -> CellActions {
     };
 
     let mut result = CellActions {
-        first_print: None,
+        prints: Vec::new(),
         plots: Vec::new(),
     };
 
@@ -114,8 +115,8 @@ pub fn detect_cell_actions(ir: &Ir) -> CellActions {
         } = stmt
         {
             match op {
-                ir::BuiltinOp::Print if result.first_print.is_none() => {
-                    result.first_print = Some(i);
+                ir::BuiltinOp::Print => {
+                    result.prints.push(i);
                 }
                 ir::BuiltinOp::Plot => {
                     result.plots.push(i);
@@ -600,15 +601,22 @@ mod action_tests {
     fn test_detect_print() {
         let ir = parse("print(3+9)").unwrap();
         let actions = detect_cell_actions(&ir);
-        assert!(actions.first_print.is_some());
+        assert_eq!(actions.prints, vec![0]);
         assert!(actions.plots.is_empty());
+    }
+
+    #[test]
+    fn test_detect_multiple_prints() {
+        let ir = parse("print(3+9)\nprint(5*2)\nprint(7)").unwrap();
+        let actions = detect_cell_actions(&ir);
+        assert_eq!(actions.prints, vec![0, 1, 2]);
     }
 
     #[test]
     fn test_detect_plot() {
         let ir = parse("plot(x+y)").unwrap();
         let actions = detect_cell_actions(&ir);
-        assert!(actions.first_print.is_none());
+        assert!(actions.prints.is_empty());
         assert_eq!(actions.plots, vec![0]);
     }
 
@@ -630,8 +638,8 @@ mod action_tests {
     fn test_detect_both_print_and_plot() {
         let ir = parse("f := x+2*x\nprint(f)\nplot(y=f)").unwrap();
         let actions = detect_cell_actions(&ir);
-        assert!(actions.first_print.is_some());
-        assert_eq!(actions.plots.len(), 1);
+        assert_eq!(actions.prints, vec![1]);
+        assert_eq!(actions.plots, vec![2]);
     }
 
     #[test]
@@ -651,7 +659,7 @@ mod action_tests {
     fn test_build_print_ir_with_bindings() {
         let ir = parse("f := 5\nprint(f)").unwrap();
         let actions = detect_cell_actions(&ir);
-        let print_ir = build_print_ir(&ir, actions.first_print.unwrap());
+        let print_ir = build_print_ir(&ir, actions.prints[0]);
         if let Ir::Block { items: stmts, .. } = &print_ir {
             assert_eq!(stmts.len(), 2);
             assert!(matches!(&stmts[0], Ir::Binding { .. }));
