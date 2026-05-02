@@ -1,5 +1,5 @@
-mod manager;
-mod tab;
+mod notebook_view;
+mod session;
 
-pub use manager::TabManager;
-pub use tab::Tab;
+pub use notebook_view::NotebookView;
+pub use session::Session;

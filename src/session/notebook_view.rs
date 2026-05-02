@@ -11,7 +11,7 @@ use crate::ui::theme::Rgba;
 /// the UI. Catppuccin Mocha "blue" — readable on both dark and light bgs.
 const DEFAULT_PLOT_COLOR: u32 = 0x89b4fa;
 
-pub struct Tab {
+pub struct NotebookView {
     pub name: String,
     pub file_path: Option<PathBuf>,
     pub cells: Vec<CodeCell>,
@@ -29,7 +29,7 @@ pub struct Tab {
     pub notebook: Notebook,
 }
 
-impl Tab {
+impl NotebookView {
     pub fn new_untitled(name: String) -> Self {
         let cell = CodeCell::new(0);
         let mut notebook = empty_notebook();
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn new_untitled_mirrors_one_empty_cell_into_notebook() {
-        let tab = Tab::new_untitled("scratch".into());
+        let tab = NotebookView::new_untitled("scratch".into());
         assert_eq!(tab.cells.len(), 1);
         assert_eq!(tab.notebook.len(), 1);
         assert_eq!(tab.notebook.cell(0).text, "");
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn add_cell_mirrors_into_notebook() {
-        let mut tab = Tab::new_untitled("scratch".into());
+        let mut tab = NotebookView::new_untitled("scratch".into());
         tab.add_cell();
         assert_eq!(tab.cells.len(), 2);
         assert_eq!(tab.notebook.len(), 2);
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn remove_cell_mirrors_into_notebook() {
-        let mut tab = Tab::new_untitled("scratch".into());
+        let mut tab = NotebookView::new_untitled("scratch".into());
         tab.add_cell();
         tab.add_cell();
         assert_eq!(tab.cells.len(), 3);
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn sync_texts_pushes_buffer_state_into_notebook() {
-        let mut tab = Tab::new_untitled("scratch".into());
+        let mut tab = NotebookView::new_untitled("scratch".into());
         tab.cells[0].buffer.set_text("plot(y = sin(x))");
         // Before sync, the notebook's text is still empty.
         assert_eq!(tab.notebook.cell(0).text, "");
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn notebook_can_play_after_text_sync() {
-        let mut tab = Tab::new_untitled("scratch".into());
+        let mut tab = NotebookView::new_untitled("scratch".into());
         tab.cells[0].buffer.set_text("plot(y = sin(x))");
         tab.sync_texts_to_notebook();
         tab.notebook.play(0);

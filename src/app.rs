@@ -16,7 +16,7 @@ use crate::lang::reduce::service::ReduceService;
 use crate::lang::reduce::translate;
 use crate::render::RenderAreaParams;
 use crate::render::{CellInfo, CellLayout, Renderer, TabHitRect, TabInfo};
-use crate::session::TabManager;
+use crate::session::Session;
 use crate::ui::layout::{LayoutResult, Rect, UiLayout};
 use crate::ui::theme::{self, fonts, spacing, split};
 
@@ -304,7 +304,7 @@ fn extract_binding(text: &str, bindings: &mut Vec<(String, String)>) {
 /// Combine the effective source of cells `[0..=cell_index]` into a single string,
 /// using each cell's simplified output when available, otherwise the buffer text.
 /// Used for error reporting (line/col lookup in user source).
-fn build_combined_source(tab: &crate::session::Tab, cell_index: usize) -> String {
+fn build_combined_source(tab: &crate::session::NotebookView, cell_index: usize) -> String {
     use crate::editor::cell::CellOutput;
     let mut s = String::new();
     for (i, cell) in tab.cells.iter().enumerate() {
@@ -774,7 +774,7 @@ struct App {
 
 struct AppState {
     renderer: Renderer,
-    tab_manager: TabManager,
+    tab_manager: Session,
     layout: UiLayout,
     cached_layout: LayoutResult,
     window: Arc<Window>,
@@ -1863,7 +1863,7 @@ impl ApplicationHandler for App {
         let window = Arc::new(event_loop.create_window(window_attrs).unwrap());
         let renderer = pollster::block_on(Renderer::new(window.clone()));
 
-        let tab_manager = TabManager::new();
+        let tab_manager = Session::new();
 
         let mut layout = UiLayout::new();
         let size = window.inner_size();
