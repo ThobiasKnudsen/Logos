@@ -908,8 +908,10 @@ impl GenContext {
     fn result_is_bool(&self, node: &Ir) -> bool {
         match node {
             Ir::Apply { callee, .. } => {
-                if self.bool_functions.contains(callee.name()) {
-                    return true;
+                if let Callee::User(name) = callee {
+                    if self.bool_functions.contains(name) {
+                        return true;
+                    }
                 }
                 returns_bool(node)
             }
@@ -941,7 +943,11 @@ impl GenContext {
     fn result_is_vec(&self, node: &Ir) -> bool {
         match node {
             Ir::Tuple { items, .. } => items.len() >= 2,
-            Ir::Apply { callee, .. } => self.vec_functions.contains(callee.name()),
+            Ir::Apply { callee, .. } => match callee {
+                Callee::Builtin(BuiltinOp::Vec2 | BuiltinOp::Vec3 | BuiltinOp::Vec4) => true,
+                Callee::User(name) => self.vec_functions.contains(name),
+                _ => false,
+            },
             Ir::IfExpr {
                 then_branch,
                 else_branch,
@@ -1487,7 +1493,7 @@ impl GenContext {
                 value: 0.0,
                 span: node.span(),
             };
-            self.emit_comparison_with_corners("eq", node, &zero)
+            self.emit_comparison_with_corners(BuiltinOp::Eq, node, &zero)
         }
     }
 
@@ -1500,7 +1506,7 @@ impl GenContext {
     /// For inequalities: all 4 corners must satisfy the condition.
     fn emit_comparison_with_corners(
         &self,
-        op: &str,
+        op: BuiltinOp,
         lhs: &Ir,
         rhs: &Ir,
     ) -> Result<String, String> {
@@ -1512,7 +1518,7 @@ impl GenContext {
             ("x_p", "y_p"),
         ];
 
-        if op == "eq" {
+        if matches!(op, BuiltinOp::Eq) {
             // Equality: curve straddles pixel if corners don't all agree on sign of (LHS - RHS).
             // We check: (LHS > RHS) at each corner, then test if they're all the same.
             // If NOT all the same → curve passes through → true.
@@ -1535,11 +1541,11 @@ impl GenContext {
         } else {
             // Inequalities: all four corners must satisfy the condition
             let wgsl_op = match op {
-                "gt" => ">",
-                "lt" => "<",
-                "gte" => ">=",
-                "lte" => "<=",
-                "neq" => "!=",
+                BuiltinOp::Gt => ">",
+                BuiltinOp::Lt => "<",
+                BuiltinOp::Gte => ">=",
+                BuiltinOp::Lte => "<=",
+                BuiltinOp::Neq => "!=",
                 _ => "==",
             };
             let mut parts = Vec::new();
@@ -1801,8 +1807,18 @@ fn returns_bool(node: &Ir) -> bool {
     match node {
         Ir::BoolLit { .. } => true,
         Ir::Apply { callee, .. } => matches!(
-            callee.name(),
-            "eq" | "neq" | "lt" | "gt" | "lte" | "gte" | "and" | "or" | "not"
+            callee,
+            Callee::Builtin(
+                BuiltinOp::Eq
+                    | BuiltinOp::Neq
+                    | BuiltinOp::Lt
+                    | BuiltinOp::Gt
+                    | BuiltinOp::Lte
+                    | BuiltinOp::Gte
+                    | BuiltinOp::And
+                    | BuiltinOp::Or
+                    | BuiltinOp::Not
+            )
         ),
         Ir::Block { items: stmts, .. } => stmts.last().is_some_and(returns_bool),
         _ => false,
