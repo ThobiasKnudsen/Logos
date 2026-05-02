@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::lang::reduce::service::ReduceService;
-use crate::notebook::{NoReduce, Notebook, NotebookCell, SharedReduce};
+use crate::lang::symbolic::{NoSimplifier, SymbolicSimplifier};
+use crate::notebook::{Notebook, NotebookCell, ReduceSimplifier, SharedReduce};
 use crate::ui::theme::Rgba;
 
 /// Default plot color for new cells until per-cell coloring is exposed via
@@ -149,14 +150,14 @@ impl NotebookView {
 }
 
 /// Construct a `Notebook` wired to the shared REDUCE service if one is
-/// provided, otherwise a `NoReduce` placeholder (for tests / CLI contexts
-/// where no REDUCE worker is running).
+/// provided, otherwise a `NoSimplifier` placeholder (for tests / CLI
+/// contexts where no REDUCE worker is running).
 fn build_notebook(reduce: Option<Rc<RefCell<ReduceService>>>) -> Notebook {
-    let backend: Box<dyn crate::notebook::ReduceBackend> = match reduce {
-        Some(rc) => Box::new(SharedReduce::new(rc)),
-        None => Box::new(NoReduce),
+    let simplifier: Box<dyn SymbolicSimplifier> = match reduce {
+        Some(rc) => Box::new(ReduceSimplifier::new(Box::new(SharedReduce::new(rc)))),
+        None => Box::new(NoSimplifier),
     };
-    Notebook::new(backend, None)
+    Notebook::new(simplifier, None)
 }
 
 #[cfg(test)]

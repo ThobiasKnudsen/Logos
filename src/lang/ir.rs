@@ -317,4 +317,347 @@ impl Ir {
             | Ir::ParallelFor { span, .. } => *span,
         }
     }
+
+    /// Pretty-print this IR back to Logos source code.
+    ///
+    /// Output should be syntactically valid Logos that, re-parsed, yields
+    /// equivalent IR. Used by `Notebook` to splice REDUCE's simplified IR
+    /// back into the cell text and to format `print` results for display.
+    ///
+    /// Top-level binary operators are emitted bare (no enclosing parens) so
+    /// the result reads naturally; sub-expressions get parenthesized so
+    /// substitution into a larger context doesn't change precedence. The
+    /// rule is "over-parenthesize when nested, never at the root."
+    ///
+    /// Variants that the parser produces but `SymbolicSimplifier` results
+    /// never contain (block, function def, loops, indexed assigns, parallel
+    /// for, …) are still handled: future callers may pretty-print arbitrary
+    /// IR, and an incomplete printer would silently corrupt their output.
+    pub fn to_source(&self) -> String {
+        let mut out = String::new();
+        write_ir(&mut out, self, false);
+        out
+    }
+}
+
+fn write_ir(out: &mut String, ir: &Ir, wrap_binary: bool) {
+    match ir {
+        Ir::Number { value, .. } => {
+            if value.is_finite() && *value == value.trunc() && value.abs() < 1e15 {
+                out.push_str(&format!("{}", *value as i64));
+            } else {
+                out.push_str(&format!("{}", value));
+            }
+        }
+        Ir::BoolLit { value, .. } => out.push_str(if *value { "true" } else { "false" }),
+        Ir::Identifier { name, .. } => out.push_str(name),
+        Ir::Apply { callee, args, .. } => write_apply(out, callee, args, wrap_binary),
+        Ir::Tuple { items, .. } => {
+            out.push('(');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                write_ir(out, item, false);
+            }
+            out.push(')');
+        }
+        Ir::Binding { name, value, .. } => {
+            out.push_str(name);
+            out.push_str(" := ");
+            write_ir(out, value, false);
+        }
+        Ir::TupleBinding { names, value, .. } => {
+            out.push('(');
+            for (i, n) in names.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(n);
+            }
+            out.push_str(") := ");
+            write_ir(out, value, false);
+        }
+        Ir::Block { items, .. } => {
+            out.push('(');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push('\n');
+                }
+                write_ir(out, item, false);
+            }
+            out.push(')');
+        }
+        Ir::IfExpr {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            out.push_str("if (");
+            write_ir(out, condition, false);
+            out.push_str(") ");
+            write_ir(out, then_branch, true);
+            if let Some(eb) = else_branch {
+                out.push_str(" else ");
+                write_ir(out, eb, true);
+            }
+        }
+        Ir::FunctionDef {
+            name, params, body, ..
+        } => {
+            out.push_str(name);
+            out.push('(');
+            for (i, p) in params.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(p);
+            }
+            out.push_str(") := ");
+            write_ir(out, body, false);
+        }
+        Ir::ForLoop {
+            var, range, body, ..
+        } => {
+            out.push_str("for ");
+            out.push_str(var);
+            out.push_str(" in ");
+            write_ir(out, range, true);
+            out.push(' ');
+            write_ir(out, body, true);
+        }
+        Ir::WhileLoop {
+            condition, body, ..
+        } => {
+            out.push_str("while (");
+            write_ir(out, condition, false);
+            out.push_str(") ");
+            write_ir(out, body, true);
+        }
+        Ir::PropertyAccess { object, property, .. } => {
+            write_ir(out, object, true);
+            out.push('.');
+            out.push_str(property);
+        }
+        Ir::ArrayLiteral { items, .. } => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                write_ir(out, item, false);
+            }
+            out.push(']');
+        }
+        Ir::IndexAccess { array, index, .. } => {
+            write_ir(out, array, true);
+            out.push('[');
+            write_ir(out, index, false);
+            out.push(']');
+        }
+        Ir::Range { start, end, .. } => {
+            write_ir(out, start, true);
+            out.push_str("..");
+            write_ir(out, end, true);
+        }
+        Ir::IndexAssign {
+            array, index, value, ..
+        } => {
+            write_ir(out, array, true);
+            out.push('[');
+            write_ir(out, index, false);
+            out.push_str("] := ");
+            write_ir(out, value, false);
+        }
+        Ir::ParallelFor {
+            var, range, body, ..
+        } => {
+            out.push_str("parallel for ");
+            out.push_str(var);
+            out.push_str(" in ");
+            write_ir(out, range, true);
+            out.push(' ');
+            write_ir(out, body, true);
+        }
+    }
+}
+
+fn write_apply(out: &mut String, callee: &Callee, args: &[Ir], wrap_binary: bool) {
+    let infix: Option<&str> = match callee {
+        Callee::Builtin(BuiltinOp::Add) => Some(" + "),
+        Callee::Builtin(BuiltinOp::Sub) => Some(" - "),
+        Callee::Builtin(BuiltinOp::Mul) => Some("*"),
+        Callee::Builtin(BuiltinOp::Div) => Some("/"),
+        Callee::Builtin(BuiltinOp::Mod) => Some(" % "),
+        Callee::Builtin(BuiltinOp::Pow) => Some("^"),
+        Callee::Builtin(BuiltinOp::Eq) => Some(" = "),
+        Callee::Builtin(BuiltinOp::Neq) => Some(" \u{2260} "),
+        Callee::Builtin(BuiltinOp::Lt) => Some(" < "),
+        Callee::Builtin(BuiltinOp::Gt) => Some(" > "),
+        Callee::Builtin(BuiltinOp::Lte) => Some(" \u{2264} "),
+        Callee::Builtin(BuiltinOp::Gte) => Some(" \u{2265} "),
+        Callee::Builtin(BuiltinOp::And) => Some(" and "),
+        Callee::Builtin(BuiltinOp::Or) => Some(" or "),
+        _ => None,
+    };
+    if let Some(sep) = infix {
+        if args.len() == 2 {
+            if wrap_binary {
+                out.push('(');
+            }
+            write_ir(out, &args[0], true);
+            out.push_str(sep);
+            write_ir(out, &args[1], true);
+            if wrap_binary {
+                out.push(')');
+            }
+            return;
+        }
+    }
+
+    // Unary prefix operators. Always wrap the operand to keep precedence
+    // unambiguous (`-x*y` would otherwise mean `-(x*y)` instead of `(-x)*y`).
+    if let Callee::Builtin(BuiltinOp::Neg) = callee {
+        if args.len() == 1 {
+            out.push_str("-");
+            write_ir(out, &args[0], true);
+            return;
+        }
+    }
+    if let Callee::Builtin(BuiltinOp::Not) = callee {
+        if args.len() == 1 {
+            out.push_str("not ");
+            write_ir(out, &args[0], true);
+            return;
+        }
+    }
+
+    // Function call form for everything else (math builtins, user fns, CAS).
+    out.push_str(callee.name());
+    out.push('(');
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        write_ir(out, arg, false);
+    }
+    out.push(')');
+}
+
+#[cfg(test)]
+mod to_source_tests {
+    use super::*;
+
+    fn parse_unwrap(s: &str) -> Ir {
+        crate::lang::parse(s).expect("parse")
+    }
+
+    /// Round-trip: source → parse → to_source → parse should produce
+    /// equivalent IR shape (we compare the discriminant string of the
+    /// parser output, which is sufficient for the cases we care about).
+    fn assert_roundtrip(s: &str) {
+        let ir1 = parse_unwrap(s);
+        let printed = ir1.to_source();
+        let ir2 = parse_unwrap(&printed);
+        assert_eq!(
+            format!("{:?}", strip_spans(&ir1)),
+            format!("{:?}", strip_spans(&ir2)),
+            "round-trip differs:\n  input: {:?}\n  printed: {:?}",
+            s,
+            printed
+        );
+    }
+
+    /// Replace every span with (0, 0) so structural comparison ignores
+    /// position differences between original and re-parsed IR.
+    fn strip_spans(ir: &Ir) -> Ir {
+        match ir {
+            Ir::Number { value, .. } => Ir::Number {
+                value: *value,
+                span: (0, 0),
+            },
+            Ir::BoolLit { value, .. } => Ir::BoolLit {
+                value: *value,
+                span: (0, 0),
+            },
+            Ir::Identifier { name, .. } => Ir::Identifier {
+                name: name.clone(),
+                span: (0, 0),
+            },
+            Ir::Apply { callee, args, .. } => Ir::Apply {
+                callee: callee.clone(),
+                args: args.iter().map(strip_spans).collect(),
+                span: (0, 0),
+            },
+            Ir::Tuple { items, .. } => Ir::Tuple {
+                items: items.iter().map(strip_spans).collect(),
+                span: (0, 0),
+            },
+            Ir::Binding { name, value, .. } => Ir::Binding {
+                name: name.clone(),
+                value: Box::new(strip_spans(value)),
+                span: (0, 0),
+            },
+            Ir::Block { items, .. } => Ir::Block {
+                items: items.iter().map(strip_spans).collect(),
+                span: (0, 0),
+            },
+            other => other.clone(),
+        }
+    }
+
+    #[test]
+    fn number() {
+        assert_eq!(
+            Ir::Number {
+                value: 5.0,
+                span: (0, 0)
+            }
+            .to_source(),
+            "5"
+        );
+    }
+
+    #[test]
+    fn identifier() {
+        assert_eq!(
+            Ir::Identifier {
+                name: "x".to_string(),
+                span: (0, 0)
+            }
+            .to_source(),
+            "x"
+        );
+    }
+
+    #[test]
+    fn binary_add() {
+        assert_roundtrip("x + y");
+    }
+
+    #[test]
+    fn nested_arith() {
+        assert_roundtrip("(x + y) * (a - b)");
+    }
+
+    #[test]
+    fn function_call() {
+        assert_roundtrip("sin(x)");
+    }
+
+    #[test]
+    fn unary_negate() {
+        assert_roundtrip("-x");
+    }
+
+    #[test]
+    fn power() {
+        assert_roundtrip("x^2");
+    }
+
+    #[test]
+    fn equation() {
+        assert_roundtrip("x = 0");
+    }
 }

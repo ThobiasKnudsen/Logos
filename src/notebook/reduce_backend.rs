@@ -20,24 +20,6 @@ pub trait ReduceBackend {
     fn has_pending(&self) -> bool;
 }
 
-/// Placeholder backend that drops every submission and never returns a
-/// response. Use as a default when a notebook is constructed in a context
-/// where REDUCE isn't wired (yet) — pure interpreter and WGSL paths still
-/// work, but symbolic prints and inline-CAS calls park indefinitely on
-/// `Pending`.
-pub struct NoReduce;
-
-impl ReduceBackend for NoReduce {
-    fn submit(&mut self, _cell_id: usize, _context: Vec<String>, _expression: String) -> u64 {
-        0
-    }
-    fn try_recv(&mut self) -> Option<ReduceResponse> {
-        None
-    }
-    fn has_pending(&self) -> bool {
-        false
-    }
-}
 
 /// Backend that funnels into a single shared `ReduceService` via
 /// `Rc<RefCell<…>>`. Production wires one of these into every

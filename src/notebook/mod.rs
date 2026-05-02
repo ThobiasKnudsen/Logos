@@ -17,11 +17,13 @@ mod cell;
 mod diagnostic;
 mod internals;
 mod reduce_backend;
+mod reduce_simplifier;
 mod shader;
 
 pub use cell::{CellMessage, CellOutcome, CellState, NotebookCell};
 pub use diagnostic::{Diagnostic, Span};
-pub use reduce_backend::{NoReduce, ReduceBackend, SharedReduce};
+pub use reduce_backend::{ReduceBackend, SharedReduce};
+pub use reduce_simplifier::ReduceSimplifier;
 pub use shader::{DispatchKind, ShaderSpec};
 // `Severity`, `Access`, `BindingSpec`, `ScalarType`, `SizeSpec` stay in
 // their sub-modules. Re-export them at this level once a consumer (UI
@@ -40,20 +42,21 @@ fn alloc_cell_id() -> usize {
     NEXT_CELL_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-use crate::lang::ir::Ir;
 use crate::lang::interpreter::{self, GpuDispatch};
+use crate::lang::ir::Ir;
 use crate::lang::reduce::translate;
+use crate::lang::symbolic::SymbolicSimplifier;
 use crate::lang::{self, highlight};
 use crate::ui::theme::Rgba;
 
 use internals::{
     collect_bindings, expand_bindings, extract_call_arg, extract_reduce_expr, find_cas_call,
-    prepare_reduce_print, substitute_reduce_result,
+    substitute_reduce_result,
 };
 
-/// Why a particular REDUCE round-trip is in flight. Lets `tick()` route the
-/// response to the right cell-update path.
-enum ReducePurpose {
+/// Why a particular simplifier round-trip is in flight. Lets `tick()` route
+/// the response to the right cell-update path.
+enum SimplifyPurpose {
     /// `print(f)` fell through because the interpreter couldn't evaluate.
     /// On response, format the simplified expression as the cell's print
     /// output (with optional `= 0` suffix for equations).
@@ -64,16 +67,16 @@ enum ReducePurpose {
     InlineCas,
 }
 
-struct PendingReduce {
-    purpose: ReducePurpose,
+struct PendingSimplify {
+    purpose: SimplifyPurpose,
 }
 
 pub struct Notebook {
     cells: Vec<NotebookCell>,
-    reduce: Box<dyn ReduceBackend>,
-    /// In-flight REDUCE round-trips, keyed by `cell_id` (not index — indices
-    /// shift on `remove_cell`).
-    pending_reduce: HashMap<usize, PendingReduce>,
+    simplifier: Box<dyn SymbolicSimplifier>,
+    /// In-flight symbolic-simplifier round-trips, keyed by `cell_id` (not
+    /// index — indices shift on `remove_cell`).
+    pending_simplify: HashMap<usize, PendingSimplify>,
     /// CPU/GPU dispatcher for interpreter-side work (parallel for, arrays).
     /// Defaults to `CpuFallback`; the production app injects a wgpu-backed
     /// dispatcher when wired through `NotebookView`.
@@ -81,14 +84,18 @@ pub struct Notebook {
 }
 
 impl Notebook {
-    /// Construct an empty notebook. `reduce` is the REDUCE backend (production
-    /// uses `ReduceServiceBackend::new()`); `gpu` defaults to a CPU fallback
-    /// when `None` — fine for tests and CLI use.
-    pub fn new(reduce: Box<dyn ReduceBackend>, gpu: Option<Box<dyn GpuDispatch>>) -> Self {
+    /// Construct an empty notebook. `simplifier` is the symbolic-algebra
+    /// backend (production uses `ReduceSimplifier::new(SharedReduce::…)`);
+    /// `gpu` defaults to a CPU fallback when `None` — fine for tests and
+    /// CLI use.
+    pub fn new(
+        simplifier: Box<dyn SymbolicSimplifier>,
+        gpu: Option<Box<dyn GpuDispatch>>,
+    ) -> Self {
         Self {
             cells: Vec::new(),
-            reduce,
-            pending_reduce: HashMap::new(),
+            simplifier,
+            pending_simplify: HashMap::new(),
             gpu: gpu.unwrap_or_else(|| Box::new(interpreter::CpuFallback)),
         }
     }
@@ -128,7 +135,7 @@ impl Notebook {
         if idx < self.cells.len() {
             let id = self.cells[idx].id;
             self.cells.remove(idx);
-            self.pending_reduce.remove(&id);
+            self.pending_simplify.remove(&id);
         }
     }
 
@@ -210,8 +217,8 @@ impl Notebook {
     /// indices whose outcome changed.
     pub fn tick(&mut self) -> Vec<usize> {
         let mut updated = Vec::new();
-        while let Some(resp) = self.reduce.try_recv() {
-            if let Some(idx) = self.handle_reduce_response(resp) {
+        while let Some(resp) = self.simplifier.try_recv() {
+            if let Some(idx) = self.handle_simplify_response(resp) {
                 if !updated.contains(&idx) {
                     updated.push(idx);
                 }
@@ -225,15 +232,15 @@ impl Notebook {
     /// `ReduceService::has_pending` directly.
     #[allow(dead_code)]
     pub fn has_pending(&self) -> bool {
-        self.reduce.has_pending() || !self.pending_reduce.is_empty()
+        self.simplifier.has_pending() || !self.pending_simplify.is_empty()
     }
 
     /// Forget every in-flight REDUCE round-trip this notebook is tracking.
     /// The shared REDUCE service may still receive responses for these
-    /// cells; the notebook will silently drop them since `pending_reduce`
+    /// cells; the notebook will silently drop them since `pending_simplify`
     /// no longer maps the cell IDs.
     pub fn clear_pending(&mut self) {
-        self.pending_reduce.clear();
+        self.pending_simplify.clear();
     }
 
     // ─── internals ─────────────────────────────────────────────────────────
@@ -290,7 +297,7 @@ impl Notebook {
         // Drop any pending REDUCE for this cell — it would only confuse the
         // response handler if it arrives now.
         let cell_id = self.cells[idx].id;
-        self.pending_reduce.remove(&cell_id);
+        self.pending_simplify.remove(&cell_id);
 
         let combined = match self.combined_ir_up_to(idx) {
             Ok(a) => a,
@@ -338,21 +345,30 @@ impl Notebook {
         }
 
         // CAS-only cell with no print/plot (e.g. raw `int(x²,x)` pasted as
-        // a cell). Submit to REDUCE for simplification.
+        // a cell). Submit to the symbolic simplifier.
         if find_cas_call(&cell_text).is_some() && !cell_text.is_empty() {
             let (reduce_input, _) = extract_reduce_expr(&cell_text);
             let bindings = collect_bindings(&self.cells, idx, &cell_text);
             let expanded = expand_bindings(reduce_input, &bindings);
-            let reduce_expr = translate::to_reduce(&expanded);
-            self.reduce
-                .submit(cell_id, Vec::new(), reduce_expr.clone());
-            self.pending_reduce.insert(
-                cell_id,
-                PendingReduce {
-                    purpose: ReducePurpose::InlineCas,
-                },
-            );
-            self.cells[idx].outcome.message = Some(CellMessage::Pending);
+            match crate::lang::parse(&expanded) {
+                Ok(submit_ir) => {
+                    self.simplifier.submit(cell_id, &submit_ir);
+                    self.pending_simplify.insert(
+                        cell_id,
+                        PendingSimplify {
+                            purpose: SimplifyPurpose::InlineCas,
+                        },
+                    );
+                    self.cells[idx].outcome.message = Some(CellMessage::Pending);
+                }
+                Err(e) => {
+                    self.set_runtime_error(
+                        idx,
+                        format!("Could not parse expression for simplification: {}", e),
+                        &snapshot,
+                    );
+                }
+            }
             return;
         }
 
@@ -379,19 +395,55 @@ impl Notebook {
             }
             Err(_) => {
                 // Interpreter couldn't evaluate (e.g. expression references
-                // axis variable `x`). Fall through to REDUCE for symbolic
-                // simplification.
+                // axis variable `x`). Fall through to symbolic simplification.
                 let inner =
                     extract_call_arg(cell_text, "print").unwrap_or_else(|| cell_text.to_string());
                 let bindings = collect_bindings(&self.cells, idx, cell_text);
                 let expanded = expand_bindings(&inner, &bindings);
-                let (reduce_expr, is_equation) = prepare_reduce_print(&expanded);
+                let parsed = match crate::lang::parse(&expanded) {
+                    Ok(ir) => ir,
+                    Err(e) => {
+                        self.set_runtime_error(
+                            idx,
+                            format!("Could not parse expression for simplification: {}", e),
+                            cell_text,
+                        );
+                        return;
+                    }
+                };
+                // Equations (`lhs = rhs`) get folded into `lhs - rhs` so the
+                // simplifier reduces them to a single value (the residual).
+                // The `is_equation` flag is plumbed back through the response
+                // so we can re-attach the trailing `= 0` when displaying.
+                let (submit_ir, is_equation) = match parsed {
+                    Ir::Apply {
+                        callee:
+                            crate::lang::ir::Callee::Builtin(crate::lang::ir::BuiltinOp::Eq),
+                        args,
+                        span,
+                    } if args.len() == 2 => {
+                        let mut iter = args.into_iter();
+                        let lhs = iter.next().unwrap();
+                        let rhs = iter.next().unwrap();
+                        (
+                            Ir::Apply {
+                                callee: crate::lang::ir::Callee::Builtin(
+                                    crate::lang::ir::BuiltinOp::Sub,
+                                ),
+                                args: vec![lhs, rhs],
+                                span,
+                            },
+                            true,
+                        )
+                    }
+                    other => (other, false),
+                };
                 let cell_id = self.cells[idx].id;
-                self.reduce.submit(cell_id, Vec::new(), reduce_expr);
-                self.pending_reduce.insert(
+                self.simplifier.submit(cell_id, &submit_ir);
+                self.pending_simplify.insert(
                     cell_id,
-                    PendingReduce {
-                        purpose: ReducePurpose::Print { is_equation },
+                    PendingSimplify {
+                        purpose: SimplifyPurpose::Print { is_equation },
                     },
                 );
                 self.cells[idx].outcome.message = Some(CellMessage::Pending);
@@ -418,16 +470,16 @@ impl Notebook {
         }
     }
 
-    fn handle_reduce_response(
+    fn handle_simplify_response(
         &mut self,
-        resp: crate::lang::reduce::service::ReduceResponse,
+        resp: crate::lang::symbolic::SimplifyResponse,
     ) -> Option<usize> {
-        let pending = self.pending_reduce.remove(&resp.cell_id)?;
+        let pending = self.pending_simplify.remove(&resp.cell_id)?;
         let idx = self.cells.iter().position(|c| c.id == resp.cell_id)?;
 
-        let simplified = match resp.result {
-            Ok(text) if !text.is_empty() => Some(translate::from_reduce(&text)),
-            Ok(_) => {
+        let result_ir = match resp.result {
+            Ok(Some(ir)) => ir,
+            Ok(None) => {
                 self.cells[idx].outcome.message = None;
                 return Some(idx);
             }
@@ -437,10 +489,13 @@ impl Notebook {
             }
         };
 
-        let result = simplified?;
+        // Pretty-print the IR back to Logos source for the still-text-level
+        // substitution / display paths below. Commit 3 will lift those to
+        // IR-walking and remove the round-trip.
+        let result = result_ir.to_source();
 
         match pending.purpose {
-            ReducePurpose::Print { is_equation } => {
+            SimplifyPurpose::Print { is_equation } => {
                 let display = if is_equation {
                     format!("{} = 0", result)
                 } else {
@@ -448,7 +503,7 @@ impl Notebook {
                 };
                 self.cells[idx].outcome.message = Some(CellMessage::Computed(display));
             }
-            ReducePurpose::InlineCas => {
+            SimplifyPurpose::InlineCas => {
                 let working_text = match &self.cells[idx].outcome.message {
                     Some(CellMessage::Simplified(s)) => s.clone(),
                     _ => self.cells[idx].buffer.text().to_string(),
@@ -459,20 +514,23 @@ impl Notebook {
                     Some(CellMessage::Simplified(substituted.clone()));
 
                 if find_cas_call(&substituted).is_some() {
-                    // Iterative CAS resolution — resubmit with bindings.
+                    // Iterative CAS resolution — re-parse the substituted
+                    // working text and resubmit the next CAS subtree.
                     let (next_input, _) = extract_reduce_expr(&substituted);
                     let bindings = collect_bindings(&self.cells, idx, &substituted);
                     let expanded = expand_bindings(next_input, &bindings);
-                    let reduce_expr = translate::to_reduce(&expanded);
-                    let cell_id = self.cells[idx].id;
-                    self.reduce.submit(cell_id, Vec::new(), reduce_expr);
-                    self.pending_reduce.insert(
-                        cell_id,
-                        PendingReduce {
-                            purpose: ReducePurpose::InlineCas,
-                        },
-                    );
-                    return Some(idx);
+                    if let Ok(next_ir) = crate::lang::parse(&expanded) {
+                        let cell_id = self.cells[idx].id;
+                        self.simplifier.submit(cell_id, &next_ir);
+                        self.pending_simplify.insert(
+                            cell_id,
+                            PendingSimplify {
+                                purpose: SimplifyPurpose::InlineCas,
+                            },
+                        );
+                        return Some(idx);
+                    }
+                    // Fall through to error reporting below if parse failed.
                 }
 
                 if let Some(op) = translate::detect_unevaluated_cas(&substituted) {

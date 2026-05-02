@@ -3,8 +3,20 @@
 //! Logos uses Unicode symbols (π, ², √, etc.) while REDUCE uses ASCII
 //! (pi, **2, sqrt(), etc.). This module converts between the two.
 
+use crate::lang::ir::Ir;
+
 /// Word-level replacements: Logos keyword → REDUCE keyword.
 const WORD_REPLACEMENTS: &[(&str, &str)] = &[("integral", "int"), ("derivative", "df")];
+
+/// Convert Logos IR to REDUCE-compatible ASCII syntax.
+///
+/// Pretty-prints the IR back to Logos source via `Ir::to_source`, then runs
+/// it through `to_reduce` to convert Unicode operators (π, ², √, ^) into
+/// the REDUCE ASCII forms (pi, **2, sqrt(), **). Used by `ReduceSimplifier`
+/// to send IR-shaped requests to the underlying REDUCE worker.
+pub fn ir_to_reduce(ir: &Ir) -> String {
+    to_reduce(&ir.to_source())
+}
 
 /// Convert Logos Unicode math notation to REDUCE-compatible ASCII.
 pub fn to_reduce(input: &str) -> String {

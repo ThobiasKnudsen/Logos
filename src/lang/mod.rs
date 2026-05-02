@@ -6,6 +6,7 @@ pub mod lang_service;
 pub mod lexer;
 pub mod parser;
 pub mod reduce;
+pub mod symbolic;
 pub mod token;
 pub mod wgsl_gen;
 

@@ -9,9 +9,10 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use crate::lang::reduce::service::ReduceResponse;
+use crate::lang::symbolic::NoSimplifier;
 use crate::ui::theme::Rgba;
 
-use super::{CellMessage, CellOutcome, Notebook, ReduceBackend, ShaderSpec};
+use super::{CellMessage, CellOutcome, Notebook, ReduceBackend, ReduceSimplifier, ShaderSpec};
 
 // REDUCE's CSL has process-global state and crashes on re-init, so even
 // `--test-threads=1` can't safely combine multiple `ReduceSession::new()`
@@ -66,23 +67,6 @@ impl ReduceBackend for MockReduce {
     }
 }
 
-/// Drop-everything backend for tests that don't reach the REDUCE path.
-struct NullReduceBackend {
-    pending: usize,
-}
-impl ReduceBackend for NullReduceBackend {
-    fn submit(&mut self, _cell_id: usize, _context: Vec<String>, _expr: String) -> u64 {
-        self.pending += 1;
-        0
-    }
-    fn try_recv(&mut self) -> Option<ReduceResponse> {
-        None
-    }
-    fn has_pending(&self) -> bool {
-        self.pending > 0
-    }
-}
-
 /// Strip the smallest leading indent shared by all non-empty lines and trim
 /// outer blank lines. Lets tests use raw multi-line strings with natural
 /// Rust indentation.
@@ -108,14 +92,18 @@ fn dedent(s: &str) -> String {
 }
 
 fn null_notebook() -> Notebook {
-    Notebook::new(Box::new(NullReduceBackend { pending: 0 }), None)
+    Notebook::new(Box::new(NoSimplifier), None)
 }
 
 /// Build a notebook with a controllable mock REDUCE. The returned handle
-/// lets the test enqueue responses with `respond_to(cell_id, …)`.
+/// lets the test enqueue responses with `respond_to(cell_id, …)`. The
+/// mock is wrapped in `ReduceSimplifier` so the notebook sees the
+/// IR-shaped `SymbolicSimplifier` API while the test still controls the
+/// underlying REDUCE-text round-trip.
 fn mock_reduce_notebook() -> (Notebook, MockReduce) {
     let mock = MockReduce::new();
-    let nb = Notebook::new(Box::new(mock.clone()), None);
+    let simplifier = ReduceSimplifier::new(Box::new(mock.clone()));
+    let nb = Notebook::new(Box::new(simplifier), None);
     (nb, mock)
 }
 

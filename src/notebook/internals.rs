@@ -4,7 +4,6 @@
 //! These were moved here from `app.rs` during the Notebook migration;
 //! the originals are gone, so this module is the sole owner.
 
-use crate::lang::reduce::translate;
 
 use super::cell::{CellMessage, NotebookCell};
 
@@ -238,22 +237,3 @@ fn replace_at_word_boundaries(input: &str, word: &str, replacement: &str) -> Str
     result
 }
 
-/// Build the REDUCE-side expression for a `print(...)` arg after binding
-/// expansion. Returns `(reduce_expr, is_equation)`. Equations are converted
-/// to `(lhs) - (rhs)` so REDUCE simplifies them as a single value.
-pub(super) fn prepare_reduce_print(expanded: &str) -> (String, bool) {
-    let reduce_expr = translate::to_reduce(expanded);
-    if let Some(eq_pos) = reduce_expr.find('=') {
-        if !reduce_expr[..eq_pos].ends_with(':')
-            && !reduce_expr[..eq_pos].ends_with('<')
-            && !reduce_expr[..eq_pos].ends_with('>')
-            && !reduce_expr[..eq_pos].ends_with('!')
-        {
-            let lhs = &reduce_expr[..eq_pos];
-            let rhs = &reduce_expr[eq_pos + 1..];
-            let combined = format!("({}) - ({})", lhs.trim(), rhs.trim());
-            return (combined, true);
-        }
-    }
-    (reduce_expr, false)
-}
