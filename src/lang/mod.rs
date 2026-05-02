@@ -105,12 +105,16 @@ pub fn detect_cell_actions(ir: &Ir) -> CellActions {
     };
 
     for (i, stmt) in stmts.iter().enumerate() {
-        if let Ir::Apply { name, .. } = stmt {
-            match name.as_str() {
-                "print" if result.first_print.is_none() => {
+        if let Ir::Apply {
+            callee: ir::Callee::Builtin(op),
+            ..
+        } = stmt
+        {
+            match op {
+                ir::BuiltinOp::Print if result.first_print.is_none() => {
                     result.first_print = Some(i);
                 }
-                "plot" => {
+                ir::BuiltinOp::Plot => {
                     result.last_plot = Some(i);
                 }
                 _ => {}
@@ -128,8 +132,13 @@ pub fn build_print_ir(ir: &Ir, print_index: usize) -> Ir {
     let stmts = match ir {
         Ir::Block { items: stmts, .. } => stmts,
         other => {
-            if let Ir::Apply { name, args, .. } = other {
-                if name == "print" && args.len() == 1 {
+            if let Ir::Apply {
+                callee: ir::Callee::Builtin(ir::BuiltinOp::Print),
+                args,
+                ..
+            } = other
+            {
+                if args.len() == 1 {
                     return args[0].clone();
                 }
             }
@@ -140,17 +149,24 @@ pub fn build_print_ir(ir: &Ir, print_index: usize) -> Ir {
     let mut result = Vec::new();
     for (i, stmt) in stmts.iter().enumerate() {
         if i == print_index {
-            if let Ir::Apply { name, args, .. } = stmt {
-                if name == "print" && args.len() == 1 {
+            if let Ir::Apply {
+                callee: ir::Callee::Builtin(ir::BuiltinOp::Print),
+                args,
+                ..
+            } = stmt
+            {
+                if args.len() == 1 {
                     result.push(args[0].clone());
                 }
             }
             break;
         }
-        if let Ir::Apply { name, .. } = stmt {
-            if name == "print" || name == "plot" {
-                continue;
-            }
+        if let Ir::Apply {
+            callee: ir::Callee::Builtin(ir::BuiltinOp::Print | ir::BuiltinOp::Plot),
+            ..
+        } = stmt
+        {
+            continue;
         }
         result.push(stmt.clone());
     }
@@ -180,8 +196,13 @@ pub fn build_plot_ir(ir: &Ir, plot_index: usize) -> Ir {
     let stmts = match ir {
         Ir::Block { items: stmts, .. } => stmts,
         other => {
-            if let Ir::Apply { name, args, .. } = other {
-                if name == "plot" && args.len() == 1 {
+            if let Ir::Apply {
+                callee: ir::Callee::Builtin(ir::BuiltinOp::Plot),
+                args,
+                ..
+            } = other
+            {
+                if args.len() == 1 {
                     return args[0].clone();
                 }
             }
@@ -192,17 +213,24 @@ pub fn build_plot_ir(ir: &Ir, plot_index: usize) -> Ir {
     let mut result = Vec::new();
     for (i, stmt) in stmts.iter().enumerate() {
         if i == plot_index {
-            if let Ir::Apply { name, args, .. } = stmt {
-                if name == "plot" && args.len() == 1 {
+            if let Ir::Apply {
+                callee: ir::Callee::Builtin(ir::BuiltinOp::Plot),
+                args,
+                ..
+            } = stmt
+            {
+                if args.len() == 1 {
                     result.push(args[0].clone());
                 }
             }
             continue;
         }
-        if let Ir::Apply { name, .. } = stmt {
-            if name == "print" || name == "plot" {
-                continue;
-            }
+        if let Ir::Apply {
+            callee: ir::Callee::Builtin(ir::BuiltinOp::Print | ir::BuiltinOp::Plot),
+            ..
+        } = stmt
+        {
+            continue;
         }
         result.push(stmt.clone());
     }
@@ -600,7 +628,13 @@ mod action_tests {
     fn test_build_print_ir_single() {
         let ir = parse("print(3+9)").unwrap();
         let print_ir = build_print_ir(&ir, 0);
-        assert!(matches!(print_ir, Ir::Apply { ref name, .. } if name == "add"));
+        assert!(matches!(
+            print_ir,
+            Ir::Apply {
+                callee: ir::Callee::Builtin(ir::BuiltinOp::Add),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -624,8 +658,12 @@ mod action_tests {
         let plot_ir = build_plot_ir(&ir, actions.last_plot.unwrap());
         if let Ir::Block { items: stmts, .. } = &plot_ir {
             for stmt in stmts {
-                if let Ir::Apply { name, .. } = stmt {
-                    assert_ne!(name, "print", "print should be stripped from plot IR");
+                if let Ir::Apply { callee, .. } = stmt {
+                    assert_ne!(
+                        callee.name(),
+                        "print",
+                        "print should be stripped from plot IR"
+                    );
                 }
             }
         }

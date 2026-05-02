@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::ir::Ir;
+use super::ir::{BuiltinOp, Callee, Ir};
 
 const MAX_LOOP_ITERATIONS: usize = 10_000;
 
@@ -372,7 +372,7 @@ fn eval_node(node: &Ir, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Value, S
             }
         }
 
-        Ir::Apply { name, args, .. } => eval_apply(name, args, env, gpu),
+        Ir::Apply { callee, args, .. } => eval_apply(callee, args, env, gpu),
 
         Ir::IndexAssign {
             array,
@@ -407,28 +407,34 @@ fn eval_node(node: &Ir, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Value, S
 // ---------------------------------------------------------------------------
 
 fn eval_apply(
-    name: &str,
+    callee: &Callee,
     args: &[Ir],
     env: &mut Env,
     gpu: &dyn GpuDispatch,
 ) -> Result<Value, String> {
-    // Check user-defined functions first
-    if let Some(func) = env.get_func(name).cloned() {
-        if args.len() != func.params.len() {
-            return Err(format!(
-                "Function '{}' expects {} args, got {}",
-                name,
-                func.params.len(),
-                args.len()
-            ));
+    let op = match callee {
+        Callee::Builtin(op) => *op,
+        Callee::User(name) => {
+            // Check user-defined functions
+            if let Some(func) = env.get_func(name).cloned() {
+                if args.len() != func.params.len() {
+                    return Err(format!(
+                        "Function '{}' expects {} args, got {}",
+                        name,
+                        func.params.len(),
+                        args.len()
+                    ));
+                }
+                let mut child = env.child();
+                for (param, arg_node) in func.params.iter().zip(args.iter()) {
+                    let val = eval_node(arg_node, env, gpu)?;
+                    child.vars.insert(param.clone(), val);
+                }
+                return eval_node(&func.body, &mut child, gpu);
+            }
+            return Err(format!("Unknown function: {}", name));
         }
-        let mut child = env.child();
-        for (param, arg_node) in func.params.iter().zip(args.iter()) {
-            let val = eval_node(arg_node, env, gpu)?;
-            child.vars.insert(param.clone(), val);
-        }
-        return eval_node(&func.body, &mut child, gpu);
-    }
+    };
 
     // Evaluate arguments
     let vals: Vec<Value> = args
@@ -436,106 +442,110 @@ fn eval_apply(
         .map(|a| eval_node(a, env, gpu))
         .collect::<Result<_, _>>()?;
 
-    match name {
+    match op {
         // Binary arithmetic
-        "add" => bin_f64(&vals, |a, b| a + b),
-        "sub" => bin_f64(&vals, |a, b| a - b),
-        "mul" => bin_f64(&vals, |a, b| a * b),
-        "div" => {
+        BuiltinOp::Add => bin_f64(&vals, |a, b| a + b),
+        BuiltinOp::Sub => bin_f64(&vals, |a, b| a - b),
+        BuiltinOp::Mul => bin_f64(&vals, |a, b| a * b),
+        BuiltinOp::Div => {
             let (a, b) = (vals[0].as_f64()?, vals[1].as_f64()?);
             if b == 0.0 {
                 return Err("division by zero".to_string());
             }
             Ok(Value::F64(a / b))
         }
-        "mod" => {
+        BuiltinOp::Mod => {
             let (a, b) = (vals[0].as_f64()?, vals[1].as_f64()?);
             if b == 0.0 {
                 return Err("modulo by zero".to_string());
             }
             Ok(Value::F64(a % b))
         }
-        "pow" => bin_f64(&vals, |a, b| a.powf(b)),
+        BuiltinOp::Pow => bin_f64(&vals, |a, b| a.powf(b)),
 
         // Comparison
-        "eq" => bin_cmp(&vals, |a, b| (a - b).abs() < 1e-10),
-        "neq" => bin_cmp(&vals, |a, b| (a - b).abs() >= 1e-10),
-        "lt" => bin_cmp(&vals, |a, b| a < b),
-        "gt" => bin_cmp(&vals, |a, b| a > b),
-        "lte" => bin_cmp(&vals, |a, b| a <= b),
-        "gte" => bin_cmp(&vals, |a, b| a >= b),
+        BuiltinOp::Eq => bin_cmp(&vals, |a, b| (a - b).abs() < 1e-10),
+        BuiltinOp::Neq => bin_cmp(&vals, |a, b| (a - b).abs() >= 1e-10),
+        BuiltinOp::Lt => bin_cmp(&vals, |a, b| a < b),
+        BuiltinOp::Gt => bin_cmp(&vals, |a, b| a > b),
+        BuiltinOp::Lte => bin_cmp(&vals, |a, b| a <= b),
+        BuiltinOp::Gte => bin_cmp(&vals, |a, b| a >= b),
 
         // Logical
-        "and" => Ok(Value::Bool(vals[0].as_bool()? && vals[1].as_bool()?)),
-        "or" => Ok(Value::Bool(vals[0].as_bool()? || vals[1].as_bool()?)),
-        "not" => Ok(Value::Bool(!vals[0].as_bool()?)),
+        BuiltinOp::And => Ok(Value::Bool(vals[0].as_bool()? && vals[1].as_bool()?)),
+        BuiltinOp::Or => Ok(Value::Bool(vals[0].as_bool()? || vals[1].as_bool()?)),
+        BuiltinOp::Not => Ok(Value::Bool(!vals[0].as_bool()?)),
 
         // Unary
-        "neg" => Ok(Value::F64(-vals[0].as_f64()?)),
+        BuiltinOp::Neg => Ok(Value::F64(-vals[0].as_f64()?)),
 
         // Math builtins (1 arg)
-        "sin" => un_f64(&vals, f64::sin),
-        "cos" => un_f64(&vals, f64::cos),
-        "tan" => un_f64(&vals, f64::tan),
-        "asin" => un_f64(&vals, f64::asin),
-        "acos" => un_f64(&vals, f64::acos),
-        "atan" => un_f64(&vals, f64::atan),
-        "sinh" => un_f64(&vals, f64::sinh),
-        "cosh" => un_f64(&vals, f64::cosh),
-        "tanh" => un_f64(&vals, f64::tanh),
-        "log" => un_f64(&vals, f64::ln),
-        "log2" => un_f64(&vals, f64::log2),
-        "log10" => un_f64(&vals, f64::log10),
-        "exp" => un_f64(&vals, f64::exp),
-        "exp2" => un_f64(&vals, f64::exp2),
-        "floor" => un_f64(&vals, f64::floor),
-        "ceil" => un_f64(&vals, f64::ceil),
-        "round" => un_f64(&vals, f64::round),
-        "fract" => un_f64(&vals, f64::fract),
-        "abs" => un_f64(&vals, f64::abs),
-        "sign" => un_f64(&vals, f64::signum),
-        "sqrt" => un_f64(&vals, f64::sqrt),
+        BuiltinOp::Sin => un_f64(&vals, f64::sin),
+        BuiltinOp::Cos => un_f64(&vals, f64::cos),
+        BuiltinOp::Tan => un_f64(&vals, f64::tan),
+        BuiltinOp::Asin => un_f64(&vals, f64::asin),
+        BuiltinOp::Acos => un_f64(&vals, f64::acos),
+        BuiltinOp::Atan => un_f64(&vals, f64::atan),
+        BuiltinOp::Sinh => un_f64(&vals, f64::sinh),
+        BuiltinOp::Cosh => un_f64(&vals, f64::cosh),
+        BuiltinOp::Tanh => un_f64(&vals, f64::tanh),
+        BuiltinOp::Log => un_f64(&vals, f64::ln),
+        BuiltinOp::Log2 => un_f64(&vals, f64::log2),
+        BuiltinOp::Log10 => un_f64(&vals, f64::log10),
+        BuiltinOp::Exp => un_f64(&vals, f64::exp),
+        BuiltinOp::Exp2 => un_f64(&vals, f64::exp2),
+        BuiltinOp::Floor => un_f64(&vals, f64::floor),
+        BuiltinOp::Ceil => un_f64(&vals, f64::ceil),
+        BuiltinOp::Round => un_f64(&vals, f64::round),
+        BuiltinOp::Fract => un_f64(&vals, f64::fract),
+        BuiltinOp::Abs => un_f64(&vals, f64::abs),
+        BuiltinOp::Sign => un_f64(&vals, f64::signum),
+        BuiltinOp::Sqrt => un_f64(&vals, f64::sqrt),
 
         // 2-arg builtins
-        "min" => bin_f64(&vals, f64::min),
-        "max" => bin_f64(&vals, f64::max),
-        "step" => bin_f64(&vals, |edge, x| if x < edge { 0.0 } else { 1.0 }),
+        BuiltinOp::Min => bin_f64(&vals, f64::min),
+        BuiltinOp::Max => bin_f64(&vals, f64::max),
+        BuiltinOp::Step => bin_f64(&vals, |edge, x| if x < edge { 0.0 } else { 1.0 }),
 
         // 3-arg builtins
-        "clamp" => {
+        BuiltinOp::Clamp => {
             let (x, lo, hi) = (vals[0].as_f64()?, vals[1].as_f64()?, vals[2].as_f64()?);
             Ok(Value::F64(x.clamp(lo, hi)))
         }
-        "mix" => {
+        BuiltinOp::Mix => {
             let (a, b, t) = (vals[0].as_f64()?, vals[1].as_f64()?, vals[2].as_f64()?);
             Ok(Value::F64(a * (1.0 - t) + b * t))
         }
-        "smoothstep" => {
+        BuiltinOp::Smoothstep => {
             let (edge0, edge1, x) = (vals[0].as_f64()?, vals[1].as_f64()?, vals[2].as_f64()?);
             let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
             Ok(Value::F64(t * t * (3.0 - 2.0 * t)))
         }
 
         // Array builtins
-        "len" => match &vals[0] {
+        BuiltinOp::Len => match &vals[0] {
             Value::Array(a) => Ok(Value::F64(a.len() as f64)),
             _ => Err("len() expects an array".to_string()),
         },
 
         // Type cast
-        "f32" | "f64" => Ok(Value::F64(vals[0].as_f64()?)),
-        "i32" => Ok(Value::F64((vals[0].as_f64()? as i32) as f64)),
+        BuiltinOp::F32 | BuiltinOp::F64 => Ok(Value::F64(vals[0].as_f64()?)),
+        BuiltinOp::I32 => Ok(Value::F64((vals[0].as_f64()? as i32) as f64)),
 
-        "print" => {
+        BuiltinOp::Print => {
             if vals.len() == 1 {
                 Ok(vals.into_iter().next().unwrap())
             } else {
                 Err("print() expects 1 argument".to_string())
             }
         }
-        "plot" => Ok(Value::Void),
+        BuiltinOp::Plot => Ok(Value::Void),
 
-        _ => Err(format!("Unknown function: {}", name)),
+        // Vector ops are not yet supported by the CPU interpreter.
+        BuiltinOp::Length | BuiltinOp::Normalize | BuiltinOp::Dot | BuiltinOp::Cross
+        | BuiltinOp::Vec2 | BuiltinOp::Vec3 | BuiltinOp::Vec4 => {
+            Err(format!("Builtin '{}' not supported in interpreter", op.name()))
+        }
     }
 }
 

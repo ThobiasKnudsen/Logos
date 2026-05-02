@@ -416,10 +416,11 @@ impl GenContext {
                 if returns_bool_val && needs_imperative {
                     if let Ir::Block { items: stmts, .. } = body.as_ref() {
                         if let Some(result) = block_result_expr_from_stmts(stmts) {
-                            if let Ir::Apply { name: op, args: cmp_args, .. } = result {
+                            if let Ir::Apply { callee, args: cmp_args, .. } = result {
+                                let op_name = callee.name();
                                 if cmp_args.len() == 2
                                     && matches!(
-                                        op.as_str(),
+                                        op_name,
                                         "eq" | "neq" | "lt" | "gt" | "lte" | "gte"
                                     )
                                 {
@@ -434,7 +435,7 @@ impl GenContext {
                                     if let Ok(diff_body) = self.emit_lifted_block_body_with(
                                         stmts,
                                         result,
-                                        &Some(op.clone()),
+                                        &Some(op_name.to_string()),
                                         declared,
                                     ) {
                                         let diff_wgsl = format!(
@@ -449,7 +450,7 @@ impl GenContext {
                                             name.clone(),
                                             LiftedFunctionDef {
                                                 diff_fn_name: diff_name,
-                                                comparison_op: op.clone(),
+                                                comparison_op: op_name.to_string(),
                                             },
                                         );
                                     }
@@ -569,14 +570,14 @@ impl GenContext {
             .ok_or_else(|| format!("block-valued binding `{}` has no result", binding_name))?;
 
         let comparison_op = match result {
-            Ir::Apply { name, args, .. }
+            Ir::Apply { callee, args, .. }
                 if args.len() == 2
                     && matches!(
-                        name.as_str(),
+                        callee.name(),
                         "eq" | "neq" | "lt" | "gt" | "lte" | "gte"
                     ) =>
             {
-                Some(name.clone())
+                Some(callee.name().to_string())
             }
             _ => None,
         };
@@ -861,8 +862,8 @@ impl GenContext {
     /// and identifiers bound to bool expressions.
     fn result_is_bool(&self, node: &Ir) -> bool {
         match node {
-            Ir::Apply { name, .. } => {
-                if self.bool_functions.contains(name) {
+            Ir::Apply { callee, .. } => {
+                if self.bool_functions.contains(callee.name()) {
                     return true;
                 }
                 returns_bool(node)
@@ -895,7 +896,7 @@ impl GenContext {
     fn result_is_vec(&self, node: &Ir) -> bool {
         match node {
             Ir::Tuple { items, .. } => items.len() >= 2,
-            Ir::Apply { name, .. } => self.vec_functions.contains(name),
+            Ir::Apply { callee, .. } => self.vec_functions.contains(callee.name()),
             Ir::IfExpr {
                 then_branch,
                 else_branch,
@@ -1108,7 +1109,7 @@ impl GenContext {
                 }
                 Ok(name.clone())
             }
-            Ir::Apply { name, args, .. } => self.emit_apply_internal(name, args, subst),
+            Ir::Apply { callee, args, .. } => self.emit_apply_internal(callee.name(), args, subst),
             Ir::Tuple { items, .. } => {
                 let parts: Result<Vec<_>, _> = items
                     .iter()
@@ -1404,8 +1405,9 @@ impl GenContext {
                 self.emit_bool_with_corners(&bound)
             }
 
-            Ir::Apply { name, args, .. } => {
-                match name.as_str() {
+            Ir::Apply { callee, args, .. } => {
+                let name = callee.name();
+                match name {
                     // Logical ops: recursively apply corner checking.
                     // Operands may be bool (comparisons) or float (implicit curves).
                     "and" if args.len() == 2 => {
@@ -1747,7 +1749,7 @@ fn substitute_params(body: &Ir, params: &[String], args: &[Ir]) -> Ir {
             body.clone()
         }
         Ir::Apply {
-            name,
+            callee,
             args: func_args,
             span,
         } => {
@@ -1757,7 +1759,7 @@ fn substitute_params(body: &Ir, params: &[String], args: &[Ir]) -> Ir {
                 .map(|a| substitute_params(a, params, args))
                 .collect();
             Ir::Apply {
-                name: name.clone(),
+                callee: callee.clone(),
                 args: new_args,
                 span: *span,
             }
@@ -1856,8 +1858,8 @@ fn block_result_expr_from_stmts(stmts: &[Ir]) -> Option<&Ir> {
 fn returns_bool(node: &Ir) -> bool {
     match node {
         Ir::BoolLit { .. } => true,
-        Ir::Apply { name, .. } => matches!(
-            name.as_str(),
+        Ir::Apply { callee, .. } => matches!(
+            callee.name(),
             "eq" | "neq" | "lt" | "gt" | "lte" | "gte" | "and" | "or" | "not"
         ),
         Ir::Block { items: stmts, .. } => stmts.last().is_some_and(returns_bool),

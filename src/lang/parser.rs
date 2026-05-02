@@ -18,7 +18,7 @@
 //!   8. Postfix (function call, indexing)
 //!   9. Primary (number, identifier, parenthesized expr/block, if, etc.)
 
-use super::ir::{Ir, Span};
+use super::ir::{BuiltinOp, Callee, Ir, Span};
 use super::token::{Token, TokenType};
 
 /// Combine two spans into one covering both. Assumes `start <= end`.
@@ -279,7 +279,7 @@ impl Parser {
             let right = self.parse_and()?;
             let span = join(left.span(), right.span());
             left = Ir::Apply {
-                name: "or".to_string(),
+                callee: Callee::Builtin(BuiltinOp::Or),
                 args: vec![left, right],
                 span,
             };
@@ -294,7 +294,7 @@ impl Parser {
             let right = self.parse_comparison()?;
             let span = join(left.span(), right.span());
             left = Ir::Apply {
-                name: "and".to_string(),
+                callee: Callee::Builtin(BuiltinOp::And),
                 args: vec![left, right],
                 span,
             };
@@ -306,19 +306,19 @@ impl Parser {
         let mut left = self.parse_range()?;
         loop {
             let op = match self.peek().ty {
-                TokenType::Eq => "eq",
-                TokenType::Neq => "neq",
-                TokenType::Lt => "lt",
-                TokenType::Gt => "gt",
-                TokenType::Lte => "lte",
-                TokenType::Gte => "gte",
+                TokenType::Eq => BuiltinOp::Eq,
+                TokenType::Neq => BuiltinOp::Neq,
+                TokenType::Lt => BuiltinOp::Lt,
+                TokenType::Gt => BuiltinOp::Gt,
+                TokenType::Lte => BuiltinOp::Lte,
+                TokenType::Gte => BuiltinOp::Gte,
                 _ => break,
             };
             self.advance();
             let right = self.parse_addition()?;
             let span = join(left.span(), right.span());
             left = Ir::Apply {
-                name: op.to_string(),
+                callee: Callee::Builtin(op),
                 args: vec![left, right],
                 span,
             };
@@ -346,15 +346,15 @@ impl Parser {
         let mut left = self.parse_multiplication()?;
         loop {
             let op = match self.peek().ty {
-                TokenType::Plus => "add",
-                TokenType::Minus => "sub",
+                TokenType::Plus => BuiltinOp::Add,
+                TokenType::Minus => BuiltinOp::Sub,
                 _ => break,
             };
             self.advance();
             let right = self.parse_multiplication()?;
             let span = join(left.span(), right.span());
             left = Ir::Apply {
-                name: op.to_string(),
+                callee: Callee::Builtin(op),
                 args: vec![left, right],
                 span,
             };
@@ -366,16 +366,16 @@ impl Parser {
         let mut left = self.parse_exponent()?;
         loop {
             let op = match self.peek().ty {
-                TokenType::Star => "mul",
-                TokenType::Slash => "div",
-                TokenType::Percent => "mod",
+                TokenType::Star => BuiltinOp::Mul,
+                TokenType::Slash => BuiltinOp::Div,
+                TokenType::Percent => BuiltinOp::Mod,
                 _ => break,
             };
             self.advance();
             let right = self.parse_exponent()?;
             let span = join(left.span(), right.span());
             left = Ir::Apply {
-                name: op.to_string(),
+                callee: Callee::Builtin(op),
                 args: vec![left, right],
                 span,
             };
@@ -391,7 +391,7 @@ impl Parser {
             let exp = self.parse_exponent()?;
             let span = join(base.span(), exp.span());
             Ok(Ir::Apply {
-                name: "pow".to_string(),
+                callee: Callee::Builtin(BuiltinOp::Pow),
                 args: vec![base, exp],
                 span,
             })
@@ -407,7 +407,7 @@ impl Parser {
             let operand = self.parse_unary()?;
             let span = join(op_span, operand.span());
             return Ok(Ir::Apply {
-                name: "neg".to_string(),
+                callee: Callee::Builtin(BuiltinOp::Neg),
                 args: vec![operand],
                 span,
             });
@@ -418,7 +418,7 @@ impl Parser {
             let operand = self.parse_unary()?;
             let span = join(op_span, operand.span());
             return Ok(Ir::Apply {
-                name: "not".to_string(),
+                callee: Callee::Builtin(BuiltinOp::Not),
                 args: vec![operand],
                 span,
             });
@@ -444,7 +444,7 @@ impl Parser {
                         let rparen_span = self.peek().span;
                         self.expect(TokenType::RParen)?;
                         expr = Ir::Apply {
-                            name,
+                            callee: Callee::from_name(name),
                             args,
                             span: join(start_span, rparen_span),
                         };
@@ -500,7 +500,7 @@ impl Parser {
                     self.advance();
                     let span = join(expr.span(), sup_span);
                     expr = Ir::Apply {
-                        name: "pow".to_string(),
+                        callee: Callee::Builtin(BuiltinOp::Pow),
                         args: vec![
                             expr,
                             Ir::Number {
@@ -564,7 +564,7 @@ impl Parser {
                     let rparen_span = self.peek().span;
                     self.expect(TokenType::RParen)?;
                     Ok(Ir::Apply {
-                        name,
+                        callee: Callee::from_name(name),
                         args,
                         span: join(tok_span, rparen_span),
                     })
@@ -849,7 +849,7 @@ impl Parser {
                     let rparen_span = self.peek().span;
                     self.expect(TokenType::RParen)?;
                     Ok(Ir::Apply {
-                        name: cast_name,
+                        callee: Callee::from_name(cast_name),
                         args,
                         span: join(cast_span, rparen_span),
                     })
@@ -1037,8 +1037,8 @@ mod tests {
     fn test_simple_addition() {
         let ast = parse("x + y");
         match ast {
-            Ir::Apply { name, args, .. } => {
-                assert_eq!(name, "add");
+            Ir::Apply { callee, args, .. } => {
+                assert_eq!(callee, Callee::Builtin(BuiltinOp::Add));
                 assert_eq!(args.len(), 2);
             }
             _ => panic!("Expected Apply node"),
@@ -1050,10 +1050,12 @@ mod tests {
         // x + y * z  should parse as  x + (y * z)
         let ast = parse("x + y * z");
         match ast {
-            Ir::Apply { name, ref args, .. } => {
-                assert_eq!(name, "add");
+            Ir::Apply { callee, ref args, .. } => {
+                assert_eq!(callee, Callee::Builtin(BuiltinOp::Add));
                 match &args[1] {
-                    Ir::Apply { name, .. } => assert_eq!(name, "mul"),
+                    Ir::Apply { callee, .. } => {
+                        assert_eq!(callee, &Callee::Builtin(BuiltinOp::Mul));
+                    }
                     _ => panic!("Expected mul"),
                 }
             }
@@ -1065,8 +1067,8 @@ mod tests {
     fn test_function_call() {
         let ast = parse("sin(x)");
         match ast {
-            Ir::Apply { name, args, .. } => {
-                assert_eq!(name, "sin");
+            Ir::Apply { callee, args, .. } => {
+                assert_eq!(callee, Callee::Builtin(BuiltinOp::Sin));
                 assert_eq!(args.len(), 1);
             }
             _ => panic!("Expected Apply"),
@@ -1077,8 +1079,8 @@ mod tests {
     fn test_negation() {
         let ast = parse("-x");
         match ast {
-            Ir::Apply { name, args, .. } => {
-                assert_eq!(name, "neg");
+            Ir::Apply { callee, args, .. } => {
+                assert_eq!(callee, Callee::Builtin(BuiltinOp::Neg));
                 assert_eq!(args.len(), 1);
             }
             _ => panic!("Expected neg Apply"),
@@ -1090,10 +1092,12 @@ mod tests {
         // x ^ y ^ z should parse as x ^ (y ^ z)
         let ast = parse("x ^ y ^ z");
         match ast {
-            Ir::Apply { name, ref args, .. } => {
-                assert_eq!(name, "pow");
+            Ir::Apply { callee, ref args, .. } => {
+                assert_eq!(callee, Callee::Builtin(BuiltinOp::Pow));
                 match &args[1] {
-                    Ir::Apply { name, .. } => assert_eq!(name, "pow"),
+                    Ir::Apply { callee, .. } => {
+                        assert_eq!(callee, &Callee::Builtin(BuiltinOp::Pow));
+                    }
                     _ => panic!("Expected inner pow"),
                 }
             }
@@ -1116,8 +1120,8 @@ mod tests {
         // `=` is equality in Logos (not assignment)
         let ast = parse("x = 5");
         match ast {
-            Ir::Apply { name, args, .. } => {
-                assert_eq!(name, "eq");
+            Ir::Apply { callee, args, .. } => {
+                assert_eq!(callee, Callee::Builtin(BuiltinOp::Eq));
                 assert_eq!(args.len(), 2);
             }
             _ => panic!("Expected equality Apply, got {:?}", ast),
@@ -1151,8 +1155,8 @@ mod tests {
     fn test_multi_arg_builtin() {
         let ast = parse("clamp(x, 0, 1)");
         match ast {
-            Ir::Apply { name, args, .. } => {
-                assert_eq!(name, "clamp");
+            Ir::Apply { callee, args, .. } => {
+                assert_eq!(callee, Callee::Builtin(BuiltinOp::Clamp));
                 assert_eq!(args.len(), 3);
             }
             _ => panic!("Expected Apply"),
@@ -1201,7 +1205,9 @@ mod tests {
         // sqrt(x*x + y*y) — common Logos pattern
         let ast = parse("sqrt(x*x + y*y)");
         match ast {
-            Ir::Apply { name, .. } => assert_eq!(name, "sqrt"),
+            Ir::Apply { callee, .. } => {
+                assert_eq!(callee, Callee::Builtin(BuiltinOp::Sqrt));
+            }
             _ => panic!("Expected sqrt Apply"),
         }
     }
@@ -1226,7 +1232,9 @@ mod tests {
     fn test_nested_function_calls() {
         let ast = parse("log(0.5 * log(x) / log(2.0))");
         match ast {
-            Ir::Apply { name, .. } => assert_eq!(name, "log"),
+            Ir::Apply { callee, .. } => {
+                assert_eq!(callee, Callee::Builtin(BuiltinOp::Log));
+            }
             _ => panic!("Expected log Apply"),
         }
     }
@@ -1235,7 +1243,9 @@ mod tests {
     fn test_chained_comparison() {
         let ast = parse("x > 0 and x < 10");
         match ast {
-            Ir::Apply { name, .. } => assert_eq!(name, "and"),
+            Ir::Apply { callee, .. } => {
+                assert_eq!(callee, Callee::Builtin(BuiltinOp::And));
+            }
             _ => panic!("Expected and Apply"),
         }
     }

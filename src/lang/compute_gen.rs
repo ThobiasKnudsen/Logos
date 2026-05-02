@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use super::ir::Ir;
+use super::ir::{BuiltinOp, Callee, Ir};
 use super::interpreter::ParallelForRequest;
 
 /// Workgroup size used by generated compute shaders. Must match the dispatch
@@ -179,72 +179,91 @@ fn emit_compute_expr(
             Err("Index access only supported on known arrays".to_string())
         }
 
-        Ir::Apply { name, args, .. } => {
+        Ir::Apply { callee, args, .. } => {
             let arg_strs: Vec<String> = args
                 .iter()
                 .map(|a| emit_compute_expr(a, loop_var, request, declared))
                 .collect::<Result<_, _>>()?;
 
-            match name.as_str() {
-                "add" => Ok(format!("({} + {})", arg_strs[0], arg_strs[1])),
-                "sub" => Ok(format!("({} - {})", arg_strs[0], arg_strs[1])),
-                "mul" => Ok(format!("({} * {})", arg_strs[0], arg_strs[1])),
-                "div" => Ok(format!("({} / {})", arg_strs[0], arg_strs[1])),
-                "mod" => Ok(format!("({} % {})", arg_strs[0], arg_strs[1])),
-                "pow" => Ok(format!("pow({}, {})", arg_strs[0], arg_strs[1])),
+            let op = match callee {
+                Callee::Builtin(op) => *op,
+                Callee::User(name) => {
+                    return Err(format!("Unsupported function '{}' in compute shader", name));
+                }
+            };
 
-                "eq" => Ok(format!(
+            match op {
+                BuiltinOp::Add => Ok(format!("({} + {})", arg_strs[0], arg_strs[1])),
+                BuiltinOp::Sub => Ok(format!("({} - {})", arg_strs[0], arg_strs[1])),
+                BuiltinOp::Mul => Ok(format!("({} * {})", arg_strs[0], arg_strs[1])),
+                BuiltinOp::Div => Ok(format!("({} / {})", arg_strs[0], arg_strs[1])),
+                BuiltinOp::Mod => Ok(format!("({} % {})", arg_strs[0], arg_strs[1])),
+                BuiltinOp::Pow => Ok(format!("pow({}, {})", arg_strs[0], arg_strs[1])),
+
+                BuiltinOp::Eq => Ok(format!(
                     "select(0.0, 1.0, ({} == {}))",
                     arg_strs[0], arg_strs[1]
                 )),
-                "neq" => Ok(format!(
+                BuiltinOp::Neq => Ok(format!(
                     "select(0.0, 1.0, ({} != {}))",
                     arg_strs[0], arg_strs[1]
                 )),
-                "lt" => Ok(format!(
+                BuiltinOp::Lt => Ok(format!(
                     "select(0.0, 1.0, ({} < {}))",
                     arg_strs[0], arg_strs[1]
                 )),
-                "gt" => Ok(format!(
+                BuiltinOp::Gt => Ok(format!(
                     "select(0.0, 1.0, ({} > {}))",
                     arg_strs[0], arg_strs[1]
                 )),
-                "lte" => Ok(format!(
+                BuiltinOp::Lte => Ok(format!(
                     "select(0.0, 1.0, ({} <= {}))",
                     arg_strs[0], arg_strs[1]
                 )),
-                "gte" => Ok(format!(
+                BuiltinOp::Gte => Ok(format!(
                     "select(0.0, 1.0, ({} >= {}))",
                     arg_strs[0], arg_strs[1]
                 )),
 
-                "neg" => Ok(format!("(-{})", arg_strs[0])),
+                BuiltinOp::Neg => Ok(format!("(-{})", arg_strs[0])),
 
-                "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh"
-                | "log" | "log2" | "exp" | "exp2" | "floor" | "ceil" | "round" | "fract"
-                | "abs" | "sign" | "sqrt" => Ok(format!("{}({})", name, arg_strs[0])),
-                "log10" => Ok(format!("(log2({}) / log2(10.0))", arg_strs[0])),
+                BuiltinOp::Sin | BuiltinOp::Cos | BuiltinOp::Tan
+                | BuiltinOp::Asin | BuiltinOp::Acos | BuiltinOp::Atan
+                | BuiltinOp::Sinh | BuiltinOp::Cosh | BuiltinOp::Tanh
+                | BuiltinOp::Log | BuiltinOp::Log2 | BuiltinOp::Exp | BuiltinOp::Exp2
+                | BuiltinOp::Floor | BuiltinOp::Ceil | BuiltinOp::Round | BuiltinOp::Fract
+                | BuiltinOp::Abs | BuiltinOp::Sign | BuiltinOp::Sqrt => {
+                    Ok(format!("{}({})", op.name(), arg_strs[0]))
+                }
+                BuiltinOp::Log10 => Ok(format!("(log2({}) / log2(10.0))", arg_strs[0])),
 
-                "min" | "max" => Ok(format!("{}({}, {})", name, arg_strs[0], arg_strs[1])),
-                "step" => Ok(format!("step({}, {})", arg_strs[0], arg_strs[1])),
+                BuiltinOp::Min | BuiltinOp::Max => {
+                    Ok(format!("{}({}, {})", op.name(), arg_strs[0], arg_strs[1]))
+                }
+                BuiltinOp::Step => Ok(format!("step({}, {})", arg_strs[0], arg_strs[1])),
 
-                "clamp" => Ok(format!(
+                BuiltinOp::Clamp => Ok(format!(
                     "clamp({}, {}, {})",
                     arg_strs[0], arg_strs[1], arg_strs[2]
                 )),
-                "mix" => Ok(format!(
+                BuiltinOp::Mix => Ok(format!(
                     "mix({}, {}, {})",
                     arg_strs[0], arg_strs[1], arg_strs[2]
                 )),
-                "smoothstep" => Ok(format!(
+                BuiltinOp::Smoothstep => Ok(format!(
                     "smoothstep({}, {}, {})",
                     arg_strs[0], arg_strs[1], arg_strs[2]
                 )),
 
-                "f32" | "f64" => Ok(arg_strs[0].clone()),
-                "i32" => Ok(format!("f32(i32({}))", arg_strs[0])),
+                BuiltinOp::F32 | BuiltinOp::F64 => Ok(arg_strs[0].clone()),
+                BuiltinOp::I32 => Ok(format!("f32(i32({}))", arg_strs[0])),
 
-                _ => Err(format!("Unsupported function '{}' in compute shader", name)),
+                BuiltinOp::And | BuiltinOp::Or | BuiltinOp::Not
+                | BuiltinOp::Length | BuiltinOp::Normalize | BuiltinOp::Dot | BuiltinOp::Cross
+                | BuiltinOp::Vec2 | BuiltinOp::Vec3 | BuiltinOp::Vec4
+                | BuiltinOp::Len | BuiltinOp::Print | BuiltinOp::Plot => {
+                    Err(format!("Unsupported builtin '{}' in compute shader", op.name()))
+                }
             }
         }
 
