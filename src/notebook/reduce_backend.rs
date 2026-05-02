@@ -22,41 +22,6 @@ pub trait ReduceBackend {
     fn clear_pending(&mut self);
 }
 
-/// Production backend: thin wrapper over `ReduceService`.
-pub struct ReduceServiceBackend {
-    inner: ReduceService,
-}
-
-impl ReduceServiceBackend {
-    pub fn new() -> Self {
-        Self {
-            inner: ReduceService::new(),
-        }
-    }
-
-    pub fn from_service(service: ReduceService) -> Self {
-        Self { inner: service }
-    }
-}
-
-impl ReduceBackend for ReduceServiceBackend {
-    fn submit(&mut self, cell_id: usize, context: Vec<String>, expression: String) -> u64 {
-        self.inner.submit(cell_id, context, expression)
-    }
-
-    fn try_recv(&mut self) -> Option<ReduceResponse> {
-        self.inner.try_recv()
-    }
-
-    fn has_pending(&self) -> bool {
-        self.inner.has_pending()
-    }
-
-    fn clear_pending(&mut self) {
-        self.inner.clear_pending()
-    }
-}
-
 /// Placeholder backend that drops every submission and never returns a
 /// response. Use as a default when a notebook is constructed in a context
 /// where REDUCE isn't wired (yet) — pure interpreter and WGSL paths still

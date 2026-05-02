@@ -515,7 +515,7 @@ struct App {
 
 struct AppState {
     renderer: Renderer,
-    tab_manager: Session,
+    session: Session,
     layout: UiLayout,
     cached_layout: LayoutResult,
     window: Arc<Window>,
@@ -608,7 +608,7 @@ impl AppState {
         let sync_start = Instant::now();
 
         let lp = self.cached_layout.left_pane;
-        let tab = self.tab_manager.active_tab();
+        let tab = self.session.active_tab();
         // Ensure cached vectors match cell count
         let cell_count = tab.cells.len();
         self.last_submitted_texts.resize(cell_count, String::new());
@@ -652,13 +652,13 @@ impl AppState {
         // Update tab bar
         let t2 = Instant::now();
         let tab_infos: Vec<TabInfo> = self
-            .tab_manager
+            .session
             .tabs
             .iter()
             .enumerate()
             .map(|(i, t)| TabInfo {
                 name: t.name.clone(),
-                is_active: i == self.tab_manager.active_index,
+                is_active: i == self.session.active_index,
                 is_modified: t.is_modified,
             })
             .collect();
@@ -683,7 +683,7 @@ impl AppState {
 
         // Update status bar
         let t3 = Instant::now();
-        let tab = self.tab_manager.active_tab();
+        let tab = self.session.active_tab();
         let cell = tab.active_cell();
         let (line, col) = line_col_from(cell.buffer.text(), cell.buffer.cursor_byte_offset());
         let line_count = cell.buffer.text().lines().count().max(1);
@@ -960,7 +960,7 @@ impl AppState {
     /// Save current axis bounds to old tab, restore from new tab (or reset to default).
     fn switch_tab_axis(&mut self, old_tab: usize, new_tab: usize) {
         // Save current axis state to old tab
-        if let Some(tab) = self.tab_manager.tabs.get_mut(old_tab) {
+        if let Some(tab) = self.session.tabs.get_mut(old_tab) {
             tab.axis_bounds = Some([
                 self.render_area.axis_x_min,
                 self.render_area.axis_x_max,
@@ -969,7 +969,7 @@ impl AppState {
             ]);
         }
         // Restore axis state from new tab (or reset to default)
-        if let Some(tab) = self.tab_manager.tabs.get(new_tab) {
+        if let Some(tab) = self.session.tabs.get(new_tab) {
             if let Some([xmin, xmax, ymin, ymax]) = tab.axis_bounds {
                 self.render_area.axis_x_min = xmin;
                 self.render_area.axis_x_max = xmax;
@@ -992,7 +992,7 @@ impl AppState {
     }
 
     fn update_autocomplete(&mut self) {
-        let tab = self.tab_manager.active_tab();
+        let tab = self.session.active_tab();
         let cell = tab.active_cell();
         let text = cell.buffer.text();
         let cursor = cell.buffer.cursor_byte_offset();
@@ -1061,17 +1061,17 @@ impl AppState {
         if let Some((label, prefix_start)) = self.autocomplete.accept() {
             let label = label.to_string();
             let cursor = self
-                .tab_manager
+                .session
                 .active_tab()
                 .active_cell()
                 .buffer
                 .cursor_byte_offset();
-            self.tab_manager
+            self.session
                 .active_tab_mut()
                 .active_cell_mut()
                 .buffer
                 .replace_range(prefix_start, cursor, &label);
-            self.tab_manager.active_tab_mut().mark_modified();
+            self.session.active_tab_mut().mark_modified();
         }
         self.dismiss_autocomplete();
         self.sync_active_tab();
@@ -1087,9 +1087,9 @@ impl AppState {
         match (menu_idx, item_idx) {
             // File menu
             (0, 0) => {
-                let old = self.tab_manager.active_index;
+                let old = self.session.active_index;
                 self.renderer.stash_tab_shaders(old);
-                let new_idx = self.tab_manager.new_tab();
+                let new_idx = self.session.new_tab();
                 self.switch_tab_axis(old, new_idx);
                 self.sync_active_tab();
             }
@@ -1099,8 +1099,8 @@ impl AppState {
                 }
             }
             (0, 2) => {
-                if self.tab_manager.active_tab().file_path.is_some() {
-                    if let Err(e) = self.tab_manager.active_tab_mut().save() {
+                if self.session.active_tab().file_path.is_some() {
+                    if let Err(e) = self.session.active_tab_mut().save() {
                         log::error!("Save failed: {}", e);
                     }
                     self.sync_active_tab();
@@ -1114,12 +1114,12 @@ impl AppState {
                 }
             }
             (0, 4) => {
-                let idx = self.tab_manager.active_index;
+                let idx = self.session.active_index;
                 self.renderer.drop_stashed_tab_shaders(idx);
-                self.tab_manager.close_tab(idx);
-                let new_idx = self.tab_manager.active_index;
+                self.session.close_tab(idx);
+                let new_idx = self.session.active_index;
                 self.renderer.restore_tab_shaders(new_idx);
-                if let Some(tab) = self.tab_manager.tabs.get(new_idx) {
+                if let Some(tab) = self.session.tabs.get(new_idx) {
                     if let Some([xmin, xmax, ymin, ymax]) = tab.axis_bounds {
                         self.render_area.axis_x_min = xmin;
                         self.render_area.axis_x_max = xmax;
@@ -1162,12 +1162,12 @@ impl AppState {
                         .get(i)
                         .map(|m| m.label)
                         .unwrap_or("Example");
-                    let old = self.tab_manager.active_index;
+                    let old = self.session.active_index;
                     self.renderer.stash_tab_shaders(old);
-                    let new_idx = self.tab_manager.new_tab();
+                    let new_idx = self.session.new_tab();
                     self.switch_tab_axis(old, new_idx);
-                    self.tab_manager.active_tab_mut().name = name.to_string();
-                    self.tab_manager
+                    self.session.active_tab_mut().name = name.to_string();
+                    self.session
                         .active_tab_mut()
                         .active_cell_mut()
                         .buffer
@@ -1185,7 +1185,7 @@ impl AppState {
 
     fn do_cut(&mut self) {
         if let Some(text) = self
-            .tab_manager
+            .session
             .active_tab()
             .active_cell()
             .buffer
@@ -1195,19 +1195,19 @@ impl AppState {
             if let Some(cb) = self.clipboard.as_mut() {
                 let _ = cb.set_text(&owned);
             }
-            self.tab_manager
+            self.session
                 .active_tab_mut()
                 .active_cell_mut()
                 .buffer
                 .backspace();
-            self.tab_manager.active_tab_mut().mark_modified();
+            self.session.active_tab_mut().mark_modified();
             self.sync_active_tab();
         }
     }
 
     fn do_copy(&mut self) {
         if let Some(text) = self
-            .tab_manager
+            .session
             .active_tab()
             .active_cell()
             .buffer
@@ -1222,19 +1222,19 @@ impl AppState {
     fn do_paste(&mut self) {
         if let Some(cb) = self.clipboard.as_mut() {
             if let Ok(text) = cb.get_text() {
-                self.tab_manager
+                self.session
                     .active_tab_mut()
                     .active_cell_mut()
                     .buffer
                     .insert_text(&text);
-                self.tab_manager.active_tab_mut().mark_modified();
+                self.session.active_tab_mut().mark_modified();
                 self.sync_active_tab();
             }
         }
     }
 
     fn do_select_all(&mut self) {
-        self.tab_manager
+        self.session
             .active_tab_mut()
             .active_cell_mut()
             .buffer
@@ -1289,9 +1289,9 @@ impl AppState {
         match key {
             Key::Character(c) if c.as_str() == "n" => {
                 self.close_menu();
-                let old = self.tab_manager.active_index;
+                let old = self.session.active_index;
                 self.renderer.stash_tab_shaders(old);
-                let new_idx = self.tab_manager.new_tab();
+                let new_idx = self.session.new_tab();
                 self.switch_tab_axis(old, new_idx);
                 self.sync_active_tab();
                 true
@@ -1309,8 +1309,8 @@ impl AppState {
                     if self.pending_dialog.is_none() {
                         self.pending_dialog = Some(FileDialog::spawn(DialogKind::Save));
                     }
-                } else if self.tab_manager.active_tab().file_path.is_some() {
-                    if let Err(e) = self.tab_manager.active_tab_mut().save() {
+                } else if self.session.active_tab().file_path.is_some() {
+                    if let Err(e) = self.session.active_tab_mut().save() {
                         log::error!("Save failed: {}", e);
                     }
                     self.sync_active_tab();
@@ -1321,12 +1321,12 @@ impl AppState {
             }
             Key::Character(c) if c.as_str() == "w" => {
                 self.close_menu();
-                let idx = self.tab_manager.active_index;
+                let idx = self.session.active_index;
                 self.renderer.drop_stashed_tab_shaders(idx);
-                self.tab_manager.close_tab(idx);
-                let new_idx = self.tab_manager.active_index;
+                self.session.close_tab(idx);
+                let new_idx = self.session.active_index;
                 self.renderer.restore_tab_shaders(new_idx);
-                if let Some(tab) = self.tab_manager.tabs.get(new_idx) {
+                if let Some(tab) = self.session.tabs.get(new_idx) {
                     if let Some([xmin, xmax, ymin, ymax]) = tab.axis_bounds {
                         self.render_area.axis_x_min = xmin;
                         self.render_area.axis_x_max = xmax;
@@ -1387,8 +1387,8 @@ impl AppState {
             // Run/Stop active cell
             Key::Named(NamedKey::Enter) => {
                 self.close_menu();
-                let active = self.tab_manager.active_tab().active_cell_index;
-                let is_playing = self.tab_manager.active_tab().cells[active].is_playing;
+                let active = self.session.active_tab().active_cell_index;
+                let is_playing = self.session.active_tab().cells[active].is_playing;
                 if is_playing {
                     self.trigger_cell_stop(active);
                 } else {
@@ -1428,12 +1428,12 @@ impl AppState {
     /// the notebook.
     fn trigger_cell_play(&mut self, cell_index: usize) {
         // Push current editor text into the notebook so the play sees it.
-        self.tab_manager
+        self.session
             .active_tab_mut()
             .sync_texts_to_notebook();
 
         // Inspect the combined AST to decide which path to take.
-        let combined_ast = self.tab_manager.active_tab().combined_ast_up_to(cell_index);
+        let combined_ast = self.session.active_tab().combined_ast_up_to(cell_index);
         let path = match &combined_ast {
             Ok(ast) => {
                 let actions = lang::detect_cell_actions(ast);
@@ -1449,7 +1449,7 @@ impl AppState {
         match path {
             PlayPath::ParseError(e) => {
                 log::error!("Parse error: {}", e);
-                let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+                let cell = &mut self.session.active_tab_mut().cells[cell_index];
                 cell.output = CellOutput::Error(e);
                 cell.output_collapsed = false;
                 self.sync_active_tab();
@@ -1460,13 +1460,13 @@ impl AppState {
                 let gpu = WgpuGpuDispatch { device, queue };
                 match lang::interpreter::eval(&ast, &gpu) {
                     Ok(val) => {
-                        let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+                        let cell = &mut self.session.active_tab_mut().cells[cell_index];
                         cell.output = CellOutput::Computed(format!("{}", val));
                         cell.output_collapsed = false;
                     }
                     Err(e) => {
                         log::error!("Interpreter error: {}", e);
-                        let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+                        let cell = &mut self.session.active_tab_mut().cells[cell_index];
                         cell.output = CellOutput::Error(e);
                         cell.output_collapsed = false;
                     }
@@ -1474,7 +1474,7 @@ impl AppState {
                 self.sync_active_tab();
             }
             PlayPath::Notebook => {
-                self.tab_manager
+                self.session
                     .active_tab_mut()
                     .notebook
                     .play(cell_index);
@@ -1494,7 +1494,7 @@ impl AppState {
     fn sync_cell_from_notebook(&mut self, cell_index: usize) {
         use crate::notebook::CellMessage;
         let outcome = self
-            .tab_manager
+            .session
             .active_tab()
             .notebook
             .cell(cell_index)
@@ -1510,7 +1510,7 @@ impl AppState {
             Some(CellMessage::Error(s)) => CellOutput::Error(s.clone()),
         };
         {
-            let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+            let cell = &mut self.session.active_tab_mut().cells[cell_index];
             cell.output = new_output;
             cell.print_pending = pending;
             cell.output_collapsed = false;
@@ -1518,17 +1518,17 @@ impl AppState {
 
         // GPU compile if the notebook produced a shader.
         if let Some(shader) = outcome.shader {
-            let cell_id = self.tab_manager.active_tab().cells[cell_index].id;
+            let cell_id = self.session.active_tab().cells[cell_index].id;
             match self.renderer.compile_cell_shader(cell_id, &shader.wgsl) {
                 Ok(()) => {
-                    let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+                    let cell = &mut self.session.active_tab_mut().cells[cell_index];
                     cell.is_playing = true;
                 }
                 Err(e) => {
                     log::error!("Shader compilation failed: {}", e);
                     let source =
-                        build_combined_source(self.tab_manager.active_tab(), cell_index);
-                    let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+                        build_combined_source(self.session.active_tab(), cell_index);
+                    let cell = &mut self.session.active_tab_mut().cells[cell_index];
                     cell.output =
                         CellOutput::Error(format_shader_error(&e.to_string(), &source));
                     cell.output_collapsed = false;
@@ -1540,10 +1540,10 @@ impl AppState {
 
     /// Stop playing a cell's shader.
     fn trigger_cell_stop(&mut self, cell_index: usize) {
-        let cell_id = self.tab_manager.active_tab().cells[cell_index].id;
+        let cell_id = self.session.active_tab().cells[cell_index].id;
         self.renderer.remove_cell_shader(cell_id);
-        self.tab_manager.active_tab_mut().cells[cell_index].is_playing = false;
-        self.tab_manager.active_tab_mut().cells[cell_index].output = CellOutput::None;
+        self.session.active_tab_mut().cells[cell_index].is_playing = false;
+        self.session.active_tab_mut().cells[cell_index].output = CellOutput::None;
         self.sync_active_tab();
     }
 }
@@ -1562,7 +1562,7 @@ impl ApplicationHandler for App {
         let renderer = pollster::block_on(Renderer::new(window.clone()));
 
         let reduce_service = std::rc::Rc::new(std::cell::RefCell::new(ReduceService::new()));
-        let tab_manager = Session::new(Some(reduce_service.clone()));
+        let session = Session::new(Some(reduce_service.clone()));
 
         let mut layout = UiLayout::new();
         let size = window.inner_size();
@@ -1570,7 +1570,7 @@ impl ApplicationHandler for App {
 
         let mut state = AppState {
             renderer,
-            tab_manager,
+            session,
             layout,
             cached_layout,
             window,
@@ -1759,7 +1759,7 @@ impl ApplicationHandler for App {
                             .unwrap_or(new_h);
                         let natural_h = content_h + text_pad * 2.0;
                         let clamped = new_h.clamp(min_h, natural_h);
-                        let tab = state.tab_manager.active_tab_mut();
+                        let tab = state.session.active_tab_mut();
                         if idx < tab.cells.len() {
                             if (clamped - natural_h).abs() < 1.0 {
                                 tab.cells[idx].contracted_editor_h = None;
@@ -1795,7 +1795,7 @@ impl ApplicationHandler for App {
                     if let Some(cell_idx) = state.editor_drag_cell {
                         let (mx, my) = state.cursor_position;
                         if let Some(byte_offset) = state.renderer.hit_test_cell(cell_idx, mx, my) {
-                            state.tab_manager.active_tab_mut().cells[cell_idx]
+                            state.session.active_tab_mut().cells[cell_idx]
                                 .buffer
                                 .set_cursor_byte_extend(byte_offset);
                             state.sync_active_tab();
@@ -1968,17 +1968,17 @@ impl ApplicationHandler for App {
                         if let Some(byte_offset) = state.renderer.hit_test_cell(i, mx, my) {
                             if state.modifiers.shift_key() {
                                 // Shift+click: extend selection to clicked position
-                                state.tab_manager.active_tab_mut().cells[i]
+                                state.session.active_tab_mut().cells[i]
                                     .buffer
                                     .set_cursor_byte_extend(byte_offset);
                             } else {
                                 // Normal click: position cursor, start potential drag
-                                state.tab_manager.active_tab_mut().cells[i]
+                                state.session.active_tab_mut().cells[i]
                                     .buffer
                                     .set_cursor_byte(byte_offset);
                             }
                         }
-                        state.tab_manager.active_tab_mut().set_active_cell(i);
+                        state.session.active_tab_mut().set_active_cell(i);
                         state.is_dragging_editor = true;
                         state.editor_drag_cell = Some(i);
                         event_loop.set_control_flow(ControlFlow::Poll);
@@ -1993,7 +1993,7 @@ impl ApplicationHandler for App {
                         state.close_menu();
                         state.dismiss_autocomplete();
                         // Copy output text to clipboard
-                        let text_to_copy = match &state.tab_manager.active_tab().cells[i].output {
+                        let text_to_copy = match &state.session.active_tab().cells[i].output {
                             CellOutput::Simplified(s) | CellOutput::Computed(s) => Some(s.clone()),
                             CellOutput::Error(e) => Some(e.clone()),
                             CellOutput::None => None,
@@ -2120,13 +2120,13 @@ impl ApplicationHandler for App {
                 for (i, hit) in state.tab_hit_rects.iter().enumerate() {
                     if point_in_rect(mx, my, &hit.close) {
                         state.renderer.drop_stashed_tab_shaders(i);
-                        let was_active = i == state.tab_manager.active_index;
-                        state.tab_manager.close_tab(i);
+                        let was_active = i == state.session.active_index;
+                        state.session.close_tab(i);
                         if was_active {
-                            let new_idx = state.tab_manager.active_index;
+                            let new_idx = state.session.active_index;
                             state.renderer.restore_tab_shaders(new_idx);
                             // Restore axis bounds for the new tab
-                            if let Some(tab) = state.tab_manager.tabs.get(new_idx) {
+                            if let Some(tab) = state.session.tabs.get(new_idx) {
                                 if let Some([xmin, xmax, ymin, ymax]) = tab.axis_bounds {
                                     state.render_area.axis_x_min = xmin;
                                     state.render_area.axis_x_max = xmax;
@@ -2142,17 +2142,17 @@ impl ApplicationHandler for App {
 
                 for (i, hit) in state.tab_hit_rects.iter().enumerate() {
                     if point_in_rect(mx, my, &hit.full) {
-                        let old = state.tab_manager.active_index;
+                        let old = state.session.active_index;
                         if old != i {
                             state.renderer.stash_tab_shaders(old);
                             state.renderer.restore_tab_shaders(i);
                             state.switch_tab_axis(old, i);
                         }
-                        state.tab_manager.set_active(i);
+                        state.session.set_active(i);
                         // Clear in-flight REDUCE bookkeeping on both ends —
                         // shared service and the (now-inactive) tab's notebook.
                         state.reduce_service.borrow_mut().clear_pending();
-                        let prev = state.tab_manager.tabs.get_mut(old);
+                        let prev = state.session.tabs.get_mut(old);
                         if let Some(prev) = prev {
                             prev.notebook.clear_pending();
                         }
@@ -2163,9 +2163,9 @@ impl ApplicationHandler for App {
                 }
 
                 if point_in_rect(mx, my, &state.plus_button_rect) {
-                    let old = state.tab_manager.active_index;
+                    let old = state.session.active_index;
                     state.renderer.stash_tab_shaders(old);
-                    let new_idx = state.tab_manager.new_tab();
+                    let new_idx = state.session.new_tab();
                     state.switch_tab_axis(old, new_idx);
                     state.sync_active_tab();
                     return;
@@ -2195,7 +2195,7 @@ impl ApplicationHandler for App {
                 };
                 match click_target {
                     HoverTarget::CellPlayButton(i) => {
-                        let is_playing = state.tab_manager.active_tab().cells[i].is_playing;
+                        let is_playing = state.session.active_tab().cells[i].is_playing;
                         if is_playing {
                             state.trigger_cell_stop(i);
                         } else {
@@ -2206,7 +2206,7 @@ impl ApplicationHandler for App {
                         // Handled on press (drag-to-select); release is a no-op.
                     }
                     HoverTarget::CellCopyButton(i) => {
-                        let text = state.tab_manager.active_tab().cells[i]
+                        let text = state.session.active_tab().cells[i]
                             .buffer
                             .text()
                             .to_string();
@@ -2215,7 +2215,7 @@ impl ApplicationHandler for App {
                         }
                     }
                     HoverTarget::CellOutputCopyButton(i) => {
-                        let output_text = match &state.tab_manager.active_tab().cells[i].output {
+                        let output_text = match &state.session.active_tab().cells[i].output {
                             CellOutput::None => String::new(),
                             CellOutput::Error(e) => e.clone(),
                             CellOutput::Simplified(s) | CellOutput::Computed(s) => s.clone(),
@@ -2225,22 +2225,22 @@ impl ApplicationHandler for App {
                         }
                     }
                     HoverTarget::CellOutputToggle(i) => {
-                        let cell = &mut state.tab_manager.active_tab_mut().cells[i];
+                        let cell = &mut state.session.active_tab_mut().cells[i];
                         cell.output_collapsed = !cell.output_collapsed;
                         state.sync_active_tab();
                     }
                     HoverTarget::CellDeleteButton(i) => {
                         // Stop shader if playing before removing
-                        let cell = &state.tab_manager.active_tab().cells[i];
+                        let cell = &state.session.active_tab().cells[i];
                         if cell.is_playing {
                             state.renderer.remove_cell_shader(cell.id);
                         }
-                        state.tab_manager.active_tab_mut().remove_cell(i);
+                        state.session.active_tab_mut().remove_cell(i);
                         state.invalidate_lang_cache();
                         state.sync_active_tab();
                     }
                     HoverTarget::AddCellButton => {
-                        state.tab_manager.active_tab_mut().add_cell();
+                        state.session.active_tab_mut().add_cell();
                         state.invalidate_lang_cache();
                         state.sync_active_tab();
                     }
@@ -2314,20 +2314,20 @@ impl ApplicationHandler for App {
                 let shift = state.modifiers.shift_key();
                 let changed = match key_event.logical_key {
                     Key::Named(NamedKey::Backspace) => state
-                        .tab_manager
+                        .session
                         .active_tab_mut()
                         .active_cell_mut()
                         .buffer
                         .backspace(),
                     Key::Named(NamedKey::Delete) => state
-                        .tab_manager
+                        .session
                         .active_tab_mut()
                         .active_cell_mut()
                         .buffer
                         .delete(),
                     Key::Named(NamedKey::Enter) => {
                         state
-                            .tab_manager
+                            .session
                             .active_tab_mut()
                             .active_cell_mut()
                             .buffer
@@ -2336,7 +2336,7 @@ impl ApplicationHandler for App {
                     }
                     Key::Named(NamedKey::Tab) => {
                         state
-                            .tab_manager
+                            .session
                             .active_tab_mut()
                             .active_cell_mut()
                             .buffer
@@ -2344,37 +2344,37 @@ impl ApplicationHandler for App {
                         true
                     }
                     Key::Named(NamedKey::ArrowLeft) => state
-                        .tab_manager
+                        .session
                         .active_tab_mut()
                         .active_cell_mut()
                         .buffer
                         .move_left(shift),
                     Key::Named(NamedKey::ArrowRight) => state
-                        .tab_manager
+                        .session
                         .active_tab_mut()
                         .active_cell_mut()
                         .buffer
                         .move_right(shift),
                     Key::Named(NamedKey::ArrowUp) => state
-                        .tab_manager
+                        .session
                         .active_tab_mut()
                         .active_cell_mut()
                         .buffer
                         .move_up(shift),
                     Key::Named(NamedKey::ArrowDown) => state
-                        .tab_manager
+                        .session
                         .active_tab_mut()
                         .active_cell_mut()
                         .buffer
                         .move_down(shift),
                     Key::Named(NamedKey::Home) => state
-                        .tab_manager
+                        .session
                         .active_tab_mut()
                         .active_cell_mut()
                         .buffer
                         .move_home(shift),
                     Key::Named(NamedKey::End) => state
-                        .tab_manager
+                        .session
                         .active_tab_mut()
                         .active_cell_mut()
                         .buffer
@@ -2387,7 +2387,7 @@ impl ApplicationHandler for App {
                             for c in text.chars() {
                                 if !c.is_control() {
                                     state
-                                        .tab_manager
+                                        .session
                                         .active_tab_mut()
                                         .active_cell_mut()
                                         .buffer
@@ -2403,7 +2403,7 @@ impl ApplicationHandler for App {
 
                 if changed {
                     let key_start = Instant::now();
-                    state.tab_manager.active_tab_mut().mark_modified();
+                    state.session.active_tab_mut().mark_modified();
                     log::debug!(
                         "[perf] --- KEYSTROKE --- (1st sync: text changed, no highlight spans yet)"
                     );
@@ -2491,7 +2491,7 @@ impl ApplicationHandler for App {
         // them in its `pending_reduce` map but no one's pumping it). On
         // tab switch we clear pending on both ends, so this is fine.
         let updated = state
-            .tab_manager
+            .session
             .active_tab_mut()
             .notebook
             .tick();
@@ -2539,17 +2539,17 @@ impl ApplicationHandler for App {
                     }
                     match kind {
                         DialogKind::Open => {
-                            let old = state.tab_manager.active_index;
+                            let old = state.session.active_index;
                             state.renderer.stash_tab_shaders(old);
-                            if let Err(e) = state.tab_manager.open_file(&path) {
+                            if let Err(e) = state.session.open_file(&path) {
                                 log::error!("Failed to open file: {}", e);
                             } else {
-                                let new_idx = state.tab_manager.active_index;
+                                let new_idx = state.session.active_index;
                                 state.switch_tab_axis(old, new_idx);
                             }
                         }
                         DialogKind::Save => {
-                            if let Err(e) = state.tab_manager.active_tab_mut().save_as(&path) {
+                            if let Err(e) = state.session.active_tab_mut().save_as(&path) {
                                 log::error!("Failed to save file: {}", e);
                             }
                         }

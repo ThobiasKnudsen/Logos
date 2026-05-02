@@ -28,7 +28,7 @@ pub use cell::{CellMessage, CellOutcome, CellState, NotebookCell};
 #[allow(unused_imports)]
 pub use diagnostic::{Diagnostic, Severity, Span};
 #[allow(unused_imports)]
-pub use reduce_backend::{NoReduce, ReduceBackend, ReduceServiceBackend, SharedReduce};
+pub use reduce_backend::{NoReduce, ReduceBackend, SharedReduce};
 #[allow(unused_imports)]
 pub use shader::{Access, BindingSpec, DispatchKind, ScalarType, ShaderSpec, SizeSpec};
 

@@ -310,7 +310,6 @@ impl ReduceSession {
         self.eval(&stmt)
     }
 
-    #[allow(dead_code)]
     pub fn set_switch(&self, name: &str, on: bool) -> Result<(), String> {
         let c_name = CString::new(name).map_err(|e| format!("Invalid switch name: {}", e))?;
         let val = if on { 1 } else { 0 };
@@ -343,21 +342,6 @@ mod tests {
 
     // CSL has global state and can only be initialized once per process.
     // All tests must live in a single #[test] function that shares one session.
-
-    /// Helper: assert that the REDUCE result contains `expected`.
-    #[allow(dead_code)]
-    fn assert_simplify(session: &ReduceSession, input: &str, expected: &str) {
-        let result = session
-            .simplify(input)
-            .unwrap_or_else(|e| panic!("simplify({:?}) failed: {}", input, e));
-        assert!(
-            result.contains(expected),
-            "simplify({:?}): expected {:?} in {:?}",
-            input,
-            expected,
-            result,
-        );
-    }
 
     /// Helper: assert the REDUCE result exactly equals `expected`.
     fn assert_simplify_eq(session: &ReduceSession, input: &str, expected: &str) {

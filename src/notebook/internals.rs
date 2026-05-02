@@ -1,8 +1,8 @@
 //! Helpers for the notebook pipeline — text-level binding extraction, CAS
 //! call detection, and REDUCE expression preparation.
 //!
-//! These mirror the helpers currently in `app.rs`. Step 2 of the refactor
-//! will consolidate by deleting the `app.rs` copies and importing from here.
+//! These were moved here from `app.rs` during the Notebook migration;
+//! the originals are gone, so this module is the sole owner.
 
 use crate::lang::reduce::translate;
 

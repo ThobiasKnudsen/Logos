@@ -34,13 +34,6 @@ impl Value {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn as_array(&self) -> Result<&Vec<f64>, String> {
-        match self {
-            Value::Array(a) => Ok(a),
-            other => Err(format!("Expected array, got {:?}", other)),
-        }
-    }
 }
 
 impl std::fmt::Display for Value {

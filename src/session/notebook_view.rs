@@ -104,10 +104,11 @@ impl NotebookView {
         self.is_modified = true;
     }
 
-    /// Push every cell's current buffer text into the notebook. App writes
-    /// directly to `cell.buffer` per keystroke; the notebook isn't told
-    /// until something needs it (typically right before `notebook.play`).
-    /// Step 3 will replace this with a reactive flow.
+    /// Push every cell's current buffer text into the notebook. The UI
+    /// writes directly to `cell.buffer` per keystroke; the notebook is
+    /// only told about new text when something needs it — typically right
+    /// before `notebook.play`. (Phase B of the cleanup will collapse
+    /// `Buffer` into `NotebookCell` and make this a no-op.)
     pub fn sync_texts_to_notebook(&mut self) {
         for (i, cell) in self.cells.iter().enumerate() {
             self.notebook.set_text(i, cell.buffer.text());
