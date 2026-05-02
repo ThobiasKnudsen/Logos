@@ -64,9 +64,6 @@ impl ReduceBackend for MockReduce {
     fn has_pending(&self) -> bool {
         !self.state.lock().unwrap().inflight.is_empty()
     }
-    fn clear_pending(&mut self) {
-        self.state.lock().unwrap().inflight.clear();
-    }
 }
 
 /// Drop-everything backend for tests that don't reach the REDUCE path.
@@ -83,9 +80,6 @@ impl ReduceBackend for NullReduceBackend {
     }
     fn has_pending(&self) -> bool {
         self.pending > 0
-    }
-    fn clear_pending(&mut self) {
-        self.pending = 0;
     }
 }
 
@@ -402,7 +396,7 @@ fn parse_error_is_stored_as_diagnostic_with_span() {
     let diags = &nb.cell(i).outcome.diagnostics;
     assert!(!diags.is_empty(), "expected at least one diagnostic");
     let d = &diags[0];
-    assert!(matches!(d.severity, super::Severity::Error));
+    assert!(matches!(d.severity, super::diagnostic::Severity::Error));
     // Span at minimum points somewhere in the source.
     assert!(d.span.start_line == 0 || d.span.end_line >= d.span.start_line);
 }

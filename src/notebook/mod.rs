@@ -13,11 +13,6 @@
 //! frontend, or anywhere else. The UI shell that wraps this is `NotebookView`
 //! (added in a later refactor step).
 
-// Public types here form a deliberate API surface — fields and variants the
-// renderer / future CLI / future JIT pipeline are expected to consume.
-// Dead-code analysis can't see those callers yet.
-#![allow(dead_code)]
-
 mod cell;
 mod diagnostic;
 mod internals;
@@ -25,12 +20,13 @@ mod reduce_backend;
 mod shader;
 
 pub use cell::{CellMessage, CellOutcome, CellState, NotebookCell};
-#[allow(unused_imports)]
-pub use diagnostic::{Diagnostic, Severity, Span};
-#[allow(unused_imports)]
+pub use diagnostic::{Diagnostic, Span};
 pub use reduce_backend::{NoReduce, ReduceBackend, SharedReduce};
-#[allow(unused_imports)]
-pub use shader::{Access, BindingSpec, DispatchKind, ScalarType, ShaderSpec, SizeSpec};
+pub use shader::{DispatchKind, ShaderSpec};
+// `Severity`, `Access`, `BindingSpec`, `ScalarType`, `SizeSpec` stay in
+// their sub-modules. Re-export them at this level once a consumer (UI
+// renderer for diagnostics, parallel/Monte-Carlo emission for bindings)
+// actually wants them.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -69,7 +65,6 @@ enum ReducePurpose {
 }
 
 struct PendingReduce {
-    cell_id: usize,
     purpose: ReducePurpose,
 }
 
@@ -104,6 +99,9 @@ impl Notebook {
         self.cells.len()
     }
 
+    /// Currently only used by tests; here as the obvious counterpart to
+    /// `len()`.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.cells.is_empty()
     }
@@ -136,6 +134,11 @@ impl Notebook {
 
     // ─── writes ────────────────────────────────────────────────────────────
 
+    /// Replace a cell's text. Currently only used by tests; the UI
+    /// mutates the buffer directly via `cell_mut().buffer`. Kept as the
+    /// programmatic equivalent so non-UI callers (CLI, scripts) don't
+    /// have to know about `Buffer`.
+    #[allow(dead_code)]
     pub fn set_text(&mut self, idx: usize, text: &str) {
         if idx >= self.cells.len() {
             return;
@@ -144,6 +147,10 @@ impl Notebook {
         self.cells[idx].invalidate_ast();
     }
 
+    /// Programmatic plot-color setter. Currently no UI binding (color is
+    /// fixed at cell creation); kept as obvious public API for future
+    /// theme/colorbar wiring.
+    #[allow(dead_code)]
     pub fn set_plot_color(&mut self, idx: usize, color: Rgba) {
         if idx >= self.cells.len() {
             return;
@@ -177,6 +184,8 @@ impl Notebook {
 
     /// Re-run cell `idx`. Stops every later cell that's currently playing —
     /// the user is acknowledging that downstream results may now be invalid.
+    /// (The UI doesn't bind a "replay" button yet; tests cover this.)
+    #[allow(dead_code)]
     pub fn replay(&mut self, idx: usize) {
         if idx >= self.cells.len() {
             return;
@@ -211,7 +220,10 @@ impl Notebook {
         updated
     }
 
-    /// True if there's at least one REDUCE round-trip outstanding.
+    /// True if there's at least one REDUCE round-trip outstanding. Tests
+    /// use this to drive their poll loops; production checks the shared
+    /// `ReduceService::has_pending` directly.
+    #[allow(dead_code)]
     pub fn has_pending(&self) -> bool {
         self.reduce.has_pending() || !self.pending_reduce.is_empty()
     }
@@ -318,7 +330,6 @@ impl Notebook {
             self.pending_reduce.insert(
                 cell_id,
                 PendingReduce {
-                    cell_id,
                     purpose: ReducePurpose::InlineCas,
                 },
             );
@@ -359,7 +370,6 @@ impl Notebook {
                 self.pending_reduce.insert(
                     cell_id,
                     PendingReduce {
-                        cell_id,
                         purpose: ReducePurpose::Print { is_equation },
                     },
                 );
@@ -438,7 +448,6 @@ impl Notebook {
                     self.pending_reduce.insert(
                         cell_id,
                         PendingReduce {
-                            cell_id,
                             purpose: ReducePurpose::InlineCas,
                         },
                     );
@@ -530,7 +539,9 @@ impl Notebook {
     }
 
     /// Flat list of `(cell_index, diagnostic)` across every cell. Cheap
-    /// snapshot for a top-level "show all errors" view.
+    /// snapshot for a top-level "show all errors" view; the UI doesn't
+    /// bind to this yet.
+    #[allow(dead_code)]
     pub fn diagnostics(&self) -> Vec<(usize, &Diagnostic)> {
         let mut out = Vec::new();
         for (i, cell) in self.cells.iter().enumerate() {

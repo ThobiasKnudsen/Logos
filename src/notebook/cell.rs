@@ -82,7 +82,9 @@ pub struct NotebookCell {
     /// (no separate mirror to keep in sync).
     pub buffer: Buffer,
     /// Color for non-RGBA plots produced by this cell. Mutable via
-    /// `Notebook::set_plot_color`.
+    /// `Notebook::set_plot_color`. The renderer doesn't read this yet —
+    /// every plot uses the theme's primary color today.
+    #[allow(dead_code)]
     pub plot_color: Rgba,
     pub state: CellState,
     pub outcome: CellOutcome,
@@ -116,15 +118,10 @@ impl NotebookCell {
         }
     }
 
-    /// Convenience: read the buffer's text. Mostly useful in tests; UI
-    /// code generally wants `&self.buffer` so it can read cursor/selection
-    /// alongside text.
-    pub fn text(&self) -> &str {
-        self.buffer.text()
-    }
-
     /// True iff the cell has been played and its text has changed since.
     /// Idle cells are never stale; a stale cell shows the replay affordance.
+    /// (UI replay-button binding is future work; tests cover this today.)
+    #[allow(dead_code)]
     pub fn is_stale(&self) -> bool {
         match &self.last_played_text {
             Some(t) => t.as_str() != self.buffer.text(),

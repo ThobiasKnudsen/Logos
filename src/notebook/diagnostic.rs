@@ -8,7 +8,6 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Severity {
     Error,
-    Warning,
 }
 
 /// 0-indexed character span within a single source string.
@@ -36,17 +35,16 @@ impl Span {
         }
     }
 
-    /// Zero-width span at a single byte offset.
-    pub fn point(source: &str, offset: usize) -> Self {
-        Self::from_byte_range(source, offset, offset)
-    }
-
     /// Span covering the whole source (line 0, col 0 → end).
     pub fn whole(source: &str) -> Self {
         Self::from_byte_range(source, 0, source.len())
     }
 }
 
+// `severity`/`message`/`span` are read by the future UI red-squiggle path
+// (the notebook's `error()` stores them; the renderer hasn't started reading
+// yet). Keep the fields public so that wiring is a one-line change.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
     pub severity: Severity,
@@ -58,14 +56,6 @@ impl Diagnostic {
     pub fn error(message: impl Into<String>, span: Span) -> Self {
         Self {
             severity: Severity::Error,
-            message: message.into(),
-            span,
-        }
-    }
-
-    pub fn warning(message: impl Into<String>, span: Span) -> Self {
-        Self {
-            severity: Severity::Warning,
             message: message.into(),
             span,
         }
@@ -95,8 +85,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn point_at_zero() {
-        let s = Span::point("hello", 0);
+    fn zero_width_at_zero() {
+        let s = Span::from_byte_range("hello", 0, 0);
         assert_eq!(s.start_line, 0);
         assert_eq!(s.start_col, 0);
         assert_eq!(s.end_line, 0);
@@ -117,7 +107,8 @@ mod tests {
     fn span_counts_chars_not_bytes() {
         // 'π' is 2 bytes; column should be 1, not 2.
         let src = "πq";
-        let s = Span::point(src, 'π'.len_utf8());
+        let off = 'π'.len_utf8();
+        let s = Span::from_byte_range(src, off, off);
         assert_eq!(s.start_line, 0);
         assert_eq!(s.start_col, 1);
     }
@@ -125,7 +116,7 @@ mod tests {
     #[test]
     fn offset_past_end_clamps() {
         let src = "abc";
-        let s = Span::point(src, 9999);
+        let s = Span::from_byte_range(src, 9999, 9999);
         assert_eq!(s.start_line, 0);
         assert_eq!(s.start_col, 3);
     }

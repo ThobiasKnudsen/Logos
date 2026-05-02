@@ -18,8 +18,6 @@ pub trait ReduceBackend {
     fn try_recv(&mut self) -> Option<ReduceResponse>;
 
     fn has_pending(&self) -> bool;
-
-    fn clear_pending(&mut self);
 }
 
 /// Placeholder backend that drops every submission and never returns a
@@ -39,7 +37,6 @@ impl ReduceBackend for NoReduce {
     fn has_pending(&self) -> bool {
         false
     }
-    fn clear_pending(&mut self) {}
 }
 
 /// Backend that funnels into a single shared `ReduceService` via
@@ -70,8 +67,5 @@ impl ReduceBackend for SharedReduce {
     }
     fn has_pending(&self) -> bool {
         self.inner.borrow().has_pending()
-    }
-    fn clear_pending(&mut self) {
-        self.inner.borrow_mut().clear_pending()
     }
 }
