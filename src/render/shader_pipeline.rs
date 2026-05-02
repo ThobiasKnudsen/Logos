@@ -106,7 +106,9 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
 
 pub struct ShaderPipelineManager {
     pipelines: Vec<CellPipeline>,
-    stashed: HashMap<usize, Vec<CellPipeline>>,
+    /// Pipelines for non-active tabs, keyed by stable `tab_id` (not index —
+    /// indices shift when tabs are closed).
+    stashed: HashMap<u64, Vec<CellPipeline>>,
     vertex_shader: wgpu::ShaderModule,
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
@@ -283,24 +285,32 @@ impl ShaderPipelineManager {
         !self.pipelines.is_empty()
     }
 
-    /// Stash current pipelines for a tab (pause rendering without destroying GPU resources).
-    pub fn stash(&mut self, tab_index: usize) {
+    /// Stash current pipelines for a tab (pause rendering without destroying
+    /// GPU resources). Always clears `pipelines`, even if empty, so the
+    /// caller can rely on the active list being empty afterwards.
+    pub fn stash(&mut self, tab_id: u64) {
         let pipelines = std::mem::take(&mut self.pipelines);
         if !pipelines.is_empty() {
-            self.stashed.insert(tab_index, pipelines);
+            self.stashed.insert(tab_id, pipelines);
         }
     }
 
-    /// Restore previously stashed pipelines for a tab.
-    pub fn restore(&mut self, tab_index: usize) {
-        if let Some(pipelines) = self.stashed.remove(&tab_index) {
-            self.pipelines = pipelines;
-        }
+    /// Restore previously stashed pipelines for a tab. Replaces the active
+    /// list — callers must `stash` the outgoing tab first or its pipelines
+    /// will leak (and keep rendering).
+    pub fn restore(&mut self, tab_id: u64) {
+        self.pipelines = self.stashed.remove(&tab_id).unwrap_or_default();
     }
 
     /// Drop stashed pipelines for a tab (e.g. when closing it).
-    pub fn drop_stashed(&mut self, tab_index: usize) {
-        self.stashed.remove(&tab_index);
+    pub fn drop_stashed(&mut self, tab_id: u64) {
+        self.stashed.remove(&tab_id);
+    }
+
+    /// Clear the active pipelines without stashing them — used when closing
+    /// the active tab, since its pipelines have nowhere to go.
+    pub fn clear_active(&mut self) {
+        self.pipelines.clear();
     }
 
     /// Render all active shader pipelines into the given surface view.

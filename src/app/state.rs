@@ -357,6 +357,49 @@ impl AppState {
         }
     }
 
+    /// Close the tab at `idx`. Handles GPU shader cleanup so a closed tab's
+    /// pipelines can't keep rendering, and pending REDUCE work is discarded
+    /// so we don't keep redrawing for a tab that no longer exists.
+    pub(super) fn close_tab_at(&mut self, idx: usize) {
+        if idx >= self.session.tabs.len() {
+            return;
+        }
+        let was_active = idx == self.session.active_index;
+        let closing_id = self.session.tabs[idx].tab_id;
+        if was_active {
+            // The active tab's pipelines live in the renderer's active list,
+            // not in `stashed`, so dropping `stashed[id]` is not enough.
+            self.renderer.clear_active_shaders();
+            // Discard in-flight REDUCE responses too — they were destined
+            // for cells that are about to be dropped.
+            self.reduce_service.borrow_mut().clear_pending();
+        } else {
+            self.renderer.drop_stashed_tab_shaders(closing_id);
+        }
+        self.session.close_tab(idx);
+        if was_active {
+            let new_idx = self.session.active_index;
+            let new_id = self.session.tabs[new_idx].tab_id;
+            self.renderer.restore_tab_shaders(new_id);
+            if let Some(tab) = self.session.tabs.get(new_idx) {
+                if let Some([xmin, xmax, ymin, ymax]) = tab.axis_bounds {
+                    self.render_area.axis_x_min = xmin;
+                    self.render_area.axis_x_max = xmax;
+                    self.render_area.axis_y_min = ymin;
+                    self.render_area.axis_y_max = ymax;
+                }
+            }
+            self.invalidate_lang_cache();
+        }
+        self.sync_active_tab();
+    }
+
+    /// Convenience for paths that always close the currently-active tab
+    /// (Ctrl+W, File → Close Tab).
+    pub(super) fn close_active_tab(&mut self) {
+        self.close_tab_at(self.session.active_index);
+    }
+
     /// Save current axis bounds to old tab, restore from new tab (or reset to default).
     pub(super) fn switch_tab_axis(&mut self, old_tab: usize, new_tab: usize) {
         if let Some(tab) = self.session.tabs.get_mut(old_tab) {
@@ -479,7 +522,8 @@ impl AppState {
         match (menu_idx, item_idx) {
             (0, 0) => {
                 let old = self.session.active_index;
-                self.renderer.stash_tab_shaders(old);
+                let old_id = self.session.tabs[old].tab_id;
+                self.renderer.stash_tab_shaders(old_id);
                 let new_idx = self.session.new_tab();
                 self.switch_tab_axis(old, new_idx);
                 self.sync_active_tab();
@@ -505,20 +549,7 @@ impl AppState {
                 }
             }
             (0, 4) => {
-                let idx = self.session.active_index;
-                self.renderer.drop_stashed_tab_shaders(idx);
-                self.session.close_tab(idx);
-                let new_idx = self.session.active_index;
-                self.renderer.restore_tab_shaders(new_idx);
-                if let Some(tab) = self.session.tabs.get(new_idx) {
-                    if let Some([xmin, xmax, ymin, ymax]) = tab.axis_bounds {
-                        self.render_area.axis_x_min = xmin;
-                        self.render_area.axis_x_max = xmax;
-                        self.render_area.axis_y_min = ymin;
-                        self.render_area.axis_y_max = ymax;
-                    }
-                }
-                self.sync_active_tab();
+                self.close_active_tab();
             }
             (0, 5) => {
                 event_loop.exit();
@@ -551,7 +582,8 @@ impl AppState {
                         .map(|m| m.label)
                         .unwrap_or("Example");
                     let old = self.session.active_index;
-                    self.renderer.stash_tab_shaders(old);
+                    let old_id = self.session.tabs[old].tab_id;
+                    self.renderer.stash_tab_shaders(old_id);
                     let new_idx = self.session.new_tab();
                     self.switch_tab_axis(old, new_idx);
                     self.session.active_tab_mut().name = name.to_string();
@@ -677,7 +709,8 @@ impl AppState {
             Key::Character(c) if c.as_str() == "n" => {
                 self.close_menu();
                 let old = self.session.active_index;
-                self.renderer.stash_tab_shaders(old);
+                let old_id = self.session.tabs[old].tab_id;
+                self.renderer.stash_tab_shaders(old_id);
                 let new_idx = self.session.new_tab();
                 self.switch_tab_axis(old, new_idx);
                 self.sync_active_tab();
@@ -708,20 +741,7 @@ impl AppState {
             }
             Key::Character(c) if c.as_str() == "w" => {
                 self.close_menu();
-                let idx = self.session.active_index;
-                self.renderer.drop_stashed_tab_shaders(idx);
-                self.session.close_tab(idx);
-                let new_idx = self.session.active_index;
-                self.renderer.restore_tab_shaders(new_idx);
-                if let Some(tab) = self.session.tabs.get(new_idx) {
-                    if let Some([xmin, xmax, ymin, ymax]) = tab.axis_bounds {
-                        self.render_area.axis_x_min = xmin;
-                        self.render_area.axis_x_max = xmax;
-                        self.render_area.axis_y_min = ymin;
-                        self.render_area.axis_y_max = ymax;
-                    }
-                }
-                self.sync_active_tab();
+                self.close_active_tab();
                 true
             }
             Key::Character(c) if c.as_str() == "q" => {

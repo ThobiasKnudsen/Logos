@@ -34,16 +34,22 @@ impl Renderer {
         (self.device.clone(), self.queue.clone())
     }
 
-    pub fn stash_tab_shaders(&mut self, tab_index: usize) {
-        self.shader_pipeline.stash(tab_index);
+    pub fn stash_tab_shaders(&mut self, tab_id: u64) {
+        self.shader_pipeline.stash(tab_id);
     }
 
-    pub fn restore_tab_shaders(&mut self, tab_index: usize) {
-        self.shader_pipeline.restore(tab_index);
+    pub fn restore_tab_shaders(&mut self, tab_id: u64) {
+        self.shader_pipeline.restore(tab_id);
     }
 
-    pub fn drop_stashed_tab_shaders(&mut self, tab_index: usize) {
-        self.shader_pipeline.drop_stashed(tab_index);
+    pub fn drop_stashed_tab_shaders(&mut self, tab_id: u64) {
+        self.shader_pipeline.drop_stashed(tab_id);
+    }
+
+    /// Drop all currently-active shader pipelines (no stash). Used when the
+    /// active tab is being closed — its pipelines have nowhere to go.
+    pub fn clear_active_shaders(&mut self) {
+        self.shader_pipeline.clear_active();
     }
 
     pub fn has_active_shaders(&self) -> bool {

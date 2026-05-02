@@ -3,6 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +11,15 @@ use crate::lang::reduce::service::ReduceService;
 use crate::lang::symbolic::{NoSimplifier, SymbolicSimplifier};
 use crate::notebook::{Notebook, NotebookCell, ReduceSimplifier, SharedReduce};
 use crate::ui::theme::Rgba;
+
+/// Process-global tab id counter. Used as a stable key for the renderer's
+/// stashed shader pipelines so a tab's GPU state survives index shifts when
+/// other tabs are closed.
+static NEXT_TAB_ID: AtomicU64 = AtomicU64::new(1);
+
+pub fn alloc_tab_id() -> u64 {
+    NEXT_TAB_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// On-disk JSON representation of one notebook cell. The notebook itself is
 /// saved as a `Vec<CellRecord>` (a JSON array at the document root).
@@ -23,6 +33,10 @@ struct CellRecord {
 /// headless `Notebook` engine that owns the cells. The renderer reads cells
 /// directly off the engine via `cell()` / `cells()` accessors.
 pub struct NotebookView {
+    /// Stable per-tab identity, independent of position in `Session::tabs`.
+    /// Used as the key for stashed GPU pipelines so closing tab N doesn't
+    /// orphan tab N+1's stashed shaders.
+    pub tab_id: u64,
     pub name: String,
     pub file_path: Option<PathBuf>,
     pub active_cell_index: usize,
@@ -41,6 +55,7 @@ impl NotebookView {
         let mut notebook = build_notebook(reduce);
         notebook.add_cell("");
         Self {
+            tab_id: alloc_tab_id(),
             name,
             file_path: None,
             active_cell_index: 0,
@@ -68,6 +83,7 @@ impl NotebookView {
             }
         }
         Ok(Self {
+            tab_id: alloc_tab_id(),
             name,
             file_path: Some(path.to_path_buf()),
             active_cell_index: 0,

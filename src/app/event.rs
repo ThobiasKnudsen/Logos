@@ -589,22 +589,7 @@ impl ApplicationHandler for App {
 
                 for (i, hit) in state.tab_hit_rects.iter().enumerate() {
                     if point_in_rect(mx, my, &hit.close) {
-                        state.renderer.drop_stashed_tab_shaders(i);
-                        let was_active = i == state.session.active_index;
-                        state.session.close_tab(i);
-                        if was_active {
-                            let new_idx = state.session.active_index;
-                            state.renderer.restore_tab_shaders(new_idx);
-                            if let Some(tab) = state.session.tabs.get(new_idx) {
-                                if let Some([xmin, xmax, ymin, ymax]) = tab.axis_bounds {
-                                    state.render_area.axis_x_min = xmin;
-                                    state.render_area.axis_x_max = xmax;
-                                    state.render_area.axis_y_min = ymin;
-                                    state.render_area.axis_y_max = ymax;
-                                }
-                            }
-                        }
-                        state.sync_active_tab();
+                        state.close_tab_at(i);
                         return;
                     }
                 }
@@ -613,8 +598,10 @@ impl ApplicationHandler for App {
                     if point_in_rect(mx, my, &hit.full) {
                         let old = state.session.active_index;
                         if old != i {
-                            state.renderer.stash_tab_shaders(old);
-                            state.renderer.restore_tab_shaders(i);
+                            let old_id = state.session.tabs[old].tab_id;
+                            let new_id = state.session.tabs[i].tab_id;
+                            state.renderer.stash_tab_shaders(old_id);
+                            state.renderer.restore_tab_shaders(new_id);
                             state.switch_tab_axis(old, i);
                         }
                         state.session.set_active(i);
@@ -632,7 +619,8 @@ impl ApplicationHandler for App {
 
                 if point_in_rect(mx, my, &state.plus_button_rect) {
                     let old = state.session.active_index;
-                    state.renderer.stash_tab_shaders(old);
+                    let old_id = state.session.tabs[old].tab_id;
+                    state.renderer.stash_tab_shaders(old_id);
                     let new_idx = state.session.new_tab();
                     state.switch_tab_axis(old, new_idx);
                     state.sync_active_tab();
@@ -990,7 +978,8 @@ impl ApplicationHandler for App {
                     match kind {
                         DialogKind::Open => {
                             let old = state.session.active_index;
-                            state.renderer.stash_tab_shaders(old);
+                            let old_id = state.session.tabs[old].tab_id;
+                            state.renderer.stash_tab_shaders(old_id);
                             if let Err(e) = state.session.open_file(&path) {
                                 log::error!("Failed to open file: {}", e);
                             } else {
