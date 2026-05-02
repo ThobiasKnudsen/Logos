@@ -170,26 +170,6 @@ fn extract_binding(text: &str, bindings: &mut Vec<(String, String)>) {
     }
 }
 
-/// Concatenate the effective source of cells `[0..=cell_index]` — using each
-/// cell's simplified output when present. Used for accurate row/col error
-/// reporting against the user's actual visible source.
-pub(super) fn build_combined_source(cells: &[NotebookCell], cell_index: usize) -> String {
-    let mut s = String::new();
-    for (i, cell) in cells.iter().enumerate() {
-        if i > cell_index {
-            break;
-        }
-        if !s.is_empty() {
-            s.push('\n');
-        }
-        match &cell.outcome.message {
-            Some(CellMessage::Simplified(out)) => s.push_str(out),
-            _ => s.push_str(&cell.text),
-        }
-    }
-    s
-}
-
 /// Pull the inner argument of `fn_name(...)` from `text`, paren-balanced.
 pub(super) fn extract_call_arg(text: &str, fn_name: &str) -> Option<String> {
     let prefix = format!("{}(", fn_name);

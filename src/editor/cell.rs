@@ -21,7 +21,6 @@ pub struct CodeCell {
     pub output_collapsed: bool,
     pub contracted_editor_h: Option<f32>,
     pub print_pending: bool,
-    pub print_is_equation: bool,
     ast_cache: RefCell<Option<(String, AstNode)>>,
 }
 
@@ -35,7 +34,6 @@ impl CodeCell {
             output_collapsed: false,
             contracted_editor_h: None,
             print_pending: false,
-            print_is_equation: false,
             ast_cache: RefCell::new(None),
         }
     }

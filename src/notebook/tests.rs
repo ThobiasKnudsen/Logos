@@ -154,8 +154,12 @@ fn add_cell_assigns_unique_ids() {
     let mut nb = null_notebook();
     let a = nb.add_cell("x", Rgba::hex(0xffffff));
     let b = nb.add_cell("y", Rgba::hex(0xffffff));
-    assert_eq!(nb.cell(a).id, 0);
-    assert_eq!(nb.cell(b).id, 1);
+    // IDs come from a process-global counter, so we don't assert exact
+    // values — only that they're unique and adjacent in submission order.
+    let ida = nb.cell(a).id;
+    let idb = nb.cell(b).id;
+    assert_ne!(ida, idb);
+    assert_eq!(idb, ida + 1);
 }
 
 #[test]

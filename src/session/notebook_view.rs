@@ -1,10 +1,13 @@
+use std::cell::RefCell;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::editor::CodeCell;
 use crate::lang::ast::AstNode;
-use crate::notebook::{NoReduce, Notebook};
+use crate::lang::reduce::service::ReduceService;
+use crate::notebook::{NoReduce, Notebook, SharedReduce};
 use crate::ui::theme::Rgba;
 
 /// Default plot color for new cells until per-cell coloring is exposed via
@@ -16,52 +19,52 @@ pub struct NotebookView {
     pub file_path: Option<PathBuf>,
     pub cells: Vec<CodeCell>,
     pub active_cell_index: usize,
-    next_cell_id: usize,
     pub is_modified: bool,
-    /// Per-tab axis bounds (saved/restored on tab switch). UI viewport state;
-    /// will move to `NotebookView` in step 3.
+    /// Math-space viewport bounds (xmin, ymin, xmax, ymax). Saved/restored
+    /// on tab switch.
     pub axis_bounds: Option<[f32; 4]>,
-    /// Headless backend that mirrors `cells` for cell text and structure.
-    /// Step 2 keeps this in sync via `add_cell` / `remove_cell` /
-    /// `sync_texts_to_notebook`. Step 3 flips the source of truth so
-    /// `cells` becomes a derived view (or goes away entirely) and the
-    /// real `ReduceServiceBackend` from `App` is wired in.
+    /// Headless engine that runs cells through parse → REDUCE → wgsl_gen →
+    /// interpreter. The source of truth for cell IDs and outcomes; `cells`
+    /// is a UI/buffer view kept in sync per text edit.
     pub notebook: Notebook,
 }
 
 impl NotebookView {
-    pub fn new_untitled(name: String) -> Self {
-        let cell = CodeCell::new(0);
-        let mut notebook = empty_notebook();
-        notebook.add_cell("", Rgba::hex(DEFAULT_PLOT_COLOR));
+    /// Create an empty notebook view sharing `reduce` with the rest of the
+    /// session. Pass `None` for `reduce` in offline contexts (tests, CLI)
+    /// to fall back to a no-op REDUCE backend.
+    pub fn new_untitled(name: String, reduce: Option<Rc<RefCell<ReduceService>>>) -> Self {
+        let mut notebook = build_notebook(reduce);
+        let nb_idx = notebook.add_cell("", Rgba::hex(DEFAULT_PLOT_COLOR));
+        let id = notebook.cell(nb_idx).id;
+        let cell = CodeCell::new(id);
         Self {
             name,
             file_path: None,
             cells: vec![cell],
             active_cell_index: 0,
-            next_cell_id: 1,
             is_modified: false,
             axis_bounds: None,
             notebook,
         }
     }
 
-    pub fn from_file(path: &Path) -> io::Result<Self> {
+    pub fn from_file(path: &Path, reduce: Option<Rc<RefCell<ReduceService>>>) -> io::Result<Self> {
         let contents = fs::read_to_string(path)?;
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Unknown".into());
-        let mut cell = CodeCell::new(0);
+        let mut notebook = build_notebook(reduce);
+        let nb_idx = notebook.add_cell(&contents, Rgba::hex(DEFAULT_PLOT_COLOR));
+        let id = notebook.cell(nb_idx).id;
+        let mut cell = CodeCell::new(id);
         cell.buffer.set_text(&contents);
-        let mut notebook = empty_notebook();
-        notebook.add_cell(&contents, Rgba::hex(DEFAULT_PLOT_COLOR));
         Ok(Self {
             name,
             file_path: Some(path.to_path_buf()),
             cells: vec![cell],
             active_cell_index: 0,
-            next_cell_id: 1,
             is_modified: false,
             axis_bounds: None,
             notebook,
@@ -77,12 +80,10 @@ impl NotebookView {
     }
 
     pub fn add_cell(&mut self) -> usize {
-        let id = self.next_cell_id;
-        self.next_cell_id += 1;
+        let nb_idx = self.notebook.add_cell("", Rgba::hex(DEFAULT_PLOT_COLOR));
+        let id = self.notebook.cell(nb_idx).id;
         let cell = CodeCell::new(id);
         self.cells.push(cell);
-        // Mirror in the notebook with the same default color.
-        self.notebook.add_cell("", Rgba::hex(DEFAULT_PLOT_COLOR));
         let new_index = self.cells.len() - 1;
         self.active_cell_index = new_index;
         self.is_modified = true;
@@ -172,11 +173,15 @@ impl NotebookView {
     }
 }
 
-/// Construct a `Notebook` with no cells, no REDUCE wired, and the default
-/// CPU dispatcher. Used by `Tab` constructors during the step-2 transition;
-/// step 3 replaces this with a shared `ReduceServiceBackend` from `App`.
-fn empty_notebook() -> Notebook {
-    Notebook::new(Box::new(NoReduce), None)
+/// Construct a `Notebook` wired to the shared REDUCE service if one is
+/// provided, otherwise a `NoReduce` placeholder (for tests / CLI contexts
+/// where no REDUCE worker is running).
+fn build_notebook(reduce: Option<Rc<RefCell<ReduceService>>>) -> Notebook {
+    let backend: Box<dyn crate::notebook::ReduceBackend> = match reduce {
+        Some(rc) => Box::new(SharedReduce::new(rc)),
+        None => Box::new(NoReduce),
+    };
+    Notebook::new(backend, None)
 }
 
 #[cfg(test)]
@@ -185,7 +190,7 @@ mod tests {
 
     #[test]
     fn new_untitled_mirrors_one_empty_cell_into_notebook() {
-        let tab = NotebookView::new_untitled("scratch".into());
+        let tab = NotebookView::new_untitled("scratch".into(), None);
         assert_eq!(tab.cells.len(), 1);
         assert_eq!(tab.notebook.len(), 1);
         assert_eq!(tab.notebook.cell(0).text, "");
@@ -193,7 +198,7 @@ mod tests {
 
     #[test]
     fn add_cell_mirrors_into_notebook() {
-        let mut tab = NotebookView::new_untitled("scratch".into());
+        let mut tab = NotebookView::new_untitled("scratch".into(), None);
         tab.add_cell();
         assert_eq!(tab.cells.len(), 2);
         assert_eq!(tab.notebook.len(), 2);
@@ -201,7 +206,7 @@ mod tests {
 
     #[test]
     fn remove_cell_mirrors_into_notebook() {
-        let mut tab = NotebookView::new_untitled("scratch".into());
+        let mut tab = NotebookView::new_untitled("scratch".into(), None);
         tab.add_cell();
         tab.add_cell();
         assert_eq!(tab.cells.len(), 3);
@@ -213,7 +218,7 @@ mod tests {
 
     #[test]
     fn sync_texts_pushes_buffer_state_into_notebook() {
-        let mut tab = NotebookView::new_untitled("scratch".into());
+        let mut tab = NotebookView::new_untitled("scratch".into(), None);
         tab.cells[0].buffer.set_text("plot(y = sin(x))");
         // Before sync, the notebook's text is still empty.
         assert_eq!(tab.notebook.cell(0).text, "");
@@ -223,7 +228,7 @@ mod tests {
 
     #[test]
     fn notebook_can_play_after_text_sync() {
-        let mut tab = NotebookView::new_untitled("scratch".into());
+        let mut tab = NotebookView::new_untitled("scratch".into(), None);
         tab.cells[0].buffer.set_text("plot(y = sin(x))");
         tab.sync_texts_to_notebook();
         tab.notebook.play(0);

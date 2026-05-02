@@ -13,6 +13,11 @@
 //! frontend, or anywhere else. The UI shell that wraps this is `NotebookView`
 //! (added in a later refactor step).
 
+// Public types here form a deliberate API surface — fields and variants the
+// renderer / future CLI / future JIT pipeline are expected to consume.
+// Dead-code analysis can't see those callers yet.
+#![allow(dead_code)]
+
 mod cell;
 mod diagnostic;
 mod internals;
@@ -20,11 +25,24 @@ mod reduce_backend;
 mod shader;
 
 pub use cell::{CellMessage, CellOutcome, CellState, NotebookCell};
+#[allow(unused_imports)]
 pub use diagnostic::{Diagnostic, Severity, Span};
-pub use reduce_backend::{NoReduce, ReduceBackend, ReduceServiceBackend};
+#[allow(unused_imports)]
+pub use reduce_backend::{NoReduce, ReduceBackend, ReduceServiceBackend, SharedReduce};
+#[allow(unused_imports)]
 pub use shader::{Access, BindingSpec, DispatchKind, ScalarType, ShaderSpec, SizeSpec};
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Process-global cell ID counter. Multiple notebooks may share a single
+/// REDUCE service, so cell IDs must be unique across all notebooks for
+/// response routing to work.
+static NEXT_CELL_ID: AtomicUsize = AtomicUsize::new(0);
+
+fn alloc_cell_id() -> usize {
+    NEXT_CELL_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 use crate::lang::ast::AstNode;
 use crate::lang::interpreter::{self, GpuDispatch};
@@ -33,8 +51,8 @@ use crate::lang::{self, highlight};
 use crate::ui::theme::Rgba;
 
 use internals::{
-    build_combined_source, collect_bindings, expand_bindings, extract_call_arg,
-    extract_reduce_expr, find_cas_call, prepare_reduce_print, substitute_reduce_result,
+    collect_bindings, expand_bindings, extract_call_arg, extract_reduce_expr, find_cas_call,
+    prepare_reduce_print, substitute_reduce_result,
 };
 
 /// Why a particular REDUCE round-trip is in flight. Lets `tick()` route the
@@ -57,7 +75,6 @@ struct PendingReduce {
 
 pub struct Notebook {
     cells: Vec<NotebookCell>,
-    next_id: usize,
     reduce: Box<dyn ReduceBackend>,
     /// In-flight REDUCE round-trips, keyed by `cell_id` (not index — indices
     /// shift on `remove_cell`).
@@ -75,7 +92,6 @@ impl Notebook {
     pub fn new(reduce: Box<dyn ReduceBackend>, gpu: Option<Box<dyn GpuDispatch>>) -> Self {
         Self {
             cells: Vec::new(),
-            next_id: 0,
             reduce,
             pending_reduce: HashMap::new(),
             gpu: gpu.unwrap_or_else(|| Box::new(interpreter::CpuFallback)),
@@ -101,8 +117,7 @@ impl Notebook {
     }
 
     pub fn add_cell(&mut self, text: &str, plot_color: Rgba) -> usize {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = alloc_cell_id();
         self.cells.push(NotebookCell::new(id, text, plot_color));
         self.cells.len() - 1
     }
@@ -187,6 +202,14 @@ impl Notebook {
     /// True if there's at least one REDUCE round-trip outstanding.
     pub fn has_pending(&self) -> bool {
         self.reduce.has_pending() || !self.pending_reduce.is_empty()
+    }
+
+    /// Forget every in-flight REDUCE round-trip this notebook is tracking.
+    /// The shared REDUCE service may still receive responses for these
+    /// cells; the notebook will silently drop them since `pending_reduce`
+    /// no longer maps the cell IDs.
+    pub fn clear_pending(&mut self) {
+        self.pending_reduce.clear();
     }
 
     // ─── internals ─────────────────────────────────────────────────────────

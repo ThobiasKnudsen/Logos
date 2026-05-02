@@ -13,7 +13,6 @@ use crate::file_dialog::{DialogKind, DialogResult, FileDialog};
 use crate::lang;
 use crate::lang::lang_service::LangService;
 use crate::lang::reduce::service::ReduceService;
-use crate::lang::reduce::translate;
 use crate::render::RenderAreaParams;
 use crate::render::{CellInfo, CellLayout, Renderer, TabHitRect, TabInfo};
 use crate::session::Session;
@@ -30,6 +29,17 @@ struct WgpuGpuDispatch<'a> {
     queue: &'a wgpu::Queue,
 }
 
+/// Routing decision for `trigger_cell_play`.
+enum PlayPath {
+    /// Combined AST failed to parse.
+    ParseError(String),
+    /// Cell needs `parallel for`/array dispatch — keep the legacy GPU
+    /// interpreter path so we can pass `&Device`/`&Queue` directly.
+    LegacyInterpreter,
+    /// All other cells delegate to `Notebook::play`.
+    Notebook,
+}
+
 impl<'a> lang::interpreter::GpuDispatch for WgpuGpuDispatch<'a> {
     fn dispatch(
         &self,
@@ -39,18 +49,6 @@ impl<'a> lang::interpreter::GpuDispatch for WgpuGpuDispatch<'a> {
     }
 }
 
-/// CAS function names that REDUCE handles but WGSL doesn't.
-const CAS_FUNCTIONS: &[&str] = &[
-    "\u{222B}(",
-    "\u{2202}(",
-    "\u{2146}(",
-    "solve(",
-    "integral(",
-    "derivative(",
-];
-
-/// Find the first CAS function call in `text` and return its byte range.
-///
 /// Extract a human-readable message from a wgpu shader error,
 /// locating the problematic identifier in the user's source if possible.
 fn format_shader_error(raw: &str, source: &str) -> String {
@@ -113,197 +111,10 @@ fn find_ident_offset(source: &str, name: &str) -> Option<usize> {
     None
 }
 
-/// For `x > y*int(x^2, x)` returns `Some((6, 20))` spanning `int(x^2, x)`.
-/// Uses balanced-parenthesis matching. Respects word boundaries.
-fn find_cas_call(text: &str) -> Option<(usize, usize)> {
-    for func in CAS_FUNCTIONS {
-        let mut search_from = 0;
-        while let Some(pos) = text[search_from..].find(func) {
-            let start = search_from + pos;
-            // Check word boundary: char before must not be alphanumeric
-            if start > 0 {
-                let prev = text[..start].chars().last().unwrap();
-                if prev.is_alphanumeric() || prev == '_' {
-                    search_from = start + 1;
-                    continue;
-                }
-            }
-            let paren = start + func.len() - 1; // byte pos of '('
-            let mut depth = 1usize;
-            for (i, ch) in text[paren + 1..].char_indices() {
-                match ch {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            return Some((start, paren + 1 + i + 1));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            break; // unbalanced parens, skip this match
-        }
-    }
-    None
-}
-
-/// Extract the expression to send to REDUCE from a cell's text.
-///
-/// Priority:
-/// 1. If there's a CAS call embedded in a larger expr, extract just that call.
-/// 2. If the whole expr is `y = <expr>`, strip the `y = ` prefix.
-/// 3. Otherwise return the whole text.
-///
-/// Returns `(reduce_input, is_embedded_cas)`.
-fn extract_reduce_expr(cell_text: &str) -> (&str, bool) {
-    let trimmed = cell_text.trim();
-
-    // Check for embedded CAS call in a larger expression
-    if let Some((start, end)) = find_cas_call(trimmed) {
-        let cas_call = &trimmed[start..end];
-        // If the CAS call IS the entire expression (possibly after y=), fall through
-        let stripped = strip_assignment_lhs(trimmed);
-        if stripped.trim() != cas_call {
-            // CAS call is embedded in something larger — extract just the call
-            return (cas_call, true);
-        }
-    }
-
-    // Simple case: strip `y = ` prefix
-    (strip_assignment_lhs(trimmed), false)
-}
-
-/// Strip `y = ` assignment prefix from cell text, returning just the RHS.
-fn strip_assignment_lhs(cell_text: &str) -> &str {
-    let trimmed = cell_text.trim();
-    if let Some(eq_pos) = trimmed.find('=') {
-        if eq_pos > 0
-            && trimmed.get(eq_pos + 1..eq_pos + 2) != Some("=")
-            && !trimmed[..eq_pos].ends_with('!')
-            && !trimmed[..eq_pos].ends_with('<')
-            && !trimmed[..eq_pos].ends_with('>')
-        {
-            let lhs = trimmed[..eq_pos].trim();
-            if !lhs.is_empty() && lhs.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                return trimmed[eq_pos + 1..].trim();
-            }
-        }
-    }
-    trimmed
-}
-
-/// Substitute a REDUCE result back into the original cell text.
-///
-/// If `embedded_cas` is true, replaces the CAS call in-place.
-/// Otherwise handles `y = <result>` reconstruction.
-fn substitute_reduce_result(cell_text: &str, reduce_result: &str, embedded_cas: bool) -> String {
-    let trimmed = cell_text.trim();
-
-    if embedded_cas {
-        if let Some((start, end)) = find_cas_call(trimmed) {
-            let mut out = String::with_capacity(trimmed.len());
-            out.push_str(&trimmed[..start]);
-            out.push('(');
-            out.push_str(reduce_result);
-            out.push(')');
-            out.push_str(&trimmed[end..]);
-            return out;
-        }
-    }
-
-    // Simple y = <result> substitution
-    if let Some(eq_pos) = trimmed.find('=') {
-        if eq_pos > 0
-            && trimmed.get(eq_pos + 1..eq_pos + 2) != Some("=")
-            && !trimmed[..eq_pos].ends_with('!')
-            && !trimmed[..eq_pos].ends_with('<')
-            && !trimmed[..eq_pos].ends_with('>')
-        {
-            let lhs = trimmed[..eq_pos].trim();
-            if !lhs.is_empty() && lhs.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                return format!("{} = {}", lhs, reduce_result);
-            }
-        }
-    }
-    reduce_result.to_string()
-}
-
-/// Collect name→body bindings from preceding cells and lines within the
-/// current cell that appear before the CAS call.
-///
-/// The `:=` operator is treated as textual substitution: `a(x) := x^2` means
-/// "wherever `a` appears, substitute `x^2`". This allows nested expansion:
-/// `ⅆ(v,x)` where `v := ⅆ(a,x)` and `a := x^2` → `ⅆ(ⅆ(x^2,x),x)`.
-fn collect_bindings(
-    cells: &[crate::editor::cell::CodeCell],
-    up_to: usize,
-    cell_text: &str,
-) -> Vec<(String, String)> {
-    use crate::editor::cell::CellOutput;
-
-    let mut bindings = Vec::new();
-
-    // From preceding cells, processed line-by-line so multi-binding cells
-    // contribute every binding (extract_binding only matches the first `:=`).
-    for cell in cells.iter().take(up_to) {
-        let src = match &cell.output {
-            CellOutput::Simplified(s) => s.as_str(),
-            _ => cell.buffer.text(),
-        };
-        for line in src.trim().lines() {
-            extract_binding(line.trim(), &mut bindings);
-        }
-    }
-
-    // From lines within the current cell, up to the first action call
-    // (CAS function, print(), or plot()). Without this, a cell like
-    //   f := x+2*x
-    //   print(f)
-    // would not see its own binding when falling back to REDUCE.
-    let stop = [
-        find_cas_call(cell_text).map(|(s, _)| s),
-        cell_text.find("print("),
-        cell_text.find("plot("),
-    ]
-    .into_iter()
-    .flatten()
-    .min()
-    .unwrap_or(cell_text.len());
-
-    for line in cell_text[..stop].lines() {
-        extract_binding(line.trim(), &mut bindings);
-    }
-
-    bindings
-}
-
-/// Extract a single binding from a line like `name := body` or `name(args) := body`.
-fn extract_binding(text: &str, bindings: &mut Vec<(String, String)>) {
-    if text.is_empty() {
-        return;
-    }
-    let Some(colon_pos) = text.find(":=") else {
-        return;
-    };
-    let lhs = text[..colon_pos].trim();
-    let rhs = text[colon_pos + 2..].trim();
-    if lhs.is_empty() || rhs.is_empty() {
-        return;
-    }
-    let name = if let Some(paren) = lhs.find('(') {
-        lhs[..paren].trim()
-    } else {
-        lhs
-    };
-    if !name.is_empty() {
-        bindings.push((name.to_string(), rhs.to_string()));
-    }
-}
-
-/// Combine the effective source of cells `[0..=cell_index]` into a single string,
-/// using each cell's simplified output when available, otherwise the buffer text.
-/// Used for error reporting (line/col lookup in user source).
+/// Combine the effective source of cells `[0..=cell_index]` into a single
+/// string, using each cell's simplified output when available, otherwise
+/// the buffer text. Used for error reporting (line/col lookup in user
+/// source) on shader compile failures.
 fn build_combined_source(tab: &crate::session::NotebookView, cell_index: usize) -> String {
     use crate::editor::cell::CellOutput;
     let mut s = String::new();
@@ -320,76 +131,6 @@ fn build_combined_source(tab: &crate::session::NotebookView, cell_index: usize) 
         }
     }
     s
-}
-
-/// Extract the argument text from a function call like `print(expr)` or `plot(y=expr)`.
-fn extract_call_arg(text: &str, fn_name: &str) -> Option<String> {
-    let prefix = format!("{}(", fn_name);
-    let start = text.find(&prefix)?;
-    let after = &text[start + prefix.len()..];
-    let mut depth = 1;
-    for (i, c) in after.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(after[..i].to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Expand all bindings in an expression by textual substitution.
-/// Repeats until no more substitutions are possible (fixed-point).
-fn expand_bindings(expr: &str, bindings: &[(String, String)]) -> String {
-    let mut result = expr.to_string();
-    for _ in 0..20 {
-        let mut changed = false;
-        for (name, body) in bindings {
-            let new = replace_at_word_boundaries(&result, name, &format!("({})", body));
-            if new != result {
-                result = new;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    result
-}
-
-/// Replace `word` with `replacement` only at word boundaries.
-fn replace_at_word_boundaries(input: &str, word: &str, replacement: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let mut start = 0;
-    while let Some(idx) = input[start..].find(word) {
-        let abs = start + idx;
-        let before_ok = abs == 0
-            || !input[..abs]
-                .chars()
-                .last()
-                .is_some_and(|c| c.is_alphanumeric() || c == '_');
-        let after_pos = abs + word.len();
-        let after_ok = after_pos >= input.len()
-            || !input[after_pos..]
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_alphanumeric() || c == '_');
-        if before_ok && after_ok {
-            result.push_str(&input[start..abs]);
-            result.push_str(replacement);
-        } else {
-            result.push_str(&input[start..abs + word.len()]);
-        }
-        start = abs + word.len();
-    }
-    result.push_str(&input[start..]);
-    result
 }
 
 // ---------------------------------------------------------------------------
@@ -842,8 +583,9 @@ struct AppState {
     autocomplete: AutocompleteState,
     autocomplete_item_rects: Vec<Rect>,
 
-    // REDUCE CAS integration
-    reduce_service: ReduceService,
+    // REDUCE CAS integration. Shared with every `NotebookView`'s `Notebook`
+    // so all notebooks route through the single process-wide REDUCE worker.
+    reduce_service: std::rc::Rc<std::cell::RefCell<ReduceService>>,
 
     // Background language service (autocomplete symbol extraction)
     lang_service: LangService,
@@ -1675,169 +1417,125 @@ impl AppState {
             || self.is_dragging_cell_v_scroll
     }
 
-    /// Compile and start playing a cell's shader, or run the interpreter
-    /// for array/parallel-for code.
+    /// Drive cell execution through the headless `Notebook` engine, then
+    /// reflect the outcome onto `CodeCell` and the GPU.
     ///
-    /// Routing:
-    /// - If AST contains arrays/parallel for → interpreter (one-shot, result as text)
-    /// - If CAS functions present → REDUCE first, then shader
-    /// - Otherwise → fragment shader (continuous rendering)
+    /// Most cells delegate fully to `notebook.play(idx)` — the notebook
+    /// handles parse, REDUCE submission, WGSL gen, and the simple
+    /// interpreter cases. Cells that need GPU dispatch for `parallel for`
+    /// (array Monte Carlo, etc.) take a legacy path here so the renderer's
+    /// device/queue are reachable without storing 'static GPU handles on
+    /// the notebook.
     fn trigger_cell_play(&mut self, cell_index: usize) {
-        let cell_text;
-        let ast_result;
-        {
-            let tab = self.tab_manager.active_tab();
-            cell_text = tab.cells[cell_index].buffer.text().trim().to_string();
-            ast_result = tab.combined_ast_up_to(cell_index);
-        }
+        // Push current editor text into the notebook so the play sees it.
+        self.tab_manager
+            .active_tab_mut()
+            .sync_texts_to_notebook();
 
-        let ast = match ast_result {
-            Ok(ast) => ast,
-            Err(e) => {
+        // Inspect the combined AST to decide which path to take.
+        let combined_ast = self.tab_manager.active_tab().combined_ast_up_to(cell_index);
+        let path = match &combined_ast {
+            Ok(ast) => {
+                let actions = lang::detect_cell_actions(ast);
+                if !actions.has_action() && lang::needs_interpreter(ast) {
+                    PlayPath::LegacyInterpreter
+                } else {
+                    PlayPath::Notebook
+                }
+            }
+            Err(e) => PlayPath::ParseError(e.clone()),
+        };
+
+        match path {
+            PlayPath::ParseError(e) => {
                 log::error!("Parse error: {}", e);
                 let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
                 cell.output = CellOutput::Error(e);
                 cell.output_collapsed = false;
                 self.sync_active_tab();
-                return;
             }
-        };
-
-        // Detect all print()/plot() actions in the AST
-        let actions = lang::detect_cell_actions(&ast);
-
-        // ── Handle print ────────────────────────────────────
-        if let Some(print_idx) = actions.first_print {
-            let eval_ast = lang::build_print_ast(&ast, print_idx);
-            let (device, queue) = self.renderer.gpu_refs();
-            let gpu = WgpuGpuDispatch { device, queue };
-            match lang::interpreter::eval(&eval_ast, &gpu) {
-                Ok(val) => {
-                    let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
-                    cell.output = CellOutput::Computed(format!("{}", val));
-                    cell.output_collapsed = false;
-                }
-                Err(_) => {
-                    let inner =
-                        extract_call_arg(&cell_text, "print").unwrap_or_else(|| cell_text.clone());
-
-                    let tab = self.tab_manager.active_tab();
-                    let bindings = collect_bindings(&tab.cells, cell_index, &cell_text);
-                    let expanded = expand_bindings(&inner, &bindings);
-
-                    let reduce_expr = translate::to_reduce(&expanded);
-                    let reduce_expr = if let Some(eq_pos) = reduce_expr.find('=') {
-                        if !reduce_expr[..eq_pos].ends_with(':')
-                            && !reduce_expr[..eq_pos].ends_with('<')
-                            && !reduce_expr[..eq_pos].ends_with('>')
-                            && !reduce_expr[..eq_pos].ends_with('!')
-                        {
-                            let lhs = &reduce_expr[..eq_pos];
-                            let rhs = &reduce_expr[eq_pos + 1..];
-                            format!("({}) - ({})", lhs.trim(), rhs.trim())
-                        } else {
-                            reduce_expr
-                        }
-                    } else {
-                        reduce_expr
-                    };
-                    let is_equation = reduce_expr.starts_with('(') && reduce_expr.contains(") - (");
-                    let cell_id;
-                    {
+            PlayPath::LegacyInterpreter => {
+                let ast = combined_ast.unwrap();
+                let (device, queue) = self.renderer.gpu_refs();
+                let gpu = WgpuGpuDispatch { device, queue };
+                match lang::interpreter::eval(&ast, &gpu) {
+                    Ok(val) => {
                         let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
-                        cell_id = cell.id;
-                        cell.output = CellOutput::Computed("…".to_string());
+                        cell.output = CellOutput::Computed(format!("{}", val));
                         cell.output_collapsed = false;
-                        cell.print_pending = true;
-                        cell.print_is_equation = is_equation;
                     }
-                    self.reduce_service.submit(cell_id, Vec::new(), reduce_expr);
+                    Err(e) => {
+                        log::error!("Interpreter error: {}", e);
+                        let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+                        cell.output = CellOutput::Error(e);
+                        cell.output_collapsed = false;
+                    }
                 }
-            }
-
-            if actions.last_plot.is_none() {
                 self.sync_active_tab();
-                return;
+            }
+            PlayPath::Notebook => {
+                self.tab_manager
+                    .active_tab_mut()
+                    .notebook
+                    .play(cell_index);
+                self.sync_cell_from_notebook(cell_index);
+                self.sync_active_tab();
             }
         }
+    }
 
-        // ── Handle plot ─────────────────────────────────────
-        if let Some(plot_idx) = actions.last_plot {
-            let plot_ast = lang::build_plot_ast(&ast, plot_idx);
-            let wgsl = match lang::wgsl_gen::generate(&plot_ast) {
-                Ok(w) => w,
-                Err(e) => {
-                    log::error!("Language pipeline error: {}", e);
-                    let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
-                    cell.output = CellOutput::Error(e);
-                    cell.output_collapsed = false;
-                    self.sync_active_tab();
-                    return;
-                }
-            };
+    /// Reflect notebook cell `cell_index`'s current outcome onto the
+    /// matching `CodeCell` (output text, print_pending, is_playing) and
+    /// GPU-compile the emitted shader if any.
+    ///
+    /// Used by both `trigger_cell_play` (one-shot) and the REDUCE poll
+    /// loop (when iterative-CAS resolution finishes producing a shader).
+    /// Caller is responsible for `sync_active_tab()` afterward.
+    fn sync_cell_from_notebook(&mut self, cell_index: usize) {
+        use crate::notebook::CellMessage;
+        let outcome = self
+            .tab_manager
+            .active_tab()
+            .notebook
+            .cell(cell_index)
+            .outcome
+            .clone();
+
+        let pending = matches!(outcome.message, Some(CellMessage::Pending));
+        let new_output = match &outcome.message {
+            None => CellOutput::None,
+            Some(CellMessage::Pending) => CellOutput::Computed("\u{2026}".to_string()),
+            Some(CellMessage::Computed(s)) => CellOutput::Computed(s.clone()),
+            Some(CellMessage::Simplified(s)) => CellOutput::Simplified(s.clone()),
+            Some(CellMessage::Error(s)) => CellOutput::Error(s.clone()),
+        };
+        {
+            let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
+            cell.output = new_output;
+            cell.print_pending = pending;
+            cell.output_collapsed = false;
+        }
+
+        // GPU compile if the notebook produced a shader.
+        if let Some(shader) = outcome.shader {
             let cell_id = self.tab_manager.active_tab().cells[cell_index].id;
-            match self.renderer.compile_cell_shader(cell_id, &wgsl) {
+            match self.renderer.compile_cell_shader(cell_id, &shader.wgsl) {
                 Ok(()) => {
                     let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
                     cell.is_playing = true;
-                    if actions.first_print.is_none() {
-                        cell.output = CellOutput::None;
-                    }
                 }
                 Err(e) => {
                     log::error!("Shader compilation failed: {}", e);
-                    let source = build_combined_source(self.tab_manager.active_tab(), cell_index);
+                    let source =
+                        build_combined_source(self.tab_manager.active_tab(), cell_index);
                     let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
-                    cell.output = CellOutput::Error(format_shader_error(&e.to_string(), &source));
+                    cell.output =
+                        CellOutput::Error(format_shader_error(&e.to_string(), &source));
                     cell.output_collapsed = false;
+                    cell.is_playing = false;
                 }
             }
-            self.sync_active_tab();
-            return;
         }
-
-        if actions.has_action() {
-            self.sync_active_tab();
-            return;
-        }
-
-        // Route: interpreter path for array/parallel-for code
-        if lang::needs_interpreter(&ast) {
-            let (device, queue) = self.renderer.gpu_refs();
-            let gpu = WgpuGpuDispatch { device, queue };
-            match lang::interpreter::eval(&ast, &gpu) {
-                Ok(val) => {
-                    let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
-                    cell.output = CellOutput::Computed(format!("{}", val));
-                    cell.output_collapsed = false;
-                }
-                Err(e) => {
-                    log::error!("Interpreter error: {}", e);
-                    let cell = &mut self.tab_manager.active_tab_mut().cells[cell_index];
-                    cell.output = CellOutput::Error(e);
-                    cell.output_collapsed = false;
-                }
-            }
-            self.sync_active_tab();
-            return;
-        }
-
-        // CAS path: submit to REDUCE if CAS functions present
-        let has_cas = find_cas_call(&cell_text).is_some();
-        if has_cas && !cell_text.is_empty() {
-            let tab = self.tab_manager.active_tab();
-            let cell_id = tab.cells[cell_index].id;
-            let (reduce_input, _) = extract_reduce_expr(&cell_text);
-            let bindings = collect_bindings(&tab.cells, cell_index, &cell_text);
-            let expanded = expand_bindings(reduce_input, &bindings);
-            let reduce_expr = translate::to_reduce(&expanded);
-            self.reduce_service.submit(cell_id, Vec::new(), reduce_expr);
-            self.sync_active_tab();
-            return;
-        }
-
-        // No action and no special path — nothing to do
-        self.sync_active_tab();
     }
 
     /// Stop playing a cell's shader.
@@ -1863,7 +1561,8 @@ impl ApplicationHandler for App {
         let window = Arc::new(event_loop.create_window(window_attrs).unwrap());
         let renderer = pollster::block_on(Renderer::new(window.clone()));
 
-        let tab_manager = Session::new();
+        let reduce_service = std::rc::Rc::new(std::cell::RefCell::new(ReduceService::new()));
+        let tab_manager = Session::new(Some(reduce_service.clone()));
 
         let mut layout = UiLayout::new();
         let size = window.inner_size();
@@ -1914,7 +1613,7 @@ impl ApplicationHandler for App {
             clipboard: arboard::Clipboard::new().ok(),
             autocomplete: AutocompleteState::new(),
             autocomplete_item_rects: Vec::new(),
-            reduce_service: ReduceService::new(),
+            reduce_service,
             lang_service: LangService::new(),
             cached_user_symbols: Vec::new(),
             last_submitted_texts: Vec::new(),
@@ -2450,7 +2149,13 @@ impl ApplicationHandler for App {
                             state.switch_tab_axis(old, i);
                         }
                         state.tab_manager.set_active(i);
-                        state.reduce_service.clear_pending();
+                        // Clear in-flight REDUCE bookkeeping on both ends —
+                        // shared service and the (now-inactive) tab's notebook.
+                        state.reduce_service.borrow_mut().clear_pending();
+                        let prev = state.tab_manager.tabs.get_mut(old);
+                        if let Some(prev) = prev {
+                            prev.notebook.clear_pending();
+                        }
                         state.invalidate_lang_cache();
                         state.sync_active_tab();
                         return;
@@ -2779,137 +2484,20 @@ impl ApplicationHandler for App {
             state.cached_user_symbols = resp.user_symbols;
         }
 
-        // --- REDUCE: poll for completed responses ---
-        while let Some(resp) = state.reduce_service.try_recv() {
-            let tab = state.tab_manager.active_tab_mut();
-            if let Some(cell_idx) = tab.cells.iter().position(|c| c.id == resp.cell_id) {
-                let simplified = match resp.result {
-                    Ok(text) if !text.is_empty() => Some(translate::from_reduce(&text)),
-                    Ok(_) => {
-                        tab.cells[cell_idx].output = CellOutput::None;
-                        None
-                    }
-                    Err(e) => {
-                        log::error!("REDUCE error for cell {}: {}", resp.cell_id, e);
-                        tab.cells[cell_idx].output = CellOutput::Error(e);
-                        tab.cells[cell_idx].output_collapsed = false;
-                        None
-                    }
-                };
-
-                // Substitute the REDUCE result back into the working text.
-                // Use previous Simplified output if available (for iterative
-                // CAS resolution), otherwise use the original cell text.
-                if let Some(result) = simplified {
-                    if tab.cells[cell_idx].print_pending {
-                        let display = if tab.cells[cell_idx].print_is_equation {
-                            format!("{} = 0", result)
-                        } else {
-                            result
-                        };
-                        tab.cells[cell_idx].output = CellOutput::Computed(display);
-                        tab.cells[cell_idx].output_collapsed = false;
-                        tab.cells[cell_idx].print_pending = false;
-                        tab.cells[cell_idx].print_is_equation = false;
-                        needs_redraw = true;
-                        continue;
-                    }
-
-                    let working_text = match &tab.cells[cell_idx].output {
-                        CellOutput::Simplified(s) => s.clone(),
-                        _ => tab.cells[cell_idx].buffer.text().to_string(),
-                    };
-                    let (_, embedded) = extract_reduce_expr(&working_text);
-                    let substituted = substitute_reduce_result(&working_text, &result, embedded);
-                    tab.cells[cell_idx].output = CellOutput::Simplified(substituted.clone());
-                    tab.cells[cell_idx].output_collapsed = false;
-
-                    // If there are still more CAS calls, expand bindings and
-                    // resubmit to REDUCE (iterative resolution).
-                    if find_cas_call(&substituted).is_some() {
-                        let (next_input, _) = extract_reduce_expr(&substituted);
-                        let bindings = collect_bindings(&tab.cells, cell_idx, &substituted);
-                        let expanded = expand_bindings(next_input, &bindings);
-                        let reduce_expr = translate::to_reduce(&expanded);
-                        let cell_id = resp.cell_id;
-                        state
-                            .reduce_service
-                            .submit(cell_id, Vec::new(), reduce_expr);
-                    } else {
-                        // All CAS calls resolved — check for unsolvable
-                        // results before attempting WGSL compilation.
-
-                        // 1) REDUCE returned the operation unevaluated
-                        //    (e.g. int(sin(cos(x)),x) — couldn't solve).
-                        if let Some(op) = translate::detect_unevaluated_cas(&substituted) {
-                            let msg = format!(
-                                "This {} cannot be computed symbolically. \
-                                 Consider using a numerical method instead.",
-                                op,
-                            );
-                            tab.cells[cell_idx].output = CellOutput::Error(msg);
-                            tab.cells[cell_idx].output_collapsed = false;
-                        }
-                        // 2) Result involves special functions Logos
-                        //    can't evaluate (e.g. fresnel_s, erf).
-                        else {
-                            let special = translate::detect_special_functions(&substituted);
-                            if !special.is_empty() {
-                                let names: Vec<&str> =
-                                    special.iter().map(|(_, desc)| *desc).collect();
-                                let msg = format!(
-                                    "No closed-form solution \u{2014} result requires {}. \
-                                 Consider using a numerical method instead.",
-                                    names.join(", "),
-                                );
-                                tab.cells[cell_idx].output = CellOutput::Error(msg);
-                                tab.cells[cell_idx].output_collapsed = false;
-                            } else {
-                                let mut source = String::new();
-                                for (i, cell) in tab.cells.iter().enumerate() {
-                                    if i > cell_idx {
-                                        break;
-                                    }
-                                    if !source.is_empty() {
-                                        source.push('\n');
-                                    }
-                                    if i == cell_idx {
-                                        source.push_str(&substituted);
-                                    } else if let CellOutput::Simplified(ref s) = cell.output {
-                                        source.push_str(s);
-                                    } else {
-                                        source.push_str(cell.buffer.text());
-                                    }
-                                }
-                                match lang::compile(&source) {
-                                    Ok(wgsl) => {
-                                        let cell_id = tab.cells[cell_idx].id;
-                                        match state.renderer.compile_cell_shader(cell_id, &wgsl) {
-                                            Ok(()) => {
-                                                tab.cells[cell_idx].is_playing = true;
-                                                tab.cells[cell_idx].output = CellOutput::None;
-                                            }
-                                            Err(e) => {
-                                                log::error!("Shader compilation failed: {}", e);
-                                                tab.cells[cell_idx].output = CellOutput::Error(
-                                                    format_shader_error(&e.to_string(), &source),
-                                                );
-                                                tab.cells[cell_idx].output_collapsed = false;
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        if !e.contains("No result expression") {
-                                            log::error!("Language pipeline error: {}", e);
-                                            tab.cells[cell_idx].output = CellOutput::Error(e);
-                                            tab.cells[cell_idx].output_collapsed = false;
-                                        }
-                                    }
-                                }
-                            } // else: no special functions
-                        } // else: no unevaluated CAS ops
-                    }
-                }
+        // --- REDUCE: drain responses through the active notebook ---
+        // The shared `ReduceService` may carry responses for any tab, but
+        // only the active tab's notebook is ticked; responses for cells in
+        // other tabs are silently dropped (the inactive notebook still has
+        // them in its `pending_reduce` map but no one's pumping it). On
+        // tab switch we clear pending on both ends, so this is fine.
+        let updated = state
+            .tab_manager
+            .active_tab_mut()
+            .notebook
+            .tick();
+        if !updated.is_empty() {
+            for cell_idx in &updated {
+                state.sync_cell_from_notebook(*cell_idx);
             }
             needs_redraw = true;
         }
@@ -2925,7 +2513,7 @@ impl ApplicationHandler for App {
         }
 
         // Continuous animation when shaders are active, or polling for REDUCE
-        if state.renderer.has_active_shaders() || state.reduce_service.has_pending() {
+        if state.renderer.has_active_shaders() || state.reduce_service.borrow().has_pending() {
             const TARGET_FRAME_TIME: std::time::Duration = std::time::Duration::from_micros(16_667);
             let elapsed = state.last_frame_time.elapsed();
             if elapsed >= TARGET_FRAME_TIME {

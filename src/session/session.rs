@@ -1,37 +1,47 @@
+use std::cell::RefCell;
 use std::io;
 use std::path::Path;
+use std::rc::Rc;
+
+use crate::lang::reduce::service::ReduceService;
 
 use super::NotebookView;
 
 /// Top-level state container: the set of open notebooks (one per UI tab) and
-/// which one is active. Owns nothing else — the renderer, REDUCE service, and
-/// global UI state live on `App`.
+/// which one is active. Owns nothing else — the renderer, REDUCE service,
+/// and global UI state live on `App`. Holds a clone of the shared REDUCE
+/// service handle so it can wire each new `NotebookView`'s `Notebook` to it.
 pub struct Session {
     pub tabs: Vec<NotebookView>,
     pub active_index: usize,
     untitled_counter: usize,
+    reduce: Option<Rc<RefCell<ReduceService>>>,
 }
 
 impl Session {
-    pub fn new() -> Self {
-        let first = NotebookView::new_untitled("Untitled 1".into());
+    /// Build a session with the given REDUCE service (production wires the
+    /// real one). Pass `None` for offline contexts.
+    pub fn new(reduce: Option<Rc<RefCell<ReduceService>>>) -> Self {
+        let first = NotebookView::new_untitled("Untitled 1".into(), reduce.clone());
         Self {
             tabs: vec![first],
             active_index: 0,
             untitled_counter: 1,
+            reduce,
         }
     }
 
     pub fn new_tab(&mut self) -> usize {
         self.untitled_counter += 1;
         let name = format!("Untitled {}", self.untitled_counter);
-        self.tabs.push(NotebookView::new_untitled(name));
+        self.tabs
+            .push(NotebookView::new_untitled(name, self.reduce.clone()));
         self.active_index = self.tabs.len() - 1;
         self.active_index
     }
 
     pub fn open_file(&mut self, path: &Path) -> io::Result<usize> {
-        let view = NotebookView::from_file(path)?;
+        let view = NotebookView::from_file(path, self.reduce.clone())?;
         self.tabs.push(view);
         self.active_index = self.tabs.len() - 1;
         Ok(self.active_index)
@@ -59,7 +69,8 @@ impl Session {
         if self.tabs.is_empty() {
             self.untitled_counter += 1;
             let name = format!("Untitled {}", self.untitled_counter);
-            self.tabs.push(NotebookView::new_untitled(name));
+            self.tabs
+                .push(NotebookView::new_untitled(name, self.reduce.clone()));
             self.active_index = 0;
         } else if self.active_index >= self.tabs.len() {
             self.active_index = self.tabs.len() - 1;
