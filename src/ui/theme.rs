@@ -52,6 +52,55 @@ impl Rgba {
     pub fn to_glyphon(self) -> glyphon::Color {
         glyphon::Color::rgba(self.r, self.g, self.b, self.a)
     }
+
+    /// Format as `#rrggbb` (or `#rrggbbaa` when alpha < 255).
+    pub fn to_hex_string(self) -> String {
+        if self.a == 255 {
+            format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
+        } else {
+            format!(
+                "#{:02x}{:02x}{:02x}{:02x}",
+                self.r, self.g, self.b, self.a
+            )
+        }
+    }
+
+    /// Parse a `#rrggbb` or `#rrggbbaa` hex string. Leading `#` optional.
+    pub fn from_hex_string(s: &str) -> Result<Self, String> {
+        let h = s.strip_prefix('#').unwrap_or(s);
+        let parse = |i: usize| -> Result<u8, String> {
+            u8::from_str_radix(&h[i..i + 2], 16)
+                .map_err(|_| format!("invalid hex color: {:?}", s))
+        };
+        match h.len() {
+            6 => Ok(Self {
+                r: parse(0)?,
+                g: parse(2)?,
+                b: parse(4)?,
+                a: 255,
+            }),
+            8 => Ok(Self {
+                r: parse(0)?,
+                g: parse(2)?,
+                b: parse(4)?,
+                a: parse(6)?,
+            }),
+            _ => Err(format!("invalid hex color: {:?}", s)),
+        }
+    }
+}
+
+impl serde::Serialize for Rgba {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&self.to_hex_string())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Rgba {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let s = <String as serde::Deserialize>::deserialize(de)?;
+        Rgba::from_hex_string(&s).map_err(serde::de::Error::custom)
+    }
 }
 
 // ---------------------------------------------------------------------------

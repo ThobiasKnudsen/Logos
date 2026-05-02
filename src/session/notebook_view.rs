@@ -4,14 +4,20 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::lang::reduce::service::ReduceService;
 use crate::lang::symbolic::{NoSimplifier, SymbolicSimplifier};
 use crate::notebook::{Notebook, NotebookCell, ReduceSimplifier, SharedReduce};
 use crate::ui::theme::Rgba;
 
-/// Default plot color for new cells until per-cell coloring is exposed via
-/// the UI. Catppuccin Mocha "blue" — readable on both dark and light bgs.
-const DEFAULT_PLOT_COLOR: u32 = 0x89b4fa;
+/// On-disk JSON representation of one notebook cell. The notebook itself is
+/// saved as a `Vec<CellRecord>` (a JSON array at the document root).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CellRecord {
+    color: Rgba,
+    content: String,
+}
 
 /// One open notebook in the UI: file metadata, viewport state, and the
 /// headless `Notebook` engine that owns the cells. The renderer reads cells
@@ -33,7 +39,7 @@ impl NotebookView {
     /// to fall back to a no-op REDUCE backend.
     pub fn new_untitled(name: String, reduce: Option<Rc<RefCell<ReduceService>>>) -> Self {
         let mut notebook = build_notebook(reduce);
-        notebook.add_cell("", Rgba::hex(DEFAULT_PLOT_COLOR));
+        notebook.add_cell("");
         Self {
             name,
             file_path: None,
@@ -50,8 +56,17 @@ impl NotebookView {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Unknown".into());
+        let records: Vec<CellRecord> = serde_json::from_str(&contents)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let mut notebook = build_notebook(reduce);
-        notebook.add_cell(&contents, Rgba::hex(DEFAULT_PLOT_COLOR));
+        if records.is_empty() {
+            notebook.add_cell("");
+        } else {
+            for rec in records {
+                let seed = crate::notebook::alloc_color_seed();
+                notebook.add_cell_with_color(&rec.content, seed, rec.color);
+            }
+        }
         Ok(Self {
             name,
             file_path: Some(path.to_path_buf()),
@@ -85,7 +100,7 @@ impl NotebookView {
     }
 
     pub fn add_cell(&mut self) -> usize {
-        let new_index = self.notebook.add_cell("", Rgba::hex(DEFAULT_PLOT_COLOR));
+        let new_index = self.notebook.add_cell("");
         self.active_cell_index = new_index;
         self.is_modified = true;
         new_index
@@ -113,7 +128,7 @@ impl NotebookView {
 
     // ─── file I/O ──────────────────────────────────────────────────────────
 
-    /// Save: concatenate all cells with double newlines.
+    /// Save the notebook as a JSON array of `{color, content}` objects.
     pub fn save(&mut self) -> io::Result<()> {
         let path = self
             .file_path
@@ -123,7 +138,7 @@ impl NotebookView {
     }
 
     pub fn save_as(&mut self, path: &Path) -> io::Result<()> {
-        let content = self.concatenated_text();
+        let content = self.serialize_json()?;
         fs::write(path, content)?;
         self.name = path
             .file_name()
@@ -138,15 +153,19 @@ impl NotebookView {
         self.is_modified = true;
     }
 
-    fn concatenated_text(&self) -> String {
-        self.notebook
+    fn serialize_json(&self) -> io::Result<String> {
+        let records: Vec<CellRecord> = self
+            .notebook
             .cells()
             .iter()
-            .map(|c| c.buffer.text())
-            .collect::<Vec<_>>()
-            .join("\n\n")
+            .map(|c| CellRecord {
+                color: c.plot_color,
+                content: c.buffer.text().to_string(),
+            })
+            .collect();
+        serde_json::to_string_pretty(&records)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
-
 }
 
 /// Construct a `Notebook` wired to the shared REDUCE service if one is
@@ -195,6 +214,6 @@ mod tests {
         let mut view = NotebookView::new_untitled("scratch".into(), None);
         view.cell_mut(0).buffer.set_text("plot(y = sin(x))");
         view.notebook.play(0);
-        assert!(view.cell(0).outcome.shader.is_some());
+        assert!(!view.cell(0).outcome.shaders.is_empty());
     }
 }

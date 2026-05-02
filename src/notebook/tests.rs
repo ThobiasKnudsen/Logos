@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex};
 
 use crate::lang::reduce::service::ReduceResponse;
 use crate::lang::symbolic::NoSimplifier;
-use crate::ui::theme::Rgba;
 
 use super::{CellMessage, CellOutcome, Notebook, ReduceBackend, ReduceSimplifier, ShaderSpec};
 
@@ -108,7 +107,7 @@ fn mock_reduce_notebook() -> (Notebook, MockReduce) {
 }
 
 fn add_and_play(nb: &mut Notebook, source: &str) -> usize {
-    let idx = nb.add_cell(&dedent(source), Rgba::hex(0xff5555));
+    let idx = nb.add_cell(&dedent(source));
     nb.play(idx);
     idx
 }
@@ -126,7 +125,7 @@ fn validate_wgsl(wgsl: &str) -> Result<(), String> {
 }
 
 fn shader(outcome: &CellOutcome) -> &ShaderSpec {
-    outcome.shader.as_ref().expect("expected shader")
+    outcome.shaders.first().expect("expected at least one shader")
 }
 
 // ─── tests ─────────────────────────────────────────────────────────────────
@@ -134,8 +133,8 @@ fn shader(outcome: &CellOutcome) -> &ShaderSpec {
 #[test]
 fn add_cell_assigns_unique_ids() {
     let mut nb = null_notebook();
-    let a = nb.add_cell("x", Rgba::hex(0xffffff));
-    let b = nb.add_cell("y", Rgba::hex(0xffffff));
+    let a = nb.add_cell("x");
+    let b = nb.add_cell("y");
     // IDs come from a process-global counter, so we don't assert exact
     // values — only that they're unique and adjacent in submission order.
     let ida = nb.cell(a).id;
@@ -147,7 +146,7 @@ fn add_cell_assigns_unique_ids() {
 #[test]
 fn set_text_invalidates_ast_and_marks_stale_after_play() {
     let mut nb = null_notebook();
-    let i = nb.add_cell("y = sin(x)", Rgba::hex(0xffffff));
+    let i = nb.add_cell("y = sin(x)");
     nb.play(i);
     assert!(!nb.cell(i).is_stale(), "fresh play is not stale");
     nb.set_text(i, "y = cos(x)");
@@ -157,7 +156,7 @@ fn set_text_invalidates_ast_and_marks_stale_after_play() {
 #[test]
 fn idle_cell_is_not_stale() {
     let mut nb = null_notebook();
-    let i = nb.add_cell("anything", Rgba::hex(0xffffff));
+    let i = nb.add_cell("anything");
     assert!(!nb.cell(i).is_stale());
 }
 
@@ -234,6 +233,141 @@ fn user_function_with_axis_capture_returning_f32_corner_substitutes() {
 }
 
 #[test]
+fn block_binding_value_returning_float_used_in_eq_plot() {
+    // Regression: `f := (sum:=0; for...; sum)` is a non-bool block whose
+    // result is the float `sum`. With `plot(y = f)` the corner-check has to
+    // call `_lifted_f` at each corner so the curve isn't dotted on slopes.
+    // It must never emit the bare identifier `sum` at top level.
+    let mut nb = null_notebook();
+    // Verbatim what the user typed (no spaces around := or +).
+    let i = nb.add_cell(
+        "f:=(\n sum:=0\n for i in 0..10 (sum:=sum+x)\n sum\n)\nplot(y=f)",
+    );
+    nb.play(i);
+    let s = shader(&nb.cell(i).outcome);
+    assert!(
+        !s.wgsl.contains(" sum)") && !s.wgsl.contains("(sum)"),
+        "WGSL must not reference bare `sum` at top level; got:\n{}",
+        s.wgsl
+    );
+    // The corner check inside `_result` must reference the per-corner values,
+    // not the pixel-center `f`. Look for `(y_m) > (_corner_f_mm)` etc.
+    let result_line = s
+        .wgsl
+        .lines()
+        .find(|l| l.contains("let _result"))
+        .expect("has _result line");
+    assert!(
+        result_line.contains("_corner_f_mm")
+            && result_line.contains("_corner_f_mp")
+            && result_line.contains("_corner_f_pm")
+            && result_line.contains("_corner_f_pp"),
+        "_result must use per-corner f, not pixel-center f;\nLine: {}\nFull WGSL:\n{}",
+        result_line,
+        s.wgsl,
+    );
+    validate_wgsl(&s.wgsl).expect("wgsl validates");
+}
+
+#[test]
+fn anonymous_imperative_block_inside_plot_compiles() {
+    // Regression: `plot(y = (sum:=0; for...; sum))` — an imperative block as
+    // an *anonymous* expression value (no `f := ...` binding around it) must
+    // still hoist its bindings/loops into a synthesized function. Otherwise
+    // the WGSL emits a bare `sum` reference and shader compilation fails.
+    let mut nb = null_notebook();
+    let i = nb.add_cell(
+        "plot(y = (sum := 0\n for i in 0..10 (sum := sum + x)\n sum))",
+    );
+    nb.play(i);
+    let s = shader(&nb.cell(i).outcome);
+    assert!(
+        !s.wgsl.contains(" sum)") && !s.wgsl.contains("(sum)"),
+        "WGSL must not reference bare `sum` at top level; got:\n{}",
+        s.wgsl
+    );
+    validate_wgsl(&s.wgsl).expect("wgsl validates");
+}
+
+#[test]
+fn typing_anonymous_block_oneliner_never_hangs() {
+    // Simulate typing the full one-liner one character at a time. Each
+    // intermediate prefix must lex+parse in bounded time — the user reported
+    // the app freezing while typing this exact text.
+    use std::time::{Duration, Instant};
+    let full = "plot(y = (sum := 0 for i in 0..10 (sum := sum + x) sum))";
+    for end in 0..=full.len() {
+        let prefix = &full[..end];
+        let start = Instant::now();
+        let mut lex = crate::lang::lexer::Lexer::new(prefix);
+        if let Ok(tokens) = lex.tokenize() {
+            let mut parser =
+                crate::lang::parser::Parser::new(tokens, prefix.to_string());
+            let _ = parser.parse(); // ok or err — we only care it returns
+        }
+        let _ = crate::lang::highlight::highlight(prefix);
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "lex+parse+highlight took {:?} on prefix {:?} (len {})",
+            start.elapsed(),
+            prefix,
+            end
+        );
+    }
+}
+
+#[test]
+fn anonymous_block_with_multiplication_compiles_and_validates() {
+    // Same shape as the one-liner above but with `*` instead of `+`.
+    // Reported to hang in naga/wgpu pipeline creation in the live app.
+    use std::time::{Duration, Instant};
+    let mut nb = null_notebook();
+    let i =
+        nb.add_cell("plot(y = (sum := 0 for i in 0..10 (sum := sum * x) sum))");
+    let start = Instant::now();
+    nb.play(i);
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "play() took longer than 3s — likely an infinite loop"
+    );
+    let s = shader(&nb.cell(i).outcome);
+    println!("--- generated WGSL ---\n{}\n--- end ---", s.wgsl);
+    let validate_start = Instant::now();
+    validate_wgsl(&s.wgsl).expect("wgsl validates");
+    assert!(
+        validate_start.elapsed() < Duration::from_secs(3),
+        "naga validation took longer than 3s — likely the freeze cause"
+    );
+}
+
+#[test]
+fn anonymous_imperative_block_inside_plot_one_liner_compiles() {
+    // Same as above but everything on one line, exactly as the user typed it.
+    // Parser must not infinite-loop and play() must complete in bounded time.
+    use std::time::{Duration, Instant};
+    let mut nb = null_notebook();
+    let i =
+        nb.add_cell("plot(y = (sum := 0 for i in 0..10 (sum := sum + x) sum))");
+    let start = Instant::now();
+    nb.play(i);
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "play() took longer than 3s — likely an infinite loop"
+    );
+    // Either the WGSL must validate, or the cell must hold a structured error.
+    if !nb.cell(i).outcome.shaders.is_empty() {
+        let s = shader(&nb.cell(i).outcome);
+        println!("--- generated WGSL ---\n{}\n--- end ---", s.wgsl);
+        validate_wgsl(&s.wgsl).expect("wgsl validates");
+    } else {
+        println!(
+            "no shader produced; outcome.message = {:?}",
+            nb.cell(i).outcome.message
+        );
+    }
+}
+
+#[test]
 fn user_function_with_axis_capture() {
     let mut nb = null_notebook();
     let i = add_and_play(
@@ -262,7 +396,7 @@ fn print_simple_numeric_evaluates_via_interpreter() {
         CellMessage::Computed(s) => assert_eq!(s, "7"),
         other => panic!("expected Computed, got {:?}", other),
     }
-    assert!(nb.cell(i).outcome.shader.is_none());
+    assert!(nb.cell(i).outcome.shaders.is_empty());
 }
 
 #[test]
@@ -306,7 +440,7 @@ fn print_symbolic_falls_to_reduce_and_resolves_via_tick() {
 fn print_symbolic_equation_appends_eq_zero() {
     let (mut nb, mock) = mock_reduce_notebook();
     // `y = x + 2*x` is an equation; print should reformat as `lhs - rhs = 0`.
-    let i = nb.add_cell("print(y = x + 2*x)", Rgba::hex(0xffffff));
+    let i = nb.add_cell("print(y = x + 2*x)");
     nb.play(i);
     let cell_id = nb.cell(i).id;
     mock.respond_to(cell_id, Ok("y - 3*x".to_string()));
@@ -338,7 +472,7 @@ fn plot_and_print_in_same_cell_both_appear_in_outcome() {
         "#,
     );
     let outcome = &nb.cell(i).outcome;
-    assert!(outcome.shader.is_some(), "plot should produce a shader");
+    assert!(!outcome.shaders.is_empty(), "plot should produce a shader");
     assert!(
         matches!(outcome.message, Some(CellMessage::Pending)),
         "symbolic print should leave the cell `Pending`, got {:?}",
@@ -349,8 +483,8 @@ fn plot_and_print_in_same_cell_both_appear_in_outcome() {
 #[test]
 fn play_auto_runs_earlier_cells_jupyter_style() {
     let mut nb = null_notebook();
-    let a = nb.add_cell("f := x²", Rgba::hex(0xff5555));
-    let b = nb.add_cell("plot(y = f)", Rgba::hex(0x55ff55));
+    let a = nb.add_cell("f := x²");
+    let b = nb.add_cell("plot(y = f)");
     nb.play(b);
     // Earlier cell should also be Playing now.
     assert!(matches!(nb.cell(a).state, super::CellState::Playing));
@@ -360,8 +494,8 @@ fn play_auto_runs_earlier_cells_jupyter_style() {
 #[test]
 fn replay_stops_later_playing_cells() {
     let mut nb = null_notebook();
-    let a = nb.add_cell("f := x²", Rgba::hex(0xff5555));
-    let b = nb.add_cell("plot(y = f)", Rgba::hex(0x55ff55));
+    let a = nb.add_cell("f := x²");
+    let b = nb.add_cell("plot(y = f)");
     nb.play(b);
     assert!(matches!(nb.cell(b).state, super::CellState::Playing));
 
@@ -375,10 +509,10 @@ fn replay_stops_later_playing_cells() {
 #[test]
 fn parse_error_is_stored_as_diagnostic_with_span() {
     let mut nb = null_notebook();
-    let i = nb.add_cell("y = sin(", Rgba::hex(0xffffff));
+    let i = nb.add_cell("y = sin(");
     nb.play(i);
     assert!(
-        nb.cell(i).outcome.shader.is_none(),
+        nb.cell(i).outcome.shaders.is_empty(),
         "no shader on parse failure"
     );
     let diags = &nb.cell(i).outcome.diagnostics;
@@ -413,7 +547,7 @@ fn stop_transitions_state_to_stopped() {
 #[test]
 fn remove_cell_drops_pending_reduce() {
     let (mut nb, _mock) = mock_reduce_notebook();
-    let i = nb.add_cell("f := x + 2*x\nprint(f)", Rgba::hex(0xffffff));
+    let i = nb.add_cell("f := x + 2*x\nprint(f)");
     nb.play(i);
     assert!(nb.has_pending());
     nb.remove_cell(i);

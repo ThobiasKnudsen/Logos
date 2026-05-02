@@ -361,6 +361,18 @@ impl ApplicationHandler for App {
                 }
             }
 
+            // Right-click on the color button steps the seed backward.
+            // The color button is the only right-click consumer right now.
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                if let HoverTarget::CellColorButton(i) = state.hover_target {
+                    state.cycle_cell_color(i, -1);
+                }
+            }
+
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
@@ -636,6 +648,7 @@ impl ApplicationHandler for App {
 
                 let click_target = match state.mouse_press_target {
                     HoverTarget::CellPlayButton(_)
+                    | HoverTarget::CellColorButton(_)
                     | HoverTarget::CellCopyButton(_)
                     | HoverTarget::CellOutputCopyButton(_)
                     | HoverTarget::CellOutputToggle(_)
@@ -652,6 +665,9 @@ impl ApplicationHandler for App {
                         } else {
                             state.trigger_cell_play(i);
                         }
+                    }
+                    HoverTarget::CellColorButton(i) => {
+                        state.cycle_cell_color(i, 1);
                     }
                     HoverTarget::CellEditor(_) => {}
                     HoverTarget::CellCopyButton(i) => {

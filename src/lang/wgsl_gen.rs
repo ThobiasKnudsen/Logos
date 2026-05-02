@@ -1,9 +1,13 @@
 use super::ir::{BuiltinOp, Callee, Ir};
 use std::collections::HashSet;
 
-/// Maximum iterations for generated WGSL `for` loops.
-/// Prevents GPU hang from unbounded loops in user code.
-const MAX_LOOP_ITERATIONS: u32 = 10000;
+// The for-loop guard's upper bound is loaded from the `max_loop_iter` uniform
+// at runtime rather than emitted as a compile-time literal. Passing it as a
+// uniform prevents driver shader compilers (notably NVIDIA's) from fully
+// unrolling small fixed-iteration loops, which previously hung pipeline
+// creation on inputs whose unrolled chain the optimizer could prove constant
+// (e.g. `sum:=0; for i in 0..10 (sum:=sum*x); sum` ≡ 0). The concrete value
+// is set in `render::shader_pipeline::MAX_LOOP_ITERATIONS`.
 
 /// Generate a complete WGSL fragment shader from Logos IR.
 ///
@@ -14,6 +18,19 @@ const MAX_LOOP_ITERATIONS: u32 = 10000;
 ///   (equality → curve straddling, inequalities → all-corners-agree)
 /// - For numeric expressions: clamps to [0, 1] grayscale
 pub fn generate(ast: &Ir) -> Result<String, String> {
+    // Pre-pass: anonymous imperative blocks (e.g. `plot(y = (sum:=0; for...; sum))`)
+    // get hoisted into synthetic top-level bindings so the same lifting logic
+    // that handles named bindings can pick them up. Without this the inner
+    // result identifier (`sum`) would leak into the WGSL with nothing
+    // declaring it.
+    let owned_ast;
+    let ast: &Ir = if needs_anon_hoisting(ast) {
+        owned_ast = hoist_anonymous_blocks(ast);
+        &owned_ast
+    } else {
+        ast
+    };
+
     let mut ctx = GenContext::new();
 
     // Collect top-level function definitions (and bindings if no top-level loops)
@@ -190,7 +207,7 @@ pub fn generate(ast: &Ir) -> Result<String, String> {
 
 const UNIFORM_STRUCT: &str = r#"struct Uniforms {
     time: f32,
-    _pad0: f32,
+    max_loop_iter: u32,
     resolution: vec2<f32>,
     mouse: vec2<f32>,
     zoom: f32,
@@ -715,8 +732,7 @@ impl GenContext {
                     )?;
                     let cond = self.emit_expr(condition)?;
                     code += &format!(
-                        "    for (var _loop_guard: u32 = 0u; _loop_guard < {}u; _loop_guard = _loop_guard + 1u) {{\n",
-                        MAX_LOOP_ITERATIONS
+                        "    for (var _loop_guard: u32 = 0u; _loop_guard < u.max_loop_iter; _loop_guard = _loop_guard + 1u) {{\n"
                     );
                     self.emit_while_condition_bindings_inner(
                         &mut code,
@@ -796,8 +812,7 @@ impl GenContext {
                     // Emit loop with iteration guard
                     let cond = self.emit_expr(condition)?;
                     code += &format!(
-                        "    for (var _loop_guard: u32 = 0u; _loop_guard < {}u; _loop_guard = _loop_guard + 1u) {{\n",
-                        MAX_LOOP_ITERATIONS
+                        "    for (var _loop_guard: u32 = 0u; _loop_guard < u.max_loop_iter; _loop_guard = _loop_guard + 1u) {{\n"
                     );
                     // Re-emit condition bindings at the top of each iteration
                     self.emit_while_condition_bindings_inner(
@@ -846,8 +861,8 @@ impl GenContext {
         }
         // Iteration-guarded loop
         code.push_str(&format!(
-            "{}for (var _loop_guard: u32 = 0u; _loop_guard < {}u; _loop_guard = _loop_guard + 1u) {{\n",
-            indent, MAX_LOOP_ITERATIONS
+            "{}for (var _loop_guard: u32 = 0u; _loop_guard < u.max_loop_iter; _loop_guard = _loop_guard + 1u) {{\n",
+            indent
         ));
         code.push_str(&format!(
             "{}    if (!({} < {})) {{ break; }}\n",
@@ -1102,8 +1117,8 @@ impl GenContext {
                     self.emit_while_condition_bindings(&mut code, condition, indent, declared)?;
                     let cond = self.emit_expr(condition)?;
                     code += &format!(
-                        "{}for (var _loop_guard: u32 = 0u; _loop_guard < {}u; _loop_guard = _loop_guard + 1u) {{\n",
-                        indent, MAX_LOOP_ITERATIONS
+                        "{}for (var _loop_guard: u32 = 0u; _loop_guard < u.max_loop_iter; _loop_guard = _loop_guard + 1u) {{\n",
+                        indent
                     );
                     let inner_indent = format!("{}    ", indent);
                     self.emit_while_condition_bindings_inner(
@@ -1152,6 +1167,19 @@ impl GenContext {
                     }
                     if name == "y" {
                         return Ok(y_var.to_string());
+                    }
+                    // Lifted block-valued binding inside a corner check: use
+                    // the precomputed `_corner_<name>_<suffix>` value so the
+                    // block actually re-evaluates per corner. Without this
+                    // the binding would resolve to its pixel-center value
+                    // and the curve would dot out on steep slopes.
+                    if self.lifted_block_defs.contains_key(name) {
+                        if let Some(suffix) = corner_suffix(x_var, y_var) {
+                            return Ok(format!("_corner_{}_{}", name, suffix));
+                        }
+                        // Non-standard corner — fall back to a direct call.
+                        let def = &self.lifted_block_defs[name];
+                        return Ok(format!("{}({}, {})", def.fn_name, x_var, y_var));
                     }
                 }
                 // Map time/t → u.time (accessible in user functions too)
@@ -1765,6 +1793,321 @@ fn substitute_params(body: &Ir, params: &[String], args: &[Ir]) -> Ir {
 /// which cannot be passed to `clamp()`. We use corner-checking for these instead.
 /// True if a list of block statements contains any imperative content
 /// (bindings, tuple bindings, loops) that wouldn't be picked up by emit_expr.
+/// Map a corner-substitution pair `(xv, yv)` back to the two-letter suffix
+/// (`mm`, `mp`, `pm`, `pp`) used by the precomputed `_corner_<name>_<suffix>`
+/// values. Returns `None` for any pair that isn't one of the four standard
+/// corners — callers fall back to a direct lifted-fn call there.
+fn corner_suffix(xv: &str, yv: &str) -> Option<&'static str> {
+    match (xv, yv) {
+        ("x_m", "y_m") => Some("mm"),
+        ("x_m", "y_p") => Some("mp"),
+        ("x_p", "y_m") => Some("pm"),
+        ("x_p", "y_p") => Some("pp"),
+        _ => None,
+    }
+}
+
+/// True if `ast` contains at least one anonymous imperative block (a Block
+/// with bindings/loops appearing somewhere other than as a binding's value or
+/// a function/loop body). Cheap check used to skip cloning when there's
+/// nothing to hoist.
+fn needs_anon_hoisting(ast: &Ir) -> bool {
+    let mut found = false;
+    scan_for_anon_blocks(ast, false, &mut found);
+    found
+}
+
+/// Walk `ast` and set `found = true` if any *expression-position* node is a
+/// `Block` containing imperative statements. `in_value_position` is true when
+/// the current node is being read as a value (Apply arg, comparison side,
+/// etc.) rather than a statement container.
+fn scan_for_anon_blocks(node: &Ir, in_value_position: bool, found: &mut bool) {
+    if *found {
+        return;
+    }
+    match node {
+        Ir::Block { items, .. } => {
+            if in_value_position && has_imperative_stmt(items) {
+                *found = true;
+                return;
+            }
+            for s in items {
+                // Inside a Block's stmt list, only the LAST stmt is in
+                // value position (it's the block result); the rest are
+                // statements and don't need hoisting in their own right.
+                scan_for_anon_blocks(s, false, found);
+            }
+        }
+        Ir::Apply { args, .. } => {
+            for a in args {
+                scan_for_anon_blocks(a, true, found);
+            }
+        }
+        Ir::Tuple { items, .. } | Ir::ArrayLiteral { items, .. } => {
+            for it in items {
+                scan_for_anon_blocks(it, true, found);
+            }
+        }
+        Ir::Binding { value, .. } | Ir::TupleBinding { value, .. } => {
+            // Named bindings are already lifted by the existing logic.
+            scan_for_anon_blocks(value, false, found);
+        }
+        Ir::IfExpr {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            scan_for_anon_blocks(condition, true, found);
+            scan_for_anon_blocks(then_branch, true, found);
+            if let Some(e) = else_branch {
+                scan_for_anon_blocks(e, true, found);
+            }
+        }
+        Ir::FunctionDef { body, .. } => {
+            // Function bodies have their own scope; lifting happens
+            // recursively when generate() is called for that scope.
+            scan_for_anon_blocks(body, false, found);
+        }
+        Ir::ForLoop { range, body, .. } => {
+            scan_for_anon_blocks(range, true, found);
+            scan_for_anon_blocks(body, false, found);
+        }
+        Ir::WhileLoop { condition, body, .. } => {
+            scan_for_anon_blocks(condition, true, found);
+            scan_for_anon_blocks(body, false, found);
+        }
+        Ir::ParallelFor { range, body, .. } => {
+            scan_for_anon_blocks(range, true, found);
+            scan_for_anon_blocks(body, false, found);
+        }
+        Ir::PropertyAccess { object, .. } => {
+            scan_for_anon_blocks(object, true, found);
+        }
+        Ir::IndexAccess { array, index, .. } => {
+            scan_for_anon_blocks(array, true, found);
+            scan_for_anon_blocks(index, true, found);
+        }
+        Ir::Range { start, end, .. } => {
+            scan_for_anon_blocks(start, true, found);
+            scan_for_anon_blocks(end, true, found);
+        }
+        Ir::IndexAssign {
+            array,
+            index,
+            value,
+            ..
+        } => {
+            scan_for_anon_blocks(array, true, found);
+            scan_for_anon_blocks(index, true, found);
+            scan_for_anon_blocks(value, true, found);
+        }
+        Ir::Number { .. } | Ir::BoolLit { .. } | Ir::Identifier { .. } => {}
+    }
+}
+
+/// Walk `ast`, replacing every anonymous imperative block in expression
+/// position with `Identifier("_anon_<N>")`, and prepend a `_anon_<N> := block`
+/// binding to the top-level Block. The resulting IR always has the form
+/// `Block([... synthetic bindings, original-stmts])` so the hoisted bindings
+/// participate in the same lifting path as user-named bindings.
+fn hoist_anonymous_blocks(ast: &Ir) -> Ir {
+    let mut counter: usize = 0;
+    let mut prepended: Vec<Ir> = Vec::new();
+    let top_span = ast.span();
+    let rewritten = hoist_recurse(ast, false, &mut counter, &mut prepended);
+
+    if prepended.is_empty() {
+        return rewritten;
+    }
+
+    let mut all = prepended;
+    match rewritten {
+        Ir::Block { items, .. } => all.extend(items),
+        other => all.push(other),
+    }
+    Ir::Block {
+        items: all,
+        span: top_span,
+    }
+}
+
+fn hoist_recurse(
+    node: &Ir,
+    in_value_position: bool,
+    counter: &mut usize,
+    prepended: &mut Vec<Ir>,
+) -> Ir {
+    // Hoist this node itself if it's an imperative Block in value position.
+    if in_value_position {
+        if let Ir::Block { items, span } = node {
+            if has_imperative_stmt(items) {
+                let name = format!("_anon_{}", *counter);
+                *counter += 1;
+                // Recurse INTO the block so any inner anonymous blocks are
+                // also hoisted (registered before this binding so they're
+                // declared earlier in the synthesized top-level block).
+                let inner = hoist_block_stmts(items, counter, prepended);
+                prepended.push(Ir::Binding {
+                    name: name.clone(),
+                    value: Box::new(Ir::Block {
+                        items: inner,
+                        span: *span,
+                    }),
+                    span: *span,
+                });
+                return Ir::Identifier {
+                    name,
+                    span: *span,
+                };
+            }
+        }
+    }
+
+    // Otherwise recurse structurally.
+    match node {
+        Ir::Block { items, span } => Ir::Block {
+            items: hoist_block_stmts(items, counter, prepended),
+            span: *span,
+        },
+        Ir::Apply { callee, args, span } => Ir::Apply {
+            callee: callee.clone(),
+            args: args
+                .iter()
+                .map(|a| hoist_recurse(a, true, counter, prepended))
+                .collect(),
+            span: *span,
+        },
+        Ir::Tuple { items, span } => Ir::Tuple {
+            items: items
+                .iter()
+                .map(|i| hoist_recurse(i, true, counter, prepended))
+                .collect(),
+            span: *span,
+        },
+        Ir::ArrayLiteral { items, span } => Ir::ArrayLiteral {
+            items: items
+                .iter()
+                .map(|i| hoist_recurse(i, true, counter, prepended))
+                .collect(),
+            span: *span,
+        },
+        Ir::Binding { name, value, span } => Ir::Binding {
+            name: name.clone(),
+            // The binding's value position is handled by existing lifting.
+            value: Box::new(hoist_recurse(value, false, counter, prepended)),
+            span: *span,
+        },
+        Ir::TupleBinding { names, value, span } => Ir::TupleBinding {
+            names: names.clone(),
+            value: Box::new(hoist_recurse(value, false, counter, prepended)),
+            span: *span,
+        },
+        Ir::IfExpr {
+            condition,
+            then_branch,
+            else_branch,
+            span,
+        } => Ir::IfExpr {
+            condition: Box::new(hoist_recurse(condition, true, counter, prepended)),
+            then_branch: Box::new(hoist_recurse(then_branch, true, counter, prepended)),
+            else_branch: else_branch
+                .as_ref()
+                .map(|e| Box::new(hoist_recurse(e, true, counter, prepended))),
+            span: *span,
+        },
+        Ir::FunctionDef {
+            name,
+            params,
+            body,
+            span,
+        } => Ir::FunctionDef {
+            name: name.clone(),
+            params: params.clone(),
+            // Function bodies are their own scope — don't hoist *out* of them.
+            body: body.clone(),
+            span: *span,
+        },
+        Ir::ForLoop {
+            var,
+            range,
+            body,
+            span,
+        } => Ir::ForLoop {
+            var: var.clone(),
+            range: Box::new(hoist_recurse(range, true, counter, prepended)),
+            body: body.clone(),
+            span: *span,
+        },
+        Ir::WhileLoop {
+            condition,
+            body,
+            span,
+        } => Ir::WhileLoop {
+            condition: Box::new(hoist_recurse(condition, true, counter, prepended)),
+            body: body.clone(),
+            span: *span,
+        },
+        Ir::ParallelFor {
+            var,
+            range,
+            body,
+            span,
+        } => Ir::ParallelFor {
+            var: var.clone(),
+            range: Box::new(hoist_recurse(range, true, counter, prepended)),
+            body: body.clone(),
+            span: *span,
+        },
+        Ir::PropertyAccess {
+            object,
+            property,
+            span,
+        } => Ir::PropertyAccess {
+            object: Box::new(hoist_recurse(object, true, counter, prepended)),
+            property: property.clone(),
+            span: *span,
+        },
+        Ir::IndexAccess { array, index, span } => Ir::IndexAccess {
+            array: Box::new(hoist_recurse(array, true, counter, prepended)),
+            index: Box::new(hoist_recurse(index, true, counter, prepended)),
+            span: *span,
+        },
+        Ir::Range { start, end, span } => Ir::Range {
+            start: Box::new(hoist_recurse(start, true, counter, prepended)),
+            end: Box::new(hoist_recurse(end, true, counter, prepended)),
+            span: *span,
+        },
+        Ir::IndexAssign {
+            array,
+            index,
+            value,
+            span,
+        } => Ir::IndexAssign {
+            array: Box::new(hoist_recurse(array, true, counter, prepended)),
+            index: Box::new(hoist_recurse(index, true, counter, prepended)),
+            value: Box::new(hoist_recurse(value, true, counter, prepended)),
+            span: *span,
+        },
+        Ir::Number { .. } | Ir::BoolLit { .. } | Ir::Identifier { .. } => node.clone(),
+    }
+}
+
+/// Apply `hoist_recurse` to each stmt in a Block's stmt list. Only the last
+/// stmt is in value position (it's the block result); the rest are statements.
+fn hoist_block_stmts(
+    stmts: &[Ir],
+    counter: &mut usize,
+    prepended: &mut Vec<Ir>,
+) -> Vec<Ir> {
+    let last = stmts.len().saturating_sub(1);
+    stmts
+        .iter()
+        .enumerate()
+        .map(|(i, s)| hoist_recurse(s, i == last, counter, prepended))
+        .collect()
+}
+
 fn has_imperative_stmt(stmts: &[Ir]) -> bool {
     stmts.iter().any(|s| {
         matches!(

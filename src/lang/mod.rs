@@ -1,3 +1,4 @@
+pub mod check;
 pub mod compute_gen;
 pub mod highlight;
 pub mod interpreter;
@@ -83,13 +84,14 @@ pub fn needs_interpreter(ir: &Ir) -> bool {
 pub struct CellActions {
     /// Index of the first `print(...)` statement in the block (if any).
     pub first_print: Option<usize>,
-    /// Index of the last `plot(...)` statement in the block (if any).
-    pub last_plot: Option<usize>,
+    /// Indices of every `plot(...)` statement in the block, in source order.
+    /// One shader is emitted per index.
+    pub plots: Vec<usize>,
 }
 
 impl CellActions {
     pub fn has_action(&self) -> bool {
-        self.first_print.is_some() || self.last_plot.is_some()
+        self.first_print.is_some() || !self.plots.is_empty()
     }
 }
 
@@ -102,7 +104,7 @@ pub fn detect_cell_actions(ir: &Ir) -> CellActions {
 
     let mut result = CellActions {
         first_print: None,
-        last_plot: None,
+        plots: Vec::new(),
     };
 
     for (i, stmt) in stmts.iter().enumerate() {
@@ -116,7 +118,7 @@ pub fn detect_cell_actions(ir: &Ir) -> CellActions {
                     result.first_print = Some(i);
                 }
                 ir::BuiltinOp::Plot => {
-                    result.last_plot = Some(i);
+                    result.plots.push(i);
                 }
                 _ => {}
             }
@@ -599,7 +601,7 @@ mod action_tests {
         let ir = parse("print(3+9)").unwrap();
         let actions = detect_cell_actions(&ir);
         assert!(actions.first_print.is_some());
-        assert!(actions.last_plot.is_none());
+        assert!(actions.plots.is_empty());
     }
 
     #[test]
@@ -607,7 +609,14 @@ mod action_tests {
         let ir = parse("plot(x+y)").unwrap();
         let actions = detect_cell_actions(&ir);
         assert!(actions.first_print.is_none());
-        assert!(actions.last_plot.is_some());
+        assert_eq!(actions.plots, vec![0]);
+    }
+
+    #[test]
+    fn test_detect_multiple_plots() {
+        let ast = parse("plot(y = x)\nplot(y = x*x)\nplot(y = x*x*x)").unwrap();
+        let actions = detect_cell_actions(&ast);
+        assert_eq!(actions.plots, vec![0, 1, 2]);
     }
 
     #[test]
@@ -622,7 +631,7 @@ mod action_tests {
         let ir = parse("f := x+2*x\nprint(f)\nplot(y=f)").unwrap();
         let actions = detect_cell_actions(&ir);
         assert!(actions.first_print.is_some());
-        assert!(actions.last_plot.is_some());
+        assert_eq!(actions.plots.len(), 1);
     }
 
     #[test]
@@ -656,7 +665,7 @@ mod action_tests {
     fn test_build_plot_ir_strips_print() {
         let ir = parse("f := x\nprint(f)\nplot(y=f)").unwrap();
         let actions = detect_cell_actions(&ir);
-        let plot_ir = build_plot_ir(&ir, actions.last_plot.unwrap());
+        let plot_ir = build_plot_ir(&ir, *actions.plots.last().unwrap());
         if let Ir::Block { items: stmts, .. } = &plot_ir {
             for stmt in stmts {
                 if let Ir::Apply { callee, .. } = stmt {

@@ -1048,3 +1048,89 @@ mod to_source_tests {
         assert_roundtrip("x = 0");
     }
 }
+
+/// A Logos type. The universe is intentionally small for now and grows by
+/// adding variants — every consumer that cares about types will then have to
+/// handle the new case (exhaustiveness as a forcing function).
+///
+/// Future variants this enum is expected to host: `Symbolic` (CAS-tracked
+/// unevaluated expressions), `Matrix(usize, usize)`, `Complex`, units, and
+/// user-defined types.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Type {
+    /// Numeric scalar (f32 / f64 — the type system stays precision-agnostic
+    /// for now; backends pick their own representation).
+    Num,
+
+    /// Boolean.
+    Bool,
+
+    /// Fixed-size float vectors. Width is encoded in the variant so consumers
+    /// can match on it directly.
+    Vec2,
+    Vec3,
+    Vec4,
+
+    /// `start..end` half-open integer range; produced by `Range` nodes,
+    /// consumed by `for` / `parallel for`.
+    Range,
+
+    /// Heterogeneous tuple. Element types are tracked so destructuring
+    /// bindings can give each name the right type.
+    Tuple(Vec<Type>),
+
+    /// Homogeneous array. Today the parser only emits arrays of `Num`, but
+    /// the variant carries the element type so future arrays of vectors or
+    /// other shapes are representable without a breaking change.
+    Array(Box<Type>),
+
+    /// Statement-level "no value" — `plot(...)`, `IndexAssign`, side-effecting
+    /// `print` in some contexts.
+    Void,
+
+    /// User-defined function. Stored separately from value types because
+    /// functions in Logos aren't first-class values yet.
+    Function(Vec<Type>, Box<Type>),
+
+    /// Type information not yet known. Used as a placeholder during checking
+    /// and as the type of identifiers that haven't been bound yet (so that
+    /// downstream errors don't cascade from a single missing definition).
+    Unknown,
+
+    /// Reserved for CAS-tracked symbolic expressions (REDUCE today, Lean
+    /// planned). Currently unused by the type checker; here so consumers can
+    /// already match on it without a breaking change later.
+    Symbolic,
+}
+
+impl Type {
+    /// Display name for diagnostics (`"Num"`, `"Vec3"`, `"(Num, Bool)"`, etc.).
+    pub fn display(&self) -> String {
+        match self {
+            Type::Num => "Num".to_string(),
+            Type::Bool => "Bool".to_string(),
+            Type::Vec2 => "Vec2".to_string(),
+            Type::Vec3 => "Vec3".to_string(),
+            Type::Vec4 => "Vec4".to_string(),
+            Type::Range => "Range".to_string(),
+            Type::Tuple(items) => {
+                let parts: Vec<String> = items.iter().map(|t| t.display()).collect();
+                format!("({})", parts.join(", "))
+            }
+            Type::Array(elem) => format!("Array<{}>", elem.display()),
+            Type::Void => "Void".to_string(),
+            Type::Function(params, ret) => {
+                let parts: Vec<String> = params.iter().map(|t| t.display()).collect();
+                format!("({}) -> {}", parts.join(", "), ret.display())
+            }
+            Type::Unknown => "?".to_string(),
+            Type::Symbolic => "Symbolic".to_string(),
+        }
+    }
+
+    /// True for `Vec2`/`Vec3`/`Vec4`. Useful when picking overloads that
+    /// accept "any vector."
+    pub fn is_vec(&self) -> bool {
+        matches!(self, Type::Vec2 | Type::Vec3 | Type::Vec4)
+    }
+}

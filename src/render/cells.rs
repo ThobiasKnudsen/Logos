@@ -224,6 +224,12 @@ impl Renderer {
                 w: cell_delete_size(),
                 h: cell_delete_size(),
             };
+            let color_button = Rect {
+                x: header.x + header.w - cell_delete_size() * 3.0 - spacing::xs() * 2.0,
+                y: btn_y,
+                w: cell_delete_size(),
+                h: cell_delete_size(),
+            };
             let separator = Rect {
                 x: container.x,
                 y: header.y + header_h,
@@ -392,6 +398,7 @@ impl Renderer {
                 container,
                 header,
                 play_button,
+                color_button,
                 copy_button,
                 delete_button,
                 separator,
@@ -407,6 +414,7 @@ impl Renderer {
                 editor_v_scrollbar_thumb,
                 resize_handle,
                 content_height: content_h,
+                plot_color: cell_info.plot_color,
             });
 
             perf_layout_us += ls.elapsed().as_micros();

@@ -57,6 +57,7 @@ impl AppState {
                         .is_some_and(|m| m.is_error()),
                     output_collapsed: c.output_collapsed,
                     contracted_editor_h: c.contracted_editor_h,
+                    plot_color: c.plot_color,
                 }
             })
             .collect();
@@ -242,6 +243,10 @@ impl AppState {
                     self.set_hover(HoverTarget::CellPlayButton(cl.cell_index));
                     return;
                 }
+                if point_in_rect(mx, my, &cl.color_button) {
+                    self.set_hover(HoverTarget::CellColorButton(cl.cell_index));
+                    return;
+                }
                 if point_in_rect(mx, my, &cl.copy_button) {
                     self.set_hover(HoverTarget::CellCopyButton(cl.cell_index));
                     return;
@@ -302,6 +307,7 @@ impl AppState {
                 HoverTarget::CellResizeHandle(_) => CursorIcon::NsResize,
                 HoverTarget::CellEditor(_) => CursorIcon::Text,
                 HoverTarget::CellPlayButton(_)
+                | HoverTarget::CellColorButton(_)
                 | HoverTarget::CellCopyButton(_)
                 | HoverTarget::CellOutputCopyButton(_)
                 | HoverTarget::CellOutputToggle(_)
@@ -800,23 +806,25 @@ impl AppState {
         self.sync_active_tab();
     }
 
-    /// GPU-compile the shader the notebook just emitted (if any). The
-    /// notebook owns `state` and `outcome.message`; this function only
-    /// touches GPU side-effects and overrides the cell's state/message
-    /// when shader compilation fails.
+    /// GPU-compile every shader the notebook just emitted for this cell
+    /// (one per `plot(...)` call). The notebook owns `state` and
+    /// `outcome.message`; this function only touches GPU side-effects and
+    /// overrides the cell's state/message when shader compilation fails.
     pub(super) fn sync_cell_from_notebook(&mut self, cell_index: usize) {
-        let shader_wgsl = self
-            .session
-            .active_tab()
-            .cell(cell_index)
+        let cell = self.session.active_tab().cell(cell_index);
+        if cell.outcome.shaders.is_empty() {
+            return;
+        }
+        let cell_id = cell.id;
+        let primary_color = cell.plot_color.to_f32_array();
+        let sources: Vec<([f32; 4], &str)> = cell
             .outcome
-            .shader
-            .as_ref()
-            .map(|s| s.wgsl.clone());
-        let Some(wgsl) = shader_wgsl else { return };
+            .shaders
+            .iter()
+            .map(|s| (primary_color, s.wgsl.as_str()))
+            .collect();
 
-        let cell_id = self.session.active_tab().cell(cell_index).id;
-        if let Err(e) = self.renderer.compile_cell_shader(cell_id, &wgsl) {
+        if let Err(e) = self.renderer.set_cell_shaders(cell_id, &sources) {
             log::error!("Shader compilation failed: {}", e);
             let source = self
                 .session
@@ -829,6 +837,23 @@ impl AppState {
             cell.outcome.message = Some(CellMessage::Error(formatted));
             cell.output_collapsed = false;
         }
+    }
+
+    /// Step the cell's color seed by `delta` (positive = next, negative =
+    /// previous), recompute its plot color, and push the new color to any
+    /// already-running shaders without recompiling.
+    pub(super) fn cycle_cell_color(&mut self, cell_index: usize, delta: i32) {
+        let tab = self.session.active_tab_mut();
+        if cell_index >= tab.notebook.len() {
+            return;
+        }
+        let cell = tab.notebook.cell_mut(cell_index);
+        cell.step_color(delta);
+        let cell_id = cell.id;
+        let new_color = cell.plot_color.to_f32_array();
+        tab.mark_modified();
+        self.renderer.set_cell_primary_color(cell_id, new_color);
+        self.sync_active_tab();
     }
 
     /// Stop playing a cell's shader.
