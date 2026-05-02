@@ -46,4 +46,4 @@ monte_carlo(x, y) := (
      1.0)
 )
 
-monte_carlo(x, y)
+plot(monte_carlo(x, y))

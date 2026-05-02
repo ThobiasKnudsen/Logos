@@ -1,3 +1,3 @@
 nx := (x - x.min) / (x.max - x.min)
 ny := (y - y.min) / (y.max - y.min)
-(nx, ny, 0.5 + 0.5 * sin(t), 1.0)
+plot((nx, ny, 0.5 + 0.5 * sin(t), 1.0))

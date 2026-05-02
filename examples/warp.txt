@@ -38,4 +38,4 @@ warp(x, y) := (
     warp_color(x, col_r, col_g, col_b, col_a)
 )
 
-warp(x, y)
+plot(warp(x, y))

@@ -71,15 +71,19 @@ impl NotebookView {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Unknown".into());
-        let records: Vec<CellRecord> = serde_json::from_str(&contents)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let mut notebook = build_notebook(reduce);
-        if records.is_empty() {
-            notebook.add_cell("");
+        if is_plain_text_path(path) {
+            notebook.add_cell(&contents);
         } else {
-            for rec in records {
-                let seed = crate::notebook::alloc_color_seed();
-                notebook.add_cell_with_color(&rec.content, seed, rec.color);
+            let records: Vec<CellRecord> = serde_json::from_str(&contents)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            if records.is_empty() {
+                notebook.add_cell("");
+            } else {
+                for rec in records {
+                    let seed = crate::notebook::alloc_color_seed();
+                    notebook.add_cell_with_color(&rec.content, seed, rec.color);
+                }
             }
         }
         Ok(Self {
@@ -154,7 +158,11 @@ impl NotebookView {
     }
 
     pub fn save_as(&mut self, path: &Path) -> io::Result<()> {
-        let content = self.serialize_json()?;
+        let content = if is_plain_text_path(path) {
+            self.serialize_text()
+        } else {
+            self.serialize_json()?
+        };
         fs::write(path, content)?;
         self.name = path
             .file_name()
@@ -182,6 +190,28 @@ impl NotebookView {
         serde_json::to_string_pretty(&records)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
+
+    /// Plain-text serialization for single-cell `.txt` files (notebook
+    /// examples). Multi-cell notebooks join cells with a blank line so
+    /// nothing is silently dropped, but the JSON format is the round-trip
+    /// path for those — this branch exists so editing an example and
+    /// hitting Save preserves it as readable source.
+    fn serialize_text(&self) -> String {
+        let parts: Vec<String> = self
+            .notebook
+            .cells()
+            .iter()
+            .map(|c| c.buffer.text().to_string())
+            .collect();
+        parts.join("\n\n")
+    }
+}
+
+fn is_plain_text_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("txt"))
+        .unwrap_or(false)
 }
 
 /// Construct a `Notebook` wired to the shared REDUCE service if one is
@@ -231,5 +261,77 @@ mod tests {
         view.cell_mut(0).buffer.set_text("plot(y = sin(x))");
         view.notebook.play(0);
         assert!(!view.cell(0).outcome.shaders.is_empty());
+    }
+
+    #[test]
+    fn save_as_txt_writes_plain_text_not_json() {
+        let dir = std::env::temp_dir().join(format!(
+            "logos_test_save_txt_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gradient.txt");
+        let body = "plot((x, y, 0.5, 1.0))";
+        let mut view = NotebookView::new_untitled("Gradient".into(), None);
+        view.cell_mut(0).buffer.set_text(body);
+        view.save_as(&path).expect("save succeeds");
+        let written = std::fs::read_to_string(&path).expect("file readable");
+        assert_eq!(written, body, "txt save must round-trip cell text");
+        assert!(!written.starts_with('['), "must not be JSON");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn from_file_loads_txt_as_single_cell() {
+        let dir = std::env::temp_dir().join(format!(
+            "logos_test_load_txt_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("example.txt");
+        let body = "plot((x, y, 0.5, 1.0))\n";
+        std::fs::write(&path, body).unwrap();
+        let view = NotebookView::from_file(&path, None).expect("loads");
+        assert_eq!(view.notebook.len(), 1, "txt loads as exactly one cell");
+        assert_eq!(view.cell(0).buffer.text(), body);
+        assert_eq!(view.file_path.as_deref(), Some(path.as_path()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn from_file_then_save_round_trips_txt() {
+        let dir = std::env::temp_dir().join(format!(
+            "logos_test_roundtrip_txt_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("example.txt");
+        let body = "nx := (x - x.min) / (x.max - x.min)\nplot((nx, 0.0, 0.0, 1.0))";
+        std::fs::write(&path, body).unwrap();
+        let mut view = NotebookView::from_file(&path, None).expect("loads");
+        view.save().expect("save uses stored path");
+        let written = std::fs::read_to_string(&path).expect("file readable");
+        assert_eq!(written, body, "txt must round-trip without reformatting");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_as_json_writes_json() {
+        let dir = std::env::temp_dir().join(format!(
+            "logos_test_save_json_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notebook.json");
+        let mut view = NotebookView::new_untitled("Untitled".into(), None);
+        view.cell_mut(0).buffer.set_text("plot(y = x)");
+        view.save_as(&path).expect("save succeeds");
+        let written = std::fs::read_to_string(&path).expect("file readable");
+        assert!(
+            written.trim_start().starts_with('['),
+            "non-txt extension must serialize as JSON; got:\n{}",
+            written
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

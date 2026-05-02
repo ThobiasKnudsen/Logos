@@ -10,7 +10,7 @@ use crate::render::{CellInfo, TabInfo};
 use crate::ui::theme::{self, fonts};
 
 use super::cas::format_shader_error;
-use super::menus::{active_theme_index, EXAMPLE_SOURCES, MENU_EXAMPLES_ITEMS};
+use super::menus::{active_theme_index, resolve_example_path, EXAMPLE_FILENAMES};
 use super::render_area::{MouseZone, RenderAreaState};
 use super::{
     compute_win_control_rects, detect_mouse_zone, edge_resize_direction, line_col_from,
@@ -576,22 +576,24 @@ impl AppState {
                 self.do_zoom(|_| fonts::reset_zoom());
             }
             (3, i) => {
-                if let Some(&src) = EXAMPLE_SOURCES.get(i) {
-                    let name = MENU_EXAMPLES_ITEMS
-                        .get(i)
-                        .map(|m| m.label)
-                        .unwrap_or("Example");
+                if let Some(&filename) = EXAMPLE_FILENAMES.get(i) {
+                    let path = match resolve_example_path(filename) {
+                        Some(p) => p,
+                        None => {
+                            log::error!("Example {filename} not found alongside binary");
+                            return;
+                        }
+                    };
                     let old = self.session.active_index;
                     let old_id = self.session.tabs[old].tab_id;
                     self.renderer.stash_tab_shaders(old_id);
-                    let new_idx = self.session.new_tab();
-                    self.switch_tab_axis(old, new_idx);
-                    self.session.active_tab_mut().name = name.to_string();
-                    self.session
-                        .active_tab_mut()
-                        .active_cell_mut()
-                        .buffer
-                        .set_text(src);
+                    match self.session.open_file(&path) {
+                        Ok(new_idx) => self.switch_tab_axis(old, new_idx),
+                        Err(e) => {
+                            log::error!("Failed to load example {}: {}", path.display(), e);
+                            return;
+                        }
+                    }
                     self.sync_active_tab();
                 }
             }

@@ -2738,15 +2738,15 @@ step(lower, ny) * step(ny, upper)"#;
 
     #[test]
     fn test_mc_full_example_compiles_and_validates() {
-        // Full Monte Carlo example as it will appear in the Examples menu
+        // Full Monte Carlo example as it will appear in the Examples menu.
+        // Examples end with `plot(...)`, so route through the same plot-arg
+        // extraction the notebook uses before handing off to wgsl_gen.
         let input = include_str!("../../examples/monte_carlo.txt");
-        let result = crate::lang::compile(input);
-        assert!(
-            result.is_ok(),
-            "Full Monte Carlo example should compile, got: {:?}",
-            result
-        );
-        let shader = result.unwrap();
+        let ir = crate::lang::parse(input).expect("example parses");
+        let actions = crate::lang::detect_cell_actions(&ir);
+        let plot_idx = actions.plots.first().copied().expect("example has plot()");
+        let plot_ir = crate::lang::build_plot_ir(&ir, plot_idx);
+        let shader = super::generate(&plot_ir).expect("wgsl_gen succeeds");
         // Validate with naga (same validation wgpu does)
         let module = naga::front::wgsl::parse_str(&shader)
             .unwrap_or_else(|e| panic!("naga parse failed:\n{}\n\n--- WGSL ---\n{}", e, shader));

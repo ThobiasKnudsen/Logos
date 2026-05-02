@@ -91,13 +91,44 @@ pub(super) const MENU_EXAMPLES_ITEMS: &[MenuItemDef] = &[
     },
 ];
 
-pub(super) const EXAMPLE_SOURCES: &[&str] = &[
-    include_str!("../../examples/gradient.txt"),
-    include_str!("../../examples/ripple.txt"),
-    include_str!("../../examples/mandlebrot.txt"),
-    include_str!("../../examples/warp.txt"),
-    include_str!("../../examples/monte_carlo.txt"),
+/// File names of each shipped example, parallel to `MENU_EXAMPLES_ITEMS`.
+/// Resolved to a real path at click-time by `resolve_example_path`, which
+/// looks for an `examples/` folder deployed next to the binary (and falls
+/// back to a few dev-tree locations so `cargo run` still works).
+pub(super) const EXAMPLE_FILENAMES: &[&str] = &[
+    "gradient.txt",
+    "ripple.txt",
+    "mandlebrot.txt",
+    "warp.txt",
+    "monte_carlo.txt",
 ];
+
+/// Resolve an example file name to an absolute path. The expected production
+/// layout is `<exe_dir>/examples/<name>`; for `cargo run` the binary lives at
+/// `target/<profile>/logos`, so we also try walking up to the repo root and
+/// the current working directory.
+pub(super) fn resolve_example_path(filename: &str) -> Option<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.push(dir.to_path_buf());
+            // `target/<profile>/logos` → repo root is two parents up.
+            if let Some(p) = dir.parent().and_then(|p| p.parent()) {
+                roots.push(p.to_path_buf());
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    for root in roots {
+        let candidate = root.join("examples").join(filename);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
 
 /// Dynamic theme menu items built from themes.json at runtime.
 pub(crate) struct DynMenuItemDef {
@@ -116,6 +147,25 @@ fn theme_menu_items() -> &'static std::sync::Mutex<Vec<DynMenuItemDef>> {
             .collect();
         std::sync::Mutex::new(items)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_menu_example_resolves_to_a_real_file() {
+        for &filename in EXAMPLE_FILENAMES {
+            let resolved = resolve_example_path(filename)
+                .unwrap_or_else(|| panic!("could not resolve {filename}"));
+            assert!(
+                resolved.is_file(),
+                "{filename} resolved to {} which is not a file",
+                resolved.display()
+            );
+        }
+        assert_eq!(EXAMPLE_FILENAMES.len(), MENU_EXAMPLES_ITEMS.len());
+    }
 }
 
 pub(crate) fn menu_items(index: usize) -> &'static [MenuItemDef] {

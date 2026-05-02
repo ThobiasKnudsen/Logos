@@ -21,15 +21,15 @@ mandelbrot_color(iter, sq) := (
 )
 mandelbrot(x, y) := (
     effective_zoom := 1.0 / (y.max - y.min),
-    (z_x, z_y) :=         (0.0, 0.0),
-    sq :=                 0.0,
-    max_iter :=           min(BASE_ITER + (40.0 * log(effective_zoom / INITIAL_ZOOM + 1.0)), MAX_ITER_CAP),
-    iter :=               0,
+    (z_x, z_y) := (0.0, 0.0),
+    sq := 0.0,
+    max_iter := min(BASE_ITER + (40.0 * log(effective_zoom / INITIAL_ZOOM + 1.0)), MAX_ITER_CAP),
+    iter := 0,
     while (iter < max_iter and (sq := z_x * z_x + z_y * z_y, sq) < BAILOUT) (
-        zy2 :=    z_y * z_y,
-        z_y :=    2.0 * z_x * z_y + y,
-        z_x :=    z_x * z_x - zy2 + x,
-        iter :=   iter+1
+        zy2 := z_y * z_y,
+        z_y := 2.0 * z_x * z_y + y,
+        z_x := z_x * z_x - zy2 + x,
+        iter := iter+1
     ),
     if (iter < max_iter) (
         mandelbrot_color(iter, sq)
@@ -38,4 +38,4 @@ mandelbrot(x, y) := (
     )
 )
 
-mandelbrot(x, y)
+plot(mandelbrot(x, y))

@@ -135,12 +135,13 @@ fn add_cell_assigns_unique_ids() {
     let mut nb = null_notebook();
     let a = nb.add_cell("x");
     let b = nb.add_cell("y");
-    // IDs come from a process-global counter, so we don't assert exact
-    // values — only that they're unique and adjacent in submission order.
+    // IDs come from a process-global counter, so parallel test threads can
+    // interleave allocations — only assert uniqueness and the locally-
+    // monotonic ordering of the two calls in this test.
     let ida = nb.cell(a).id;
     let idb = nb.cell(b).id;
     assert_ne!(ida, idb);
-    assert_eq!(idb, ida + 1);
+    assert!(idb > ida);
 }
 
 #[test]
@@ -625,6 +626,32 @@ fn stop_transitions_state_to_stopped() {
     assert!(matches!(nb.cell(i).state, super::CellState::Playing));
     nb.stop(i);
     assert!(matches!(nb.cell(i).state, super::CellState::Stopped));
+}
+
+#[test]
+fn examples_render_through_notebook() {
+    let cases: &[(&str, &str)] = &[
+        ("gradient", include_str!("../../examples/gradient.txt")),
+        ("ripple", include_str!("../../examples/ripple.txt")),
+        ("mandlebrot", include_str!("../../examples/mandlebrot.txt")),
+        ("warp", include_str!("../../examples/warp.txt")),
+        ("monte_carlo", include_str!("../../examples/monte_carlo.txt")),
+    ];
+    for (name, src) in cases {
+        let mut nb = null_notebook();
+        let i = nb.add_cell(src);
+        nb.play(i);
+        let cell = nb.cell(i);
+        assert!(
+            !cell.outcome.shaders.is_empty(),
+            "{name}: expected at least one shader, got message={:?}",
+            cell.outcome.message,
+        );
+        for s in &cell.outcome.shaders {
+            validate_wgsl(&s.wgsl)
+                .unwrap_or_else(|e| panic!("{name}: WGSL invalid: {e}"));
+        }
+    }
 }
 
 #[test]
