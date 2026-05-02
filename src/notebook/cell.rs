@@ -102,6 +102,13 @@ pub struct NotebookCell {
     /// `buffer.text()`.
     pub last_played_text: Option<String>,
     pub(super) ir_cache: RefCell<Option<(String, Ir)>>,
+    /// Post-simplification IR for this cell. Set by the iterative-CAS path
+    /// after the symbolic simplifier returns IR that's been spliced into
+    /// the original cell IR. `Notebook::combined_ir_up_to` consults this
+    /// before falling back to `cached_ir` so downstream cells see the
+    /// resolved form, not the raw `int(...)`/`df(...)` calls. Cleared on
+    /// the next `play()` of this cell (via the `outcome` reset).
+    pub effective_ir: Option<Ir>,
 }
 
 impl NotebookCell {
@@ -118,6 +125,7 @@ impl NotebookCell {
             contracted_editor_h: None,
             last_played_text: None,
             ir_cache: RefCell::new(None),
+            effective_ir: None,
         }
     }
 
@@ -154,5 +162,9 @@ impl NotebookCell {
 
     pub(super) fn invalidate_ir(&mut self) {
         *self.ir_cache.borrow_mut() = None;
+        // Edits invalidate the post-simplification form too — the user is
+        // typing on top of a simplified cell, so the splice no longer
+        // applies to the new text.
+        self.effective_ir = None;
     }
 }

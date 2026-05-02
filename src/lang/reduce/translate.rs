@@ -236,50 +236,93 @@ const SPECIAL_FUNCTIONS: &[(&str, &str)] = &[
 /// a problem. Each entry is (REDUCE keyword, human-readable operation).
 const UNEVALUATED_OPS: &[(&str, &str)] = &[("int", "integral"), ("df", "derivative")];
 
-/// Check whether REDUCE returned an unevaluated CAS operation (meaning
-/// it could not solve the problem). Returns the human-readable name of
-/// the first unevaluated operation found, if any.
-pub fn detect_unevaluated_cas(reduce_output: &str) -> Option<&'static str> {
-    let lower = reduce_output.to_ascii_lowercase();
-    for &(keyword, description) in UNEVALUATED_OPS {
-        let mut start = 0;
-        while let Some(idx) = lower[start..].find(keyword) {
-            let abs = start + idx;
-            let before_ok = abs == 0 || !is_word_char(&lower, abs - 1);
-            // Must be followed by '(' to be a function call, not just a variable
-            let after = lower.as_bytes().get(abs + keyword.len());
-            if before_ok && after == Some(&b'(') {
+/// CAS function names users can write in Logos source. Mirrors the prior
+/// text-level CAS-call list so the IR-walking detector finds the same set
+/// of subtrees `find_cas_call` (text) used to locate.
+const CAS_CALLEES: &[&str] = &[
+    "int",
+    "df",
+    "integral",
+    "derivative",
+    "limit",
+    "solve",
+    "diff",
+];
+
+/// True if `callee` is a `User`-typed CAS function — i.e. something that
+/// should be sent to the symbolic simplifier rather than evaluated by the
+/// interpreter or lowered to WGSL.
+pub fn is_cas_callee(callee: &crate::lang::ir::Callee) -> bool {
+    if let crate::lang::ir::Callee::User(name) = callee {
+        CAS_CALLEES.contains(&name.as_str())
+    } else {
+        false
+    }
+}
+
+/// Find the path to the first CAS-call subtree in `ir`, or `None` if none.
+/// CAS calls are `Apply { callee: User("int"|"df"|"integral"|"derivative"), … }`.
+pub fn find_cas_path(ir: &Ir) -> Option<Vec<usize>> {
+    ir.find_path(&mut |node| {
+        matches!(node, Ir::Apply { callee, .. } if is_cas_callee(callee))
+    })
+}
+
+/// IR-level analogue of `detect_unevaluated_cas`: returns the human-readable
+/// name of the first residual CAS subtree (`int(...)` or `df(...)`) in the
+/// simplifier's response IR, indicating REDUCE couldn't solve it.
+pub fn detect_unevaluated_cas_ir(ir: &Ir) -> Option<&'static str> {
+    let path = ir.find_path(&mut |node| {
+        if let Ir::Apply { callee, .. } = node {
+            if let crate::lang::ir::Callee::User(name) = callee {
+                return matches!(name.as_str(), "int" | "df");
+            }
+        }
+        false
+    })?;
+    let node = ir.get_at_path(&path)?;
+    if let Ir::Apply { callee: crate::lang::ir::Callee::User(name), .. } = node {
+        for &(keyword, description) in UNEVALUATED_OPS {
+            if name == keyword {
                 return Some(description);
             }
-            start = abs + keyword.len();
         }
     }
     None
 }
 
-/// Check whether REDUCE output contains special functions that Logos
-/// cannot evaluate. Returns the list of (name, description) pairs found.
-pub fn detect_special_functions(reduce_output: &str) -> Vec<(&'static str, &'static str)> {
-    let lower = reduce_output.to_ascii_lowercase();
-    SPECIAL_FUNCTIONS
-        .iter()
-        .filter(|&&(name, _)| {
-            // Word-boundary check: the function name must not be part of a
-            // longer identifier (same logic as replace_word).
-            let mut start = 0;
-            while let Some(idx) = lower[start..].find(name) {
-                let abs = start + idx;
-                let before_ok = abs == 0 || !is_word_char(&lower, abs - 1);
-                let after_ok = !is_word_char(&lower, abs + name.len());
-                if before_ok && after_ok {
-                    return true;
-                }
-                start = abs + name.len();
+/// IR-level analogue of `detect_special_functions`: walks the simplifier's
+/// response IR for `Apply { callee: User(name), … }` where `name` matches
+/// any entry in `SPECIAL_FUNCTIONS`. Returns the matched (name, description)
+/// pairs.
+pub fn detect_special_functions_ir(ir: &Ir) -> Vec<(&'static str, &'static str)> {
+    let mut found: Vec<(&'static str, &'static str)> = Vec::new();
+    visit_idents_and_callees(ir, &mut |name| {
+        let lower = name.to_ascii_lowercase();
+        for &(sf_name, sf_desc) in SPECIAL_FUNCTIONS {
+            if lower == sf_name && !found.iter().any(|(n, _)| *n == sf_name) {
+                found.push((sf_name, sf_desc));
             }
-            false
-        })
-        .map(|&(name, desc)| (name, desc))
-        .collect()
+        }
+    });
+    found
+}
+
+fn visit_idents_and_callees(ir: &Ir, f: &mut dyn FnMut(&str)) {
+    match ir {
+        Ir::Identifier { name, .. } => f(name),
+        Ir::Apply { callee, args, .. } => {
+            f(callee.name());
+            for a in args {
+                visit_idents_and_callees(a, f);
+            }
+        }
+        _ => {
+            for c in ir.children() {
+                visit_idents_and_callees(c, f);
+            }
+        }
+    }
 }
 
 /// Convert REDUCE ASCII output back to Logos notation.
@@ -561,70 +604,79 @@ mod tests {
         assert_eq!(back, "x^2*y^2+sin(x)^3-sin(y^2)^2");
     }
 
-    // ── detect_special_functions ─────────────────────────────────
+    fn parse_ir(s: &str) -> Ir {
+        crate::lang::parse(s).expect("parse")
+    }
+
+    // ── detect_special_functions_ir ──────────────────────────────
 
     #[test]
     fn test_detect_fresnel() {
-        let result = detect_special_functions("sqrt(pi)*fresnel_s(sqrt(2)*x/sqrt(pi))/sqrt(2)");
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0, "fresnel_s");
+        let ir = parse_ir("fresnel_s(\u{221A}(2)*x)");
+        let result = detect_special_functions_ir(&ir);
+        assert!(result.iter().any(|(n, _)| *n == "fresnel_s"));
     }
 
     #[test]
     fn test_detect_erf() {
-        let result = detect_special_functions("erf(x)");
+        let ir = parse_ir("erf(x)");
+        let result = detect_special_functions_ir(&ir);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "erf");
     }
 
     #[test]
     fn test_detect_none_for_elementary() {
-        let result = detect_special_functions("sin(x)^2 + cos(x)^2");
+        let ir = parse_ir("sin(x)^2 + cos(x)^2");
+        let result = detect_special_functions_ir(&ir);
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_detect_no_false_positive_on_substrings() {
-        // "erf" should not match inside "serf" or "erfurt"
-        let result = detect_special_functions("serf(x) + erfurt");
+        // "erf" must not match the identifier names "serf" or "erfurt".
+        let ir = parse_ir("serf(x) + erfurt");
+        let result = detect_special_functions_ir(&ir);
         assert!(result.is_empty());
     }
 
     #[test]
     fn test_detect_multiple() {
-        let result = detect_special_functions("fresnel_s(x) + erf(y) + besselj(0, z)");
+        let ir = parse_ir("fresnel_s(x) + erf(y) + besselj(0, z)");
+        let result = detect_special_functions_ir(&ir);
         let names: Vec<&str> = result.iter().map(|(n, _)| *n).collect();
         assert!(names.contains(&"fresnel_s"));
         assert!(names.contains(&"erf"));
         assert!(names.contains(&"besselj"));
     }
 
-    // ── detect_unevaluated_cas ──────────────────────────────────
+    // ── detect_unevaluated_cas_ir ────────────────────────────────
 
     #[test]
     fn test_detect_unevaluated_int() {
-        assert_eq!(
-            detect_unevaluated_cas("int(sin(cos(x)),x)"),
-            Some("integral"),
-        );
+        let ir = parse_ir("int(sin(cos(x)),x)");
+        assert_eq!(detect_unevaluated_cas_ir(&ir), Some("integral"));
     }
 
     #[test]
     fn test_detect_unevaluated_df() {
-        assert_eq!(detect_unevaluated_cas("df(foo(x),x)"), Some("derivative"),);
+        let ir = parse_ir("df(foo(x),x)");
+        assert_eq!(detect_unevaluated_cas_ir(&ir), Some("derivative"));
     }
 
     #[test]
     fn test_detect_unevaluated_none_for_solved() {
-        // Normal result with no leftover int/df
-        assert_eq!(detect_unevaluated_cas("sin(x)^2 + cos(x)"), None,);
+        let ir = parse_ir("sin(x)^2 + cos(x)");
+        assert_eq!(detect_unevaluated_cas_ir(&ir), None);
     }
 
     #[test]
     fn test_detect_unevaluated_no_false_positive() {
-        // "int" as part of a word should not match
-        assert_eq!(detect_unevaluated_cas("interval + mint"), None);
-        // "df" as part of a word should not match
-        assert_eq!(detect_unevaluated_cas("pdf + adf"), None);
+        // `interval` / `mint` are identifiers, not `int(...)` calls.
+        let ir = parse_ir("interval + mint");
+        assert_eq!(detect_unevaluated_cas_ir(&ir), None);
+        // `pdf` / `adf` — same.
+        let ir = parse_ir("pdf + adf");
+        assert_eq!(detect_unevaluated_cas_ir(&ir), None);
     }
 }

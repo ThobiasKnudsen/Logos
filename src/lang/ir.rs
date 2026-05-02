@@ -338,6 +338,393 @@ impl Ir {
         write_ir(&mut out, self, false);
         out
     }
+
+    /// Direct children of this node, in a stable left-to-right order. Used
+    /// by `find_path` / `get_at_path` / `replace_at_path` to address sub-
+    /// expressions by their child index. Leaves return an empty slice.
+    ///
+    /// Order is field-declaration order for struct-shaped variants
+    /// (e.g. IfExpr → condition, then_branch, else_branch?). For
+    /// vec-shaped variants (Apply.args, Block.items, Tuple.items,
+    /// ArrayLiteral.items) the order is the vec order.
+    pub fn children(&self) -> Vec<&Ir> {
+        match self {
+            Ir::Number { .. } | Ir::BoolLit { .. } | Ir::Identifier { .. } => Vec::new(),
+            Ir::Apply { args, .. } => args.iter().collect(),
+            Ir::Tuple { items, .. } | Ir::ArrayLiteral { items, .. } | Ir::Block { items, .. } => {
+                items.iter().collect()
+            }
+            Ir::Binding { value, .. } | Ir::TupleBinding { value, .. } => vec![value],
+            Ir::IfExpr {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let mut v = vec![condition.as_ref(), then_branch.as_ref()];
+                if let Some(eb) = else_branch {
+                    v.push(eb);
+                }
+                v
+            }
+            Ir::FunctionDef { body, .. } => vec![body],
+            Ir::ForLoop { range, body, .. } => vec![range, body],
+            Ir::WhileLoop { condition, body, .. } => vec![condition, body],
+            Ir::PropertyAccess { object, .. } => vec![object],
+            Ir::IndexAccess { array, index, .. } => vec![array, index],
+            Ir::Range { start, end, .. } => vec![start, end],
+            Ir::IndexAssign {
+                array, index, value, ..
+            } => vec![array, index, value],
+            Ir::ParallelFor { range, body, .. } => vec![range, body],
+        }
+    }
+
+    /// Find the path to the first node (in left-most pre-order traversal)
+    /// for which `pred` returns true. The empty path matches `self`. Returns
+    /// `None` if no node matches.
+    pub fn find_path(&self, pred: &mut dyn FnMut(&Ir) -> bool) -> Option<Vec<usize>> {
+        if pred(self) {
+            return Some(Vec::new());
+        }
+        for (i, child) in self.children().into_iter().enumerate() {
+            if let Some(mut p) = child.find_path(pred) {
+                p.insert(0, i);
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    /// Resolve a path produced by `find_path`. Empty path returns `self`.
+    pub fn get_at_path(&self, path: &[usize]) -> Option<&Ir> {
+        let mut cur = self;
+        for &i in path {
+            cur = *cur.children().get(i)?;
+        }
+        Some(cur)
+    }
+
+    /// Return a copy of `self` with the node at `path` replaced by
+    /// `replacement`. Empty path replaces the whole tree. Returns `None` if
+    /// the path doesn't resolve.
+    pub fn replace_at_path(&self, path: &[usize], replacement: Ir) -> Option<Ir> {
+        replace_at_path_inner(self.clone(), path, replacement)
+    }
+
+    /// Substitute every `Identifier` whose name appears in `bindings` with
+    /// the corresponding IR value (cloned). Used for binding expansion
+    /// before submitting a sub-expression to the symbolic simplifier — the
+    /// IR-level analogue of the old text-level `expand_bindings`.
+    pub fn substitute_idents(&self, bindings: &[(String, Ir)]) -> Ir {
+        substitute_idents_inner(self, bindings)
+    }
+}
+
+fn replace_at_path_inner(node: Ir, path: &[usize], replacement: Ir) -> Option<Ir> {
+    if path.is_empty() {
+        return Some(replacement);
+    }
+    let head = path[0];
+    let tail = &path[1..];
+    match node {
+        Ir::Apply { callee, mut args, span } => {
+            let child = args.get(head)?.clone();
+            let new_child = replace_at_path_inner(child, tail, replacement)?;
+            args[head] = new_child;
+            Some(Ir::Apply { callee, args, span })
+        }
+        Ir::Tuple { mut items, span } => {
+            let child = items.get(head)?.clone();
+            items[head] = replace_at_path_inner(child, tail, replacement)?;
+            Some(Ir::Tuple { items, span })
+        }
+        Ir::ArrayLiteral { mut items, span } => {
+            let child = items.get(head)?.clone();
+            items[head] = replace_at_path_inner(child, tail, replacement)?;
+            Some(Ir::ArrayLiteral { items, span })
+        }
+        Ir::Block { mut items, span } => {
+            let child = items.get(head)?.clone();
+            items[head] = replace_at_path_inner(child, tail, replacement)?;
+            Some(Ir::Block { items, span })
+        }
+        Ir::Binding { name, value, span } if head == 0 => {
+            let new_value = replace_at_path_inner(*value, tail, replacement)?;
+            Some(Ir::Binding {
+                name,
+                value: Box::new(new_value),
+                span,
+            })
+        }
+        Ir::TupleBinding { names, value, span } if head == 0 => {
+            let new_value = replace_at_path_inner(*value, tail, replacement)?;
+            Some(Ir::TupleBinding {
+                names,
+                value: Box::new(new_value),
+                span,
+            })
+        }
+        Ir::IfExpr {
+            condition,
+            then_branch,
+            else_branch,
+            span,
+        } => match head {
+            0 => Some(Ir::IfExpr {
+                condition: Box::new(replace_at_path_inner(*condition, tail, replacement)?),
+                then_branch,
+                else_branch,
+                span,
+            }),
+            1 => Some(Ir::IfExpr {
+                condition,
+                then_branch: Box::new(replace_at_path_inner(*then_branch, tail, replacement)?),
+                else_branch,
+                span,
+            }),
+            2 => {
+                let eb = else_branch?;
+                Some(Ir::IfExpr {
+                    condition,
+                    then_branch,
+                    else_branch: Some(Box::new(replace_at_path_inner(*eb, tail, replacement)?)),
+                    span,
+                })
+            }
+            _ => None,
+        },
+        Ir::FunctionDef {
+            name,
+            params,
+            body,
+            span,
+        } if head == 0 => Some(Ir::FunctionDef {
+            name,
+            params,
+            body: Box::new(replace_at_path_inner(*body, tail, replacement)?),
+            span,
+        }),
+        Ir::ForLoop {
+            var, range, body, span,
+        } => match head {
+            0 => Some(Ir::ForLoop {
+                var,
+                range: Box::new(replace_at_path_inner(*range, tail, replacement)?),
+                body,
+                span,
+            }),
+            1 => Some(Ir::ForLoop {
+                var,
+                range,
+                body: Box::new(replace_at_path_inner(*body, tail, replacement)?),
+                span,
+            }),
+            _ => None,
+        },
+        Ir::WhileLoop {
+            condition, body, span,
+        } => match head {
+            0 => Some(Ir::WhileLoop {
+                condition: Box::new(replace_at_path_inner(*condition, tail, replacement)?),
+                body,
+                span,
+            }),
+            1 => Some(Ir::WhileLoop {
+                condition,
+                body: Box::new(replace_at_path_inner(*body, tail, replacement)?),
+                span,
+            }),
+            _ => None,
+        },
+        Ir::PropertyAccess {
+            object, property, span,
+        } if head == 0 => Some(Ir::PropertyAccess {
+            object: Box::new(replace_at_path_inner(*object, tail, replacement)?),
+            property,
+            span,
+        }),
+        Ir::IndexAccess { array, index, span } => match head {
+            0 => Some(Ir::IndexAccess {
+                array: Box::new(replace_at_path_inner(*array, tail, replacement)?),
+                index,
+                span,
+            }),
+            1 => Some(Ir::IndexAccess {
+                array,
+                index: Box::new(replace_at_path_inner(*index, tail, replacement)?),
+                span,
+            }),
+            _ => None,
+        },
+        Ir::Range { start, end, span } => match head {
+            0 => Some(Ir::Range {
+                start: Box::new(replace_at_path_inner(*start, tail, replacement)?),
+                end,
+                span,
+            }),
+            1 => Some(Ir::Range {
+                start,
+                end: Box::new(replace_at_path_inner(*end, tail, replacement)?),
+                span,
+            }),
+            _ => None,
+        },
+        Ir::IndexAssign {
+            array, index, value, span,
+        } => match head {
+            0 => Some(Ir::IndexAssign {
+                array: Box::new(replace_at_path_inner(*array, tail, replacement)?),
+                index,
+                value,
+                span,
+            }),
+            1 => Some(Ir::IndexAssign {
+                array,
+                index: Box::new(replace_at_path_inner(*index, tail, replacement)?),
+                value,
+                span,
+            }),
+            2 => Some(Ir::IndexAssign {
+                array,
+                index,
+                value: Box::new(replace_at_path_inner(*value, tail, replacement)?),
+                span,
+            }),
+            _ => None,
+        },
+        Ir::ParallelFor {
+            var, range, body, span,
+        } => match head {
+            0 => Some(Ir::ParallelFor {
+                var,
+                range: Box::new(replace_at_path_inner(*range, tail, replacement)?),
+                body,
+                span,
+            }),
+            1 => Some(Ir::ParallelFor {
+                var,
+                range,
+                body: Box::new(replace_at_path_inner(*body, tail, replacement)?),
+                span,
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn substitute_idents_inner(node: &Ir, bindings: &[(String, Ir)]) -> Ir {
+    match node {
+        Ir::Identifier { name, .. } => {
+            for (b_name, b_value) in bindings {
+                if b_name == name {
+                    return b_value.clone();
+                }
+            }
+            node.clone()
+        }
+        Ir::Number { .. } | Ir::BoolLit { .. } => node.clone(),
+        Ir::Apply { callee, args, span } => Ir::Apply {
+            callee: callee.clone(),
+            args: args.iter().map(|a| substitute_idents_inner(a, bindings)).collect(),
+            span: *span,
+        },
+        Ir::Tuple { items, span } => Ir::Tuple {
+            items: items.iter().map(|a| substitute_idents_inner(a, bindings)).collect(),
+            span: *span,
+        },
+        Ir::ArrayLiteral { items, span } => Ir::ArrayLiteral {
+            items: items.iter().map(|a| substitute_idents_inner(a, bindings)).collect(),
+            span: *span,
+        },
+        Ir::Block { items, span } => Ir::Block {
+            items: items.iter().map(|a| substitute_idents_inner(a, bindings)).collect(),
+            span: *span,
+        },
+        Ir::Binding { name, value, span } => Ir::Binding {
+            name: name.clone(),
+            value: Box::new(substitute_idents_inner(value, bindings)),
+            span: *span,
+        },
+        Ir::TupleBinding { names, value, span } => Ir::TupleBinding {
+            names: names.clone(),
+            value: Box::new(substitute_idents_inner(value, bindings)),
+            span: *span,
+        },
+        Ir::IfExpr {
+            condition,
+            then_branch,
+            else_branch,
+            span,
+        } => Ir::IfExpr {
+            condition: Box::new(substitute_idents_inner(condition, bindings)),
+            then_branch: Box::new(substitute_idents_inner(then_branch, bindings)),
+            else_branch: else_branch
+                .as_ref()
+                .map(|eb| Box::new(substitute_idents_inner(eb, bindings))),
+            span: *span,
+        },
+        Ir::FunctionDef {
+            name,
+            params,
+            body,
+            span,
+        } => Ir::FunctionDef {
+            name: name.clone(),
+            params: params.clone(),
+            body: Box::new(substitute_idents_inner(body, bindings)),
+            span: *span,
+        },
+        Ir::ForLoop {
+            var, range, body, span,
+        } => Ir::ForLoop {
+            var: var.clone(),
+            range: Box::new(substitute_idents_inner(range, bindings)),
+            body: Box::new(substitute_idents_inner(body, bindings)),
+            span: *span,
+        },
+        Ir::WhileLoop {
+            condition, body, span,
+        } => Ir::WhileLoop {
+            condition: Box::new(substitute_idents_inner(condition, bindings)),
+            body: Box::new(substitute_idents_inner(body, bindings)),
+            span: *span,
+        },
+        Ir::PropertyAccess {
+            object, property, span,
+        } => Ir::PropertyAccess {
+            object: Box::new(substitute_idents_inner(object, bindings)),
+            property: property.clone(),
+            span: *span,
+        },
+        Ir::IndexAccess { array, index, span } => Ir::IndexAccess {
+            array: Box::new(substitute_idents_inner(array, bindings)),
+            index: Box::new(substitute_idents_inner(index, bindings)),
+            span: *span,
+        },
+        Ir::Range { start, end, span } => Ir::Range {
+            start: Box::new(substitute_idents_inner(start, bindings)),
+            end: Box::new(substitute_idents_inner(end, bindings)),
+            span: *span,
+        },
+        Ir::IndexAssign {
+            array, index, value, span,
+        } => Ir::IndexAssign {
+            array: Box::new(substitute_idents_inner(array, bindings)),
+            index: Box::new(substitute_idents_inner(index, bindings)),
+            value: Box::new(substitute_idents_inner(value, bindings)),
+            span: *span,
+        },
+        Ir::ParallelFor {
+            var, range, body, span,
+        } => Ir::ParallelFor {
+            var: var.clone(),
+            range: Box::new(substitute_idents_inner(range, bindings)),
+            body: Box::new(substitute_idents_inner(body, bindings)),
+            span: *span,
+        },
+    }
 }
 
 fn write_ir(out: &mut String, ir: &Ir, wrap_binary: bool) {

@@ -15,7 +15,6 @@
 
 mod cell;
 mod diagnostic;
-mod internals;
 mod reduce_backend;
 mod reduce_simplifier;
 mod shader;
@@ -43,16 +42,11 @@ fn alloc_cell_id() -> usize {
 }
 
 use crate::lang::interpreter::{self, GpuDispatch};
-use crate::lang::ir::Ir;
+use crate::lang::ir::{BuiltinOp, Callee, Ir};
 use crate::lang::reduce::translate;
 use crate::lang::symbolic::SymbolicSimplifier;
 use crate::lang::{self, highlight};
 use crate::ui::theme::Rgba;
-
-use internals::{
-    collect_bindings, expand_bindings, extract_call_arg, extract_reduce_expr, find_cas_call,
-    substitute_reduce_result,
-};
 
 /// Why a particular simplifier round-trip is in flight. Lets `tick()` route
 /// the response to the right cell-update path.
@@ -62,13 +56,92 @@ enum SimplifyPurpose {
     /// output (with optional `= 0` suffix for equations).
     Print { is_equation: bool },
     /// CAS function (`int`, `df`, etc.) embedded in source. On response,
-    /// substitute the simplified form back into the cell's working text and
-    /// either resubmit (if more CAS calls remain) or generate WGSL.
-    InlineCas,
+    /// splice the simplified IR back into the cell's `effective_ir` at
+    /// `path` and, if more CAS subtrees remain, resubmit; otherwise
+    /// regenerate WGSL from the resolved IR.
+    InlineCas { path: Vec<usize> },
 }
 
 struct PendingSimplify {
     purpose: SimplifyPurpose,
+}
+
+/// Pull every top-level `Binding` statement out of `ir`, stopping at
+/// `before_idx` if given (exclusive). Used to gather the in-scope binding
+/// set when expanding identifier references in a CAS / print expression
+/// before submitting it to the simplifier.
+fn collect_top_bindings(ir: &Ir, before_idx: Option<usize>) -> Vec<(String, Ir)> {
+    let stmts: &[Ir] = match ir {
+        Ir::Block { items, .. } => items.as_slice(),
+        single => std::slice::from_ref(single),
+    };
+    let limit = before_idx.unwrap_or(stmts.len()).min(stmts.len());
+    let mut bindings = Vec::new();
+    for stmt in stmts.iter().take(limit) {
+        if let Ir::Binding { name, value, .. } = stmt {
+            bindings.push((name.clone(), value.as_ref().clone()));
+        }
+    }
+    bindings
+}
+
+/// Walk the cell's IR for the top-level `print(arg)` or `plot(arg)` Apply
+/// at `stmt_idx` and return its single argument. Returns `None` if the
+/// statement isn't an Apply with one argument matching the requested op.
+fn action_arg<'a>(combined: &'a Ir, stmt_idx: usize, op: BuiltinOp) -> Option<&'a Ir> {
+    let stmts: &[Ir] = match combined {
+        Ir::Block { items, .. } => items.as_slice(),
+        single => std::slice::from_ref(single),
+    };
+    let stmt = stmts.get(stmt_idx)?;
+    if let Ir::Apply {
+        callee: Callee::Builtin(c),
+        args,
+        ..
+    } = stmt
+    {
+        if *c == op && args.len() == 1 {
+            return Some(&args[0]);
+        }
+    }
+    None
+}
+
+/// Rewrite an equation `lhs = rhs` as `lhs - rhs` so the simplifier
+/// reduces the residual to a single value. Returns `(rewritten_ir,
+/// is_equation)` where the flag tells the response handler whether to
+/// re-attach the trailing `= 0` for display.
+fn fold_equation(ir: Ir) -> (Ir, bool) {
+    if let Ir::Apply {
+        callee: Callee::Builtin(BuiltinOp::Eq),
+        args,
+        span,
+    } = ir
+    {
+        if args.len() == 2 {
+            let mut iter = args.into_iter();
+            let lhs = iter.next().unwrap();
+            let rhs = iter.next().unwrap();
+            return (
+                Ir::Apply {
+                    callee: Callee::Builtin(BuiltinOp::Sub),
+                    args: vec![lhs, rhs],
+                    span,
+                },
+                true,
+            );
+        }
+        // Restore the original Apply if arity wasn't 2.
+        return (
+            Ir::Apply {
+                callee: Callee::Builtin(BuiltinOp::Eq),
+                args,
+                span,
+            },
+            false,
+        );
+    }
+    (ir, false)
 }
 
 pub struct Notebook {
@@ -246,28 +319,25 @@ impl Notebook {
     // ─── internals ─────────────────────────────────────────────────────────
 
     /// Build the combined IR for cells `[0..=cell_index]` using each cell's
-    /// *effective* source — the iterative-CAS-substituted text when one
-    /// exists, otherwise the raw buffer text.
+    /// *effective* IR — the post-simplification splice when present,
+    /// otherwise the parsed buffer text.
     ///
-    /// Invariant on the per-cell `ir_cache`: it always reflects the raw
-    /// buffer text (`cell.cached_ir()` parses `buffer.text()`). When a
-    /// cell's outcome carries a `Simplified` message — produced by
-    /// `compile_after_simplify` after a REDUCE round-trip rewrote the
-    /// source — we bypass the cache and parse the simplified text directly,
-    /// because (a) caching a key for "simplified" form would mean two cache
-    /// entries per cell, and (b) the simplified form is short-lived and
-    /// re-parsed at most once per REDUCE round-trip resolution.
+    /// `cell.effective_ir` is set by the iterative-CAS path after each
+    /// `int(...)` / `df(...)` is replaced with the simplified subtree.
+    /// Downstream cells should see the resolved form so their bindings
+    /// reference fully-evaluated values, not the raw CAS calls.
     fn combined_ir_up_to(&self, cell_index: usize) -> Result<Ir, String> {
         let mut all_stmts = Vec::new();
         for (i, cell) in self.cells.iter().enumerate() {
             if i > cell_index {
                 break;
             }
-            let parsed = match &cell.outcome.message {
-                Some(CellMessage::Simplified(s)) => crate::lang::parse(s),
-                _ => cell.cached_ir(),
-            }
-            .map_err(|e| format!("Cell {}: {}", i + 1, e))?;
+            let parsed = if let Some(ir) = &cell.effective_ir {
+                ir.clone()
+            } else {
+                cell.cached_ir()
+                    .map_err(|e| format!("Cell {}: {}", i + 1, e))?
+            };
             match parsed {
                 Ir::Block { items, .. } => all_stmts.extend(items),
                 other => all_stmts.push(other),
@@ -291,11 +361,14 @@ impl Notebook {
         let snapshot = self.cells[idx].buffer.text().to_string();
 
         // Reset outcome but keep token colors fresh regardless of success.
+        // Also clear any prior post-simplification splice — a fresh play
+        // starts from the raw buffer IR.
         self.cells[idx].outcome = CellOutcome::default();
         self.cells[idx].outcome.token_colors = highlight::highlight(&snapshot);
+        self.cells[idx].effective_ir = None;
 
-        // Drop any pending REDUCE for this cell — it would only confuse the
-        // response handler if it arrives now.
+        // Drop any pending simplifier round-trip for this cell — it would
+        // only confuse the response handler if it arrives now.
         let cell_id = self.cells[idx].id;
         self.pending_simplify.remove(&cell_id);
 
@@ -309,10 +382,8 @@ impl Notebook {
 
         let actions = lang::detect_cell_actions(&combined);
 
-        let cell_text = self.cells[idx].buffer.text().trim().to_string();
-
         if let Some(print_idx) = actions.first_print {
-            self.handle_print(idx, print_idx, &combined, &cell_text);
+            self.handle_print(idx, print_idx, &combined);
             if actions.last_plot.is_none() {
                 return;
             }
@@ -345,30 +416,21 @@ impl Notebook {
         }
 
         // CAS-only cell with no print/plot (e.g. raw `int(x²,x)` pasted as
-        // a cell). Submit to the symbolic simplifier.
-        if find_cas_call(&cell_text).is_some() && !cell_text.is_empty() {
-            let (reduce_input, _) = extract_reduce_expr(&cell_text);
-            let bindings = collect_bindings(&self.cells, idx, &cell_text);
-            let expanded = expand_bindings(reduce_input, &bindings);
-            match crate::lang::parse(&expanded) {
-                Ok(submit_ir) => {
-                    self.simplifier.submit(cell_id, &submit_ir);
-                    self.pending_simplify.insert(
-                        cell_id,
-                        PendingSimplify {
-                            purpose: SimplifyPurpose::InlineCas,
-                        },
-                    );
-                    self.cells[idx].outcome.message = Some(CellMessage::Pending);
-                }
-                Err(e) => {
-                    self.set_runtime_error(
-                        idx,
-                        format!("Could not parse expression for simplification: {}", e),
-                        &snapshot,
-                    );
-                }
+        // a cell). Find the CAS subtree in the cell's own IR, expand
+        // bindings referenced inside it, and submit to the simplifier.
+        let cell_ir = match self.cells[idx].cached_ir() {
+            Ok(ir) => ir,
+            Err(_) => {
+                // Combined parse already succeeded above; the per-cell
+                // parse should too. Fall through to the pure-expr branch.
+                self.cells[idx].outcome.program_ir = Some(combined);
+                self.cells[idx].state = CellState::Playing;
+                self.cells[idx].last_played_text = Some(snapshot);
+                return;
             }
+        };
+        if let Some(cas_path) = translate::find_cas_path(&cell_ir) {
+            self.submit_cas_at(idx, &cell_ir, cas_path);
             return;
         }
 
@@ -379,13 +441,62 @@ impl Notebook {
         self.cells[idx].last_played_text = Some(snapshot);
     }
 
-    fn handle_print(
-        &mut self,
+    /// Gather the in-scope bindings for a CAS-or-print expression at
+    /// `current_path` in `current_cell_ir`: every top-level `Binding` from
+    /// prior cells (using their post-simplification IR when available) plus
+    /// the bindings in the current cell that come before the addressed
+    /// statement.
+    fn in_scope_bindings(
+        &self,
         idx: usize,
-        print_idx: usize,
-        combined: &Ir,
-        cell_text: &str,
-    ) {
+        current_cell_ir: &Ir,
+        current_path: &[usize],
+    ) -> Vec<(String, Ir)> {
+        let mut bindings = Vec::new();
+        for cell in self.cells.iter().take(idx) {
+            let prior_ir = cell.effective_ir.clone().or_else(|| cell.cached_ir().ok());
+            if let Some(ir) = prior_ir {
+                bindings.extend(collect_top_bindings(&ir, None));
+            }
+        }
+        bindings.extend(collect_top_bindings(
+            current_cell_ir,
+            current_path.first().copied(),
+        ));
+        bindings
+    }
+
+    /// Submit the CAS subtree at `cas_path` in `cell_ir` to the simplifier,
+    /// after substituting in-scope bindings. Stores `cas_path` on the
+    /// pending entry so the response can splice into the cell's working IR
+    /// at the same spot.
+    fn submit_cas_at(&mut self, idx: usize, cell_ir: &Ir, cas_path: Vec<usize>) {
+        let bindings = self.in_scope_bindings(idx, cell_ir, &cas_path);
+        let cas_subtree = match cell_ir.get_at_path(&cas_path) {
+            Some(node) => node.clone(),
+            None => {
+                self.set_runtime_error(
+                    idx,
+                    "internal error: CAS path didn't resolve in cell IR".to_string(),
+                    &self.cells[idx].buffer.text().to_string(),
+                );
+                return;
+            }
+        };
+        let submit_ir = cas_subtree.substitute_idents(&bindings);
+
+        let cell_id = self.cells[idx].id;
+        self.simplifier.submit(cell_id, &submit_ir);
+        self.pending_simplify.insert(
+            cell_id,
+            PendingSimplify {
+                purpose: SimplifyPurpose::InlineCas { path: cas_path },
+            },
+        );
+        self.cells[idx].outcome.message = Some(CellMessage::Pending);
+    }
+
+    fn handle_print(&mut self, idx: usize, print_idx: usize, combined: &Ir) {
         let eval_ir = lang::build_print_ir(combined, print_idx);
         match interpreter::eval(&eval_ir, self.gpu.as_ref()) {
             Ok(val) => {
@@ -396,48 +507,26 @@ impl Notebook {
             Err(_) => {
                 // Interpreter couldn't evaluate (e.g. expression references
                 // axis variable `x`). Fall through to symbolic simplification.
-                let inner =
-                    extract_call_arg(cell_text, "print").unwrap_or_else(|| cell_text.to_string());
-                let bindings = collect_bindings(&self.cells, idx, cell_text);
-                let expanded = expand_bindings(&inner, &bindings);
-                let parsed = match crate::lang::parse(&expanded) {
-                    Ok(ir) => ir,
-                    Err(e) => {
+                let arg = match action_arg(combined, print_idx, BuiltinOp::Print) {
+                    Some(a) => a.clone(),
+                    None => {
                         self.set_runtime_error(
                             idx,
-                            format!("Could not parse expression for simplification: {}", e),
-                            cell_text,
+                            "internal error: print arg not found in IR".to_string(),
+                            "",
                         );
                         return;
                     }
                 };
+                // Bindings come from every top-level `Binding` in `combined`
+                // before the print statement.
+                let bindings = collect_top_bindings(combined, Some(print_idx));
+                let expanded = arg.substitute_idents(&bindings);
                 // Equations (`lhs = rhs`) get folded into `lhs - rhs` so the
                 // simplifier reduces them to a single value (the residual).
                 // The `is_equation` flag is plumbed back through the response
                 // so we can re-attach the trailing `= 0` when displaying.
-                let (submit_ir, is_equation) = match parsed {
-                    Ir::Apply {
-                        callee:
-                            crate::lang::ir::Callee::Builtin(crate::lang::ir::BuiltinOp::Eq),
-                        args,
-                        span,
-                    } if args.len() == 2 => {
-                        let mut iter = args.into_iter();
-                        let lhs = iter.next().unwrap();
-                        let rhs = iter.next().unwrap();
-                        (
-                            Ir::Apply {
-                                callee: crate::lang::ir::Callee::Builtin(
-                                    crate::lang::ir::BuiltinOp::Sub,
-                                ),
-                                args: vec![lhs, rhs],
-                                span,
-                            },
-                            true,
-                        )
-                    }
-                    other => (other, false),
-                };
+                let (submit_ir, is_equation) = fold_equation(expanded);
                 let cell_id = self.cells[idx].id;
                 self.simplifier.submit(cell_id, &submit_ir);
                 self.pending_simplify.insert(
@@ -489,13 +578,9 @@ impl Notebook {
             }
         };
 
-        // Pretty-print the IR back to Logos source for the still-text-level
-        // substitution / display paths below. Commit 3 will lift those to
-        // IR-walking and remove the round-trip.
-        let result = result_ir.to_source();
-
         match pending.purpose {
             SimplifyPurpose::Print { is_equation } => {
+                let result = result_ir.to_source();
                 let display = if is_equation {
                     format!("{} = 0", result)
                 } else {
@@ -503,37 +588,41 @@ impl Notebook {
                 };
                 self.cells[idx].outcome.message = Some(CellMessage::Computed(display));
             }
-            SimplifyPurpose::InlineCas => {
-                let working_text = match &self.cells[idx].outcome.message {
-                    Some(CellMessage::Simplified(s)) => s.clone(),
-                    _ => self.cells[idx].buffer.text().to_string(),
+            SimplifyPurpose::InlineCas { path } => {
+                // Splice the simplified IR into the cell's working IR at
+                // `path`. The working IR is the previous splice result if
+                // present, else the parsed buffer text.
+                let working_ir = self.cells[idx]
+                    .effective_ir
+                    .clone()
+                    .or_else(|| self.cells[idx].cached_ir().ok());
+                let working_ir = match working_ir {
+                    Some(ir) => ir,
+                    None => return Some(idx),
                 };
-                let (_, embedded) = extract_reduce_expr(&working_text);
-                let substituted = substitute_reduce_result(&working_text, &result, embedded);
-                self.cells[idx].outcome.message =
-                    Some(CellMessage::Simplified(substituted.clone()));
-
-                if find_cas_call(&substituted).is_some() {
-                    // Iterative CAS resolution — re-parse the substituted
-                    // working text and resubmit the next CAS subtree.
-                    let (next_input, _) = extract_reduce_expr(&substituted);
-                    let bindings = collect_bindings(&self.cells, idx, &substituted);
-                    let expanded = expand_bindings(next_input, &bindings);
-                    if let Ok(next_ir) = crate::lang::parse(&expanded) {
-                        let cell_id = self.cells[idx].id;
-                        self.simplifier.submit(cell_id, &next_ir);
-                        self.pending_simplify.insert(
-                            cell_id,
-                            PendingSimplify {
-                                purpose: SimplifyPurpose::InlineCas,
-                            },
+                let new_ir = match working_ir.replace_at_path(&path, result_ir) {
+                    Some(spliced) => spliced,
+                    None => {
+                        self.set_runtime_error(
+                            idx,
+                            "internal error: simplifier splice path no longer valid".to_string(),
+                            &self.cells[idx].buffer.text().to_string(),
                         );
                         return Some(idx);
                     }
-                    // Fall through to error reporting below if parse failed.
-                }
+                };
 
-                if let Some(op) = translate::detect_unevaluated_cas(&substituted) {
+                // Persist the spliced form. The `Simplified` message is a
+                // pretty-printed display string derived from the IR; the IR
+                // itself is the source of truth for downstream cells.
+                self.cells[idx].outcome.message =
+                    Some(CellMessage::Simplified(new_ir.to_source()));
+                self.cells[idx].effective_ir = Some(new_ir.clone());
+
+                // Surface unsolvable / special-function residuals before
+                // attempting another iteration: a returned `int(...)` /
+                // `df(...)` would otherwise drive an infinite resubmit loop.
+                if let Some(op) = translate::detect_unevaluated_cas_ir(&new_ir) {
                     let msg = format!(
                         "This {} cannot be computed symbolically. \
                          Consider using a numerical method instead.",
@@ -542,7 +631,7 @@ impl Notebook {
                     self.set_runtime_error(idx, msg, &self.cells[idx].buffer.text().to_string());
                     return Some(idx);
                 }
-                let special = translate::detect_special_functions(&substituted);
+                let special = translate::detect_special_functions_ir(&new_ir);
                 if !special.is_empty() {
                     let names: Vec<&str> = special.iter().map(|(_, d)| *d).collect();
                     let msg = format!(
@@ -554,54 +643,42 @@ impl Notebook {
                     return Some(idx);
                 }
 
-                // All clean — generate WGSL from the combined source with
-                // this cell's text replaced by the simplified form.
-                self.compile_after_simplify(idx, &substituted);
+                // Another CAS subtree to resolve?
+                if let Some(next_path) = translate::find_cas_path(&new_ir) {
+                    self.submit_cas_at(idx, &new_ir, next_path);
+                    return Some(idx);
+                }
+
+                // All CAS resolved — generate WGSL from the combined IR
+                // (which now reads `effective_ir` for this cell).
+                self.compile_after_simplify(idx);
             }
         }
         Some(idx)
     }
 
-    fn compile_after_simplify(&mut self, idx: usize, substituted: &str) {
-        let mut source = String::new();
-        for (i, cell) in self.cells.iter().enumerate() {
-            if i > idx {
-                break;
-            }
-            if !source.is_empty() {
-                source.push('\n');
-            }
-            if i == idx {
-                source.push_str(substituted);
-            } else if let Some(CellMessage::Simplified(s)) = &cell.outcome.message {
-                source.push_str(s);
-            } else {
-                source.push_str(cell.buffer.text());
-            }
-        }
-        let parsed = match crate::lang::parse(&source) {
+    fn compile_after_simplify(&mut self, idx: usize) {
+        let combined = match self.combined_ir_up_to(idx) {
             Ok(ir) => ir,
             Err(e) => {
-                if !e.contains("No result expression") {
-                    self.set_runtime_error(idx, e, &source);
-                }
+                self.set_runtime_error(idx, e, &self.cells[idx].buffer.text().to_string());
                 return;
             }
         };
-        match crate::lang::wgsl_gen::generate(&parsed) {
+        match crate::lang::wgsl_gen::generate(&combined) {
             Ok(wgsl) => {
                 self.cells[idx].outcome.shader = Some(ShaderSpec {
                     wgsl,
                     dispatch: DispatchKind::Fragment,
                     bindings: Vec::new(),
                 });
-                self.cells[idx].outcome.program_ir = Some(parsed);
+                self.cells[idx].outcome.program_ir = Some(combined);
                 self.cells[idx].state = CellState::Playing;
                 self.cells[idx].last_played_text = Some(self.cells[idx].buffer.text().to_string());
             }
             Err(e) => {
                 if !e.contains("No result expression") {
-                    self.set_runtime_error(idx, e, &source);
+                    self.set_runtime_error(idx, e, &self.cells[idx].buffer.text().to_string());
                 }
             }
         }
@@ -628,10 +705,10 @@ impl Notebook {
     }
 
     /// Concatenate the effective source of cells `[0..=cell_index]` —
-    /// using each cell's `Simplified` message as its source if present,
-    /// otherwise the buffer text. Used by the renderer to build the
-    /// "user-visible" source string for line/col error reporting on
-    /// shader-compile failures.
+    /// pretty-printing the post-simplification IR when present, otherwise
+    /// the buffer text. Used by the renderer to build the "user-visible"
+    /// source string for line/col error reporting on shader-compile
+    /// failures.
     pub fn combined_source(&self, cell_index: usize) -> String {
         let mut s = String::new();
         for (i, cell) in self.cells.iter().enumerate() {
@@ -641,9 +718,10 @@ impl Notebook {
             if !s.is_empty() {
                 s.push('\n');
             }
-            match &cell.outcome.message {
-                Some(CellMessage::Simplified(out)) => s.push_str(out),
-                _ => s.push_str(cell.buffer.text()),
+            if let Some(ir) = &cell.effective_ir {
+                s.push_str(&ir.to_source());
+            } else {
+                s.push_str(cell.buffer.text());
             }
         }
         s
