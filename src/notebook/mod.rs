@@ -239,16 +239,23 @@ impl Notebook {
     // ─── internals ─────────────────────────────────────────────────────────
 
     /// Build the combined AST for cells `[0..=cell_index]` using each cell's
-    /// effective source (the simplified output if any, else the buffer text).
+    /// *effective* source — the iterative-CAS-substituted text when one
+    /// exists, otherwise the raw buffer text.
+    ///
+    /// Invariant on the per-cell `ast_cache`: it always reflects the raw
+    /// buffer text (`cell.cached_ast()` parses `buffer.text()`). When a
+    /// cell's outcome carries a `Simplified` message — produced by
+    /// `compile_after_simplify` after a REDUCE round-trip rewrote the
+    /// source — we bypass the cache and parse the simplified text directly,
+    /// because (a) caching a key for "simplified" form would mean two cache
+    /// entries per cell, and (b) the simplified form is short-lived and
+    /// re-parsed at most once per REDUCE round-trip resolution.
     fn combined_ast_up_to(&self, cell_index: usize) -> Result<AstNode, String> {
         let mut all_stmts = Vec::new();
         for (i, cell) in self.cells.iter().enumerate() {
             if i > cell_index {
                 break;
             }
-            // For the simplified-output case, parse the simplified text
-            // directly (it bypasses the cell's AST cache, which holds the
-            // pre-substitution form).
             let parsed = match &cell.outcome.message {
                 Some(CellMessage::Simplified(s)) => crate::lang::parse(s),
                 _ => cell.cached_ast(),
@@ -536,6 +543,28 @@ impl Notebook {
             .diagnostics
             .push(Diagnostic::error(msg.clone(), span));
         self.cells[idx].outcome.message = Some(CellMessage::Error(msg));
+    }
+
+    /// Concatenate the effective source of cells `[0..=cell_index]` —
+    /// using each cell's `Simplified` message as its source if present,
+    /// otherwise the buffer text. Used by the renderer to build the
+    /// "user-visible" source string for line/col error reporting on
+    /// shader-compile failures.
+    pub fn combined_source(&self, cell_index: usize) -> String {
+        let mut s = String::new();
+        for (i, cell) in self.cells.iter().enumerate() {
+            if i > cell_index {
+                break;
+            }
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            match &cell.outcome.message {
+                Some(CellMessage::Simplified(out)) => s.push_str(out),
+                _ => s.push_str(cell.buffer.text()),
+            }
+        }
+        s
     }
 
     /// Flat list of `(cell_index, diagnostic)` across every cell. Cheap

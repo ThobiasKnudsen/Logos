@@ -108,27 +108,6 @@ fn find_ident_offset(source: &str, name: &str) -> Option<usize> {
     None
 }
 
-/// Combine the effective source of cells `[0..=cell_index]` into a single
-/// string, using each cell's simplified output when available, otherwise
-/// the buffer text. Used for error reporting (line/col lookup in user
-/// source) on shader compile failures.
-fn build_combined_source(tab: &crate::session::NotebookView, cell_index: usize) -> String {
-    let mut s = String::new();
-    for (i, cell) in tab.cells().iter().enumerate() {
-        if i > cell_index {
-            break;
-        }
-        if !s.is_empty() {
-            s.push('\n');
-        }
-        match &cell.outcome.message {
-            Some(CellMessage::Simplified(out)) => s.push_str(out),
-            _ => s.push_str(cell.buffer.text()),
-        }
-    }
-    s
-}
-
 // ---------------------------------------------------------------------------
 // Menu definitions
 // ---------------------------------------------------------------------------
@@ -1449,7 +1428,11 @@ impl AppState {
         let cell_id = self.session.active_tab().cell(cell_index).id;
         if let Err(e) = self.renderer.compile_cell_shader(cell_id, &wgsl) {
             log::error!("Shader compilation failed: {}", e);
-            let source = build_combined_source(self.session.active_tab(), cell_index);
+            let source = self
+                .session
+                .active_tab()
+                .notebook
+                .combined_source(cell_index);
             let formatted = format_shader_error(&e.to_string(), &source);
             let cell = self.session.active_tab_mut().cell_mut(cell_index);
             cell.state = CellState::Idle;
