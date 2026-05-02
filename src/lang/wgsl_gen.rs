@@ -1,4 +1,4 @@
-use super::ir::Ir;
+use super::ir::{BuiltinOp, Callee, Ir};
 use std::collections::HashSet;
 
 /// Maximum iterations for generated WGSL `for` loops.
@@ -263,7 +263,7 @@ struct GenContext {
 #[derive(Debug, Clone)]
 struct LiftedBlockDef {
     fn_name: String,
-    comparison_op: Option<String>,
+    comparison_op: Option<BuiltinOp>,
 }
 
 /// Metadata for a user-defined function whose bool body has imperative content.
@@ -272,7 +272,66 @@ struct LiftedBlockDef {
 #[derive(Debug, Clone)]
 struct LiftedFunctionDef {
     diff_fn_name: String,
-    comparison_op: String,
+    comparison_op: BuiltinOp,
+}
+
+/// If `callee` is a 2-arg comparison operator, return it; otherwise `None`.
+/// Used to detect `lhs op rhs` results that should drive corner-checking.
+fn as_comparison_op(callee: &Callee, args: &[Ir]) -> Option<BuiltinOp> {
+    if args.len() != 2 {
+        return None;
+    }
+    match callee {
+        Callee::Builtin(
+            op @ (BuiltinOp::Eq
+            | BuiltinOp::Neq
+            | BuiltinOp::Lt
+            | BuiltinOp::Gt
+            | BuiltinOp::Lte
+            | BuiltinOp::Gte),
+        ) => Some(*op),
+        _ => None,
+    }
+}
+
+/// Emit the four-corner WGSL pattern that decides whether a comparison op
+/// straddles `0.0` over the four pixel corners. `calls[i]` is the WGSL
+/// expression evaluating `lhs - rhs` at corner `i`.
+fn emit_corner_compare(op: BuiltinOp, calls: &[String; 4]) -> String {
+    match op {
+        // = and ≠ use sign-change detection: are all four corners on the same side?
+        BuiltinOp::Eq | BuiltinOp::Neq => {
+            let sides: [String; 4] = std::array::from_fn(|i| format!("(({}) > 0.0)", calls[i]));
+            let all_same = format!(
+                "({} == {} && {} == {} && {} == {})",
+                sides[0], sides[1], sides[1], sides[2], sides[2], sides[3],
+            );
+            if matches!(op, BuiltinOp::Eq) {
+                format!("(!{})", all_same)
+            } else {
+                all_same
+            }
+        }
+        // For inequalities, all four corners must agree.
+        BuiltinOp::Lt => format!(
+            "(({}) < 0.0 && ({}) < 0.0 && ({}) < 0.0 && ({}) < 0.0)",
+            calls[0], calls[1], calls[2], calls[3]
+        ),
+        BuiltinOp::Gt => format!(
+            "(({}) > 0.0 && ({}) > 0.0 && ({}) > 0.0 && ({}) > 0.0)",
+            calls[0], calls[1], calls[2], calls[3]
+        ),
+        BuiltinOp::Lte => format!(
+            "(({}) <= 0.0 && ({}) <= 0.0 && ({}) <= 0.0 && ({}) <= 0.0)",
+            calls[0], calls[1], calls[2], calls[3]
+        ),
+        BuiltinOp::Gte => format!(
+            "(({}) >= 0.0 && ({}) >= 0.0 && ({}) >= 0.0 && ({}) >= 0.0)",
+            calls[0], calls[1], calls[2], calls[3]
+        ),
+        // as_comparison_op is the only construction site, so this is unreachable.
+        _ => String::new(),
+    }
 }
 
 /// Optional x/y substitution for corner-checking.
@@ -417,13 +476,7 @@ impl GenContext {
                     if let Ir::Block { items: stmts, .. } = body.as_ref() {
                         if let Some(result) = block_result_expr_from_stmts(stmts) {
                             if let Ir::Apply { callee, args: cmp_args, .. } = result {
-                                let op_name = callee.name();
-                                if cmp_args.len() == 2
-                                    && matches!(
-                                        op_name,
-                                        "eq" | "neq" | "lt" | "gt" | "lte" | "gte"
-                                    )
-                                {
+                                if let Some(cmp_op) = as_comparison_op(callee, cmp_args) {
                                     let diff_name = format!("_diff_{}", name);
                                     let mut declared: HashSet<String> = HashSet::new();
                                     for p in params {
@@ -435,7 +488,7 @@ impl GenContext {
                                     if let Ok(diff_body) = self.emit_lifted_block_body_with(
                                         stmts,
                                         result,
-                                        &Some(op_name.to_string()),
+                                        &Some(cmp_op),
                                         declared,
                                     ) {
                                         let diff_wgsl = format!(
@@ -450,7 +503,7 @@ impl GenContext {
                                             name.clone(),
                                             LiftedFunctionDef {
                                                 diff_fn_name: diff_name,
-                                                comparison_op: op_name.to_string(),
+                                                comparison_op: cmp_op,
                                             },
                                         );
                                     }
@@ -565,20 +618,12 @@ impl GenContext {
         &mut self,
         binding_name: &str,
         stmts: &[Ir],
-    ) -> Result<(String, Option<String>, String), String> {
+    ) -> Result<(String, Option<BuiltinOp>, String), String> {
         let result = block_result_expr_from_stmts(stmts)
             .ok_or_else(|| format!("block-valued binding `{}` has no result", binding_name))?;
 
         let comparison_op = match result {
-            Ir::Apply { callee, args, .. }
-                if args.len() == 2
-                    && matches!(
-                        callee.name(),
-                        "eq" | "neq" | "lt" | "gt" | "lte" | "gte"
-                    ) =>
-            {
-                Some(callee.name().to_string())
-            }
+            Ir::Apply { callee, args, .. } => as_comparison_op(callee, args),
             _ => None,
         };
 
@@ -587,14 +632,14 @@ impl GenContext {
         let func_wgsl = format!("fn {}(x: f32, y: f32) -> f32 {{\n{}}}\n", fn_name, body);
         self.functions.push(EmittedFunction { wgsl_code: func_wgsl });
 
-        let binding_expr = if let Some(op) = &comparison_op {
-            let wgsl_op = match op.as_str() {
-                "eq" => "==",
-                "neq" => "!=",
-                "lt" => "<",
-                "gt" => ">",
-                "lte" => "<=",
-                "gte" => ">=",
+        let binding_expr = if let Some(op) = comparison_op {
+            let wgsl_op = match op {
+                BuiltinOp::Eq => "==",
+                BuiltinOp::Neq => "!=",
+                BuiltinOp::Lt => "<",
+                BuiltinOp::Gt => ">",
+                BuiltinOp::Lte => "<=",
+                BuiltinOp::Gte => ">=",
                 _ => "==",
             };
             format!("({}(x, y) {} 0.0)", fn_name, wgsl_op)
@@ -613,7 +658,7 @@ impl GenContext {
         &self,
         stmts: &[Ir],
         result: &Ir,
-        comparison_op: &Option<String>,
+        comparison_op: &Option<BuiltinOp>,
     ) -> Result<String, String> {
         let mut declared: HashSet<String> = HashSet::new();
         declared.insert("x".to_string());
@@ -628,7 +673,7 @@ impl GenContext {
         &self,
         stmts: &[Ir],
         result: &Ir,
-        comparison_op: &Option<String>,
+        comparison_op: &Option<BuiltinOp>,
         mut declared: HashSet<String>,
     ) -> Result<String, String> {
         let mut code = String::new();
@@ -1109,7 +1154,7 @@ impl GenContext {
                 }
                 Ok(name.clone())
             }
-            Ir::Apply { callee, args, .. } => self.emit_apply_internal(callee.name(), args, subst),
+            Ir::Apply { callee, args, .. } => self.emit_apply_internal(callee, args, subst),
             Ir::Tuple { items, .. } => {
                 let parts: Result<Vec<_>, _> = items
                     .iter()
@@ -1180,7 +1225,7 @@ impl GenContext {
 
     fn emit_apply_internal(
         &self,
-        name: &str,
+        callee: &Callee,
         args: &[Ir],
         subst: CornerSubst,
     ) -> Result<String, String> {
@@ -1190,57 +1235,77 @@ impl GenContext {
             .collect();
         let emitted = emit_args?;
 
-        match (name, args.len()) {
+        let op = match callee {
+            Callee::Builtin(op) => *op,
+            Callee::User(name) => {
+                // User-defined functions: emit as regular call, appending captured vars
+                // if any. Captured axis vars (`x`, `y`) get the corner substitution when
+                // we're inside corner-checking — otherwise the function would be
+                // evaluated at the pixel center for all four corners, killing the
+                // sign-change check and producing a dotted curve.
+                let mut all_args = emitted;
+                if let Some(captured) = self.captured_vars.get(name) {
+                    for cap in captured {
+                        let s = match (subst, cap.as_str()) {
+                            (Some((xv, _)), "x") => xv.to_string(),
+                            (Some((_, yv)), "y") => yv.to_string(),
+                            _ => cap.clone(),
+                        };
+                        all_args.push(s);
+                    }
+                }
+                return Ok(format!("{}({})", name, all_args.join(", ")));
+            }
+        };
+
+        match op {
             // Binary infix operators
-            ("add", 2) => Ok(format!("({} + {})", emitted[0], emitted[1])),
-            ("sub", 2) => Ok(format!("({} - {})", emitted[0], emitted[1])),
-            ("mul", 2) => Ok(format!("({} * {})", emitted[0], emitted[1])),
-            ("div", 2) => Ok(format!("({} / {})", emitted[0], emitted[1])),
-            ("mod", 2) => Ok(format!(
+            BuiltinOp::Add => Ok(format!("({} + {})", emitted[0], emitted[1])),
+            BuiltinOp::Sub => Ok(format!("({} - {})", emitted[0], emitted[1])),
+            BuiltinOp::Mul => Ok(format!("({} * {})", emitted[0], emitted[1])),
+            BuiltinOp::Div => Ok(format!("({} / {})", emitted[0], emitted[1])),
+            BuiltinOp::Mod => Ok(format!(
                 "((({} % {}) + {}) % {})",
                 emitted[0], emitted[1], emitted[1], emitted[1]
             )),
 
             // Comparison
-            ("eq", 2) => Ok(format!("({} == {})", emitted[0], emitted[1])),
-            ("neq", 2) => Ok(format!("({} != {})", emitted[0], emitted[1])),
-            ("lt", 2) => Ok(format!("({} < {})", emitted[0], emitted[1])),
-            ("gt", 2) => Ok(format!("({} > {})", emitted[0], emitted[1])),
-            ("lte", 2) => Ok(format!("({} <= {})", emitted[0], emitted[1])),
-            ("gte", 2) => Ok(format!("({} >= {})", emitted[0], emitted[1])),
+            BuiltinOp::Eq => Ok(format!("({} == {})", emitted[0], emitted[1])),
+            BuiltinOp::Neq => Ok(format!("({} != {})", emitted[0], emitted[1])),
+            BuiltinOp::Lt => Ok(format!("({} < {})", emitted[0], emitted[1])),
+            BuiltinOp::Gt => Ok(format!("({} > {})", emitted[0], emitted[1])),
+            BuiltinOp::Lte => Ok(format!("({} <= {})", emitted[0], emitted[1])),
+            BuiltinOp::Gte => Ok(format!("({} >= {})", emitted[0], emitted[1])),
 
             // Logical
-            ("and", 2) => Ok(format!("({} && {})", emitted[0], emitted[1])),
-            ("or", 2) => Ok(format!("({} || {})", emitted[0], emitted[1])),
-            ("not", 1) => Ok(format!("!({})", emitted[0])),
+            BuiltinOp::And => Ok(format!("({} && {})", emitted[0], emitted[1])),
+            BuiltinOp::Or => Ok(format!("({} || {})", emitted[0], emitted[1])),
+            BuiltinOp::Not => Ok(format!("!({})", emitted[0])),
 
             // Unary
-            ("neg", 1) => Ok(format!("-({})", emitted[0])),
+            BuiltinOp::Neg => Ok(format!("-({})", emitted[0])),
 
-            // Math builtins — direct WGSL mapping
-            ("sin", 1) => Ok(format!("sin({})", emitted[0])),
-            ("cos", 1) => Ok(format!("cos({})", emitted[0])),
-            ("tan", 1) => Ok(format!("tan({})", emitted[0])),
-            ("asin", 1) => Ok(format!("asin({})", emitted[0])),
-            ("acos", 1) => Ok(format!("acos({})", emitted[0])),
-            ("atan", 1) => Ok(format!("atan({})", emitted[0])),
-            ("atan", 2) => Ok(format!("atan2({}, {})", emitted[0], emitted[1])),
-            ("sinh", 1) => Ok(format!("sinh({})", emitted[0])),
-            ("cosh", 1) => Ok(format!("cosh({})", emitted[0])),
-            ("tanh", 1) => Ok(format!("tanh({})", emitted[0])),
-            ("log", 1) => Ok(format!("log({})", emitted[0])),
-            ("log2", 1) => Ok(format!("log2({})", emitted[0])),
-            ("log10", 1) => Ok(format!("(log2({}) / log2(10.0))", emitted[0])),
-            ("exp", 1) => Ok(format!("exp({})", emitted[0])),
-            ("exp2", 1) => Ok(format!("exp2({})", emitted[0])),
-            ("sqrt", 1) => Ok(format!("sqrt({})", emitted[0])),
-            ("abs", 1) => Ok(format!("abs({})", emitted[0])),
-            ("sign", 1) => Ok(format!("sign({})", emitted[0])),
-            ("floor", 1) => Ok(format!("floor({})", emitted[0])),
-            ("ceil", 1) => Ok(format!("ceil({})", emitted[0])),
-            ("round", 1) => Ok(format!("round({})", emitted[0])),
-            ("fract", 1) => Ok(format!("fract({})", emitted[0])),
-            ("pow", 2) => {
+            // Pure unary math — direct WGSL mapping
+            BuiltinOp::Sin | BuiltinOp::Cos | BuiltinOp::Tan
+            | BuiltinOp::Asin | BuiltinOp::Acos
+            | BuiltinOp::Sinh | BuiltinOp::Cosh | BuiltinOp::Tanh
+            | BuiltinOp::Log | BuiltinOp::Log2 | BuiltinOp::Exp | BuiltinOp::Exp2
+            | BuiltinOp::Sqrt | BuiltinOp::Abs | BuiltinOp::Sign
+            | BuiltinOp::Floor | BuiltinOp::Ceil | BuiltinOp::Round | BuiltinOp::Fract
+            | BuiltinOp::Length | BuiltinOp::Normalize => {
+                Ok(format!("{}({})", op.name(), emitted[0]))
+            }
+
+            // atan is overloaded: 1 arg → atan, 2 args → atan2
+            BuiltinOp::Atan => match args.len() {
+                1 => Ok(format!("atan({})", emitted[0])),
+                2 => Ok(format!("atan2({}, {})", emitted[0], emitted[1])),
+                n => Err(format!("atan expects 1 or 2 args, got {}", n)),
+            },
+
+            BuiltinOp::Log10 => Ok(format!("(log2({}) / log2(10.0))", emitted[0])),
+
+            BuiltinOp::Pow => {
                 // pow(x, n) for small non-negative integer n is much cheaper as
                 // repeated multiplication — pow() costs ~20+ GPU ops via exp2/log2,
                 // and `x²` (very common in plotting) shouldn't pay that.
@@ -1256,53 +1321,32 @@ impl GenContext {
                 }
                 Ok(format!("pow({}, {})", emitted[0], emitted[1]))
             }
-            ("min", 2) => Ok(format!("min({}, {})", emitted[0], emitted[1])),
-            ("max", 2) => Ok(format!("max({}, {})", emitted[0], emitted[1])),
-            ("clamp", 3) => Ok(format!(
-                "clamp({}, {}, {})",
+
+            // Pure binary math
+            BuiltinOp::Min | BuiltinOp::Max | BuiltinOp::Step
+            | BuiltinOp::Dot | BuiltinOp::Cross => {
+                Ok(format!("{}({}, {})", op.name(), emitted[0], emitted[1]))
+            }
+
+            // Pure ternary math
+            BuiltinOp::Clamp | BuiltinOp::Mix | BuiltinOp::Smoothstep => Ok(format!(
+                "{}({}, {}, {})",
+                op.name(),
                 emitted[0], emitted[1], emitted[2]
             )),
-            ("mix", 3) => Ok(format!(
-                "mix({}, {}, {})",
-                emitted[0], emitted[1], emitted[2]
-            )),
-            ("step", 2) => Ok(format!("step({}, {})", emitted[0], emitted[1])),
-            ("smoothstep", 3) => Ok(format!(
-                "smoothstep({}, {}, {})",
-                emitted[0], emitted[1], emitted[2]
-            )),
-            ("length", 1) => Ok(format!("length({})", emitted[0])),
-            ("normalize", 1) => Ok(format!("normalize({})", emitted[0])),
-            ("dot", 2) => Ok(format!("dot({}, {})", emitted[0], emitted[1])),
-            ("cross", 2) => Ok(format!("cross({}, {})", emitted[0], emitted[1])),
 
             // Type constructors / casts
-            ("f32", 1) => Ok(format!("f32({})", emitted[0])),
-            ("f64", 1) => Ok(format!("f32({})", emitted[0])),
-            ("i32", 1) => Ok(format!("i32({})", emitted[0])),
-            ("vec2", n) if n >= 1 => Ok(format!("vec2<f32>({})", emitted.join(", "))),
-            ("vec3", n) if n >= 1 => Ok(format!("vec3<f32>({})", emitted.join(", "))),
-            ("vec4", n) if n >= 1 => Ok(format!("vec4<f32>({})", emitted.join(", "))),
+            BuiltinOp::F32 | BuiltinOp::F64 => Ok(format!("f32({})", emitted[0])),
+            BuiltinOp::I32 => Ok(format!("i32({})", emitted[0])),
+            BuiltinOp::Vec2 => Ok(format!("vec2<f32>({})", emitted.join(", "))),
+            BuiltinOp::Vec3 => Ok(format!("vec3<f32>({})", emitted.join(", "))),
+            BuiltinOp::Vec4 => Ok(format!("vec4<f32>({})", emitted.join(", "))),
 
-            // User-defined functions: emit as regular call, appending captured vars if any.
-            // Captured axis vars (`x`, `y`) get the corner substitution when we're
-            // inside corner-checking — otherwise the function would be evaluated at
-            // the pixel center for all four corners, killing the sign-change check
-            // and producing a dotted curve.
-            _ => {
-                let mut all_args = emitted;
-                if let Some(captured) = self.captured_vars.get(name) {
-                    for cap in captured {
-                        let s = match (subst, cap.as_str()) {
-                            (Some((xv, _)), "x") => xv.to_string(),
-                            (Some((_, yv)), "y") => yv.to_string(),
-                            _ => cap.clone(),
-                        };
-                        all_args.push(s);
-                    }
-                }
-                Ok(format!("{}({})", name, all_args.join(", ")))
-            }
+            // No fragment-shader semantics for these.
+            BuiltinOp::Len | BuiltinOp::Print | BuiltinOp::Plot => Err(format!(
+                "Builtin '{}' is not supported in fragment shaders",
+                op.name()
+            )),
         }
     }
 
@@ -1328,74 +1372,17 @@ impl GenContext {
             // not 6+ (the corner expression below references each corner twice).
             Ir::Identifier { name, .. } if self.lifted_block_defs.contains_key(name) => {
                 let def = self.lifted_block_defs.get(name).unwrap();
-                let calls: Vec<String> = vec![
+                let calls = [
                     format!("_corner_{}_mm", name),
                     format!("_corner_{}_mp", name),
                     format!("_corner_{}_pm", name),
                     format!("_corner_{}_pp", name),
                 ];
 
-                if let Some(op) = &def.comparison_op {
-                    match op.as_str() {
-                        "eq" => {
-                            let sides: Vec<String> = calls
-                                .iter()
-                                .map(|c| format!("(({}) > 0.0)", c))
-                                .collect();
-                            Ok(format!(
-                                "(!({} == {} && {} == {} && {} == {}))",
-                                sides[0],
-                                sides[1],
-                                sides[1],
-                                sides[2],
-                                sides[2],
-                                sides[3]
-                            ))
-                        }
-                        "neq" => {
-                            let sides: Vec<String> = calls
-                                .iter()
-                                .map(|c| format!("(({}) > 0.0)", c))
-                                .collect();
-                            Ok(format!(
-                                "({} == {} && {} == {} && {} == {})",
-                                sides[0],
-                                sides[1],
-                                sides[1],
-                                sides[2],
-                                sides[2],
-                                sides[3]
-                            ))
-                        }
-                        "lt" => Ok(format!(
-                            "(({}) < 0.0 && ({}) < 0.0 && ({}) < 0.0 && ({}) < 0.0)",
-                            calls[0], calls[1], calls[2], calls[3]
-                        )),
-                        "gt" => Ok(format!(
-                            "(({}) > 0.0 && ({}) > 0.0 && ({}) > 0.0 && ({}) > 0.0)",
-                            calls[0], calls[1], calls[2], calls[3]
-                        )),
-                        "lte" => Ok(format!(
-                            "(({}) <= 0.0 && ({}) <= 0.0 && ({}) <= 0.0 && ({}) <= 0.0)",
-                            calls[0], calls[1], calls[2], calls[3]
-                        )),
-                        "gte" => Ok(format!(
-                            "(({}) >= 0.0 && ({}) >= 0.0 && ({}) >= 0.0 && ({}) >= 0.0)",
-                            calls[0], calls[1], calls[2], calls[3]
-                        )),
-                        _ => self.emit_expr(node),
-                    }
-                } else {
-                    // No comparison — treat the float result as an implicit curve `f = 0`.
-                    let sides: Vec<String> = calls
-                        .iter()
-                        .map(|c| format!("(({}) > 0.0)", c))
-                        .collect();
-                    Ok(format!(
-                        "(!({} == {} && {} == {} && {} == {}))",
-                        sides[0], sides[1], sides[1], sides[2], sides[2], sides[3]
-                    ))
-                }
+                // No comparison op → treat float result as implicit curve `f = 0`,
+                // which is the same pattern as `Eq` (sign-change detection).
+                let op = def.comparison_op.unwrap_or(BuiltinOp::Eq);
+                Ok(emit_corner_compare(op, &calls))
             }
 
             // Identifier bound to a bool expression: inline so the comparison
@@ -1406,35 +1393,38 @@ impl GenContext {
             }
 
             Ir::Apply { callee, args, .. } => {
-                let name = callee.name();
-                match name {
-                    // Logical ops: recursively apply corner checking.
-                    // Operands may be bool (comparisons) or float (implicit curves).
-                    "and" if args.len() == 2 => {
-                        let l = self.emit_bool_operand_with_corners(&args[0])?;
-                        let r = self.emit_bool_operand_with_corners(&args[1])?;
-                        Ok(format!("({} && {})", l, r))
-                    }
-                    "or" if args.len() == 2 => {
-                        let l = self.emit_bool_operand_with_corners(&args[0])?;
-                        let r = self.emit_bool_operand_with_corners(&args[1])?;
-                        Ok(format!("({} || {})", l, r))
-                    }
-                    "not" if args.len() == 1 => {
-                        let inner = self.emit_bool_operand_with_corners(&args[0])?;
-                        Ok(format!("!({})", inner))
+                // Logical ops: recursively apply corner checking.
+                // Operands may be bool (comparisons) or float (implicit curves).
+                if let Callee::Builtin(op) = callee {
+                    match (op, args.len()) {
+                        (BuiltinOp::And, 2) => {
+                            let l = self.emit_bool_operand_with_corners(&args[0])?;
+                            let r = self.emit_bool_operand_with_corners(&args[1])?;
+                            return Ok(format!("({} && {})", l, r));
+                        }
+                        (BuiltinOp::Or, 2) => {
+                            let l = self.emit_bool_operand_with_corners(&args[0])?;
+                            let r = self.emit_bool_operand_with_corners(&args[1])?;
+                            return Ok(format!("({} || {})", l, r));
+                        }
+                        (BuiltinOp::Not, 1) => {
+                            let inner = self.emit_bool_operand_with_corners(&args[0])?;
+                            return Ok(format!("!({})", inner));
+                        }
+                        _ => {}
                     }
                     // Comparison ops: apply corner checking
-                    "eq" | "neq" | "lt" | "gt" | "lte" | "gte" if args.len() == 2 => {
-                        self.emit_comparison_with_corners(name, &args[0], &args[1])
+                    if let Some(cmp_op) = as_comparison_op(callee, args) {
+                        return self.emit_comparison_with_corners(cmp_op, &args[0], &args[1]);
                     }
-                    // User-defined bool function: inline body and apply corner-checking.
-                    // This makes f(x,y) produce identical rendering to the inline expression.
-                    // User-defined function with imperative body + comparison
-                    // result: call the precomputed `_diff_<name>` companion at
-                    // the four pixel corners. Inlining doesn't work here because
-                    // emit_bool_with_corners can't re-emit imperative stmts.
-                    _ if self.lifted_function_defs.contains_key(name) => {
+                }
+
+                // User-defined bool function with imperative body + comparison
+                // result: call the precomputed `_diff_<name>` companion at the
+                // four pixel corners. Inlining doesn't work here because
+                // emit_bool_with_corners can't re-emit imperative stmts.
+                if let Callee::User(name) = callee {
+                    if self.lifted_function_defs.contains_key(name) {
                         let def = self.lifted_function_defs.get(name).unwrap().clone();
                         let captured = self
                             .captured_vars
@@ -1468,64 +1458,16 @@ impl GenContext {
                             corner_call("x_p", "y_p"),
                         ];
 
-                        match def.comparison_op.as_str() {
-                            "eq" => {
-                                let sides: Vec<String> = calls
-                                    .iter()
-                                    .map(|c| format!("(({}) > 0.0)", c))
-                                    .collect();
-                                Ok(format!(
-                                    "(!({} == {} && {} == {} && {} == {}))",
-                                    sides[0],
-                                    sides[1],
-                                    sides[1],
-                                    sides[2],
-                                    sides[2],
-                                    sides[3]
-                                ))
-                            }
-                            "neq" => {
-                                let sides: Vec<String> = calls
-                                    .iter()
-                                    .map(|c| format!("(({}) > 0.0)", c))
-                                    .collect();
-                                Ok(format!(
-                                    "({} == {} && {} == {} && {} == {})",
-                                    sides[0],
-                                    sides[1],
-                                    sides[1],
-                                    sides[2],
-                                    sides[2],
-                                    sides[3]
-                                ))
-                            }
-                            "lt" => Ok(format!(
-                                "(({}) < 0.0 && ({}) < 0.0 && ({}) < 0.0 && ({}) < 0.0)",
-                                calls[0], calls[1], calls[2], calls[3]
-                            )),
-                            "gt" => Ok(format!(
-                                "(({}) > 0.0 && ({}) > 0.0 && ({}) > 0.0 && ({}) > 0.0)",
-                                calls[0], calls[1], calls[2], calls[3]
-                            )),
-                            "lte" => Ok(format!(
-                                "(({}) <= 0.0 && ({}) <= 0.0 && ({}) <= 0.0 && ({}) <= 0.0)",
-                                calls[0], calls[1], calls[2], calls[3]
-                            )),
-                            "gte" => Ok(format!(
-                                "(({}) >= 0.0 && ({}) >= 0.0 && ({}) >= 0.0 && ({}) >= 0.0)",
-                                calls[0], calls[1], calls[2], calls[3]
-                            )),
-                            _ => self.emit_expr(node),
-                        }
+                        return Ok(emit_corner_compare(def.comparison_op, &calls));
                     }
-                    _ if self.bool_function_defs.contains_key(name) => {
+                    if self.bool_function_defs.contains_key(name) {
                         let func_def = self.bool_function_defs.get(name).unwrap();
                         let inlined = substitute_params(&func_def.body, &func_def.params, args);
-                        self.emit_bool_with_corners(&inlined)
+                        return self.emit_bool_with_corners(&inlined);
                     }
-                    // Anything else: fall back to normal emission
-                    _ => self.emit_expr(node),
                 }
+                // Anything else: fall back to normal emission
+                self.emit_expr(node)
             }
 
             // Non-boolean nodes or identifiers: emit normally
