@@ -40,7 +40,7 @@ fn alloc_cell_id() -> usize {
     NEXT_CELL_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-use crate::lang::ast::AstNode;
+use crate::lang::ir::Ir;
 use crate::lang::interpreter::{self, GpuDispatch};
 use crate::lang::reduce::translate;
 use crate::lang::{self, highlight};
@@ -144,7 +144,7 @@ impl Notebook {
             return;
         }
         self.cells[idx].buffer.set_text(text);
-        self.cells[idx].invalidate_ast();
+        self.cells[idx].invalidate_ir();
     }
 
     /// Programmatic plot-color setter. Currently no UI binding (color is
@@ -238,19 +238,19 @@ impl Notebook {
 
     // ─── internals ─────────────────────────────────────────────────────────
 
-    /// Build the combined AST for cells `[0..=cell_index]` using each cell's
+    /// Build the combined IR for cells `[0..=cell_index]` using each cell's
     /// *effective* source — the iterative-CAS-substituted text when one
     /// exists, otherwise the raw buffer text.
     ///
-    /// Invariant on the per-cell `ast_cache`: it always reflects the raw
-    /// buffer text (`cell.cached_ast()` parses `buffer.text()`). When a
+    /// Invariant on the per-cell `ir_cache`: it always reflects the raw
+    /// buffer text (`cell.cached_ir()` parses `buffer.text()`). When a
     /// cell's outcome carries a `Simplified` message — produced by
     /// `compile_after_simplify` after a REDUCE round-trip rewrote the
     /// source — we bypass the cache and parse the simplified text directly,
     /// because (a) caching a key for "simplified" form would mean two cache
     /// entries per cell, and (b) the simplified form is short-lived and
     /// re-parsed at most once per REDUCE round-trip resolution.
-    fn combined_ast_up_to(&self, cell_index: usize) -> Result<AstNode, String> {
+    fn combined_ir_up_to(&self, cell_index: usize) -> Result<Ir, String> {
         let mut all_stmts = Vec::new();
         for (i, cell) in self.cells.iter().enumerate() {
             if i > cell_index {
@@ -258,11 +258,11 @@ impl Notebook {
             }
             let parsed = match &cell.outcome.message {
                 Some(CellMessage::Simplified(s)) => crate::lang::parse(s),
-                _ => cell.cached_ast(),
+                _ => cell.cached_ir(),
             }
             .map_err(|e| format!("Cell {}: {}", i + 1, e))?;
             match parsed {
-                AstNode::Block { items, .. } => all_stmts.extend(items),
+                Ir::Block { items, .. } => all_stmts.extend(items),
                 other => all_stmts.push(other),
             }
         }
@@ -274,7 +274,7 @@ impl Notebook {
                 all_stmts.last().unwrap().span().1,
             )
         };
-        Ok(AstNode::Block {
+        Ok(Ir::Block {
             items: all_stmts,
             span,
         })
@@ -292,7 +292,7 @@ impl Notebook {
         let cell_id = self.cells[idx].id;
         self.pending_reduce.remove(&cell_id);
 
-        let combined = match self.combined_ast_up_to(idx) {
+        let combined = match self.combined_ir_up_to(idx) {
             Ok(a) => a,
             Err(msg) => {
                 self.set_parse_error(idx, msg, &snapshot);
@@ -326,6 +326,7 @@ impl Notebook {
                 Ok(val) => {
                     self.cells[idx].outcome.message =
                         Some(CellMessage::Computed(format!("{}", val)));
+                    self.cells[idx].outcome.program_ir = Some(combined);
                     self.cells[idx].state = CellState::Playing;
                     self.cells[idx].last_played_text = Some(snapshot);
                 }
@@ -356,7 +357,8 @@ impl Notebook {
         }
 
         // Pure expression cell with no action — treat as Playing (its bindings
-        // are still in scope for later cells via combined_ast_up_to).
+        // are still in scope for later cells via combined_ir_up_to).
+        self.cells[idx].outcome.program_ir = Some(combined);
         self.cells[idx].state = CellState::Playing;
         self.cells[idx].last_played_text = Some(snapshot);
     }
@@ -365,14 +367,15 @@ impl Notebook {
         &mut self,
         idx: usize,
         print_idx: usize,
-        combined: &AstNode,
+        combined: &Ir,
         cell_text: &str,
     ) {
-        let eval_ast = lang::build_print_ast(combined, print_idx);
-        match interpreter::eval(&eval_ast, self.gpu.as_ref()) {
+        let eval_ir = lang::build_print_ir(combined, print_idx);
+        match interpreter::eval(&eval_ir, self.gpu.as_ref()) {
             Ok(val) => {
                 self.cells[idx].outcome.message =
                     Some(CellMessage::Computed(format!("{}", val)));
+                self.cells[idx].outcome.program_ir = Some(eval_ir);
             }
             Err(_) => {
                 // Interpreter couldn't evaluate (e.g. expression references
@@ -396,16 +399,16 @@ impl Notebook {
         }
     }
 
-    fn handle_plot(&mut self, idx: usize, plot_idx: usize, combined: &AstNode, snapshot: &str) {
-        let plot_ast = lang::build_plot_ast(combined, plot_idx);
-        match crate::lang::wgsl_gen::generate(&plot_ast) {
+    fn handle_plot(&mut self, idx: usize, plot_idx: usize, combined: &Ir, snapshot: &str) {
+        let plot_ir = lang::build_plot_ir(combined, plot_idx);
+        match crate::lang::wgsl_gen::generate(&plot_ir) {
             Ok(wgsl) => {
                 self.cells[idx].outcome.shader = Some(ShaderSpec {
                     wgsl,
                     dispatch: DispatchKind::Fragment,
                     bindings: Vec::new(),
                 });
-                self.cells[idx].outcome.cpu_program = Some(plot_ast);
+                self.cells[idx].outcome.program_ir = Some(plot_ir);
                 self.cells[idx].state = CellState::Playing;
                 self.cells[idx].last_played_text = Some(snapshot.to_string());
             }
@@ -518,13 +521,23 @@ impl Notebook {
                 source.push_str(cell.buffer.text());
             }
         }
-        match crate::lang::compile(&source) {
+        let parsed = match crate::lang::parse(&source) {
+            Ok(ir) => ir,
+            Err(e) => {
+                if !e.contains("No result expression") {
+                    self.set_runtime_error(idx, e, &source);
+                }
+                return;
+            }
+        };
+        match crate::lang::wgsl_gen::generate(&parsed) {
             Ok(wgsl) => {
                 self.cells[idx].outcome.shader = Some(ShaderSpec {
                     wgsl,
                     dispatch: DispatchKind::Fragment,
                     bindings: Vec::new(),
                 });
+                self.cells[idx].outcome.program_ir = Some(parsed);
                 self.cells[idx].state = CellState::Playing;
                 self.cells[idx].last_played_text = Some(self.cells[idx].buffer.text().to_string());
             }

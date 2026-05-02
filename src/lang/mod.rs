@@ -1,13 +1,15 @@
-pub mod ast;
 pub mod compute_gen;
 pub mod highlight;
 pub mod interpreter;
+pub mod ir;
 pub mod lang_service;
 pub mod lexer;
 pub mod parser;
 pub mod reduce;
 pub mod token;
 pub mod wgsl_gen;
+
+use ir::Ir;
 
 /// Convert a byte offset in source to (line, col) — both 1-based.
 pub(crate) fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
@@ -45,19 +47,19 @@ pub fn format_error_at(source: &str, offset: usize, message: &str) -> String {
     )
 }
 
-/// Check whether the AST contains nodes that require the interpreter
+/// Check whether the IR contains nodes that require the interpreter
 /// (arrays, parallel for) rather than the fragment shader path.
-pub fn needs_interpreter(ast: &ast::AstNode) -> bool {
-    match ast {
-        ast::AstNode::ArrayLiteral { .. }
-        | ast::AstNode::IndexAccess { .. }
-        | ast::AstNode::ParallelFor { .. }
-        | ast::AstNode::IndexAssign { .. } => true,
-        ast::AstNode::Block { items: stmts, .. } => stmts.iter().any(needs_interpreter),
-        ast::AstNode::Binding { value, .. } => needs_interpreter(value),
-        ast::AstNode::TupleBinding { value, .. } => needs_interpreter(value),
-        ast::AstNode::FunctionDef { body, .. } => needs_interpreter(body),
-        ast::AstNode::IfExpr {
+pub fn needs_interpreter(ir: &Ir) -> bool {
+    match ir {
+        Ir::ArrayLiteral { .. }
+        | Ir::IndexAccess { .. }
+        | Ir::ParallelFor { .. }
+        | Ir::IndexAssign { .. } => true,
+        Ir::Block { items: stmts, .. } => stmts.iter().any(needs_interpreter),
+        Ir::Binding { value, .. } => needs_interpreter(value),
+        Ir::TupleBinding { value, .. } => needs_interpreter(value),
+        Ir::FunctionDef { body, .. } => needs_interpreter(body),
+        Ir::IfExpr {
             condition,
             then_branch,
             else_branch,
@@ -67,15 +69,15 @@ pub fn needs_interpreter(ast: &ast::AstNode) -> bool {
                 || needs_interpreter(then_branch)
                 || else_branch.as_ref().is_some_and(|e| needs_interpreter(e))
         }
-        ast::AstNode::Apply { args, .. } => args.iter().any(needs_interpreter),
-        ast::AstNode::WhileLoop {
+        Ir::Apply { args, .. } => args.iter().any(needs_interpreter),
+        Ir::WhileLoop {
             condition, body, ..
         } => needs_interpreter(condition) || needs_interpreter(body),
         _ => false,
     }
 }
 
-/// Detected print/plot actions in a cell's AST.
+/// Detected print/plot actions in a cell's IR.
 #[derive(Debug)]
 pub struct CellActions {
     /// Index of the first `print(...)` statement in the block (if any).
@@ -90,10 +92,10 @@ impl CellActions {
     }
 }
 
-/// Walk the AST to find all print() and plot() action statements.
-pub fn detect_cell_actions(ast: &ast::AstNode) -> CellActions {
-    let stmts: &[ast::AstNode] = match ast {
-        ast::AstNode::Block { items: stmts, .. } => stmts,
+/// Walk the IR to find all print() and plot() action statements.
+pub fn detect_cell_actions(ir: &Ir) -> CellActions {
+    let stmts: &[Ir] = match ir {
+        Ir::Block { items: stmts, .. } => stmts,
         other => std::slice::from_ref(other),
     };
 
@@ -103,7 +105,7 @@ pub fn detect_cell_actions(ast: &ast::AstNode) -> CellActions {
     };
 
     for (i, stmt) in stmts.iter().enumerate() {
-        if let ast::AstNode::Apply { name, .. } = stmt {
+        if let Ir::Apply { name, .. } = stmt {
             match name.as_str() {
                 "print" if result.first_print.is_none() => {
                     result.first_print = Some(i);
@@ -119,14 +121,14 @@ pub fn detect_cell_actions(ast: &ast::AstNode) -> CellActions {
     result
 }
 
-/// Build an AST for evaluating a print expression.
+/// Build an IR subtree for evaluating a print expression.
 /// Includes all non-action statements before the print index,
 /// plus the unwrapped inner expression from print().
-pub fn build_print_ast(ast: &ast::AstNode, print_index: usize) -> ast::AstNode {
-    let stmts = match ast {
-        ast::AstNode::Block { items: stmts, .. } => stmts,
+pub fn build_print_ir(ir: &Ir, print_index: usize) -> Ir {
+    let stmts = match ir {
+        Ir::Block { items: stmts, .. } => stmts,
         other => {
-            if let ast::AstNode::Apply { name, args, .. } = other {
+            if let Ir::Apply { name, args, .. } = other {
                 if name == "print" && args.len() == 1 {
                     return args[0].clone();
                 }
@@ -138,14 +140,14 @@ pub fn build_print_ast(ast: &ast::AstNode, print_index: usize) -> ast::AstNode {
     let mut result = Vec::new();
     for (i, stmt) in stmts.iter().enumerate() {
         if i == print_index {
-            if let ast::AstNode::Apply { name, args, .. } = stmt {
+            if let Ir::Apply { name, args, .. } = stmt {
                 if name == "print" && args.len() == 1 {
                     result.push(args[0].clone());
                 }
             }
             break;
         }
-        if let ast::AstNode::Apply { name, .. } = stmt {
+        if let Ir::Apply { name, .. } = stmt {
             if name == "print" || name == "plot" {
                 continue;
             }
@@ -157,14 +159,14 @@ pub fn build_print_ast(ast: &ast::AstNode, print_index: usize) -> ast::AstNode {
         1 => result.remove(0),
         _ => {
             let span = if result.is_empty() {
-                ast.span()
+                ir.span()
             } else {
                 (
                     result.first().unwrap().span().0,
                     result.last().unwrap().span().1,
                 )
             };
-            ast::AstNode::Block {
+            Ir::Block {
                 items: result,
                 span,
             }
@@ -172,13 +174,13 @@ pub fn build_print_ast(ast: &ast::AstNode, print_index: usize) -> ast::AstNode {
     }
 }
 
-/// Build an AST for plotting. Includes all non-action statements
+/// Build an IR subtree for plotting. Includes all non-action statements
 /// plus the unwrapped inner expression from plot().
-pub fn build_plot_ast(ast: &ast::AstNode, plot_index: usize) -> ast::AstNode {
-    let stmts = match ast {
-        ast::AstNode::Block { items: stmts, .. } => stmts,
+pub fn build_plot_ir(ir: &Ir, plot_index: usize) -> Ir {
+    let stmts = match ir {
+        Ir::Block { items: stmts, .. } => stmts,
         other => {
-            if let ast::AstNode::Apply { name, args, .. } = other {
+            if let Ir::Apply { name, args, .. } = other {
                 if name == "plot" && args.len() == 1 {
                     return args[0].clone();
                 }
@@ -190,14 +192,14 @@ pub fn build_plot_ast(ast: &ast::AstNode, plot_index: usize) -> ast::AstNode {
     let mut result = Vec::new();
     for (i, stmt) in stmts.iter().enumerate() {
         if i == plot_index {
-            if let ast::AstNode::Apply { name, args, .. } = stmt {
+            if let Ir::Apply { name, args, .. } = stmt {
                 if name == "plot" && args.len() == 1 {
                     result.push(args[0].clone());
                 }
             }
             continue;
         }
-        if let ast::AstNode::Apply { name, .. } = stmt {
+        if let Ir::Apply { name, .. } = stmt {
             if name == "print" || name == "plot" {
                 continue;
             }
@@ -209,14 +211,14 @@ pub fn build_plot_ast(ast: &ast::AstNode, plot_index: usize) -> ast::AstNode {
         1 => result.remove(0),
         _ => {
             let span = if result.is_empty() {
-                ast.span()
+                ir.span()
             } else {
                 (
                     result.first().unwrap().span().0,
                     result.last().unwrap().span().1,
                 )
             };
-            ast::AstNode::Block {
+            Ir::Block {
                 items: result,
                 span,
             }
@@ -224,8 +226,8 @@ pub fn build_plot_ast(ast: &ast::AstNode, plot_index: usize) -> ast::AstNode {
     }
 }
 
-/// Lex and parse source code into an AST.
-pub fn parse(source: &str) -> Result<ast::AstNode, String> {
+/// Lex and parse source code into Logos IR.
+pub fn parse(source: &str) -> Result<Ir, String> {
     let mut lex = lexer::Lexer::new(source);
     let tokens = lex.tokenize()?;
     let mut p = parser::Parser::new(tokens, source.to_string());
@@ -234,12 +236,16 @@ pub fn parse(source: &str) -> Result<ast::AstNode, String> {
 
 /// Compile source code through the full pipeline: lex → parse → WGSL gen.
 /// Returns the complete WGSL shader source string.
+///
+/// Currently only used by integration tests; production callers go through
+/// `Notebook` which keeps the IR around (see `program_ir`).
+#[allow(dead_code)]
 pub fn compile(source: &str) -> Result<String, String> {
     let mut lex = lexer::Lexer::new(source);
     let tokens = lex.tokenize()?;
     let mut parser = parser::Parser::new(tokens, source.to_string());
-    let ast = parser.parse()?;
-    wgsl_gen::generate(&ast)
+    let ir = parser.parse()?;
+    wgsl_gen::generate(&ir)
 }
 
 #[cfg(test)]
@@ -561,65 +567,65 @@ mod action_tests {
 
     #[test]
     fn test_detect_print() {
-        let ast = parse("print(3+9)").unwrap();
-        let actions = detect_cell_actions(&ast);
+        let ir = parse("print(3+9)").unwrap();
+        let actions = detect_cell_actions(&ir);
         assert!(actions.first_print.is_some());
         assert!(actions.last_plot.is_none());
     }
 
     #[test]
     fn test_detect_plot() {
-        let ast = parse("plot(x+y)").unwrap();
-        let actions = detect_cell_actions(&ast);
+        let ir = parse("plot(x+y)").unwrap();
+        let actions = detect_cell_actions(&ir);
         assert!(actions.first_print.is_none());
         assert!(actions.last_plot.is_some());
     }
 
     #[test]
     fn test_detect_none() {
-        let ast = parse("3+9").unwrap();
-        let actions = detect_cell_actions(&ast);
+        let ir = parse("3+9").unwrap();
+        let actions = detect_cell_actions(&ir);
         assert!(!actions.has_action());
     }
 
     #[test]
     fn test_detect_both_print_and_plot() {
-        let ast = parse("f := x+2*x\nprint(f)\nplot(y=f)").unwrap();
-        let actions = detect_cell_actions(&ast);
+        let ir = parse("f := x+2*x\nprint(f)\nplot(y=f)").unwrap();
+        let actions = detect_cell_actions(&ir);
         assert!(actions.first_print.is_some());
         assert!(actions.last_plot.is_some());
     }
 
     #[test]
-    fn test_build_print_ast_single() {
-        let ast = parse("print(3+9)").unwrap();
-        let print_ast = build_print_ast(&ast, 0);
-        assert!(matches!(print_ast, ast::AstNode::Apply { ref name, .. } if name == "add"));
+    fn test_build_print_ir_single() {
+        let ir = parse("print(3+9)").unwrap();
+        let print_ir = build_print_ir(&ir, 0);
+        assert!(matches!(print_ir, Ir::Apply { ref name, .. } if name == "add"));
     }
 
     #[test]
-    fn test_build_print_ast_with_bindings() {
-        let ast = parse("f := 5\nprint(f)").unwrap();
-        let actions = detect_cell_actions(&ast);
-        let print_ast = build_print_ast(&ast, actions.first_print.unwrap());
-        if let ast::AstNode::Block { items: stmts, .. } = &print_ast {
+    fn test_build_print_ir_with_bindings() {
+        let ir = parse("f := 5\nprint(f)").unwrap();
+        let actions = detect_cell_actions(&ir);
+        let print_ir = build_print_ir(&ir, actions.first_print.unwrap());
+        if let Ir::Block { items: stmts, .. } = &print_ir {
             assert_eq!(stmts.len(), 2);
-            assert!(matches!(&stmts[0], ast::AstNode::Binding { .. }));
-            assert!(matches!(&stmts[1], ast::AstNode::Identifier { .. }));
+            assert!(matches!(&stmts[0], Ir::Binding { .. }));
+            assert!(matches!(&stmts[1], Ir::Identifier { .. }));
         } else {
-            panic!("Expected Block, got {:?}", print_ast);
+            panic!("Expected Block, got {:?}", print_ir);
         }
     }
 
     #[test]
-    fn test_build_plot_ast_strips_print() {
-        let ast = parse("f := x\nprint(f)\nplot(y=f)").unwrap();
-        let actions = detect_cell_actions(&ast);
-        let plot_ast = build_plot_ast(&ast, actions.last_plot.unwrap());
-        if let ast::AstNode::Block { items: stmts, .. } = &plot_ast {
+    fn test_build_plot_ir_strips_print() {
+        let ir = parse("f := x\nprint(f)\nplot(y=f)").unwrap();
+        let actions = detect_cell_actions(&ir);
+        let plot_ir = build_plot_ir(&ir, actions.last_plot.unwrap());
+        if let Ir::Block { items: stmts, .. } = &plot_ir {
             for stmt in stmts {
-                if let ast::AstNode::Apply { name, .. } = stmt {
-                    assert_ne!(name, "print", "print should be stripped from plot AST");
+                if let Ir::Apply { name, .. } = stmt {
+                    assert_ne!(name, "print", "print should be stripped from plot IR");
                 }
             }
         }

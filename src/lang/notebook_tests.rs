@@ -107,13 +107,13 @@ fn compile_stages(source: &str) -> String {
 
     // Stage 2: Parse
     let mut parser = crate::lang::parser::Parser::new(tokens, source.to_string());
-    let ast = parser
+    let ir = parser
         .parse()
         .unwrap_or_else(|e| panic!("PARSER FAILED\n  source: {:?}\n  error: {}", source, e));
-    eprintln!("  parse: ok (AST: {:?})", std::mem::discriminant(&ast));
+    eprintln!("  parse: ok (IR: {:?})", std::mem::discriminant(&ir));
 
     // Stage 3: WGSL codegen
-    let wgsl = crate::lang::wgsl_gen::generate(&ast)
+    let wgsl = crate::lang::wgsl_gen::generate(&ir)
         .unwrap_or_else(|e| panic!("WGSL GEN FAILED\n  source: {:?}\n  error: {}", source, e));
     eprintln!("  wgsl gen: {} bytes", wgsl.len());
 

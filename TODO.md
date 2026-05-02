@@ -79,10 +79,11 @@ change once the consumer side is written.
   the variable on the notebook engine side, and `NotebookView` keeps
   only viewport state (which variables are currently shown as x/y axes).
 
-- **CPU JIT (Cranelift) pipeline.** `CellOutcome.cpu_program` currently
-  holds the AST as-is. When CPU-side execution starts going through
-  Cranelift, this is where the lowered IR would live (or, if AST stays
-  as the IR, this is what the JIT consumes).
+- **CPU JIT (Cranelift) pipeline.** `CellOutcome.program_ir` already
+  exposes the Logos IR for every successful run. When CPU-side execution
+  starts going through Cranelift, this is what the JIT consumes — adding
+  type annotations and scope-resolved identifiers to `Ir` is the likely
+  prerequisite, since cranelift wants typed values and SSA-able input.
 
 - **`tests/` integration tests with real REDUCE.** REDUCE has process-
   global CSL state, so the existing `test_reduce_session` and the

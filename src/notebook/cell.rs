@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 
 use crate::editor::Buffer;
-use crate::lang::ast::AstNode;
+use crate::lang::ir::Ir;
 use crate::lang::highlight::HighlightSpan;
 use crate::ui::theme::Rgba;
 
@@ -67,8 +67,11 @@ impl CellMessage {
 pub struct CellOutcome {
     pub message: Option<CellMessage>,
     pub shader: Option<ShaderSpec>,
-    /// CPU-side program (currently the AST itself; future home for JIT IR).
-    pub cpu_program: Option<AstNode>,
+    /// Logos IR for the program this cell evaluates. Populated on every
+    /// successful run (print path, plot path, interpreter path, pure-expr
+    /// path, post-simplify path). Consumers: the planned cranelift CPU JIT;
+    /// also useful for tooling that wants the structured form of the cell.
+    pub program_ir: Option<Ir>,
     /// Per-token color spans for syntax highlighting. Recomputed on every
     /// successful play and kept here so the UI doesn't need to re-lex.
     pub token_colors: Vec<HighlightSpan>,
@@ -98,7 +101,7 @@ pub struct NotebookCell {
     /// moment. Used to detect "needs replay" — UI compares against current
     /// `buffer.text()`.
     pub last_played_text: Option<String>,
-    pub(super) ast_cache: RefCell<Option<(String, AstNode)>>,
+    pub(super) ir_cache: RefCell<Option<(String, Ir)>>,
 }
 
 impl NotebookCell {
@@ -114,7 +117,7 @@ impl NotebookCell {
             output_collapsed: false,
             contracted_editor_h: None,
             last_played_text: None,
-            ast_cache: RefCell::new(None),
+            ir_cache: RefCell::new(None),
         }
     }
 
@@ -129,27 +132,27 @@ impl NotebookCell {
         }
     }
 
-    /// Parse and cache the AST for this cell's *raw* source. Reuses the
-    /// cached AST when the buffer text hasn't changed since the last call.
+    /// Parse and cache the IR for this cell's *raw* source. Reuses the
+    /// cached IR when the buffer text hasn't changed since the last call.
     /// Note: when an iterative-CAS pass produces a `Simplified` message,
-    /// `Notebook::combined_ast_up_to` parses that text directly instead of
-    /// going through `cached_ast` — the cache here is for the editable form.
-    pub fn cached_ast(&self) -> Result<AstNode, String> {
+    /// `Notebook::combined_ir_up_to` parses that text directly instead of
+    /// going through `cached_ir` — the cache here is for the editable form.
+    pub fn cached_ir(&self) -> Result<Ir, String> {
         let text = self.buffer.text();
         {
-            let cache = self.ast_cache.borrow();
-            if let Some((cached_text, ast)) = cache.as_ref() {
+            let cache = self.ir_cache.borrow();
+            if let Some((cached_text, ir)) = cache.as_ref() {
                 if cached_text.as_str() == text {
-                    return Ok(ast.clone());
+                    return Ok(ir.clone());
                 }
             }
         }
         let parsed = crate::lang::parse(text)?;
-        *self.ast_cache.borrow_mut() = Some((text.to_string(), parsed.clone()));
+        *self.ir_cache.borrow_mut() = Some((text.to_string(), parsed.clone()));
         Ok(parsed)
     }
 
-    pub(super) fn invalidate_ast(&mut self) {
-        *self.ast_cache.borrow_mut() = None;
+    pub(super) fn invalidate_ir(&mut self) {
+        *self.ir_cache.borrow_mut() = None;
     }
 }

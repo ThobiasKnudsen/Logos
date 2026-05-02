@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use super::ast::AstNode;
+use super::ir::Ir;
 use super::interpreter::ParallelForRequest;
 
 /// Workgroup size used by generated compute shaders. Must match the dispatch
@@ -82,19 +82,19 @@ pub fn binding_count(request: &ParallelForRequest) -> u32 {
 // ---------------------------------------------------------------------------
 
 fn emit_body_statements(
-    node: &AstNode,
+    node: &Ir,
     loop_var: &str,
     request: &ParallelForRequest,
     shader: &mut String,
     declared: &mut HashSet<String>,
 ) -> Result<(), String> {
     match node {
-        AstNode::Block { items: stmts, .. } => {
+        Ir::Block { items: stmts, .. } => {
             for stmt in stmts {
                 emit_body_statements(stmt, loop_var, request, shader, declared)?;
             }
         }
-        AstNode::IndexAssign {
+        Ir::IndexAssign {
             array,
             index,
             value,
@@ -102,13 +102,13 @@ fn emit_body_statements(
         } => {
             let idx = emit_compute_index(index, loop_var, request)?;
             let val = emit_compute_expr(value, loop_var, request, declared)?;
-            if let AstNode::Identifier { name, .. } = array.as_ref() {
+            if let Ir::Identifier { name, .. } = array.as_ref() {
                 shader.push_str(&format!("    arr_{}[{}] = {};\n", name, idx, val));
             } else {
                 return Err("IndexAssign target must be an identifier".to_string());
             }
         }
-        AstNode::Binding { name, value, .. } => {
+        Ir::Binding { name, value, .. } => {
             let val = emit_compute_expr(value, loop_var, request, declared)?;
             if declared.contains(name) {
                 shader.push_str(&format!("    {} = {};\n", name, val));
@@ -127,7 +127,7 @@ fn emit_body_statements(
 }
 
 // ---------------------------------------------------------------------------
-// Expression emitter (AST → WGSL compute expression)
+// Expression emitter (IR → WGSL compute expression)
 // ---------------------------------------------------------------------------
 
 fn is_array(name: &str, request: &ParallelForRequest) -> bool {
@@ -136,13 +136,13 @@ fn is_array(name: &str, request: &ParallelForRequest) -> bool {
 }
 
 fn emit_compute_expr(
-    node: &AstNode,
+    node: &Ir,
     loop_var: &str,
     request: &ParallelForRequest,
     declared: &HashSet<String>,
 ) -> Result<String, String> {
     match node {
-        AstNode::Number { value: n, .. } => {
+        Ir::Number { value: n, .. } => {
             if *n == n.floor() && n.abs() < 1e15 {
                 Ok(format!("{:.1}", n))
             } else {
@@ -150,9 +150,9 @@ fn emit_compute_expr(
             }
         }
 
-        AstNode::BoolLit { value: b, .. } => Ok(format!("{}", b)),
+        Ir::BoolLit { value: b, .. } => Ok(format!("{}", b)),
 
-        AstNode::Identifier { name, .. } => {
+        Ir::Identifier { name, .. } => {
             if name == loop_var {
                 Ok(format!("f32({})", name))
             } else if declared.contains(name) {
@@ -169,9 +169,9 @@ fn emit_compute_expr(
             }
         }
 
-        AstNode::IndexAccess { array, index, .. } => {
+        Ir::IndexAccess { array, index, .. } => {
             let idx = emit_compute_index(index, loop_var, request)?;
-            if let AstNode::Identifier { name, .. } = array.as_ref() {
+            if let Ir::Identifier { name, .. } = array.as_ref() {
                 if is_array(name, request) {
                     return Ok(format!("arr_{}[{}]", name, idx));
                 }
@@ -179,7 +179,7 @@ fn emit_compute_expr(
             Err("Index access only supported on known arrays".to_string())
         }
 
-        AstNode::Apply { name, args, .. } => {
+        Ir::Apply { name, args, .. } => {
             let arg_strs: Vec<String> = args
                 .iter()
                 .map(|a| emit_compute_expr(a, loop_var, request, declared))
@@ -248,7 +248,7 @@ fn emit_compute_expr(
             }
         }
 
-        AstNode::IfExpr {
+        Ir::IfExpr {
             condition,
             then_branch,
             else_branch,
@@ -276,12 +276,12 @@ fn emit_compute_expr(
 
 /// Emit an index expression — must produce a u32 for array indexing.
 fn emit_compute_index(
-    node: &AstNode,
+    node: &Ir,
     loop_var: &str,
     request: &ParallelForRequest,
 ) -> Result<String, String> {
     match node {
-        AstNode::Identifier { name, .. } if name == loop_var => Ok(name.clone()),
+        Ir::Identifier { name, .. } if name == loop_var => Ok(name.clone()),
         _ => {
             let declared = HashSet::new();
             let expr = emit_compute_expr(node, loop_var, request, &declared)?;
@@ -299,7 +299,7 @@ mod tests {
     use super::*;
 
     fn make_request(
-        body: AstNode,
+        body: Ir,
         readwrite: Vec<(&str, Vec<f64>)>,
         readonly: Vec<(&str, Vec<f64>)>,
         scalars: Vec<(&str, f64)>,
@@ -324,7 +324,7 @@ mod tests {
         }
     }
 
-    fn parse_body(source: &str) -> AstNode {
+    fn parse_body(source: &str) -> Ir {
         let mut lex = crate::lang::lexer::Lexer::new(source);
         let tokens = lex.tokenize().unwrap();
         let mut parser = crate::lang::parser::Parser::new(tokens, source.to_string());

@@ -1,6 +1,6 @@
 //! Background language service.
 //!
-//! Runs autocomplete symbol extraction (lex → parse → AST walk) on a
+//! Runs autocomplete symbol extraction (lex → parse → IR walk) on a
 //! dedicated thread so the UI thread never blocks on parsing.
 
 use std::collections::HashMap;
@@ -162,8 +162,8 @@ fn extract_symbols(source: &str) -> Vec<Candidate> {
     let mut lex = crate::lang::lexer::Lexer::new(source);
     if let Ok(tokens) = lex.tokenize() {
         let mut parser = crate::lang::parser::Parser::new(tokens, source.to_string());
-        if let Ok(ast) = parser.parse() {
-            return autocomplete::extract_user_symbols(&ast);
+        if let Ok(ir) = parser.parse() {
+            return autocomplete::extract_user_symbols(&ir);
         }
     }
     Vec::new()

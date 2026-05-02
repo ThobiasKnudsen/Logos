@@ -18,7 +18,7 @@
 //!   8. Postfix (function call, indexing)
 //!   9. Primary (number, identifier, parenthesized expr/block, if, etc.)
 
-use super::ast::{AstNode, Span};
+use super::ir::{Ir, Span};
 use super::token::{Token, TokenType};
 
 /// Combine two spans into one covering both. Assumes `start <= end`.
@@ -70,11 +70,11 @@ impl Parser {
         self.depth = self.depth.saturating_sub(1);
     }
 
-    pub fn parse(&mut self) -> Result<AstNode, String> {
+    pub fn parse(&mut self) -> Result<Ir, String> {
         self.skip_newlines();
         if self.at_end() {
             // Empty input — return a default zero
-            return Ok(AstNode::Number {
+            return Ok(Ir::Number {
                 value: 0.0,
                 span: (0, 0),
             });
@@ -96,7 +96,7 @@ impl Parser {
         }
 
         if stmts.is_empty() {
-            Ok(AstNode::Number {
+            Ok(Ir::Number {
                 value: 0.0,
                 span: (0, 0),
             })
@@ -104,11 +104,11 @@ impl Parser {
             Ok(stmts.pop().unwrap())
         } else {
             let span = join(stmts.first().unwrap().span(), stmts.last().unwrap().span());
-            Ok(AstNode::Block { items: stmts, span })
+            Ok(Ir::Block { items: stmts, span })
         }
     }
 
-    fn parse_statement(&mut self) -> Result<AstNode, String> {
+    fn parse_statement(&mut self) -> Result<Ir, String> {
         // Check for tuple destructuring binding: (a, b) := expr
         if let Some(tb) = self.try_parse_tuple_binding()? {
             return Ok(tb);
@@ -128,7 +128,7 @@ impl Parser {
         self.try_index_assign(expr)
     }
 
-    fn try_parse_function_def(&mut self) -> Result<Option<AstNode>, String> {
+    fn try_parse_function_def(&mut self) -> Result<Option<Ir>, String> {
         let save = self.pos;
 
         // name(params) := body  OR  name(params) = body (for backward compat)
@@ -171,7 +171,7 @@ impl Parser {
             self.advance();
             let body = self.parse_expr()?;
             let span = join(name_span, body.span());
-            return Ok(Some(AstNode::FunctionDef {
+            return Ok(Some(Ir::FunctionDef {
                 name,
                 params,
                 body: Box::new(body),
@@ -184,7 +184,7 @@ impl Parser {
         Ok(None)
     }
 
-    fn try_parse_binding(&mut self) -> Result<Option<AstNode>, String> {
+    fn try_parse_binding(&mut self) -> Result<Option<Ir>, String> {
         // name := expr (using := for binding)
         let (name, name_span) = match &self.peek().ty {
             TokenType::Identifier(name) => (name.clone(), self.peek().span),
@@ -199,7 +199,7 @@ impl Parser {
         self.advance(); // consume ':='
         let value = self.parse_expr()?;
         let span = join(name_span, value.span());
-        Ok(Some(AstNode::Binding {
+        Ok(Some(Ir::Binding {
             name,
             value: Box::new(value),
             span,
@@ -207,7 +207,7 @@ impl Parser {
     }
 
     /// Try to parse a tuple destructuring binding: `(a, b) := expr`
-    fn try_parse_tuple_binding(&mut self) -> Result<Option<AstNode>, String> {
+    fn try_parse_tuple_binding(&mut self) -> Result<Option<Ir>, String> {
         if self.peek().ty != TokenType::LParen {
             return Ok(None);
         }
@@ -259,7 +259,7 @@ impl Parser {
 
         let value = self.parse_expr()?;
         let span = join(lparen_span, value.span());
-        Ok(Some(AstNode::TupleBinding {
+        Ok(Some(Ir::TupleBinding {
             names,
             value: Box::new(value),
             span,
@@ -268,17 +268,17 @@ impl Parser {
 
     // --- Expression parsing with precedence climbing ---
 
-    fn parse_expr(&mut self) -> Result<AstNode, String> {
+    fn parse_expr(&mut self) -> Result<Ir, String> {
         self.parse_or()
     }
 
-    fn parse_or(&mut self) -> Result<AstNode, String> {
+    fn parse_or(&mut self) -> Result<Ir, String> {
         let mut left = self.parse_and()?;
         while self.peek().ty == TokenType::Or {
             self.advance();
             let right = self.parse_and()?;
             let span = join(left.span(), right.span());
-            left = AstNode::Apply {
+            left = Ir::Apply {
                 name: "or".to_string(),
                 args: vec![left, right],
                 span,
@@ -287,13 +287,13 @@ impl Parser {
         Ok(left)
     }
 
-    fn parse_and(&mut self) -> Result<AstNode, String> {
+    fn parse_and(&mut self) -> Result<Ir, String> {
         let mut left = self.parse_comparison()?;
         while self.peek().ty == TokenType::And {
             self.advance();
             let right = self.parse_comparison()?;
             let span = join(left.span(), right.span());
-            left = AstNode::Apply {
+            left = Ir::Apply {
                 name: "and".to_string(),
                 args: vec![left, right],
                 span,
@@ -302,7 +302,7 @@ impl Parser {
         Ok(left)
     }
 
-    fn parse_comparison(&mut self) -> Result<AstNode, String> {
+    fn parse_comparison(&mut self) -> Result<Ir, String> {
         let mut left = self.parse_range()?;
         loop {
             let op = match self.peek().ty {
@@ -317,7 +317,7 @@ impl Parser {
             self.advance();
             let right = self.parse_addition()?;
             let span = join(left.span(), right.span());
-            left = AstNode::Apply {
+            left = Ir::Apply {
                 name: op.to_string(),
                 args: vec![left, right],
                 span,
@@ -326,13 +326,13 @@ impl Parser {
         Ok(left)
     }
 
-    fn parse_range(&mut self) -> Result<AstNode, String> {
+    fn parse_range(&mut self) -> Result<Ir, String> {
         let left = self.parse_addition()?;
         if self.peek().ty == TokenType::DotDot {
             self.advance();
             let right = self.parse_addition()?;
             let span = join(left.span(), right.span());
-            Ok(AstNode::Range {
+            Ok(Ir::Range {
                 start: Box::new(left),
                 end: Box::new(right),
                 span,
@@ -342,7 +342,7 @@ impl Parser {
         }
     }
 
-    fn parse_addition(&mut self) -> Result<AstNode, String> {
+    fn parse_addition(&mut self) -> Result<Ir, String> {
         let mut left = self.parse_multiplication()?;
         loop {
             let op = match self.peek().ty {
@@ -353,7 +353,7 @@ impl Parser {
             self.advance();
             let right = self.parse_multiplication()?;
             let span = join(left.span(), right.span());
-            left = AstNode::Apply {
+            left = Ir::Apply {
                 name: op.to_string(),
                 args: vec![left, right],
                 span,
@@ -362,7 +362,7 @@ impl Parser {
         Ok(left)
     }
 
-    fn parse_multiplication(&mut self) -> Result<AstNode, String> {
+    fn parse_multiplication(&mut self) -> Result<Ir, String> {
         let mut left = self.parse_exponent()?;
         loop {
             let op = match self.peek().ty {
@@ -374,7 +374,7 @@ impl Parser {
             self.advance();
             let right = self.parse_exponent()?;
             let span = join(left.span(), right.span());
-            left = AstNode::Apply {
+            left = Ir::Apply {
                 name: op.to_string(),
                 args: vec![left, right],
                 span,
@@ -383,14 +383,14 @@ impl Parser {
         Ok(left)
     }
 
-    fn parse_exponent(&mut self) -> Result<AstNode, String> {
+    fn parse_exponent(&mut self) -> Result<Ir, String> {
         let base = self.parse_unary()?;
         if self.peek().ty == TokenType::Caret {
             self.advance();
             // Right-associative: recurse into parse_exponent
             let exp = self.parse_exponent()?;
             let span = join(base.span(), exp.span());
-            Ok(AstNode::Apply {
+            Ok(Ir::Apply {
                 name: "pow".to_string(),
                 args: vec![base, exp],
                 span,
@@ -400,13 +400,13 @@ impl Parser {
         }
     }
 
-    fn parse_unary(&mut self) -> Result<AstNode, String> {
+    fn parse_unary(&mut self) -> Result<Ir, String> {
         if self.peek().ty == TokenType::Minus {
             let op_span = self.peek().span;
             self.advance();
             let operand = self.parse_unary()?;
             let span = join(op_span, operand.span());
-            return Ok(AstNode::Apply {
+            return Ok(Ir::Apply {
                 name: "neg".to_string(),
                 args: vec![operand],
                 span,
@@ -417,7 +417,7 @@ impl Parser {
             self.advance();
             let operand = self.parse_unary()?;
             let span = join(op_span, operand.span());
-            return Ok(AstNode::Apply {
+            return Ok(Ir::Apply {
                 name: "not".to_string(),
                 args: vec![operand],
                 span,
@@ -426,7 +426,7 @@ impl Parser {
         self.parse_postfix()
     }
 
-    fn parse_postfix(&mut self) -> Result<AstNode, String> {
+    fn parse_postfix(&mut self) -> Result<Ir, String> {
         let mut expr = self.parse_primary()?;
 
         loop {
@@ -436,14 +436,14 @@ impl Parser {
                     if !self.allow_ident_call {
                         break;
                     }
-                    if let AstNode::Identifier { ref name, .. } = expr {
+                    if let Ir::Identifier { ref name, .. } = expr {
                         let name = name.clone();
                         let start_span = expr.span();
                         self.advance(); // consume '('
                         let args = self.parse_arg_list()?;
                         let rparen_span = self.peek().span;
                         self.expect(TokenType::RParen)?;
-                        expr = AstNode::Apply {
+                        expr = Ir::Apply {
                             name,
                             args,
                             span: join(start_span, rparen_span),
@@ -459,7 +459,7 @@ impl Parser {
                     let index = self.parse_expr()?;
                     let rbracket_span = self.peek().span;
                     self.expect(TokenType::RBracket)?;
-                    expr = AstNode::IndexAccess {
+                    expr = Ir::IndexAccess {
                         array: Box::new(expr),
                         index: Box::new(index),
                         span: join(start_span, rbracket_span),
@@ -475,7 +475,7 @@ impl Parser {
                         | TokenType::AxisVar(prop)
                         | TokenType::Builtin(prop) => {
                             self.advance();
-                            expr = AstNode::PropertyAccess {
+                            expr = Ir::PropertyAccess {
                                 object: Box::new(expr),
                                 property: prop,
                                 span: join(start_span, prop_tok.span),
@@ -499,11 +499,11 @@ impl Parser {
                     let sup_span = self.peek().span;
                     self.advance();
                     let span = join(expr.span(), sup_span);
-                    expr = AstNode::Apply {
+                    expr = Ir::Apply {
                         name: "pow".to_string(),
                         args: vec![
                             expr,
-                            AstNode::Number {
+                            Ir::Number {
                                 value: exp,
                                 span: sup_span,
                             },
@@ -518,40 +518,40 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_primary(&mut self) -> Result<AstNode, String> {
+    fn parse_primary(&mut self) -> Result<Ir, String> {
         self.enter()?;
         let result = self.parse_primary_inner();
         self.leave();
         result
     }
 
-    fn parse_primary_inner(&mut self) -> Result<AstNode, String> {
+    fn parse_primary_inner(&mut self) -> Result<Ir, String> {
         let tok_span = self.peek().span;
         match self.peek().ty.clone() {
             TokenType::Number(n) => {
                 self.advance();
-                Ok(AstNode::Number {
+                Ok(Ir::Number {
                     value: n,
                     span: tok_span,
                 })
             }
             TokenType::BoolLit(b) => {
                 self.advance();
-                Ok(AstNode::BoolLit {
+                Ok(Ir::BoolLit {
                     value: b,
                     span: tok_span,
                 })
             }
             TokenType::Identifier(name) => {
                 self.advance();
-                Ok(AstNode::Identifier {
+                Ok(Ir::Identifier {
                     name,
                     span: tok_span,
                 })
             }
             TokenType::AxisVar(name) => {
                 self.advance();
-                Ok(AstNode::Identifier {
+                Ok(Ir::Identifier {
                     name,
                     span: tok_span,
                 })
@@ -563,13 +563,13 @@ impl Parser {
                     let args = self.parse_arg_list()?;
                     let rparen_span = self.peek().span;
                     self.expect(TokenType::RParen)?;
-                    Ok(AstNode::Apply {
+                    Ok(Ir::Apply {
                         name,
                         args,
                         span: join(tok_span, rparen_span),
                     })
                 } else {
-                    Ok(AstNode::Identifier {
+                    Ok(Ir::Identifier {
                         name,
                         span: tok_span,
                     })
@@ -582,7 +582,7 @@ impl Parser {
                 if self.peek().ty == TokenType::RParen {
                     let rparen_span = self.peek().span;
                     self.advance();
-                    return Ok(AstNode::Tuple {
+                    return Ok(Ir::Tuple {
                         items: Vec::new(),
                         span: join(lparen_span, rparen_span),
                     });
@@ -618,17 +618,17 @@ impl Parser {
                     let has_block_items = items.iter().any(|item| {
                         matches!(
                             item,
-                            AstNode::Binding { .. }
-                                | AstNode::FunctionDef { .. }
-                                | AstNode::WhileLoop { .. }
-                                | AstNode::IndexAssign { .. }
-                                | AstNode::TupleBinding { .. }
+                            Ir::Binding { .. }
+                                | Ir::FunctionDef { .. }
+                                | Ir::WhileLoop { .. }
+                                | Ir::IndexAssign { .. }
+                                | Ir::TupleBinding { .. }
                         )
                     });
                     if has_block_items {
-                        Ok(AstNode::Block { items, span })
+                        Ok(Ir::Block { items, span })
                     } else {
-                        Ok(AstNode::Tuple { items, span })
+                        Ok(Ir::Tuple { items, span })
                     }
                 }
             }
@@ -660,7 +660,7 @@ impl Parser {
                     .as_deref()
                     .map(|n| n.span())
                     .unwrap_or_else(|| then_branch.span());
-                Ok(AstNode::IfExpr {
+                Ok(Ir::IfExpr {
                     condition: Box::new(condition),
                     then_branch: Box::new(then_branch),
                     else_branch,
@@ -677,7 +677,7 @@ impl Parser {
                 self.skip_newlines();
                 let body = self.parse_expr()?;
                 let span = join(while_span, body.span());
-                Ok(AstNode::WhileLoop {
+                Ok(Ir::WhileLoop {
                     condition: Box::new(condition),
                     body: Box::new(body),
                     span,
@@ -726,13 +726,13 @@ impl Parser {
                 let body = if stmts.len() == 1 {
                     stmts.pop().unwrap()
                 } else {
-                    AstNode::Block {
+                    Ir::Block {
                         items: stmts,
                         span: join(body_lparen_span, body_rparen_span),
                     }
                 };
                 let span = join(for_span, body_rparen_span);
-                Ok(AstNode::ForLoop {
+                Ok(Ir::ForLoop {
                     var,
                     range: Box::new(range),
                     body: Box::new(body),
@@ -758,7 +758,7 @@ impl Parser {
                 }
                 let rbracket_span = self.peek().span;
                 self.expect(TokenType::RBracket)?;
-                Ok(AstNode::ArrayLiteral {
+                Ok(Ir::ArrayLiteral {
                     items: elements,
                     span: join(lbracket_span, rbracket_span),
                 })
@@ -810,13 +810,13 @@ impl Parser {
                 let body = if stmts.len() == 1 {
                     stmts.pop().unwrap()
                 } else {
-                    AstNode::Block {
+                    Ir::Block {
                         items: stmts,
                         span: join(body_lparen_span, body_rparen_span),
                     }
                 };
                 let span = join(parallel_span, body_rparen_span);
-                Ok(AstNode::ParallelFor {
+                Ok(Ir::ParallelFor {
                     var,
                     range: Box::new(range),
                     body: Box::new(body),
@@ -848,13 +848,13 @@ impl Parser {
                     let args = self.parse_arg_list()?;
                     let rparen_span = self.peek().span;
                     self.expect(TokenType::RParen)?;
-                    Ok(AstNode::Apply {
+                    Ok(Ir::Apply {
                         name: cast_name,
                         args,
                         span: join(cast_span, rparen_span),
                     })
                 } else {
-                    Ok(AstNode::Identifier {
+                    Ok(Ir::Identifier {
                         name: cast_name,
                         span: cast_span,
                     })
@@ -869,7 +869,7 @@ impl Parser {
     }
 
     /// Parse an item inside a parenthesized block (handles binding with `:=`).
-    fn parse_block_item(&mut self) -> Result<AstNode, String> {
+    fn parse_block_item(&mut self) -> Result<Ir, String> {
         // Try tuple destructuring binding: (a, b): expr
         if let Some(tb) = self.try_parse_tuple_binding()? {
             return Ok(tb);
@@ -887,8 +887,8 @@ impl Parser {
     }
 
     /// If `expr` is an IndexAccess and next token is `:=`, parse as IndexAssign.
-    fn try_index_assign(&mut self, expr: AstNode) -> Result<AstNode, String> {
-        if let AstNode::IndexAccess {
+    fn try_index_assign(&mut self, expr: Ir) -> Result<Ir, String> {
+        if let Ir::IndexAccess {
             ref array,
             ref index,
             ..
@@ -899,7 +899,7 @@ impl Parser {
                 self.advance(); // consume ':='
                 let value = self.parse_expr()?;
                 let span = join(start_span, value.span());
-                return Ok(AstNode::IndexAssign {
+                return Ok(Ir::IndexAssign {
                     array: array.clone(),
                     index: index.clone(),
                     value: Box::new(value),
@@ -910,7 +910,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_arg_list(&mut self) -> Result<Vec<AstNode>, String> {
+    fn parse_arg_list(&mut self) -> Result<Vec<Ir>, String> {
         let mut args = Vec::new();
         self.skip_newlines();
         if self.peek().ty == TokenType::RParen {
@@ -1002,7 +1002,7 @@ mod tests {
     use super::*;
     use crate::lang::lexer::Lexer;
 
-    fn parse(input: &str) -> AstNode {
+    fn parse(input: &str) -> Ir {
         let mut lexer = Lexer::new(input);
         let tokens = lexer.tokenize().unwrap();
         let mut parser = Parser::new(tokens, input.to_string());
@@ -1012,32 +1012,32 @@ mod tests {
     #[test]
     fn test_empty_input() {
         let ast = parse("");
-        assert!(matches!(ast, AstNode::Number { value, .. } if value == 0.0));
+        assert!(matches!(ast, Ir::Number { value, .. } if value == 0.0));
     }
 
     #[test]
     fn test_whitespace_only() {
         let ast = parse("   \t  ");
-        assert!(matches!(ast, AstNode::Number { value, .. } if value == 0.0));
+        assert!(matches!(ast, Ir::Number { value, .. } if value == 0.0));
     }
 
     #[test]
     fn test_single_number() {
         let ast = parse("42");
-        assert!(matches!(ast, AstNode::Number { value, .. } if value == 42.0));
+        assert!(matches!(ast, Ir::Number { value, .. } if value == 42.0));
     }
 
     #[test]
     fn test_single_variable() {
         let ast = parse("x");
-        assert!(matches!(ast, AstNode::Identifier { ref name, .. } if name == "x"));
+        assert!(matches!(ast, Ir::Identifier { ref name, .. } if name == "x"));
     }
 
     #[test]
     fn test_simple_addition() {
         let ast = parse("x + y");
         match ast {
-            AstNode::Apply { name, args, .. } => {
+            Ir::Apply { name, args, .. } => {
                 assert_eq!(name, "add");
                 assert_eq!(args.len(), 2);
             }
@@ -1050,10 +1050,10 @@ mod tests {
         // x + y * z  should parse as  x + (y * z)
         let ast = parse("x + y * z");
         match ast {
-            AstNode::Apply { name, ref args, .. } => {
+            Ir::Apply { name, ref args, .. } => {
                 assert_eq!(name, "add");
                 match &args[1] {
-                    AstNode::Apply { name, .. } => assert_eq!(name, "mul"),
+                    Ir::Apply { name, .. } => assert_eq!(name, "mul"),
                     _ => panic!("Expected mul"),
                 }
             }
@@ -1065,7 +1065,7 @@ mod tests {
     fn test_function_call() {
         let ast = parse("sin(x)");
         match ast {
-            AstNode::Apply { name, args, .. } => {
+            Ir::Apply { name, args, .. } => {
                 assert_eq!(name, "sin");
                 assert_eq!(args.len(), 1);
             }
@@ -1077,7 +1077,7 @@ mod tests {
     fn test_negation() {
         let ast = parse("-x");
         match ast {
-            AstNode::Apply { name, args, .. } => {
+            Ir::Apply { name, args, .. } => {
                 assert_eq!(name, "neg");
                 assert_eq!(args.len(), 1);
             }
@@ -1090,10 +1090,10 @@ mod tests {
         // x ^ y ^ z should parse as x ^ (y ^ z)
         let ast = parse("x ^ y ^ z");
         match ast {
-            AstNode::Apply { name, ref args, .. } => {
+            Ir::Apply { name, ref args, .. } => {
                 assert_eq!(name, "pow");
                 match &args[1] {
-                    AstNode::Apply { name, .. } => assert_eq!(name, "pow"),
+                    Ir::Apply { name, .. } => assert_eq!(name, "pow"),
                     _ => panic!("Expected inner pow"),
                 }
             }
@@ -1106,7 +1106,7 @@ mod tests {
         // `:=` is the binding operator in Logos
         let ast = parse("a := 5");
         match ast {
-            AstNode::Binding { name, .. } => assert_eq!(name, "a"),
+            Ir::Binding { name, .. } => assert_eq!(name, "a"),
             _ => panic!("Expected Binding, got {:?}", ast),
         }
     }
@@ -1116,7 +1116,7 @@ mod tests {
         // `=` is equality in Logos (not assignment)
         let ast = parse("x = 5");
         match ast {
-            AstNode::Apply { name, args, .. } => {
+            Ir::Apply { name, args, .. } => {
                 assert_eq!(name, "eq");
                 assert_eq!(args.len(), 2);
             }
@@ -1128,7 +1128,7 @@ mod tests {
     fn test_function_def_with_colon() {
         let ast = parse("f(x, y) := x + y");
         match ast {
-            AstNode::FunctionDef { name, params, .. } => {
+            Ir::FunctionDef { name, params, .. } => {
                 assert_eq!(name, "f");
                 assert_eq!(params, vec!["x", "y"]);
             }
@@ -1140,7 +1140,7 @@ mod tests {
     fn test_if_expr() {
         let ast = parse("if (x > 0) 1 else -1");
         match ast {
-            AstNode::IfExpr { else_branch, .. } => {
+            Ir::IfExpr { else_branch, .. } => {
                 assert!(else_branch.is_some());
             }
             _ => panic!("Expected IfExpr"),
@@ -1151,7 +1151,7 @@ mod tests {
     fn test_multi_arg_builtin() {
         let ast = parse("clamp(x, 0, 1)");
         match ast {
-            AstNode::Apply { name, args, .. } => {
+            Ir::Apply { name, args, .. } => {
                 assert_eq!(name, "clamp");
                 assert_eq!(args.len(), 3);
             }
@@ -1164,10 +1164,10 @@ mod tests {
         // Newline-separated statements
         let ast = parse("a := 5\nb := 10\na + b");
         match ast {
-            AstNode::Block { items: stmts, .. } => {
+            Ir::Block { items: stmts, .. } => {
                 assert_eq!(stmts.len(), 3);
-                assert!(matches!(&stmts[0], AstNode::Binding { name, .. } if name == "a"));
-                assert!(matches!(&stmts[1], AstNode::Binding { name, .. } if name == "b"));
+                assert!(matches!(&stmts[0], Ir::Binding { name, .. } if name == "a"));
+                assert!(matches!(&stmts[1], Ir::Binding { name, .. } if name == "b"));
             }
             _ => panic!("Expected Block with 3 stmts"),
         }
@@ -1178,7 +1178,7 @@ mod tests {
         // Comma-separated block inside parens
         let ast = parse("(a := 5, b := 10, a + b)");
         match ast {
-            AstNode::Block { items: stmts, .. } => {
+            Ir::Block { items: stmts, .. } => {
                 assert_eq!(stmts.len(), 3);
             }
             _ => panic!("Expected Block, got {:?}", ast),
@@ -1189,7 +1189,7 @@ mod tests {
     fn test_tuple() {
         let ast = parse("(1, 2, 3)");
         match ast {
-            AstNode::Tuple { items, .. } => {
+            Ir::Tuple { items, .. } => {
                 assert_eq!(items.len(), 3);
             }
             _ => panic!("Expected Tuple"),
@@ -1201,7 +1201,7 @@ mod tests {
         // sqrt(x*x + y*y) — common Logos pattern
         let ast = parse("sqrt(x*x + y*y)");
         match ast {
-            AstNode::Apply { name, .. } => assert_eq!(name, "sqrt"),
+            Ir::Apply { name, .. } => assert_eq!(name, "sqrt"),
             _ => panic!("Expected sqrt Apply"),
         }
     }
@@ -1211,12 +1211,12 @@ mod tests {
         // Function with block body (comma-separated bindings)
         let ast = parse("f(a, b) := (r := a + b, r * 2)");
         match ast {
-            AstNode::FunctionDef {
+            Ir::FunctionDef {
                 name, params, body, ..
             } => {
                 assert_eq!(name, "f");
                 assert_eq!(params, vec!["a", "b"]);
-                assert!(matches!(*body, AstNode::Block { .. }));
+                assert!(matches!(*body, Ir::Block { .. }));
             }
             _ => panic!("Expected FunctionDef, got {:?}", ast),
         }
@@ -1226,7 +1226,7 @@ mod tests {
     fn test_nested_function_calls() {
         let ast = parse("log(0.5 * log(x) / log(2.0))");
         match ast {
-            AstNode::Apply { name, .. } => assert_eq!(name, "log"),
+            Ir::Apply { name, .. } => assert_eq!(name, "log"),
             _ => panic!("Expected log Apply"),
         }
     }
@@ -1235,7 +1235,7 @@ mod tests {
     fn test_chained_comparison() {
         let ast = parse("x > 0 and x < 10");
         match ast {
-            AstNode::Apply { name, .. } => assert_eq!(name, "and"),
+            Ir::Apply { name, .. } => assert_eq!(name, "and"),
             _ => panic!("Expected and Apply"),
         }
     }
@@ -1244,7 +1244,7 @@ mod tests {
     // Error-recovery tests — these inputs must NOT panic; they must return Err.
     // -----------------------------------------------------------------------
 
-    fn try_parse(source: &str) -> Result<AstNode, String> {
+    fn try_parse(source: &str) -> Result<Ir, String> {
         let mut lex = crate::lang::lexer::Lexer::new(source);
         let tokens = lex.tokenize()?;
         let mut parser = Parser::new(tokens, source.to_string());

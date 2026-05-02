@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::lang::ast::AstNode;
+use crate::lang::ir::Ir;
 use crate::lang::lexer;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -388,17 +388,17 @@ pub fn static_candidates() -> Vec<Candidate> {
     result
 }
 
-/// Extract user-defined symbols from the AST of the current cell.
-pub fn extract_user_symbols(ast: &AstNode) -> Vec<Candidate> {
+/// Extract user-defined symbols from the IR of the current cell.
+pub fn extract_user_symbols(ir: &Ir) -> Vec<Candidate> {
     let mut result = Vec::new();
     let mut seen = HashSet::new();
-    walk_ast(ast, &mut result, &mut seen);
+    walk_ir(ir, &mut result, &mut seen);
     result
 }
 
-fn walk_ast(node: &AstNode, result: &mut Vec<Candidate>, seen: &mut HashSet<String>) {
+fn walk_ir(node: &Ir, result: &mut Vec<Candidate>, seen: &mut HashSet<String>) {
     match node {
-        AstNode::Binding { name, .. } => {
+        Ir::Binding { name, .. } => {
             if seen.insert(name.clone()) {
                 result.push(Candidate {
                     label: name.clone(),
@@ -408,7 +408,7 @@ fn walk_ast(node: &AstNode, result: &mut Vec<Candidate>, seen: &mut HashSet<Stri
                 });
             }
         }
-        AstNode::FunctionDef { name, .. } => {
+        Ir::FunctionDef { name, .. } => {
             if seen.insert(name.clone()) {
                 result.push(Candidate {
                     label: name.clone(),
@@ -418,7 +418,7 @@ fn walk_ast(node: &AstNode, result: &mut Vec<Candidate>, seen: &mut HashSet<Stri
                 });
             }
         }
-        AstNode::TupleBinding { names, .. } => {
+        Ir::TupleBinding { names, .. } => {
             for n in names {
                 if seen.insert(n.clone()) {
                     result.push(Candidate {
@@ -430,23 +430,23 @@ fn walk_ast(node: &AstNode, result: &mut Vec<Candidate>, seen: &mut HashSet<Stri
                 }
             }
         }
-        AstNode::Block { items: stmts, .. } => {
+        Ir::Block { items: stmts, .. } => {
             for s in stmts {
-                walk_ast(s, result, seen);
+                walk_ir(s, result, seen);
             }
         }
-        AstNode::IfExpr {
+        Ir::IfExpr {
             then_branch,
             else_branch,
             ..
         } => {
-            walk_ast(then_branch, result, seen);
+            walk_ir(then_branch, result, seen);
             if let Some(eb) = else_branch {
-                walk_ast(eb, result, seen);
+                walk_ir(eb, result, seen);
             }
         }
-        AstNode::WhileLoop { body, .. } | AstNode::ForLoop { body, .. } => {
-            walk_ast(body, result, seen);
+        Ir::WhileLoop { body, .. } | Ir::ForLoop { body, .. } => {
+            walk_ir(body, result, seen);
         }
         _ => {}
     }
