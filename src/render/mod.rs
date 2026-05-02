@@ -234,8 +234,8 @@ fn output_toggle_height() -> f32 {
 
 /// Handles all GPU rendering: wgpu setup, text via glyphon, rects via instanced draw.
 pub struct Renderer {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
     surface: wgpu::Surface<'static>,
     surface_config: SurfaceConfiguration,
 
@@ -398,6 +398,8 @@ impl Renderer {
             .request_device(&DeviceDescriptor::default(), None)
             .await
             .unwrap();
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
 
         let caps = surface.get_capabilities(&adapter);
         let swapchain_format = caps
@@ -1234,9 +1236,11 @@ impl Renderer {
         self.shader_pipeline.remove(cell_id);
     }
 
-    /// Get references to device and queue for GPU compute dispatch.
-    pub fn gpu_refs(&self) -> (&wgpu::Device, &wgpu::Queue) {
-        (&self.device, &self.queue)
+    /// Clone the shared `Arc`s for device and queue. Used when something
+    /// needs to outlive the renderer borrow — e.g. the notebook's
+    /// `WgpuGpuDispatch`, which stores `'static` GPU handles.
+    pub fn gpu_arcs(&self) -> (Arc<wgpu::Device>, Arc<wgpu::Queue>) {
+        (self.device.clone(), self.queue.clone())
     }
 
     pub fn stash_tab_shaders(&mut self, tab_index: usize) {

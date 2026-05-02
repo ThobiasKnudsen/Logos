@@ -23,29 +23,26 @@ use crate::ui::theme::{self, fonts, spacing, split};
 // GPU dispatch adapter for the interpreter
 // ---------------------------------------------------------------------------
 
-/// Bridges the interpreter's GpuDispatch trait to the real wgpu compute pipeline.
-struct WgpuGpuDispatch<'a> {
-    device: &'a wgpu::Device,
-    queue: &'a wgpu::Queue,
+/// Bridges the interpreter's `GpuDispatch` trait to the real wgpu compute
+/// pipeline. Owns shared `Arc` handles to the renderer's device and queue
+/// so it can live on a `'static` `Notebook` without a borrow lifetime.
+pub struct WgpuGpuDispatch {
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
 }
 
-/// Routing decision for `trigger_cell_play`.
-enum PlayPath {
-    /// Combined AST failed to parse.
-    ParseError(String),
-    /// Cell needs `parallel for`/array dispatch — keep the legacy GPU
-    /// interpreter path so we can pass `&Device`/`&Queue` directly.
-    LegacyInterpreter,
-    /// All other cells delegate to `Notebook::play`.
-    Notebook,
+impl WgpuGpuDispatch {
+    pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
+        Self { device, queue }
+    }
 }
 
-impl<'a> lang::interpreter::GpuDispatch for WgpuGpuDispatch<'a> {
+impl lang::interpreter::GpuDispatch for WgpuGpuDispatch {
     fn dispatch(
         &self,
         request: &lang::interpreter::ParallelForRequest,
     ) -> Result<Vec<(String, Vec<f64>)>, String> {
-        crate::render::compute_pipeline::dispatch(self.device, self.queue, request)
+        crate::render::compute_pipeline::dispatch(&self.device, &self.queue, request)
     }
 }
 
@@ -1421,67 +1418,13 @@ impl AppState {
     }
 
     /// Drive cell execution through the headless `Notebook` engine, then
-    /// reflect the outcome onto `CodeCell` and the GPU.
-    ///
-    /// Most cells delegate fully to `notebook.play(idx)` — the notebook
-    /// handles parse, REDUCE submission, WGSL gen, and the simple
-    /// interpreter cases. Cells that need GPU dispatch for `parallel for`
-    /// (array Monte Carlo, etc.) take a legacy path here so the renderer's
-    /// device/queue are reachable without storing 'static GPU handles on
-    /// the notebook.
+    /// GPU-compile any emitted shader. The notebook handles parse, REDUCE
+    /// submission, WGSL gen, interpreter (including `parallel for` via
+    /// the `WgpuGpuDispatch` injected at session construction).
     fn trigger_cell_play(&mut self, cell_index: usize) {
-        // Inspect the combined AST to decide which path to take. Buffer
-        // text is the notebook's source of truth (no separate sync step).
-        let combined_ast = self.session.active_tab().combined_ast_up_to(cell_index);
-        let path = match &combined_ast {
-            Ok(ast) => {
-                let actions = lang::detect_cell_actions(ast);
-                if !actions.has_action() && lang::needs_interpreter(ast) {
-                    PlayPath::LegacyInterpreter
-                } else {
-                    PlayPath::Notebook
-                }
-            }
-            Err(e) => PlayPath::ParseError(e.clone()),
-        };
-
-        match path {
-            PlayPath::ParseError(e) => {
-                log::error!("Parse error: {}", e);
-                let cell = self.session.active_tab_mut().cell_mut(cell_index);
-                cell.outcome.message = Some(CellMessage::Error(e));
-                cell.output_collapsed = false;
-                self.sync_active_tab();
-            }
-            PlayPath::LegacyInterpreter => {
-                let ast = combined_ast.unwrap();
-                let (device, queue) = self.renderer.gpu_refs();
-                let gpu = WgpuGpuDispatch { device, queue };
-                match lang::interpreter::eval(&ast, &gpu) {
-                    Ok(val) => {
-                        let cell = self.session.active_tab_mut().cell_mut(cell_index);
-                        cell.outcome.message =
-                            Some(CellMessage::Computed(format!("{}", val)));
-                        cell.output_collapsed = false;
-                    }
-                    Err(e) => {
-                        log::error!("Interpreter error: {}", e);
-                        let cell = self.session.active_tab_mut().cell_mut(cell_index);
-                        cell.outcome.message = Some(CellMessage::Error(e));
-                        cell.output_collapsed = false;
-                    }
-                }
-                self.sync_active_tab();
-            }
-            PlayPath::Notebook => {
-                self.session
-                    .active_tab_mut()
-                    .notebook
-                    .play(cell_index);
-                self.sync_cell_from_notebook(cell_index);
-                self.sync_active_tab();
-            }
-        }
+        self.session.active_tab_mut().notebook.play(cell_index);
+        self.sync_cell_from_notebook(cell_index);
+        self.sync_active_tab();
     }
 
     /// GPU-compile the shader the notebook just emitted (if any). The
@@ -1540,7 +1483,15 @@ impl ApplicationHandler for App {
         let renderer = pollster::block_on(Renderer::new(window.clone()));
 
         let reduce_service = std::rc::Rc::new(std::cell::RefCell::new(ReduceService::new()));
-        let session = Session::new(Some(reduce_service.clone()));
+        // GPU factory: each notebook's `parallel for`/array dispatch goes
+        // through a `WgpuGpuDispatch` holding shared `Arc`s of the
+        // renderer's device & queue. Without the factory the notebook
+        // would fall back to CpuFallback.
+        let (gpu_device, gpu_queue) = renderer.gpu_arcs();
+        let gpu_factory: crate::session::GpuFactory = Box::new(move || {
+            Box::new(WgpuGpuDispatch::new(gpu_device.clone(), gpu_queue.clone()))
+        });
+        let session = Session::new(Some(reduce_service.clone()), Some(gpu_factory));
 
         let mut layout = UiLayout::new();
         let size = window.inner_size();

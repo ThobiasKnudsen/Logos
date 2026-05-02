@@ -151,6 +151,14 @@ impl Notebook {
         self.cells[idx].plot_color = color;
     }
 
+    /// Replace the GPU dispatcher used by the interpreter for
+    /// `parallel for`/array cells. Production calls this once after the
+    /// renderer is up — before that, the notebook uses `CpuFallback` and
+    /// dispatch is sequential on the CPU.
+    pub fn set_gpu(&mut self, gpu: Box<dyn GpuDispatch>) {
+        self.gpu = gpu;
+    }
+
     // ─── execution ─────────────────────────────────────────────────────────
 
     /// Run cell `idx`, auto-running any earlier cells that aren't already
