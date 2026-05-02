@@ -215,6 +215,39 @@ fn user_block_with_loop_plot() {
 }
 
 #[test]
+fn user_function_with_axis_capture_returning_f32_corner_substitutes() {
+    // Regression: when a user fn returns f32 and captures `x`, calling it
+    // inside `y = f(...)` corner-checking has to substitute the corner's
+    // `x_m`/`x_p` for the captured arg. Otherwise every corner gets the
+    // pixel-center `x`, the sign check never flips, and the curve renders
+    // as scattered dots instead of a continuous line.
+    let mut nb = null_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        f(n) := (
+            sum := x
+            for i in 0..n (sum := sum^x)
+            sum
+        )
+        plot(y = f(2))
+        "#,
+    );
+    let s = shader(&nb.cell(i).outcome);
+    assert!(
+        s.wgsl.contains("f(2.0, x_m)") && s.wgsl.contains("f(2.0, x_p)"),
+        "corner-checking must call f with corner-substituted x; got:\n{}",
+        s.wgsl
+    );
+    assert!(
+        !s.wgsl.contains("f(2.0, x))"),
+        "must NOT see the pixel-center `x` slip in as a captured arg; got:\n{}",
+        s.wgsl
+    );
+    validate_wgsl(&s.wgsl).expect("wgsl validates");
+}
+
+#[test]
 fn user_function_with_axis_capture() {
     let mut nb = null_notebook();
     let i = add_and_play(

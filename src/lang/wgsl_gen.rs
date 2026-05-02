@@ -1258,12 +1258,21 @@ impl GenContext {
             ("vec3", n) if n >= 1 => Ok(format!("vec3<f32>({})", emitted.join(", "))),
             ("vec4", n) if n >= 1 => Ok(format!("vec4<f32>({})", emitted.join(", "))),
 
-            // User-defined functions: emit as regular call, appending captured vars if any
+            // User-defined functions: emit as regular call, appending captured vars if any.
+            // Captured axis vars (`x`, `y`) get the corner substitution when we're
+            // inside corner-checking — otherwise the function would be evaluated at
+            // the pixel center for all four corners, killing the sign-change check
+            // and producing a dotted curve.
             _ => {
                 let mut all_args = emitted;
                 if let Some(captured) = self.captured_vars.get(name) {
                     for cap in captured {
-                        all_args.push(cap.clone());
+                        let s = match (subst, cap.as_str()) {
+                            (Some((xv, _)), "x") => xv.to_string(),
+                            (Some((_, yv)), "y") => yv.to_string(),
+                            _ => cap.clone(),
+                        };
+                        all_args.push(s);
                     }
                 }
                 Ok(format!("{}({})", name, all_args.join(", ")))
