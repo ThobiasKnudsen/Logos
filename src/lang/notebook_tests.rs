@@ -1,14 +1,11 @@
-//! Integration tests for the Logos notebook compilation pipeline.
+//! Lower-level integration tests for the Logos compile pipeline:
+//! lex → parse → wgsl_gen → naga validate. These tests bypass the
+//! `Notebook` engine on purpose so they can exercise bare expressions
+//! (the fixtures pre-date `plot()`/`print()` actions and rely on
+//! `lang::compile`'s "wrap any expression as a fragment shader" default).
 //!
-//! Tests the FULL pipeline:
-//!   1. JSON loading (file format → cell structs)
-//!   2. Lexer (raw text → tokens)
-//!   3. Parser (tokens → AST)
-//!   4. WGSL code generation (AST → WGSL shader string)
-//!   5. WGSL validation via naga (proves the generated shader is valid WGSL)
-//!
-//! Each test loads a `.json` notebook file with cells (each having `code` and `color` fields),
-//! then compiles cells sequentially (concatenating 0..=i), matching `app.rs::trigger_cell_play`.
+//! For full notebook-pipeline integration tests (action routing, REDUCE
+//! round-trips, sync), see `src/notebook/tests.rs`.
 
 use serde::Deserialize;
 

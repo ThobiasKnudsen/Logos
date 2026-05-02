@@ -341,6 +341,30 @@ fn print_symbolic_equation_appends_eq_zero() {
 }
 
 #[test]
+fn plot_and_print_in_same_cell_both_appear_in_outcome() {
+    // A cell that has both `print(f)` and `plot(y = f)`: the plot produces
+    // a shader, and the symbolic print parks on `Pending` (interpreter
+    // can't evaluate `x` symbolically; the UI's REDUCE roundtrip would
+    // resolve it via `tick`). Both effects coexist on the same outcome.
+    let (mut nb, _mock) = mock_reduce_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        f := x + 2*x
+        print(f)
+        plot(y = f)
+        "#,
+    );
+    let outcome = &nb.cell(i).outcome;
+    assert!(outcome.shader.is_some(), "plot should produce a shader");
+    assert!(
+        matches!(outcome.message, Some(CellMessage::Pending)),
+        "symbolic print should leave the cell `Pending`, got {:?}",
+        outcome.message
+    );
+}
+
+#[test]
 fn play_auto_runs_earlier_cells_jupyter_style() {
     let mut nb = null_notebook();
     let a = nb.add_cell("f := x²", Rgba::hex(0xff5555));
