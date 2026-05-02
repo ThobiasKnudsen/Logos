@@ -1,7 +1,4 @@
 pub mod autocomplete;
-pub mod cell;
-
-pub use cell::CodeCell;
 
 /// A simple text buffer with cursor and selection for basic editing.
 ///

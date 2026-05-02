@@ -390,7 +390,7 @@ fn token_colors_populated_after_play() {
     let colors = &nb.cell(i).outcome.token_colors;
     assert!(!colors.is_empty(), "token_colors should be populated");
     // Total span coverage should equal source length.
-    let source = &nb.cell(i).text;
+    let source = nb.cell(i).buffer.text();
     let total: usize = colors.iter().map(|c| c.end - c.start).sum();
     assert_eq!(total, source.len());
 }

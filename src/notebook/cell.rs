@@ -1,11 +1,14 @@
 //! A single notebook cell — the smallest unit of executable user input.
 //!
-//! Holds source text, a plot color, and the most recent run's outcome. All
-//! editor concerns (cursor, selection, scroll, layout) live in the
-//! `NotebookView` UI shell, not here — this type is pure backend state.
+//! Holds an editable text buffer, a plot color, the most recent run's
+//! outcome, and a few pieces of cell-scoped UI state (output collapse,
+//! contracted editor height) that the renderer reads back to decide layout.
+//! Window-level UI state (active tab index, scroll offsets) lives on
+//! `NotebookView` instead.
 
 use std::cell::RefCell;
 
+use crate::editor::Buffer;
 use crate::lang::ast::AstNode;
 use crate::lang::highlight::HighlightSpan;
 use crate::ui::theme::Rgba;
@@ -40,6 +43,23 @@ pub enum CellMessage {
     Error(String),
 }
 
+impl CellMessage {
+    /// Text to render at the bottom of the cell. `Pending` shows the
+    /// ellipsis placeholder; the others return their stored string.
+    pub fn display_text(&self) -> &str {
+        match self {
+            CellMessage::Pending => "\u{2026}",
+            CellMessage::Computed(s)
+            | CellMessage::Simplified(s)
+            | CellMessage::Error(s) => s.as_str(),
+        }
+    }
+
+    pub fn is_error(&self) -> bool {
+        matches!(self, CellMessage::Error(_))
+    }
+}
+
 /// Everything the last play produced for this cell. None of these fields
 /// reach for the GPU — the renderer reads `shader.wgsl` and the printer
 /// reads `message`.
@@ -57,53 +77,78 @@ pub struct CellOutcome {
 
 pub struct NotebookCell {
     pub id: usize,
-    pub text: String,
+    /// Editable source text + cursor + selection. The renderer reads from
+    /// here directly; mutations from keystrokes / paste go straight in
+    /// (no separate mirror to keep in sync).
+    pub buffer: Buffer,
     /// Color for non-RGBA plots produced by this cell. Mutable via
     /// `Notebook::set_plot_color`.
     pub plot_color: Rgba,
     pub state: CellState,
     pub outcome: CellOutcome,
+    /// Whether the cell's output area is collapsed in the UI.
+    pub output_collapsed: bool,
+    /// Custom (smaller) editor height set by the user dragging the cell's
+    /// bottom edge. `None` means "use the natural editor height for this
+    /// cell's text".
+    pub contracted_editor_h: Option<f32>,
     /// `Some(t)` after a successful play; `t` is the text snapshot at that
-    /// moment. Used to detect "needs replay" — UI compares against `text`.
+    /// moment. Used to detect "needs replay" — UI compares against current
+    /// `buffer.text()`.
     pub last_played_text: Option<String>,
     pub(super) ast_cache: RefCell<Option<(String, AstNode)>>,
 }
 
 impl NotebookCell {
     pub(super) fn new(id: usize, text: &str, plot_color: Rgba) -> Self {
+        let mut buffer = Buffer::new();
+        buffer.set_text(text);
         Self {
             id,
-            text: text.to_string(),
+            buffer,
             plot_color,
             state: CellState::Idle,
             outcome: CellOutcome::default(),
+            output_collapsed: false,
+            contracted_editor_h: None,
             last_played_text: None,
             ast_cache: RefCell::new(None),
         }
+    }
+
+    /// Convenience: read the buffer's text. Mostly useful in tests; UI
+    /// code generally wants `&self.buffer` so it can read cursor/selection
+    /// alongside text.
+    pub fn text(&self) -> &str {
+        self.buffer.text()
     }
 
     /// True iff the cell has been played and its text has changed since.
     /// Idle cells are never stale; a stale cell shows the replay affordance.
     pub fn is_stale(&self) -> bool {
         match &self.last_played_text {
-            Some(t) => t != &self.text,
+            Some(t) => t.as_str() != self.buffer.text(),
             None => false,
         }
     }
 
-    /// Parse and cache the AST for this cell's source. Reuses the cached AST
-    /// when the text hasn't changed since the last call.
-    pub(super) fn cached_ast(&self) -> Result<AstNode, String> {
+    /// Parse and cache the AST for this cell's *raw* source. Reuses the
+    /// cached AST when the buffer text hasn't changed since the last call.
+    /// Note: when an iterative-CAS pass produces a `Simplified` message,
+    /// `Notebook::combined_ast_up_to` parses that text directly instead of
+    /// going through `cached_ast` — the cache here is for the editable form.
+    pub fn cached_ast(&self) -> Result<AstNode, String> {
+        let text = self.buffer.text();
         {
             let cache = self.ast_cache.borrow();
             if let Some((cached_text, ast)) = cache.as_ref() {
-                if cached_text == &self.text {
+                if cached_text.as_str() == text {
                     return Ok(ast.clone());
                 }
             }
         }
-        let parsed = crate::lang::parse(&self.text)?;
-        *self.ast_cache.borrow_mut() = Some((self.text.clone(), parsed.clone()));
+        let parsed = crate::lang::parse(text)?;
+        *self.ast_cache.borrow_mut() = Some((text.to_string(), parsed.clone()));
         Ok(parsed)
     }
 

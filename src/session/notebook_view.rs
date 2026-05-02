@@ -4,28 +4,26 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use crate::editor::CodeCell;
 use crate::lang::ast::AstNode;
 use crate::lang::reduce::service::ReduceService;
-use crate::notebook::{NoReduce, Notebook, SharedReduce};
+use crate::notebook::{NoReduce, Notebook, NotebookCell, SharedReduce};
 use crate::ui::theme::Rgba;
 
 /// Default plot color for new cells until per-cell coloring is exposed via
 /// the UI. Catppuccin Mocha "blue" — readable on both dark and light bgs.
 const DEFAULT_PLOT_COLOR: u32 = 0x89b4fa;
 
+/// One open notebook in the UI: file metadata, viewport state, and the
+/// headless `Notebook` engine that owns the cells. The renderer reads cells
+/// directly off the engine via `cell()` / `cells()` accessors.
 pub struct NotebookView {
     pub name: String,
     pub file_path: Option<PathBuf>,
-    pub cells: Vec<CodeCell>,
     pub active_cell_index: usize,
     pub is_modified: bool,
     /// Math-space viewport bounds (xmin, ymin, xmax, ymax). Saved/restored
     /// on tab switch.
     pub axis_bounds: Option<[f32; 4]>,
-    /// Headless engine that runs cells through parse → REDUCE → wgsl_gen →
-    /// interpreter. The source of truth for cell IDs and outcomes; `cells`
-    /// is a UI/buffer view kept in sync per text edit.
     pub notebook: Notebook,
 }
 
@@ -35,13 +33,10 @@ impl NotebookView {
     /// to fall back to a no-op REDUCE backend.
     pub fn new_untitled(name: String, reduce: Option<Rc<RefCell<ReduceService>>>) -> Self {
         let mut notebook = build_notebook(reduce);
-        let nb_idx = notebook.add_cell("", Rgba::hex(DEFAULT_PLOT_COLOR));
-        let id = notebook.cell(nb_idx).id;
-        let cell = CodeCell::new(id);
+        notebook.add_cell("", Rgba::hex(DEFAULT_PLOT_COLOR));
         Self {
             name,
             file_path: None,
-            cells: vec![cell],
             active_cell_index: 0,
             is_modified: false,
             axis_bounds: None,
@@ -56,14 +51,10 @@ impl NotebookView {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Unknown".into());
         let mut notebook = build_notebook(reduce);
-        let nb_idx = notebook.add_cell(&contents, Rgba::hex(DEFAULT_PLOT_COLOR));
-        let id = notebook.cell(nb_idx).id;
-        let mut cell = CodeCell::new(id);
-        cell.buffer.set_text(&contents);
+        notebook.add_cell(&contents, Rgba::hex(DEFAULT_PLOT_COLOR));
         Ok(Self {
             name,
             file_path: Some(path.to_path_buf()),
-            cells: vec![cell],
             active_cell_index: 0,
             is_modified: false,
             axis_bounds: None,
@@ -71,55 +62,56 @@ impl NotebookView {
         })
     }
 
-    pub fn active_cell(&self) -> &CodeCell {
-        &self.cells[self.active_cell_index]
+    // ─── cell access (delegates to the notebook) ───────────────────────────
+
+    pub fn cells(&self) -> &[NotebookCell] {
+        self.notebook.cells()
     }
 
-    pub fn active_cell_mut(&mut self) -> &mut CodeCell {
-        &mut self.cells[self.active_cell_index]
+    pub fn cell(&self, idx: usize) -> &NotebookCell {
+        self.notebook.cell(idx)
+    }
+
+    pub fn cell_mut(&mut self, idx: usize) -> &mut NotebookCell {
+        self.notebook.cell_mut(idx)
+    }
+
+    pub fn active_cell(&self) -> &NotebookCell {
+        self.notebook.cell(self.active_cell_index)
+    }
+
+    pub fn active_cell_mut(&mut self) -> &mut NotebookCell {
+        self.notebook.cell_mut(self.active_cell_index)
     }
 
     pub fn add_cell(&mut self) -> usize {
-        let nb_idx = self.notebook.add_cell("", Rgba::hex(DEFAULT_PLOT_COLOR));
-        let id = self.notebook.cell(nb_idx).id;
-        let cell = CodeCell::new(id);
-        self.cells.push(cell);
-        let new_index = self.cells.len() - 1;
+        let new_index = self.notebook.add_cell("", Rgba::hex(DEFAULT_PLOT_COLOR));
         self.active_cell_index = new_index;
         self.is_modified = true;
         new_index
     }
 
     pub fn remove_cell(&mut self, index: usize) {
-        if self.cells.len() <= 1 || index >= self.cells.len() {
+        if self.notebook.len() <= 1 || index >= self.notebook.len() {
             return;
         }
-        self.cells.remove(index);
         self.notebook.remove_cell(index);
-        if self.active_cell_index >= self.cells.len() {
-            self.active_cell_index = self.cells.len() - 1;
+        let len = self.notebook.len();
+        if self.active_cell_index >= len {
+            self.active_cell_index = len - 1;
         } else if self.active_cell_index > index {
             self.active_cell_index -= 1;
         }
         self.is_modified = true;
     }
 
-    /// Push every cell's current buffer text into the notebook. The UI
-    /// writes directly to `cell.buffer` per keystroke; the notebook is
-    /// only told about new text when something needs it — typically right
-    /// before `notebook.play`. (Phase B of the cleanup will collapse
-    /// `Buffer` into `NotebookCell` and make this a no-op.)
-    pub fn sync_texts_to_notebook(&mut self) {
-        for (i, cell) in self.cells.iter().enumerate() {
-            self.notebook.set_text(i, cell.buffer.text());
-        }
-    }
-
     pub fn set_active_cell(&mut self, index: usize) {
-        if index < self.cells.len() {
+        if index < self.notebook.len() {
             self.active_cell_index = index;
         }
     }
+
+    // ─── file I/O ──────────────────────────────────────────────────────────
 
     /// Save: concatenate all cells with double newlines.
     pub fn save(&mut self) -> io::Result<()> {
@@ -147,18 +139,21 @@ impl NotebookView {
     }
 
     fn concatenated_text(&self) -> String {
-        self.cells
+        self.notebook
+            .cells()
             .iter()
             .map(|c| c.buffer.text())
             .collect::<Vec<_>>()
             .join("\n\n")
     }
 
-    /// Combine the parsed ASTs of cells `[0..=cell_index]` into a single Block.
-    /// Reuses each cell's cached AST when its source hasn't changed.
+    /// Combine the parsed ASTs of cells `[0..=cell_index]` into a single
+    /// Block. Reuses each cell's cached AST when its source hasn't changed.
+    /// Used by the renderer/lang service for autocomplete-time analysis;
+    /// `Notebook::play` builds the same combined AST internally.
     pub fn combined_ast_up_to(&self, cell_index: usize) -> Result<AstNode, String> {
         let mut all_stmts = Vec::new();
-        for (i, cell) in self.cells.iter().enumerate() {
+        for (i, cell) in self.notebook.cells().iter().enumerate() {
             if i > cell_index {
                 break;
             }
@@ -190,53 +185,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_untitled_mirrors_one_empty_cell_into_notebook() {
-        let tab = NotebookView::new_untitled("scratch".into(), None);
-        assert_eq!(tab.cells.len(), 1);
-        assert_eq!(tab.notebook.len(), 1);
-        assert_eq!(tab.notebook.cell(0).text, "");
+    fn new_untitled_creates_one_empty_cell() {
+        let view = NotebookView::new_untitled("scratch".into(), None);
+        assert_eq!(view.notebook.len(), 1);
+        assert_eq!(view.cell(0).buffer.text(), "");
     }
 
     #[test]
-    fn add_cell_mirrors_into_notebook() {
-        let mut tab = NotebookView::new_untitled("scratch".into(), None);
-        tab.add_cell();
-        assert_eq!(tab.cells.len(), 2);
-        assert_eq!(tab.notebook.len(), 2);
+    fn add_cell_grows_notebook_and_advances_active_index() {
+        let mut view = NotebookView::new_untitled("scratch".into(), None);
+        view.add_cell();
+        assert_eq!(view.notebook.len(), 2);
+        assert_eq!(view.active_cell_index, 1);
     }
 
     #[test]
-    fn remove_cell_mirrors_into_notebook() {
-        let mut tab = NotebookView::new_untitled("scratch".into(), None);
-        tab.add_cell();
-        tab.add_cell();
-        assert_eq!(tab.cells.len(), 3);
-        assert_eq!(tab.notebook.len(), 3);
-        tab.remove_cell(1);
-        assert_eq!(tab.cells.len(), 2);
-        assert_eq!(tab.notebook.len(), 2);
+    fn remove_cell_shrinks_notebook_and_clamps_active_index() {
+        let mut view = NotebookView::new_untitled("scratch".into(), None);
+        view.add_cell();
+        view.add_cell();
+        view.set_active_cell(2);
+        view.remove_cell(2);
+        assert_eq!(view.notebook.len(), 2);
+        assert_eq!(view.active_cell_index, 1);
     }
 
     #[test]
-    fn sync_texts_pushes_buffer_state_into_notebook() {
-        let mut tab = NotebookView::new_untitled("scratch".into(), None);
-        tab.cells[0].buffer.set_text("plot(y = sin(x))");
-        // Before sync, the notebook's text is still empty.
-        assert_eq!(tab.notebook.cell(0).text, "");
-        tab.sync_texts_to_notebook();
-        assert_eq!(tab.notebook.cell(0).text, "plot(y = sin(x))");
-    }
-
-    #[test]
-    fn notebook_can_play_after_text_sync() {
-        let mut tab = NotebookView::new_untitled("scratch".into(), None);
-        tab.cells[0].buffer.set_text("plot(y = sin(x))");
-        tab.sync_texts_to_notebook();
-        tab.notebook.play(0);
-        let cell = tab.notebook.cell(0);
-        assert!(
-            cell.outcome.shader.is_some(),
-            "notebook play should produce a shader"
-        );
+    fn buffer_writes_are_visible_to_notebook_play() {
+        let mut view = NotebookView::new_untitled("scratch".into(), None);
+        view.cell_mut(0).buffer.set_text("plot(y = sin(x))");
+        view.notebook.play(0);
+        assert!(view.cell(0).outcome.shader.is_some());
     }
 }

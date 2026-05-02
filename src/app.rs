@@ -8,11 +8,11 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
 use crate::editor::autocomplete::{self, AutocompleteState};
-use crate::editor::cell::CellOutput;
 use crate::file_dialog::{DialogKind, DialogResult, FileDialog};
 use crate::lang;
 use crate::lang::lang_service::LangService;
 use crate::lang::reduce::service::ReduceService;
+use crate::notebook::{CellMessage, CellState};
 use crate::render::RenderAreaParams;
 use crate::render::{CellInfo, CellLayout, Renderer, TabHitRect, TabInfo};
 use crate::session::Session;
@@ -116,17 +116,16 @@ fn find_ident_offset(source: &str, name: &str) -> Option<usize> {
 /// the buffer text. Used for error reporting (line/col lookup in user
 /// source) on shader compile failures.
 fn build_combined_source(tab: &crate::session::NotebookView, cell_index: usize) -> String {
-    use crate::editor::cell::CellOutput;
     let mut s = String::new();
-    for (i, cell) in tab.cells.iter().enumerate() {
+    for (i, cell) in tab.cells().iter().enumerate() {
         if i > cell_index {
             break;
         }
         if !s.is_empty() {
             s.push('\n');
         }
-        match &cell.output {
-            CellOutput::Simplified(out) => s.push_str(out),
+        match &cell.outcome.message {
+            Some(CellMessage::Simplified(out)) => s.push_str(out),
             _ => s.push_str(cell.buffer.text()),
         }
     }
@@ -610,12 +609,12 @@ impl AppState {
         let lp = self.cached_layout.left_pane;
         let tab = self.session.active_tab();
         // Ensure cached vectors match cell count
-        let cell_count = tab.cells.len();
+        let cell_count = tab.cells().len();
         self.last_submitted_texts.resize(cell_count, String::new());
 
         let t0 = Instant::now();
         let cell_infos: Vec<CellInfo> = tab
-            .cells
+            .cells()
             .iter()
             .enumerate()
             .map(|(i, c)| {
@@ -628,14 +627,18 @@ impl AppState {
                 CellInfo {
                     text,
                     cursor_byte: c.buffer.cursor_byte_offset(),
-                    is_playing: c.is_playing,
+                    is_playing: matches!(c.state, CellState::Playing),
                     selection: c.buffer.selection_range(),
-                    output_text: match &c.output {
-                        CellOutput::Simplified(s) | CellOutput::Computed(s) => Some(s.clone()),
-                        CellOutput::Error(e) => Some(e.clone()),
-                        CellOutput::None => None,
-                    },
-                    is_error: matches!(&c.output, CellOutput::Error(_)),
+                    output_text: c
+                        .outcome
+                        .message
+                        .as_ref()
+                        .map(|m| m.display_text().to_string()),
+                    is_error: c
+                        .outcome
+                        .message
+                        .as_ref()
+                        .is_some_and(|m| m.is_error()),
                     output_collapsed: c.output_collapsed,
                     contracted_editor_h: c.contracted_editor_h,
                 }
@@ -1388,7 +1391,7 @@ impl AppState {
             Key::Named(NamedKey::Enter) => {
                 self.close_menu();
                 let active = self.session.active_tab().active_cell_index;
-                let is_playing = self.session.active_tab().cells[active].is_playing;
+                let is_playing = self.session.active_tab().cell(active).state == CellState::Playing;
                 if is_playing {
                     self.trigger_cell_stop(active);
                 } else {
@@ -1427,12 +1430,8 @@ impl AppState {
     /// device/queue are reachable without storing 'static GPU handles on
     /// the notebook.
     fn trigger_cell_play(&mut self, cell_index: usize) {
-        // Push current editor text into the notebook so the play sees it.
-        self.session
-            .active_tab_mut()
-            .sync_texts_to_notebook();
-
-        // Inspect the combined AST to decide which path to take.
+        // Inspect the combined AST to decide which path to take. Buffer
+        // text is the notebook's source of truth (no separate sync step).
         let combined_ast = self.session.active_tab().combined_ast_up_to(cell_index);
         let path = match &combined_ast {
             Ok(ast) => {
@@ -1449,8 +1448,8 @@ impl AppState {
         match path {
             PlayPath::ParseError(e) => {
                 log::error!("Parse error: {}", e);
-                let cell = &mut self.session.active_tab_mut().cells[cell_index];
-                cell.output = CellOutput::Error(e);
+                let cell = self.session.active_tab_mut().cell_mut(cell_index);
+                cell.outcome.message = Some(CellMessage::Error(e));
                 cell.output_collapsed = false;
                 self.sync_active_tab();
             }
@@ -1460,14 +1459,15 @@ impl AppState {
                 let gpu = WgpuGpuDispatch { device, queue };
                 match lang::interpreter::eval(&ast, &gpu) {
                     Ok(val) => {
-                        let cell = &mut self.session.active_tab_mut().cells[cell_index];
-                        cell.output = CellOutput::Computed(format!("{}", val));
+                        let cell = self.session.active_tab_mut().cell_mut(cell_index);
+                        cell.outcome.message =
+                            Some(CellMessage::Computed(format!("{}", val)));
                         cell.output_collapsed = false;
                     }
                     Err(e) => {
                         log::error!("Interpreter error: {}", e);
-                        let cell = &mut self.session.active_tab_mut().cells[cell_index];
-                        cell.output = CellOutput::Error(e);
+                        let cell = self.session.active_tab_mut().cell_mut(cell_index);
+                        cell.outcome.message = Some(CellMessage::Error(e));
                         cell.output_collapsed = false;
                     }
                 }
@@ -1484,66 +1484,44 @@ impl AppState {
         }
     }
 
-    /// Reflect notebook cell `cell_index`'s current outcome onto the
-    /// matching `CodeCell` (output text, print_pending, is_playing) and
-    /// GPU-compile the emitted shader if any.
+    /// GPU-compile the shader the notebook just emitted (if any). The
+    /// notebook owns `state` and `outcome.message`; this function only
+    /// touches GPU side-effects and overrides the cell's state/message
+    /// when shader compilation fails.
     ///
     /// Used by both `trigger_cell_play` (one-shot) and the REDUCE poll
     /// loop (when iterative-CAS resolution finishes producing a shader).
     /// Caller is responsible for `sync_active_tab()` afterward.
     fn sync_cell_from_notebook(&mut self, cell_index: usize) {
-        use crate::notebook::CellMessage;
-        let outcome = self
+        let shader_wgsl = self
             .session
             .active_tab()
-            .notebook
             .cell(cell_index)
             .outcome
-            .clone();
+            .shader
+            .as_ref()
+            .map(|s| s.wgsl.clone());
+        let Some(wgsl) = shader_wgsl else { return };
 
-        let pending = matches!(outcome.message, Some(CellMessage::Pending));
-        let new_output = match &outcome.message {
-            None => CellOutput::None,
-            Some(CellMessage::Pending) => CellOutput::Computed("\u{2026}".to_string()),
-            Some(CellMessage::Computed(s)) => CellOutput::Computed(s.clone()),
-            Some(CellMessage::Simplified(s)) => CellOutput::Simplified(s.clone()),
-            Some(CellMessage::Error(s)) => CellOutput::Error(s.clone()),
-        };
-        {
-            let cell = &mut self.session.active_tab_mut().cells[cell_index];
-            cell.output = new_output;
-            cell.print_pending = pending;
+        let cell_id = self.session.active_tab().cell(cell_index).id;
+        if let Err(e) = self.renderer.compile_cell_shader(cell_id, &wgsl) {
+            log::error!("Shader compilation failed: {}", e);
+            let source = build_combined_source(self.session.active_tab(), cell_index);
+            let formatted = format_shader_error(&e.to_string(), &source);
+            let cell = self.session.active_tab_mut().cell_mut(cell_index);
+            cell.state = CellState::Idle;
+            cell.outcome.message = Some(CellMessage::Error(formatted));
             cell.output_collapsed = false;
-        }
-
-        // GPU compile if the notebook produced a shader.
-        if let Some(shader) = outcome.shader {
-            let cell_id = self.session.active_tab().cells[cell_index].id;
-            match self.renderer.compile_cell_shader(cell_id, &shader.wgsl) {
-                Ok(()) => {
-                    let cell = &mut self.session.active_tab_mut().cells[cell_index];
-                    cell.is_playing = true;
-                }
-                Err(e) => {
-                    log::error!("Shader compilation failed: {}", e);
-                    let source =
-                        build_combined_source(self.session.active_tab(), cell_index);
-                    let cell = &mut self.session.active_tab_mut().cells[cell_index];
-                    cell.output =
-                        CellOutput::Error(format_shader_error(&e.to_string(), &source));
-                    cell.output_collapsed = false;
-                    cell.is_playing = false;
-                }
-            }
         }
     }
 
     /// Stop playing a cell's shader.
     fn trigger_cell_stop(&mut self, cell_index: usize) {
-        let cell_id = self.session.active_tab().cells[cell_index].id;
+        let cell_id = self.session.active_tab().cell(cell_index).id;
         self.renderer.remove_cell_shader(cell_id);
-        self.session.active_tab_mut().cells[cell_index].is_playing = false;
-        self.session.active_tab_mut().cells[cell_index].output = CellOutput::None;
+        self.session.active_tab_mut().notebook.stop(cell_index);
+        let cell = self.session.active_tab_mut().cell_mut(cell_index);
+        cell.outcome.message = None;
         self.sync_active_tab();
     }
 }
@@ -1760,11 +1738,11 @@ impl ApplicationHandler for App {
                         let natural_h = content_h + text_pad * 2.0;
                         let clamped = new_h.clamp(min_h, natural_h);
                         let tab = state.session.active_tab_mut();
-                        if idx < tab.cells.len() {
+                        if idx < tab.cells().len() {
                             if (clamped - natural_h).abs() < 1.0 {
-                                tab.cells[idx].contracted_editor_h = None;
+                                tab.cell_mut(idx).contracted_editor_h = None;
                             } else {
-                                tab.cells[idx].contracted_editor_h = Some(clamped);
+                                tab.cell_mut(idx).contracted_editor_h = Some(clamped);
                             }
                         }
                         state.sync_active_tab();
@@ -1795,7 +1773,7 @@ impl ApplicationHandler for App {
                     if let Some(cell_idx) = state.editor_drag_cell {
                         let (mx, my) = state.cursor_position;
                         if let Some(byte_offset) = state.renderer.hit_test_cell(cell_idx, mx, my) {
-                            state.session.active_tab_mut().cells[cell_idx]
+                            state.session.active_tab_mut().cell_mut(cell_idx)
                                 .buffer
                                 .set_cursor_byte_extend(byte_offset);
                             state.sync_active_tab();
@@ -1968,12 +1946,12 @@ impl ApplicationHandler for App {
                         if let Some(byte_offset) = state.renderer.hit_test_cell(i, mx, my) {
                             if state.modifiers.shift_key() {
                                 // Shift+click: extend selection to clicked position
-                                state.session.active_tab_mut().cells[i]
+                                state.session.active_tab_mut().cell_mut(i)
                                     .buffer
                                     .set_cursor_byte_extend(byte_offset);
                             } else {
                                 // Normal click: position cursor, start potential drag
-                                state.session.active_tab_mut().cells[i]
+                                state.session.active_tab_mut().cell_mut(i)
                                     .buffer
                                     .set_cursor_byte(byte_offset);
                             }
@@ -1993,11 +1971,14 @@ impl ApplicationHandler for App {
                         state.close_menu();
                         state.dismiss_autocomplete();
                         // Copy output text to clipboard
-                        let text_to_copy = match &state.session.active_tab().cells[i].output {
-                            CellOutput::Simplified(s) | CellOutput::Computed(s) => Some(s.clone()),
-                            CellOutput::Error(e) => Some(e.clone()),
-                            CellOutput::None => None,
-                        };
+                        let text_to_copy = state
+                            .session
+                            .active_tab()
+                            .cell(i)
+                            .outcome
+                            .message
+                            .as_ref()
+                            .map(|m| m.display_text().to_string());
                         if let Some(text) = text_to_copy {
                             if let Some(cb) = state.clipboard.as_mut() {
                                 let _ = cb.set_text(&text);
@@ -2195,7 +2176,7 @@ impl ApplicationHandler for App {
                 };
                 match click_target {
                     HoverTarget::CellPlayButton(i) => {
-                        let is_playing = state.session.active_tab().cells[i].is_playing;
+                        let is_playing = state.session.active_tab().cell(i).state == CellState::Playing;
                         if is_playing {
                             state.trigger_cell_stop(i);
                         } else {
@@ -2206,7 +2187,7 @@ impl ApplicationHandler for App {
                         // Handled on press (drag-to-select); release is a no-op.
                     }
                     HoverTarget::CellCopyButton(i) => {
-                        let text = state.session.active_tab().cells[i]
+                        let text = state.session.active_tab().cell(i)
                             .buffer
                             .text()
                             .to_string();
@@ -2215,24 +2196,28 @@ impl ApplicationHandler for App {
                         }
                     }
                     HoverTarget::CellOutputCopyButton(i) => {
-                        let output_text = match &state.session.active_tab().cells[i].output {
-                            CellOutput::None => String::new(),
-                            CellOutput::Error(e) => e.clone(),
-                            CellOutput::Simplified(s) | CellOutput::Computed(s) => s.clone(),
-                        };
+                        let output_text = state
+                            .session
+                            .active_tab()
+                            .cell(i)
+                            .outcome
+                            .message
+                            .as_ref()
+                            .map(|m| m.display_text().to_string())
+                            .unwrap_or_default();
                         if let Some(cb) = state.clipboard.as_mut() {
                             let _ = cb.set_text(&output_text);
                         }
                     }
                     HoverTarget::CellOutputToggle(i) => {
-                        let cell = &mut state.session.active_tab_mut().cells[i];
+                        let cell = state.session.active_tab_mut().cell_mut(i);
                         cell.output_collapsed = !cell.output_collapsed;
                         state.sync_active_tab();
                     }
                     HoverTarget::CellDeleteButton(i) => {
                         // Stop shader if playing before removing
-                        let cell = &state.session.active_tab().cells[i];
-                        if cell.is_playing {
+                        let cell = state.session.active_tab().cell(i);
+                        if cell.state == CellState::Playing {
                             state.renderer.remove_cell_shader(cell.id);
                         }
                         state.session.active_tab_mut().remove_cell(i);

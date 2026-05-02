@@ -112,6 +112,10 @@ impl Notebook {
         &self.cells[idx]
     }
 
+    pub fn cell_mut(&mut self, idx: usize) -> &mut NotebookCell {
+        &mut self.cells[idx]
+    }
+
     pub fn cells(&self) -> &[NotebookCell] {
         &self.cells
     }
@@ -136,7 +140,7 @@ impl Notebook {
         if idx >= self.cells.len() {
             return;
         }
-        self.cells[idx].text = text.to_string();
+        self.cells[idx].buffer.set_text(text);
         self.cells[idx].invalidate_ast();
     }
 
@@ -239,7 +243,7 @@ impl Notebook {
     }
 
     fn run_cell(&mut self, idx: usize) {
-        let snapshot = self.cells[idx].text.clone();
+        let snapshot = self.cells[idx].buffer.text().to_string();
 
         // Reset outcome but keep token colors fresh regardless of success.
         self.cells[idx].outcome = CellOutcome::default();
@@ -260,7 +264,7 @@ impl Notebook {
 
         let actions = lang::detect_cell_actions(&combined);
 
-        let cell_text = self.cells[idx].text.trim().to_string();
+        let cell_text = self.cells[idx].buffer.text().trim().to_string();
 
         if let Some(print_idx) = actions.first_print {
             self.handle_print(idx, print_idx, &combined, &cell_text);
@@ -389,7 +393,7 @@ impl Notebook {
                 return Some(idx);
             }
             Err(e) => {
-                self.set_runtime_error(idx, e, &self.cells[idx].text.clone());
+                self.set_runtime_error(idx, e, &self.cells[idx].buffer.text().to_string());
                 return Some(idx);
             }
         };
@@ -408,7 +412,7 @@ impl Notebook {
             ReducePurpose::InlineCas => {
                 let working_text = match &self.cells[idx].outcome.message {
                     Some(CellMessage::Simplified(s)) => s.clone(),
-                    _ => self.cells[idx].text.clone(),
+                    _ => self.cells[idx].buffer.text().to_string(),
                 };
                 let (_, embedded) = extract_reduce_expr(&working_text);
                 let substituted = substitute_reduce_result(&working_text, &result, embedded);
@@ -439,7 +443,7 @@ impl Notebook {
                          Consider using a numerical method instead.",
                         op
                     );
-                    self.set_runtime_error(idx, msg, &self.cells[idx].text.clone());
+                    self.set_runtime_error(idx, msg, &self.cells[idx].buffer.text().to_string());
                     return Some(idx);
                 }
                 let special = translate::detect_special_functions(&substituted);
@@ -450,7 +454,7 @@ impl Notebook {
                          Consider using a numerical method instead.",
                         names.join(", ")
                     );
-                    self.set_runtime_error(idx, msg, &self.cells[idx].text.clone());
+                    self.set_runtime_error(idx, msg, &self.cells[idx].buffer.text().to_string());
                     return Some(idx);
                 }
 
@@ -476,7 +480,7 @@ impl Notebook {
             } else if let Some(CellMessage::Simplified(s)) = &cell.outcome.message {
                 source.push_str(s);
             } else {
-                source.push_str(&cell.text);
+                source.push_str(cell.buffer.text());
             }
         }
         match crate::lang::compile(&source) {
@@ -487,7 +491,7 @@ impl Notebook {
                     bindings: Vec::new(),
                 });
                 self.cells[idx].state = CellState::Playing;
-                self.cells[idx].last_played_text = Some(self.cells[idx].text.clone());
+                self.cells[idx].last_played_text = Some(self.cells[idx].buffer.text().to_string());
             }
             Err(e) => {
                 if !e.contains("No result expression") {

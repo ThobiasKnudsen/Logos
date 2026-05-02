@@ -125,7 +125,7 @@ pub(super) fn collect_bindings(
         // post-REDUCE-substitution form.
         let src: &str = match &cell.outcome.message {
             Some(CellMessage::Simplified(s)) => s.as_str(),
-            _ => cell.text.as_str(),
+            _ => cell.buffer.text(),
         };
         for line in src.trim().lines() {
             extract_binding(line.trim(), &mut bindings);

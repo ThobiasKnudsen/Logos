@@ -310,6 +310,7 @@ impl ReduceSession {
         self.eval(&stmt)
     }
 
+    #[cfg(test)]
     pub fn set_switch(&self, name: &str, on: bool) -> Result<(), String> {
         let c_name = CString::new(name).map_err(|e| format!("Invalid switch name: {}", e))?;
         let val = if on { 1 } else { 0 };
