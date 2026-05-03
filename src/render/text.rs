@@ -12,6 +12,25 @@ impl Renderer {
         self.cell_texts.clear();
     }
 
+    /// Force every cell editor and output buffer to re-shape from scratch on
+    /// the next sync. Used when the active font family changes — clearing the
+    /// cached text alone isn't enough because the incremental-shape path
+    /// preserves each line's existing `AttrsList` (still referencing the old
+    /// family). Wiping the buffer lines forces a full rebuild with the new
+    /// default attrs.
+    pub fn invalidate_cell_fonts(&mut self) {
+        self.cell_texts.clear();
+        self.cell_output_texts.clear();
+        for buf in &mut self.cell_buffers {
+            buf.lines.clear();
+            buf.set_redraw(true);
+        }
+        for buf in &mut self.cell_output_buffers {
+            buf.lines.clear();
+            buf.set_redraw(true);
+        }
+    }
+
     /// Update a cosmic-text buffer incrementally: only reshape lines that
     /// actually changed.  Returns the number of lines that were reshaped.
     pub(super) fn incremental_set_rich_text(

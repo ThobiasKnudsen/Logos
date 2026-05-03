@@ -1,11 +1,17 @@
-use crate::ui::theme;
+use crate::ui::theme::{self, font_family};
 
 pub(crate) struct MenuItemDef {
     pub label: &'static str,
     pub shortcut: &'static str,
 }
 
-pub(crate) const MENU_NAMES: &[&str] = &["File", "Edit", "View", "Examples", "Theme", "Help"];
+pub(crate) const MENU_NAMES: &[&str] =
+    &["File", "Edit", "View", "Examples", "Theme", "Fonts", "Help"];
+
+/// Index of the Theme menu in `MENU_NAMES` — the first dynamic menu.
+pub(crate) const THEME_MENU_INDEX: usize = 4;
+/// Index of the Fonts menu in `MENU_NAMES`.
+pub(crate) const FONTS_MENU_INDEX: usize = 5;
 
 const MENU_FILE_ITEMS: &[MenuItemDef] = &[
     MenuItemDef {
@@ -196,4 +202,35 @@ pub(super) fn active_theme_index() -> usize {
     let name = theme::active_theme_name();
     let items = theme_menu_items().lock().unwrap();
     items.iter().position(|i| i.label == name).unwrap_or(0)
+}
+
+pub(crate) fn font_menu_count() -> usize {
+    font_family::count()
+}
+
+pub(crate) fn font_menu_label(idx: usize) -> String {
+    font_family::name(idx).to_string()
+}
+
+pub(super) fn active_font_index() -> usize {
+    font_family::active_index()
+}
+
+/// Number of items in a dynamic menu (Theme/Fonts) — used by the renderer.
+/// Returns 0 for non-dynamic menus.
+pub(crate) fn dynamic_menu_count(menu_index: usize) -> Option<usize> {
+    match menu_index {
+        THEME_MENU_INDEX => Some(theme_menu_count()),
+        FONTS_MENU_INDEX => Some(font_menu_count()),
+        _ => None,
+    }
+}
+
+/// Label for a dynamic-menu item. Caller must ensure `menu_index` is dynamic.
+pub(crate) fn dynamic_menu_label(menu_index: usize, item_index: usize) -> String {
+    match menu_index {
+        THEME_MENU_INDEX => theme_menu_label(item_index),
+        FONTS_MENU_INDEX => font_menu_label(item_index),
+        _ => String::new(),
+    }
 }

@@ -1,7 +1,7 @@
 use glyphon::{Attrs, Family, Shaping};
 
 use crate::ui::layout::Rect;
-use crate::ui::theme::fonts;
+use crate::ui::theme::{font_family, fonts};
 
 use super::{
     tab_close_pad, tab_close_size, tab_dot_pad, tab_pad_h, Renderer, TabHitRect, TabInfo,
@@ -13,10 +13,11 @@ impl Renderer {
             return;
         }
         self.cached_status_text = text.to_string();
+        let family = font_family::active_family();
         self.status_label.set_text(
             &mut self.font_system,
             text,
-            Attrs::new().family(Family::SansSerif),
+            Attrs::new().family(Family::Name(family)),
             Shaping::Advanced,
         );
         self.status_label

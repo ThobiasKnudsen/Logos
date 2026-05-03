@@ -95,7 +95,8 @@ impl Renderer {
                 self.cell_buffers[i].set_size(&mut self.font_system, None, None);
 
                 let spans = crate::lang::highlight::highlight(&cell_info.text);
-                let default_attrs = Attrs::new().family(Family::Monospace);
+                let mono_family = crate::ui::theme::font_family::active_family();
+                let default_attrs = Attrs::new().family(Family::Name(mono_family));
 
                 let srt = std::time::Instant::now();
                 let lines_updated = Self::incremental_set_rich_text(
@@ -148,11 +149,12 @@ impl Renderer {
             self.cell_output_is_error[i] = cell_info.is_error;
             if output_changed {
                 if has_output {
+                    let mono_family = crate::ui::theme::font_family::active_family();
                     self.cell_output_buffers[i].set_size(&mut self.font_system, None, None);
                     self.cell_output_buffers[i].set_text(
                         &mut self.font_system,
                         output_text_ref,
-                        Attrs::new().family(Family::Monospace),
+                        Attrs::new().family(Family::Name(mono_family)),
                         Shaping::Advanced,
                     );
                     self.cell_output_buffers[i].shape_until_scroll(&mut self.font_system, false);

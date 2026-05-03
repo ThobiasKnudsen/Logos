@@ -3,17 +3,18 @@ use glyphon::{Attrs, Family, Shaping};
 use crate::app::{self, MenuItemDef};
 use crate::editor::autocomplete::CandidateKind;
 use crate::ui::layout::Rect;
-use crate::ui::theme::{fonts, spacing};
+use crate::ui::theme::{font_family, fonts, spacing};
 
 use super::{menu_item_pad, Renderer};
 
 impl Renderer {
     pub fn set_maximized_icon(&mut self, is_maximized: bool) {
         let icon = if is_maximized { "\u{274F}" } else { "\u{25A1}" };
+        let family = font_family::active_family();
         self.win_max_label.set_text(
             &mut self.font_system,
             icon,
-            Attrs::new().family(Family::SansSerif),
+            Attrs::new().family(Family::Name(family)),
             Shaping::Advanced,
         );
         self.win_max_label
@@ -50,12 +51,8 @@ impl Renderer {
         active_item: Option<usize>,
     ) -> Vec<Rect> {
         let static_items: &[MenuItemDef] = app::menu_items(menu_index);
-        let is_theme_menu = menu_index == 4;
-        let item_count = if is_theme_menu {
-            app::theme_menu_count()
-        } else {
-            static_items.len()
-        };
+        let dynamic_count = app::dynamic_menu_count(menu_index);
+        let item_count = dynamic_count.unwrap_or(static_items.len());
         if item_count == 0 {
             self.dropdown_active = false;
             return Vec::new();
@@ -72,8 +69,8 @@ impl Renderer {
 
         #[allow(clippy::needless_range_loop)]
         for i in 0..item_count {
-            let (item_label, item_shortcut) = if is_theme_menu {
-                (app::theme_menu_label(i), "")
+            let (item_label, item_shortcut) = if dynamic_count.is_some() {
+                (app::dynamic_menu_label(menu_index, i), "")
             } else {
                 (static_items[i].label.to_string(), static_items[i].shortcut)
             };

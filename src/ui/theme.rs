@@ -606,6 +606,75 @@ pub mod fonts {
 }
 
 // ---------------------------------------------------------------------------
+// Monospace font families — registry of embedded TTFs the editor can switch
+// between at runtime via the Fonts menu. To add a new font, drop the .ttf into
+// `assets/fonts/`, append a `FontFamily` entry below, and rebuild.
+// ---------------------------------------------------------------------------
+
+pub mod font_family {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// One selectable monospace family. Multiple weights of the same family
+    /// (e.g. Regular + Bold) live in `font_data` and are loaded together.
+    pub struct FontFamily {
+        /// Display name in the Fonts menu.
+        pub name: &'static str,
+        /// Family name embedded in the TTFs — must match the OS/2 `name` table
+        /// so cosmic-text can resolve `Family::Name(family)`.
+        pub family: &'static str,
+        /// Raw bytes of every weight to load into the FontSystem at startup.
+        pub font_data: &'static [&'static [u8]],
+    }
+
+    pub const FAMILIES: &[FontFamily] = &[
+        FontFamily {
+            name: "Geist Mono",
+            family: "Geist Mono",
+            font_data: &[
+                include_bytes!("../../assets/fonts/GeistMono-Regular.ttf"),
+                include_bytes!("../../assets/fonts/GeistMono-Bold.ttf"),
+            ],
+        },
+        FontFamily {
+            name: "JuliaMono",
+            family: "JuliaMono",
+            font_data: &[
+                include_bytes!("../../assets/fonts/JuliaMono-Regular.ttf"),
+                include_bytes!("../../assets/fonts/JuliaMono-Bold.ttf"),
+            ],
+        },
+    ];
+
+    static CURRENT: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn count() -> usize {
+        FAMILIES.len()
+    }
+
+    pub fn active_index() -> usize {
+        CURRENT.load(Ordering::Relaxed).min(FAMILIES.len().saturating_sub(1))
+    }
+
+    pub fn active_family() -> &'static str {
+        FAMILIES[active_index()].family
+    }
+
+    pub fn active_name() -> &'static str {
+        FAMILIES[active_index()].name
+    }
+
+    pub fn name(idx: usize) -> &'static str {
+        FAMILIES.get(idx).map(|f| f.name).unwrap_or("")
+    }
+
+    pub fn set(idx: usize) {
+        if idx < FAMILIES.len() {
+            CURRENT.store(idx, Ordering::Relaxed);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Split defaults
 // ---------------------------------------------------------------------------
 

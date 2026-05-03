@@ -7,10 +7,11 @@ use crate::editor::autocomplete;
 use crate::file_dialog::{DialogKind, FileDialog};
 use crate::notebook::{CellMessage, CellState};
 use crate::render::{CellInfo, TabInfo};
-use crate::ui::theme::{self, fonts};
+use crate::ui::theme::{self, font_family, fonts};
 
 use super::cas::format_shader_error;
-use super::menus::{active_theme_index, resolve_example_path, EXAMPLE_FILENAMES};
+use super::menus::{active_font_index, active_theme_index, resolve_example_path, EXAMPLE_FILENAMES};
+use super::{FONTS_MENU_INDEX, THEME_MENU_INDEX};
 use super::render_area::{MouseZone, RenderAreaState};
 use super::{
     compute_win_control_rects, detect_mouse_zone, edge_resize_direction, line_col_from,
@@ -351,10 +352,10 @@ impl AppState {
             return;
         }
         let menu_rect = self.menu_item_rects[index];
-        let active_item = if index == 4 {
-            Some(active_theme_index())
-        } else {
-            None
+        let active_item = match index {
+            THEME_MENU_INDEX => Some(active_theme_index()),
+            FONTS_MENU_INDEX => Some(active_font_index()),
+            _ => None,
         };
         self.dropdown_item_rects = self.renderer.open_dropdown(index, menu_rect, active_item);
         self.open_menu = Some(index);
@@ -610,8 +611,11 @@ impl AppState {
                     self.sync_active_tab();
                 }
             }
-            (4, i) => {
+            (m, i) if m == THEME_MENU_INDEX => {
                 self.select_theme(i);
+            }
+            (m, i) if m == FONTS_MENU_INDEX => {
+                self.select_font(i);
             }
             _ => {}
         }
@@ -701,6 +705,15 @@ impl AppState {
         log::info!("Selected theme: {}", theme::active_theme_name());
         self.renderer.invalidate_cell_texts();
         self.invalidate_lang_cache();
+        self.sync_active_tab();
+    }
+
+    pub(super) fn select_font(&mut self, index: usize) {
+        font_family::set(index);
+        log::info!("Selected font: {}", font_family::active_name());
+        self.renderer.invalidate_cell_fonts();
+        self.renderer.rebuild_labels();
+        self.window.request_redraw();
         self.sync_active_tab();
     }
 

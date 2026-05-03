@@ -14,7 +14,7 @@ use winit::window::Window;
 
 use crate::app;
 use crate::ui::layout::Rect;
-use crate::ui::theme::fonts;
+use crate::ui::theme::{font_family, fonts};
 
 use super::rects::RectRenderer;
 use super::shader_pipeline::ShaderPipelineManager;
@@ -70,6 +70,11 @@ impl Renderer {
         surface.configure(&device, &surface_config);
 
         let mut font_system = FontSystem::new();
+        for family in font_family::FAMILIES {
+            for &bytes in family.font_data {
+                font_system.db_mut().load_font_data(bytes.to_vec());
+            }
+        }
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let viewport = glyphon::Viewport::new(&device, &cache);
@@ -482,6 +487,7 @@ impl Renderer {
         }
 
         self.cached_tab_info.clear();
+        self.cached_status_text.clear();
         self.cell_texts.clear();
         self.cell_output_texts.clear();
         self.cell_output_is_error.clear();
@@ -493,10 +499,11 @@ impl Renderer {
     pub(super) fn create_label(font_system: &mut FontSystem, size: f32, text: &str) -> TextBuffer {
         let mut buf = TextBuffer::new(font_system, Metrics::new(size, size * 1.4));
         buf.set_size(font_system, Some(2000.0), Some(size * 2.0));
+        let family = font_family::active_family();
         buf.set_text(
             font_system,
             text,
-            Attrs::new().family(Family::SansSerif),
+            Attrs::new().family(Family::Name(family)),
             Shaping::Advanced,
         );
         buf.shape_until_scroll(font_system, false);

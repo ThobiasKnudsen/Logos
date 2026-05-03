@@ -1232,12 +1232,13 @@ impl Renderer {
             y_step *= 2.0;
         };
 
+        let mono_family = crate::ui::theme::font_family::active_family();
         for (i, tick) in x_ticks.iter().enumerate() {
             let text = format_tick(*tick, x_step);
             self.axis_label_buffers[i].set_text(
                 &mut self.font_system,
                 &text,
-                Attrs::new().family(Family::Monospace),
+                Attrs::new().family(Family::Name(mono_family)),
                 Shaping::Advanced,
             );
             self.axis_label_buffers[i].shape_until_scroll(&mut self.font_system, false);
@@ -1247,7 +1248,7 @@ impl Renderer {
             self.axis_label_buffers[MAX_AXIS_LABELS + i].set_text(
                 &mut self.font_system,
                 &text,
-                Attrs::new().family(Family::Monospace),
+                Attrs::new().family(Family::Name(mono_family)),
                 Shaping::Advanced,
             );
             self.axis_label_buffers[MAX_AXIS_LABELS + i]
@@ -1387,7 +1388,7 @@ impl Renderer {
             self.cursor_x_label.set_text(
                 &mut self.font_system,
                 &cx_text,
-                Attrs::new().family(Family::Monospace),
+                Attrs::new().family(Family::Name(mono_family)),
                 Shaping::Advanced,
             );
             self.cursor_x_label
@@ -1400,7 +1401,7 @@ impl Renderer {
             self.cursor_y_label.set_text(
                 &mut self.font_system,
                 &cy_text,
-                Attrs::new().family(Family::Monospace),
+                Attrs::new().family(Family::Name(mono_family)),
                 Shaping::Advanced,
             );
             self.cursor_y_label
