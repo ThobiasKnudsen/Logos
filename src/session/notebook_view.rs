@@ -86,6 +86,9 @@ impl NotebookView {
                 }
             }
         }
+        for i in 0..notebook.len() {
+            notebook.cell_mut(i).buffer.set_cursor_byte(0);
+        }
         Ok(Self {
             tab_id: alloc_tab_id(),
             name,

@@ -1,4 +1,4 @@
-MAX_ITER := 8
+MAX_ITER := 7
 RAD_OFFSET := 0.4
 DENOM_EPS := 0.01
 GLOW_SCALE := 6.0
@@ -39,3 +39,4 @@ warp(x, y) := (
 )
 
 plot(warp(x, y))
+print(x=y+x)

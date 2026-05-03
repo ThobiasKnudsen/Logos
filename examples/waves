@@ -1,0 +1,6 @@
+[
+  {
+    "color": "#d73f31",
+    "content": "f(x,i) := (\n\tsum := 0\n\tfor j in 1..i (\n\t\tsum := sum + sin(j*2*t+x/j)\n\t) \n\tsum\t\n)\nplot(y = f(x, 10))"
+  }
+]

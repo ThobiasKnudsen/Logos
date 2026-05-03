@@ -89,6 +89,10 @@ pub(super) const MENU_EXAMPLES_ITEMS: &[MenuItemDef] = &[
         label: "Monte Carlo",
         shortcut: "",
     },
+    MenuItemDef {
+        label: "Waves",
+        shortcut: "",
+    },
 ];
 
 /// File names of each shipped example, parallel to `MENU_EXAMPLES_ITEMS`.
@@ -101,6 +105,7 @@ pub(super) const EXAMPLE_FILENAMES: &[&str] = &[
     "mandlebrot.txt",
     "warp.txt",
     "monte_carlo.txt",
+    "waves",
 ];
 
 /// Resolve an example file name to an absolute path. The expected production

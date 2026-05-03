@@ -133,7 +133,7 @@ impl AppState {
     /// Determine what the cursor is hovering over and set the cursor icon.
     pub(super) fn recompute_hover(&mut self) {
         let (mx, my) = self.cursor_position;
-        let wc = &self.win_control_rects;
+        let wc = self.win_control_rects;
 
         if !self.is_maximized {
             let size = self.window.inner_size();
@@ -171,6 +171,13 @@ impl AppState {
                     self.set_hover(HoverTarget::None);
                     return;
                 }
+            }
+            let on_menu_item = self
+                .menu_item_rects
+                .iter()
+                .any(|r| point_in_rect(mx, my, r));
+            if !on_menu_item {
+                self.close_menu();
             }
         }
 
@@ -328,6 +335,12 @@ impl AppState {
             };
             self.window.set_cursor(icon);
             self.window.request_redraw();
+
+            if let HoverTarget::MenuItem(i) = target {
+                if self.open_menu != Some(i) {
+                    self.open_menu(i);
+                }
+            }
         }
     }
 
