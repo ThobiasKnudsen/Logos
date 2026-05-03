@@ -202,18 +202,24 @@ pub struct Theme {
 // ---------------------------------------------------------------------------
 
 pub struct JsonTheme {
-    // UI base (7 colors — everything else derived)
+    // 3 background tones — chrome, elevated (cells/dropdowns/tooltips), and
+    // canvas (notebook + render area, formerly `render_bg`).
     pub primary_bg: Rgba,
     pub secondary_bg: Rgba,
     pub tertiary_bg: Rgba,
+    // Background used by hovered surfaces (button bg, tab close, plus
+    // button, etc.) — explicit color so themes can pick it directly
+    // instead of having it derived from `secondary_bg`.
+    pub hover_bg: Rgba,
+    // 2 text tones — strong (active text + accent + cursor) and weak
+    // (muted text + axis labels + output text).
     pub primary_text: Rgba,
     pub secondary_text: Rgba,
-    pub primary_border: Rgba,
-    pub secondary_border: Rgba,
-    // Render area
-    pub render_bg: Rgba,
-    // Functional (3 colors)
-    pub accent: Rgba,
+    // 2 line tones — strong (the selected cell outline) and weak (all
+    // other borders, separators, dividers, grid lines).
+    pub primary_line: Rgba,
+    pub secondary_line: Rgba,
+    // Functional (2 colors)
     pub red: Rgba,
     pub green: Rgba,
     // Syntax (10 colors)
@@ -248,16 +254,22 @@ const fn muted(c: Rgba, n: u8, is_dark: bool) -> Rgba {
 
 impl JsonTheme {
     pub const fn to_theme(&self) -> Theme {
+        // Backgrounds: 3 tones — chrome / elevated / canvas.
+        // Foregrounds: 2 tones — strong (`pt`) for active/important
+        // text+borders+accent+cursor, weak (`st`) for muted text +
+        // subtle/inactive borders + grid lines.
         let pb = self.primary_bg;
         let sb = self.secondary_bg;
         let tb = self.tertiary_bg;
         let pt = self.primary_text;
         let st = self.secondary_text;
-        let b1 = self.primary_border;
-        let b2 = self.secondary_border;
-        let ac = self.accent;
+        let pl = self.primary_line;
+        let sl = self.secondary_line;
         let rd = self.red;
         let gn = self.green;
+        // Canvas (notebook + render area + active tab) — replaces the old
+        // `render_bg` slot with `tertiary_bg`.
+        let canvas = tb;
 
         // Auto-detect dark vs light from background brightness
         let is_dark = (pb.r as u16 + pb.g as u16 + pb.b as u16) < 384;
@@ -265,48 +277,48 @@ impl JsonTheme {
         Theme {
             bg_primary: pb,
             bg_secondary: sb,
-            bg_elevated: tb,
-            bg_hover: hover(tb, 40, is_dark),
-            border: b1,
-            border_focus: ac,
+            bg_elevated: sb,
+            bg_hover: self.hover_bg,
+            border: sl,
+            border_focus: pl,
             text_primary: pt,
             text_secondary: st,
-            text_muted: muted(st, 20, is_dark),
-            accent_primary: ac,
+            text_muted: st,
+            accent_primary: pt,
             accent_secondary: gn,
-            accent_info: ac,
-            tab_active: tb,
+            accent_info: pt,
+            tab_active: canvas,
             tab_inactive: pb,
-            tab_hover: mid(pb, tb),
-            editor_bg: self.render_bg,
+            tab_hover: mid(pb, sb),
+            editor_bg: canvas,
             editor_gutter: sb,
-            editor_selection: alpha(ac, 60),
-            graph_bg: self.render_bg,
-            graph_grid: alpha(b1, 130),
+            editor_selection: alpha(pt, 60),
+            graph_bg: canvas,
+            graph_grid: alpha(sl, 130),
             graph_axis: st,
             axis_zone_bg: alpha(pb, 210),
             axis_label: st,
             toolbar_bg: sb,
-            toolbar_button: tb,
-            toolbar_button_hover: hover(tb, 12, is_dark),
+            toolbar_button: sb,
+            toolbar_button_hover: hover(sb, 12, is_dark),
             toolbar_button_active: gn,
-            split_handle: b1,
-            split_handle_hover: b2,
+            split_handle: sl,
+            split_handle_hover: sl,
             close_button_hover: rd,
             dropdown_bg: sb,
-            dropdown_hover: tb,
-            dropdown_separator: b1,
-            menu_item_hover: tb,
+            dropdown_hover: hover(sb, 12, is_dark),
+            dropdown_separator: sl,
+            menu_item_hover: sb,
             scrollbar_track: alpha(sb, 120),
-            scrollbar_thumb: alpha(b2, 190),
-            scrollbar_thumb_hover: alpha(hover(b2, 20, is_dark), 230),
+            scrollbar_thumb: alpha(st, 190),
+            scrollbar_thumb_hover: alpha(hover(st, 20, is_dark), 230),
             cursor: pt,
             play_button: gn,
             play_button_hover: hover(gn, 25, is_dark),
             stop_button: rd,
             stop_button_hover: hover(rd, 25, is_dark),
             tooltip_bg: sb,
-            tooltip_border: b1,
+            tooltip_border: sl,
             keyword: self.keyword,
             identifier: self.identifier,
             math_variable: self.math_variable,
@@ -331,15 +343,14 @@ impl JsonTheme {
 const THEMES: [Theme; 2] = [
     // Dark — original UI, Catppuccin Mocha syntax
     JsonTheme {
-        primary_bg: Rgba::hex(0x0f1116),
-        secondary_bg: Rgba::hex(0x14171e),
-        tertiary_bg: Rgba::hex(0x1e2128),
+        primary_bg: Rgba::hex(0x303030),
+        secondary_bg: Rgba::hex(0x202020),
+        tertiary_bg: Rgba::hex(0x181818),
+        hover_bg: Rgba::hex(0x4040404),
         primary_text: Rgba::hex(0xffffff),
-        secondary_text: Rgba::hex(0xa0a8bc),
-        primary_border: Rgba::hex(0x3a4050),
-        secondary_border: Rgba::hex(0x505868),
-        render_bg: Rgba::hex(0x000000),
-        accent: Rgba::hex(0xffffff),
+        secondary_text: Rgba::hex(0xd0d0d0),
+        primary_line: Rgba::hex(0xffffff),
+        secondary_line: Rgba::hex(0x404040),
         red: Rgba::hex(0xc43c32),
         green: Rgba::hex(0x4ba55f),
         keyword: Rgba::hex(0xcba6f7),
@@ -359,12 +370,11 @@ const THEMES: [Theme; 2] = [
         primary_bg: Rgba::hex(0xffffff),
         secondary_bg: Rgba::hex(0xf3f4f6),
         tertiary_bg: Rgba::hex(0xe5e7eb),
+        hover_bg: Rgba::hex(0xcbccce),
         primary_text: Rgba::hex(0x1f2937),
         secondary_text: Rgba::hex(0x6b7280),
-        primary_border: Rgba::hex(0xd1d5db),
-        secondary_border: Rgba::hex(0x9ca3af),
-        render_bg: Rgba::hex(0xffffff),
-        accent: Rgba::hex(0x2563eb),
+        primary_line: Rgba::hex(0x1f2937),
+        secondary_line: Rgba::hex(0xd1d5db),
         red: Rgba::hex(0xdc2626),
         green: Rgba::hex(0x16a34a),
         keyword: Rgba::hex(0x8839ef),
@@ -437,10 +447,13 @@ pub mod spacing {
     pub const MD: f32 = 12.0;
     pub const LG: f32 = 16.0;
     pub const XL: f32 = 24.0;
+    /// Standard thickness for all UI lines (borders, separators, split handle visual).
+    pub const LINE_THICKNESS: f32 = 1.0;
     pub const MENU_HEIGHT: f32 = 28.0;
     pub const TAB_HEIGHT: f32 = 36.0;
     pub const STATUS_HEIGHT: f32 = 24.0;
-    pub const SPLIT_HANDLE_WIDTH: f32 = 4.08;
+    /// Hit/drag area for the split-handle. Visual line thickness is `LINE_THICKNESS`.
+    pub const SPLIT_HANDLE_WIDTH: f32 = 6.0;
     pub const WINDOW_CONTROL_WIDTH: f32 = 46.0;
     pub const DROPDOWN_ITEM_HEIGHT: f32 = 28.0;
     pub const DROPDOWN_PADDING: f32 = 4.0;
@@ -474,6 +487,9 @@ pub mod spacing {
     }
     pub fn xl() -> f32 {
         XL * scale()
+    }
+    pub fn line_thickness() -> f32 {
+        LINE_THICKNESS * scale()
     }
     pub fn menu_height() -> f32 {
         MENU_HEIGHT * scale()

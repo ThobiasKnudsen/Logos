@@ -224,10 +224,15 @@ impl Renderer {
                 w: cell_delete_size(),
                 h: cell_delete_size(),
             };
+            // Color button is a horizontal pill sized to fit the "color"
+            // label with horizontal padding; height matches the other
+            // header buttons so the rounded ends are perfect semicircles.
+            let color_label_w = Self::measure_label_width(&self.cell_color_label);
+            let color_button_w = color_label_w + spacing::md() * 2.0;
             let color_button = Rect {
-                x: header.x + header.w - cell_delete_size() * 3.0 - spacing::xs() * 2.0,
+                x: copy_button.x - spacing::xs() - color_button_w,
                 y: btn_y,
-                w: cell_delete_size(),
+                w: color_button_w,
                 h: cell_delete_size(),
             };
             let separator = Rect {

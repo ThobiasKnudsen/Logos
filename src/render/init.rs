@@ -221,6 +221,7 @@ impl Renderer {
         let cell_copy_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{2398}");
         let cell_play_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25B6}");
         let cell_stop_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25A0}");
+        let cell_color_label = Self::create_label(&mut font_system, fonts::small_size(), "color");
         let cell_chevron_right =
             Self::create_label(&mut font_system, fonts::small_size(), "\u{25B6}");
         let cell_chevron_down =
@@ -263,6 +264,7 @@ impl Renderer {
             cell_copy_label,
             cell_play_label,
             cell_stop_label,
+            cell_color_label,
             cell_chevron_right,
             cell_chevron_down,
             output_label,
@@ -453,6 +455,8 @@ impl Renderer {
             Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{25B6}");
         self.cell_stop_label =
             Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{25A0}");
+        self.cell_color_label =
+            Self::create_label(&mut self.font_system, fonts::small_size(), "color");
         self.cell_chevron_right =
             Self::create_label(&mut self.font_system, fonts::small_size(), "\u{25B6}");
         self.cell_chevron_down =

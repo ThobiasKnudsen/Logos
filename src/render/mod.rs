@@ -198,7 +198,6 @@ pub(crate) fn format_tick(v: f32, step: f32) -> String {
 const BASE_TAB_PAD_H: f32 = 12.0;
 const BASE_TAB_CLOSE_SIZE: f32 = 20.0;
 const BASE_TAB_CLOSE_PAD: f32 = 6.0;
-const BASE_TAB_GAP: f32 = 2.0;
 const BASE_TAB_DOT_PAD: f32 = 6.0;
 const BASE_MENU_ITEM_PAD: f32 = 10.0;
 const BASE_CELL_HEADER_HEIGHT: f32 = 28.0;
@@ -213,9 +212,6 @@ pub(crate) fn tab_close_size() -> f32 {
 }
 pub(crate) fn tab_close_pad() -> f32 {
     BASE_TAB_CLOSE_PAD * fonts::scale()
-}
-pub(crate) fn tab_gap() -> f32 {
-    BASE_TAB_GAP * fonts::scale()
 }
 pub(crate) fn tab_dot_pad() -> f32 {
     BASE_TAB_DOT_PAD * fonts::scale()
@@ -264,6 +260,7 @@ pub struct Renderer {
     pub(crate) cell_copy_label: TextBuffer,
     pub(crate) cell_play_label: TextBuffer,
     pub(crate) cell_stop_label: TextBuffer,
+    pub(crate) cell_color_label: TextBuffer,
     pub(crate) tooltip_label: TextBuffer,
     pub(crate) cell_playing: Vec<bool>,
     pub(crate) cell_output_scroll_x: Vec<f32>,

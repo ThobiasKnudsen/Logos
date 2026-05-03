@@ -41,26 +41,48 @@ fn alloc_cell_id() -> usize {
     NEXT_CELL_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Process-global plot-color seed. Each new cell takes one — the resulting
-/// color is deterministic in the seed (see `color_from_seed`), so two cells
-/// created back-to-back are always different.
+/// Process-global plot-color seed. Each `alloc_color_seed` call mixes a
+/// monotonically-incrementing counter with the current wall-clock nanos so
+/// successive cells get unrelated, "random-feeling" seeds (and a +1 step on
+/// the color button still moves to a totally different color thanks to the
+/// bit-mixing in `color_from_seed`).
 static NEXT_COLOR_SEED: AtomicU32 = AtomicU32::new(0);
 
 pub fn alloc_color_seed() -> u32 {
-    NEXT_COLOR_SEED.fetch_add(1, Ordering::Relaxed)
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let counter = NEXT_COLOR_SEED.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u32)
+        .unwrap_or(0);
+    counter
+        .wrapping_mul(0x9E3779B1)
+        .wrapping_add(nanos)
 }
 
-/// Deterministic seed → color mapping. Uses golden-ratio hue rotation so
-/// nearby seeds land on distinct, well-spread hues; saturation/lightness are
-/// fixed for plot-friendly contrast against both dark and light backgrounds.
+/// Seed → color mapping. The seed is bit-mixed three different ways
+/// (splitmix32) to derive hue, saturation, and lightness independently, so
+/// adjacent seeds produce visually unrelated colors and the result spans
+/// the full HSL space.
 pub fn color_from_seed(seed: u32) -> crate::ui::theme::Rgba {
-    // Golden-ratio conjugate (≈ 0.618) — classic technique for low-discrepancy
-    // hue selection. Multiply the seed by it, take the fractional part as hue.
-    const PHI: f32 = 0.618_034;
-    let hue = (seed as f32 * PHI).fract();
-    let s = 0.65;
-    let l = 0.62;
-    let (r, g, b) = hsl_to_rgb(hue, s, l);
+    fn splitmix32(mut x: u32) -> u32 {
+        x ^= x >> 16;
+        x = x.wrapping_mul(0x7feb352d);
+        x ^= x >> 15;
+        x = x.wrapping_mul(0x846ca68b);
+        x ^= x >> 16;
+        x
+    }
+    let h_bits = splitmix32(seed.wrapping_add(0x9E3779B1));
+    let s_bits = splitmix32(seed.wrapping_add(0x517CC1B7));
+    let l_bits = splitmix32(seed.wrapping_add(0x59E7E0A3));
+    let unit = u32::MAX as f32;
+    let hue = h_bits as f32 / unit;
+    // Vibrant but not neon — keep saturation and lightness in plot-friendly
+    // ranges so colors stay legible against both dark and light backgrounds.
+    let sat = 0.55 + (s_bits as f32 / unit) * 0.40;
+    let light = 0.45 + (l_bits as f32 / unit) * 0.25;
+    let (r, g, b) = hsl_to_rgb(hue, sat, light);
     crate::ui::theme::Rgba::rgb(
         (r * 255.0).round() as u8,
         (g * 255.0).round() as u8,

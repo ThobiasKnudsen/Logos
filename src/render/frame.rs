@@ -62,7 +62,16 @@ impl Renderer {
         } else {
             t.split_handle
         };
-        ui_rects.push(rect_from(layout.split_handle, split_color));
+        let split_thickness = spacing::line_thickness();
+        ui_rects.push(RectInstance {
+            x: layout.split_handle.x + (layout.split_handle.w - split_thickness) / 2.0,
+            y: layout.split_handle.y,
+            w: split_thickness,
+            h: layout.split_handle.h,
+            color: split_color.to_f32_array(),
+            corner_radius: 0.0,
+            _padding: [0.0; 3],
+        });
 
         for (i, cl) in self.cell_layouts.iter().enumerate() {
             if cl.container.y + cl.container.h < lp.y || cl.container.y > lp.y + lp.h {
@@ -109,24 +118,25 @@ impl Renderer {
                 ));
             }
 
-            // Color button: a filled swatch using the cell's plot color.
-            // Hover ring is drawn underneath for feedback.
+            // Color button: a stadium-shaped pill filled with the cell's
+            // plot color, labeled "color" so its purpose is clear. On hover,
+            // the pill is drawn slightly inset on a hover background so the
+            // hover state reads.
             {
+                let radius = cl.color_button.h / 2.0;
                 if hover == HoverTarget::CellColorButton(i) {
-                    ui_rects.push(rect_rounded(
-                        cl.color_button,
-                        t.bg_hover,
-                        cl.color_button.w / 2.0,
-                    ));
+                    ui_rects.push(rect_rounded(cl.color_button, t.bg_hover, radius));
+                    let inset = 2.0 * fonts::scale();
+                    let inner = Rect {
+                        x: cl.color_button.x + inset,
+                        y: cl.color_button.y + inset,
+                        w: (cl.color_button.w - inset * 2.0).max(0.0),
+                        h: (cl.color_button.h - inset * 2.0).max(0.0),
+                    };
+                    ui_rects.push(rect_rounded(inner, cl.plot_color, inner.h / 2.0));
+                } else {
+                    ui_rects.push(rect_rounded(cl.color_button, cl.plot_color, radius));
                 }
-                let inset = 4.0 * fonts::scale();
-                let swatch = Rect {
-                    x: cl.color_button.x + inset,
-                    y: cl.color_button.y + inset,
-                    w: (cl.color_button.w - inset * 2.0).max(0.0),
-                    h: (cl.color_button.h - inset * 2.0).max(0.0),
-                };
-                ui_rects.push(rect_rounded(swatch, cl.plot_color, swatch.w / 2.0));
             }
 
             if hover == HoverTarget::CellCopyButton(i) {
@@ -308,9 +318,9 @@ impl Renderer {
             ui_rects.push(rect_from(thumb, color));
         }
 
-        ui_rects.push(rect_from(layout.title_bar, t.bg_secondary));
-        ui_rects.push(rect_from(layout.tab_bar, t.tab_inactive));
-        ui_rects.push(rect_from(layout.status_bar, t.bg_secondary));
+        ui_rects.push(rect_from(layout.title_bar, t.bg_primary));
+        ui_rects.push(rect_from(layout.tab_bar, t.bg_primary));
+        ui_rects.push(rect_from(layout.status_bar, t.bg_primary));
 
         for (idx, rect) in self.menu_item_rects.iter().enumerate() {
             let is_open = open_menu == Some(idx);
@@ -329,6 +339,19 @@ impl Renderer {
                 t.tab_inactive
             };
             ui_rects.push(rect_from(*rect, color));
+        }
+
+        let line_th = spacing::line_thickness();
+        for (rect, _) in self.tab_bg_rects.iter() {
+            ui_rects.push(RectInstance {
+                x: rect.x + rect.w - line_th,
+                y: rect.y,
+                w: line_th,
+                h: rect.h,
+                color: t.border.to_f32_array(),
+                corner_radius: 0.0,
+                _padding: [0.0; 3],
+            });
         }
 
         for (idx, close_rect) in self.tab_close_rects.iter().enumerate() {
@@ -350,11 +373,12 @@ impl Renderer {
             ui_rects.push(rect_rounded(r, t.bg_hover, size / 2.0));
         }
 
+        // Line between the menu (title) bar and the tab bar.
         ui_rects.push(RectInstance {
             x: 0.0,
-            y: layout.tab_bar.y + layout.tab_bar.h - 1.0,
+            y: layout.tab_bar.y,
             w: sw,
-            h: 1.0,
+            h: line_th,
             color: t.border.to_f32_array(),
             corner_radius: 0.0,
             _padding: [0.0; 3],
@@ -362,9 +386,35 @@ impl Renderer {
 
         ui_rects.push(RectInstance {
             x: 0.0,
+            y: layout.tab_bar.y + layout.tab_bar.h - line_th,
+            w: sw,
+            h: line_th,
+            color: t.border.to_f32_array(),
+            corner_radius: 0.0,
+            _padding: [0.0; 3],
+        });
+
+        // Merge the active tab with the content area below: cover the bottom
+        // border line under the active tab with the tab's background color.
+        for (rect, is_active) in self.tab_bg_rects.iter() {
+            if *is_active {
+                ui_rects.push(RectInstance {
+                    x: rect.x,
+                    y: rect.y + rect.h - line_th,
+                    w: rect.w - line_th,
+                    h: line_th,
+                    color: t.tab_active.to_f32_array(),
+                    corner_radius: 0.0,
+                    _padding: [0.0; 3],
+                });
+            }
+        }
+
+        ui_rects.push(RectInstance {
+            x: 0.0,
             y: layout.status_bar.y,
             w: sw,
-            h: 1.0,
+            h: line_th,
             color: t.border.to_f32_array(),
             corner_radius: 0.0,
             _padding: [0.0; 3],
@@ -373,7 +423,7 @@ impl Renderer {
         ui_rects.push(RectInstance {
             x: layout.left_pane.x,
             y: layout.left_pane.y,
-            w: 1.0,
+            w: line_th,
             h: layout.left_pane.h,
             color: t.border.to_f32_array(),
             corner_radius: 0.0,
@@ -381,10 +431,48 @@ impl Renderer {
         });
 
         ui_rects.push(RectInstance {
-            x: layout.right_pane.x + layout.right_pane.w - 1.0,
+            x: layout.right_pane.x + layout.right_pane.w - line_th,
             y: layout.right_pane.y,
-            w: 1.0,
+            w: line_th,
             h: layout.right_pane.h,
+            color: t.border.to_f32_array(),
+            corner_radius: 0.0,
+            _padding: [0.0; 3],
+        });
+
+        // Outer window edges (top, bottom, left, right).
+        ui_rects.push(RectInstance {
+            x: 0.0,
+            y: 0.0,
+            w: sw,
+            h: line_th,
+            color: t.border.to_f32_array(),
+            corner_radius: 0.0,
+            _padding: [0.0; 3],
+        });
+        ui_rects.push(RectInstance {
+            x: 0.0,
+            y: sh - line_th,
+            w: sw,
+            h: line_th,
+            color: t.border.to_f32_array(),
+            corner_radius: 0.0,
+            _padding: [0.0; 3],
+        });
+        ui_rects.push(RectInstance {
+            x: 0.0,
+            y: 0.0,
+            w: line_th,
+            h: sh,
+            color: t.border.to_f32_array(),
+            corner_radius: 0.0,
+            _padding: [0.0; 3],
+        });
+        ui_rects.push(RectInstance {
+            x: sw - line_th,
+            y: 0.0,
+            w: line_th,
+            h: sh,
             color: t.border.to_f32_array(),
             corner_radius: 0.0,
             _padding: [0.0; 3],
@@ -407,16 +495,16 @@ impl Renderer {
                 x: db.x,
                 y: db.y,
                 w: db.w,
-                h: 1.0,
+                h: line_th,
                 color: t.dropdown_separator.to_f32_array(),
                 corner_radius: 0.0,
                 _padding: [0.0; 3],
             });
             ui_rects.push(RectInstance {
                 x: db.x,
-                y: db.y + db.h - 1.0,
+                y: db.y + db.h - line_th,
                 w: db.w,
-                h: 1.0,
+                h: line_th,
                 color: t.dropdown_separator.to_f32_array(),
                 corner_radius: 0.0,
                 _padding: [0.0; 3],
@@ -424,16 +512,16 @@ impl Renderer {
             ui_rects.push(RectInstance {
                 x: db.x,
                 y: db.y,
-                w: 1.0,
+                w: line_th,
                 h: db.h,
                 color: t.dropdown_separator.to_f32_array(),
                 corner_radius: 0.0,
                 _padding: [0.0; 3],
             });
             ui_rects.push(RectInstance {
-                x: db.x + db.w - 1.0,
+                x: db.x + db.w - line_th,
                 y: db.y,
-                w: 1.0,
+                w: line_th,
                 h: db.h,
                 color: t.dropdown_separator.to_f32_array(),
                 corner_radius: 0.0,
@@ -714,6 +802,50 @@ impl Renderer {
                             scale: 1.0,
                             bounds,
                             default_color: t.text_secondary.to_glyphon(),
+                            custom_glyphs: &[],
+                        });
+                    }
+                }
+            }
+
+            {
+                let cob = &cl.color_button;
+                let cob_clip_top = (cob.y as i32).max(pane_top);
+                let cob_clip_bottom = ((cob.y + cob.h) as i32).min(pane_bottom);
+                if cob_clip_top < cob_clip_bottom {
+                    let mut bounds = TextBounds {
+                        left: cob.x as i32,
+                        top: cob_clip_top,
+                        right: (cob.x + cob.w) as i32,
+                        bottom: cob_clip_bottom,
+                    };
+                    let visible = dd_clip
+                        .as_ref()
+                        .is_none_or(|dd| clip_bounds_under_dropdown(&mut bounds, dd));
+
+                    if visible {
+                        let label_w = Self::measure_label_width(&self.cell_color_label);
+                        let line_h = fonts::small_size() * 1.4;
+                        let cx = cob.x + (cob.w - label_w) / 2.0;
+                        let cy = cob.y + (cob.h - line_h) / 2.0;
+                        // Pick black or white for legibility against the
+                        // pill's plot color.
+                        let pc = cl.plot_color;
+                        let luma = 0.299 * pc.r as f32
+                            + 0.587 * pc.g as f32
+                            + 0.114 * pc.b as f32;
+                        let label_color = if luma > 140.0 {
+                            GlyphonColor::rgb(0, 0, 0)
+                        } else {
+                            GlyphonColor::rgb(255, 255, 255)
+                        };
+                        text_areas.push(TextArea {
+                            buffer: &self.cell_color_label,
+                            left: cx,
+                            top: cy,
+                            scale: 1.0,
+                            bounds,
+                            default_color: label_color,
                             custom_glyphs: &[],
                         });
                     }
@@ -1122,19 +1254,25 @@ impl Renderer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
-        let grid_color = [1.0_f32, 1.0, 1.0, 0.5];
-        let zero_color = [1.0_f32, 1.0, 1.0, 0.5];
-        let mut axis_rects: Vec<RectInstance> = Vec::new();
+        // Grid + zero lines render through the inversion overlay so their
+        // color adapts to whatever plot is underneath. Two visual strengths:
+        // weak (regular grid) and strong (zero axis), encoded in alpha.
+        let grid_color = [1.0_f32, 1.0, 1.0, 0.7];
+        let zero_color = [1.0_f32, 1.0, 1.0, 1.0];
+        let grid_th = spacing::line_thickness();
+        let zero_th = grid_th * 2.0;
+        let mut overlay_grid_rects: Vec<RectInstance> = Vec::new();
         if x_range > f32::EPSILON {
             for tick in &x_ticks {
                 let t_ = (tick - render_area.axis_x_min) / x_range;
                 let sx = rp.x + t_ * rp.w;
                 if sx >= rp.x && sx <= rp.x + rp.w {
                     let is_zero = tick.abs() < f32::EPSILON;
-                    axis_rects.push(RectInstance {
-                        x: if is_zero { sx - 0.5 } else { sx },
+                    let w = if is_zero { zero_th } else { grid_th };
+                    overlay_grid_rects.push(RectInstance {
+                        x: sx - w / 2.0,
                         y: rp.y,
-                        w: if is_zero { 2.0 } else { 1.0 },
+                        w,
                         h: rp.h,
                         color: if is_zero { zero_color } else { grid_color },
                         corner_radius: 0.0,
@@ -1149,11 +1287,12 @@ impl Renderer {
                 let sy = rp.y + rp.h - t_ * rp.h;
                 if sy >= rp.y && sy <= rp.y + rp.h {
                     let is_zero = tick.abs() < f32::EPSILON;
-                    axis_rects.push(RectInstance {
+                    let h = if is_zero { zero_th } else { grid_th };
+                    overlay_grid_rects.push(RectInstance {
                         x: rp.x,
-                        y: if is_zero { sy - 0.5 } else { sy },
+                        y: sy - h / 2.0,
                         w: rp.w,
-                        h: if is_zero { 2.0 } else { 1.0 },
+                        h,
                         color: if is_zero { zero_color } else { grid_color },
                         corner_radius: 0.0,
                         _padding: [0.0; 3],
@@ -1164,7 +1303,7 @@ impl Renderer {
         let label_h = fonts::small_size() * 1.4;
 
         let mut axis_text_areas: Vec<TextArea> = Vec::new();
-        let label_color = GlyphonColor::rgba(255, 255, 255, 255);
+        let label_color = t.text_primary.to_glyphon();
         let rp_bounds = TextBounds {
             left: rp.x as i32,
             top: rp.y as i32,
@@ -1213,25 +1352,25 @@ impl Renderer {
         let mut cursor_text_areas: Vec<TextArea> = Vec::new();
         if hover == HoverTarget::RenderArea {
             let cursor_color = [1.0_f32, 1.0, 1.0, 0.8];
-            let line_thickness = 2.0_f32;
+            let cursor_line_thickness = 2.0_f32;
             let [mu, mv] = render_area.mouse_uv;
             let cx = rp.x + mu * rp.w;
             let cy = rp.y + (1.0 - mv) * rp.h;
 
-            axis_rects.push(RectInstance {
-                x: cx - line_thickness / 2.0,
+            overlay_grid_rects.push(RectInstance {
+                x: cx - cursor_line_thickness / 2.0,
                 y: rp.y,
-                w: line_thickness,
+                w: cursor_line_thickness,
                 h: rp.h,
                 color: cursor_color,
                 corner_radius: 0.0,
                 _padding: [0.0; 3],
             });
-            axis_rects.push(RectInstance {
+            overlay_grid_rects.push(RectInstance {
                 x: rp.x,
-                y: cy - line_thickness / 2.0,
+                y: cy - cursor_line_thickness / 2.0,
                 w: rp.w,
-                h: line_thickness,
+                h: cursor_line_thickness,
                 color: cursor_color,
                 corner_radius: 0.0,
                 _padding: [0.0; 3],
@@ -1382,6 +1521,30 @@ impl Renderer {
             );
         }
 
+        // Draw axis tick labels into the scene texture (on top of plot
+        // shaders) for full theme-color brightness. Grid + cursor lines stay
+        // in the inversion overlay below so they adapt to plot colors.
+        {
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("scene_axis_pass"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &self.scene_view,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Load,
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            self.axis_text_renderer
+                .render(&self.axis_atlas, &self.viewport, &mut pass)
+                .unwrap();
+        }
+
         {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("overlay_pass"),
@@ -1399,10 +1562,7 @@ impl Renderer {
             });
 
             self.overlay_rect_renderer
-                .draw(&self.queue, &mut pass, sw, sh, &axis_rects);
-            self.axis_text_renderer
-                .render(&self.axis_atlas, &self.viewport, &mut pass)
-                .unwrap();
+                .draw(&self.queue, &mut pass, sw, sh, &overlay_grid_rects);
         }
 
         {

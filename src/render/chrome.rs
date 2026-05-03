@@ -4,7 +4,7 @@ use crate::ui::layout::Rect;
 use crate::ui::theme::fonts;
 
 use super::{
-    tab_close_pad, tab_close_size, tab_dot_pad, tab_gap, tab_pad_h, Renderer, TabHitRect, TabInfo,
+    tab_close_pad, tab_close_size, tab_dot_pad, tab_pad_h, Renderer, TabHitRect, TabInfo,
 };
 
 impl Renderer {
@@ -44,7 +44,7 @@ impl Renderer {
         self.tab_close_rects.clear();
 
         let tab_h = tab_bar_rect.h;
-        let mut x = tab_bar_rect.x + tab_gap();
+        let mut x = tab_bar_rect.x;
         let y = tab_bar_rect.y;
         let mut hit_rects = Vec::with_capacity(tabs.len());
 
@@ -84,7 +84,7 @@ impl Renderer {
                 full: tab_rect,
                 close: close_rect,
             });
-            x += tab_w + tab_gap();
+            x += tab_w;
         }
 
         let plus_w = tab_pad_h() * 2.0 + Self::measure_label_width(&self.plus_label);
