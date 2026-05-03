@@ -9,7 +9,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::editor::autocomplete::AutocompleteState;
-use crate::file_dialog::{DialogKind, DialogResult};
+use crate::file_dialog::{self, DialogKind, DialogResult};
 use crate::lang::lang_service::LangService;
 use crate::lang::reduce::service::ReduceService;
 use crate::notebook::CellState;
@@ -982,6 +982,10 @@ impl ApplicationHandler for App {
                             state.renderer.stash_tab_shaders(old_id);
                             if let Err(e) = state.session.open_file(&path) {
                                 log::error!("Failed to open file: {}", e);
+                                file_dialog::show_error(
+                                    "Cannot open file",
+                                    &format!("{}\n\n{}", path.display(), e),
+                                );
                             } else {
                                 let new_idx = state.session.active_index;
                                 state.switch_tab_axis(old, new_idx);
@@ -990,6 +994,10 @@ impl ApplicationHandler for App {
                         DialogKind::Save => {
                             if let Err(e) = state.session.active_tab_mut().save_as(&path) {
                                 log::error!("Failed to save file: {}", e);
+                                file_dialog::show_error(
+                                    "Cannot save file",
+                                    &format!("{}\n\n{}", path.display(), e),
+                                );
                             }
                         }
                     }

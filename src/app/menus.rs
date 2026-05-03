@@ -106,19 +106,19 @@ pub(super) const MENU_EXAMPLES_ITEMS: &[MenuItemDef] = &[
 /// looks for an `examples/` folder deployed next to the binary (and falls
 /// back to a few dev-tree locations so `cargo run` still works).
 pub(super) const EXAMPLE_FILENAMES: &[&str] = &[
-    "gradient.txt",
-    "ripple.txt",
-    "mandlebrot.txt",
-    "warp.txt",
-    "monte_carlo.txt",
-    "waves",
+    "gradient.logos",
+    "ripple.logos",
+    "mandlebrot.logos",
+    "warp.logos",
+    "monte_carlo.logos",
+    "waves.logos",
 ];
 
 /// Resolve an example file name to an absolute path. The expected production
 /// layout is `<exe_dir>/examples/<name>`; for `cargo run` the binary lives at
 /// `target/<profile>/logos`, so we also try walking up to the repo root and
 /// the current working directory.
-pub(super) fn resolve_example_path(filename: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn resolve_example_path(filename: &str) -> Option<std::path::PathBuf> {
     let mut roots: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {

@@ -1,0 +1,14 @@
+logos_version := 0.1
+
+cells := [
+  (
+    plot_color := (0.5490, 0.7843, 0.9608, 1.0000),
+    content := (
+        r := sqrt(x * x + y * y)
+        wave := sin(r * 8.0 - t * 4.0) * 0.5 + 0.5
+        fade := 1.0 - clamp(r / 5.0, 0.0, 1.0)
+        v := wave * fade
+        plot((v * 0.2, v * 0.5, v * 0.9, 1.0))
+    ),
+  ),
+]

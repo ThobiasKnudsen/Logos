@@ -5,6 +5,7 @@ pub mod interpreter;
 pub mod ir;
 pub mod lang_service;
 pub mod lexer;
+pub mod notebook_format;
 pub mod parser;
 pub mod reduce;
 pub mod symbolic;

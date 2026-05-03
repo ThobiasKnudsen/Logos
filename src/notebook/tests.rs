@@ -630,26 +630,31 @@ fn stop_transitions_state_to_stopped() {
 
 #[test]
 fn examples_render_through_notebook() {
-    let cases: &[(&str, &str)] = &[
-        ("gradient", include_str!("../../examples/gradient.txt")),
-        ("ripple", include_str!("../../examples/ripple.txt")),
-        ("mandlebrot", include_str!("../../examples/mandlebrot.txt")),
-        ("warp", include_str!("../../examples/warp.txt")),
-        ("monte_carlo", include_str!("../../examples/monte_carlo.txt")),
+    let files: &[(&str, &str)] = &[
+        ("gradient", include_str!("../../examples/gradient.logos")),
+        ("ripple", include_str!("../../examples/ripple.logos")),
+        ("mandlebrot", include_str!("../../examples/mandlebrot.logos")),
+        ("warp", include_str!("../../examples/warp.logos")),
+        ("monte_carlo", include_str!("../../examples/monte_carlo.logos")),
+        ("waves", include_str!("../../examples/waves.logos")),
     ];
-    for (name, src) in cases {
-        let mut nb = null_notebook();
-        let i = nb.add_cell(src);
-        nb.play(i);
-        let cell = nb.cell(i);
-        assert!(
-            !cell.outcome.shaders.is_empty(),
-            "{name}: expected at least one shader, got message={:?}",
-            cell.outcome.message,
-        );
-        for s in &cell.outcome.shaders {
-            validate_wgsl(&s.wgsl)
-                .unwrap_or_else(|e| panic!("{name}: WGSL invalid: {e}"));
+    for (name, file) in files {
+        let cells = crate::lang::notebook_format::parse_logos(file)
+            .unwrap_or_else(|e| panic!("{name}: parse_logos failed: {e}"));
+        for cell in cells {
+            let mut nb = null_notebook();
+            let i = nb.add_cell(&cell.content);
+            nb.play(i);
+            let nbcell = nb.cell(i);
+            assert!(
+                !nbcell.outcome.shaders.is_empty(),
+                "{name}: expected at least one shader, got message={:?}",
+                nbcell.outcome.message,
+            );
+            for s in &nbcell.outcome.shaders {
+                validate_wgsl(&s.wgsl)
+                    .unwrap_or_else(|e| panic!("{name}: WGSL invalid: {e}"));
+            }
         }
     }
 }

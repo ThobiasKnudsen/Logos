@@ -2741,7 +2741,10 @@ step(lower, ny) * step(ny, upper)"#;
         // Full Monte Carlo example as it will appear in the Examples menu.
         // Examples end with `plot(...)`, so route through the same plot-arg
         // extraction the notebook uses before handing off to wgsl_gen.
-        let input = include_str!("../../examples/monte_carlo.txt");
+        let file = include_str!("../../examples/monte_carlo.logos");
+        let cells = crate::lang::notebook_format::parse_logos(file)
+            .expect("example .logos parses");
+        let input = &cells[0].content;
         let ir = crate::lang::parse(input).expect("example parses");
         let actions = crate::lang::detect_cell_actions(&ir);
         let plot_idx = actions.plots.first().copied().expect("example has plot()");

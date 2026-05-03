@@ -5,8 +5,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde::{Deserialize, Serialize};
-
+use crate::lang::notebook_format::{parse_logos, serialize_logos};
 use crate::lang::reduce::service::ReduceService;
 use crate::lang::symbolic::{NoSimplifier, SymbolicSimplifier};
 use crate::notebook::{Notebook, NotebookCell, ReduceSimplifier, SharedReduce};
@@ -19,14 +18,6 @@ static NEXT_TAB_ID: AtomicU64 = AtomicU64::new(1);
 
 pub fn alloc_tab_id() -> u64 {
     NEXT_TAB_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-/// On-disk JSON representation of one notebook cell. The notebook itself is
-/// saved as a `Vec<CellRecord>` (a JSON array at the document root).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CellRecord {
-    color: Rgba,
-    content: String,
 }
 
 /// One open notebook in the UI: file metadata, viewport state, and the
@@ -66,24 +57,29 @@ impl NotebookView {
     }
 
     pub fn from_file(path: &Path, reduce: Option<Rc<RefCell<ReduceService>>>) -> io::Result<Self> {
+        if !is_logos_path(path) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Logos only opens .logos files (got {:?})",
+                    path.extension().and_then(|e| e.to_str()).unwrap_or("")
+                ),
+            ));
+        }
         let contents = fs::read_to_string(path)?;
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Unknown".into());
         let mut notebook = build_notebook(reduce);
-        if is_plain_text_path(path) {
-            notebook.add_cell(&contents);
+        let cells = parse_logos(&contents)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        if cells.is_empty() {
+            notebook.add_cell("");
         } else {
-            let records: Vec<CellRecord> = serde_json::from_str(&contents)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            if records.is_empty() {
-                notebook.add_cell("");
-            } else {
-                for rec in records {
-                    let seed = crate::notebook::alloc_color_seed();
-                    notebook.add_cell_with_color(&rec.content, seed, rec.color);
-                }
+            for cell in cells {
+                let seed = crate::notebook::alloc_color_seed();
+                notebook.add_cell_with_color(&cell.content, seed, color_from_floats(cell.color));
             }
         }
         for i in 0..notebook.len() {
@@ -151,7 +147,6 @@ impl NotebookView {
 
     // ─── file I/O ──────────────────────────────────────────────────────────
 
-    /// Save the notebook as a JSON array of `{color, content}` objects.
     pub fn save(&mut self) -> io::Result<()> {
         let path = self
             .file_path
@@ -161,17 +156,18 @@ impl NotebookView {
     }
 
     pub fn save_as(&mut self, path: &Path) -> io::Result<()> {
-        let content = if is_plain_text_path(path) {
-            self.serialize_text()
-        } else {
-            self.serialize_json()?
-        };
-        fs::write(path, content)?;
+        let path = ensure_logos_extension(path);
+        let cells = self.notebook.cells().iter().map(|c| {
+            let [r, g, b, a] = c.plot_color.to_f32_array();
+            (c.buffer.text().to_string(), [r, g, b, a])
+        });
+        let content = serialize_logos(cells);
+        fs::write(&path, content)?;
         self.name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Unknown".into());
-        self.file_path = Some(path.to_path_buf());
+        self.file_path = Some(path);
         self.is_modified = false;
         Ok(())
     }
@@ -179,42 +175,30 @@ impl NotebookView {
     pub fn mark_modified(&mut self) {
         self.is_modified = true;
     }
+}
 
-    fn serialize_json(&self) -> io::Result<String> {
-        let records: Vec<CellRecord> = self
-            .notebook
-            .cells()
-            .iter()
-            .map(|c| CellRecord {
-                color: c.plot_color,
-                content: c.buffer.text().to_string(),
-            })
-            .collect();
-        serde_json::to_string_pretty(&records)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-    }
-
-    /// Plain-text serialization for single-cell `.txt` files (notebook
-    /// examples). Multi-cell notebooks join cells with a blank line so
-    /// nothing is silently dropped, but the JSON format is the round-trip
-    /// path for those — this branch exists so editing an example and
-    /// hitting Save preserves it as readable source.
-    fn serialize_text(&self) -> String {
-        let parts: Vec<String> = self
-            .notebook
-            .cells()
-            .iter()
-            .map(|c| c.buffer.text().to_string())
-            .collect();
-        parts.join("\n\n")
+fn color_from_floats([r, g, b, a]: [f32; 4]) -> Rgba {
+    Rgba {
+        r: (r.clamp(0.0, 1.0) * 255.0).round() as u8,
+        g: (g.clamp(0.0, 1.0) * 255.0).round() as u8,
+        b: (b.clamp(0.0, 1.0) * 255.0).round() as u8,
+        a: (a.clamp(0.0, 1.0) * 255.0).round() as u8,
     }
 }
 
-fn is_plain_text_path(path: &Path) -> bool {
+fn is_logos_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("txt"))
+        .map(|e| e.eq_ignore_ascii_case("logos"))
         .unwrap_or(false)
+}
+
+fn ensure_logos_extension(path: &Path) -> PathBuf {
+    if is_logos_path(path) {
+        path.to_path_buf()
+    } else {
+        path.with_extension("logos")
+    }
 }
 
 /// Construct a `Notebook` wired to the shared REDUCE service if one is
@@ -267,74 +251,112 @@ mod tests {
     }
 
     #[test]
-    fn save_as_txt_writes_plain_text_not_json() {
+    fn save_and_load_round_trip_preserves_text_and_color() {
         let dir = std::env::temp_dir().join(format!(
-            "logos_test_save_txt_{}",
+            "logos_test_roundtrip_{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("gradient.txt");
-        let body = "plot((x, y, 0.5, 1.0))";
-        let mut view = NotebookView::new_untitled("Gradient".into(), None);
+        let path = dir.join("rt.logos");
+
+        let mut view = NotebookView::new_untitled("rt".into(), None);
+        let body = "r := sqrt(x*x + y*y)\nplot((r, r, r, 1.0))";
         view.cell_mut(0).buffer.set_text(body);
+        view.cell_mut(0).plot_color = Rgba::new(245, 140, 168, 255);
         view.save_as(&path).expect("save succeeds");
-        let written = std::fs::read_to_string(&path).expect("file readable");
-        assert_eq!(written, body, "txt save must round-trip cell text");
-        assert!(!written.starts_with('['), "must not be JSON");
-        std::fs::remove_dir_all(&dir).ok();
-    }
 
-    #[test]
-    fn from_file_loads_txt_as_single_cell() {
-        let dir = std::env::temp_dir().join(format!(
-            "logos_test_load_txt_{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("example.txt");
-        let body = "plot((x, y, 0.5, 1.0))\n";
-        std::fs::write(&path, body).unwrap();
-        let view = NotebookView::from_file(&path, None).expect("loads");
-        assert_eq!(view.notebook.len(), 1, "txt loads as exactly one cell");
-        assert_eq!(view.cell(0).buffer.text(), body);
-        assert_eq!(view.file_path.as_deref(), Some(path.as_path()));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn from_file_then_save_round_trips_txt() {
-        let dir = std::env::temp_dir().join(format!(
-            "logos_test_roundtrip_txt_{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("example.txt");
-        let body = "nx := (x - x.min) / (x.max - x.min)\nplot((nx, 0.0, 0.0, 1.0))";
-        std::fs::write(&path, body).unwrap();
-        let mut view = NotebookView::from_file(&path, None).expect("loads");
-        view.save().expect("save uses stored path");
-        let written = std::fs::read_to_string(&path).expect("file readable");
-        assert_eq!(written, body, "txt must round-trip without reformatting");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn save_as_json_writes_json() {
-        let dir = std::env::temp_dir().join(format!(
-            "logos_test_save_json_{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("notebook.json");
-        let mut view = NotebookView::new_untitled("Untitled".into(), None);
-        view.cell_mut(0).buffer.set_text("plot(y = x)");
-        view.save_as(&path).expect("save succeeds");
-        let written = std::fs::read_to_string(&path).expect("file readable");
+        let loaded = NotebookView::from_file(&path, None).expect("load succeeds");
+        assert_eq!(loaded.notebook.len(), 1);
+        assert_eq!(loaded.cell(0).buffer.text(), body);
+        let c = loaded.cell(0).plot_color;
         assert!(
-            written.trim_start().starts_with('['),
-            "non-txt extension must serialize as JSON; got:\n{}",
-            written
+            (c.r as i16 - 245).abs() <= 1
+                && (c.g as i16 - 140).abs() <= 1
+                && (c.b as i16 - 168).abs() <= 1
+                && (c.a as i16 - 255).abs() <= 1,
+            "color drift: {:?}",
+            c
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_and_load_round_trip_multi_cell() {
+        let dir = std::env::temp_dir().join(format!(
+            "logos_test_multi_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("multi.logos");
+
+        let mut view = NotebookView::new_untitled("multi".into(), None);
+        view.cell_mut(0).buffer.set_text("plot(sin(x))");
+        view.add_cell();
+        view.cell_mut(1).buffer.set_text("plot(cos(x))");
+        view.save_as(&path).expect("save succeeds");
+
+        let loaded = NotebookView::from_file(&path, None).expect("load succeeds");
+        assert_eq!(loaded.notebook.len(), 2);
+        assert_eq!(loaded.cell(0).buffer.text(), "plot(sin(x))");
+        assert_eq!(loaded.cell(1).buffer.text(), "plot(cos(x))");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_rejects_non_logos_extension() {
+        let dir = std::env::temp_dir().join(format!(
+            "logos_test_reject_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("foo.txt");
+        std::fs::write(&path, "logos_version := 0.1\ncells := []\n").unwrap();
+        let err = NotebookView::from_file(&path, None)
+            .err()
+            .expect("must reject .txt");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn shipped_examples_open_through_from_file() {
+        // Hit the same code path the Examples menu uses — `from_file` on
+        // the actual files in examples/ — and verify each ends up with at
+        // least one cell of non-empty content.
+        for filename in &[
+            "gradient.logos",
+            "ripple.logos",
+            "mandlebrot.logos",
+            "warp.logos",
+            "monte_carlo.logos",
+            "waves.logos",
+        ] {
+            let path = crate::app::resolve_example_path(filename)
+                .unwrap_or_else(|| panic!("could not resolve example {filename}"));
+            let view = NotebookView::from_file(&path, None)
+                .unwrap_or_else(|e| panic!("from_file({}) failed: {}", path.display(), e));
+            assert!(view.notebook.len() >= 1, "{filename}: expected at least one cell");
+            assert!(
+                !view.cell(0).buffer.text().is_empty(),
+                "{filename}: cell 0 content is empty"
+            );
+        }
+    }
+
+    #[test]
+    fn save_as_appends_logos_extension_if_missing() {
+        let dir = std::env::temp_dir().join(format!(
+            "logos_test_ext_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("noext");
+        let mut view = NotebookView::new_untitled("rt".into(), None);
+        view.cell_mut(0).buffer.set_text("plot(x)");
+        view.save_as(&target).expect("save succeeds");
+        let actual = view.file_path.clone().unwrap();
+        assert_eq!(actual, dir.join("noext.logos"));
+        assert!(actual.exists(), "file with .logos extension should exist");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

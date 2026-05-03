@@ -1,0 +1,12 @@
+logos_version := 0.1
+
+cells := [
+  (
+    plot_color := (0.9608, 0.5490, 0.6588, 1.0000),
+    content := (
+        nx := (x - x.min) / (x.max - x.min)
+        ny := (y - y.min) / (y.max - y.min)
+        plot((nx, ny, 0.5 + 0.5 * sin(t), 1.0))
+    ),
+  ),
+]

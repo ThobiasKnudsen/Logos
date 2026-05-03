@@ -24,8 +24,15 @@ impl FileDialog {
 
         std::thread::spawn(move || {
             let result = match kind {
-                DialogKind::Open => rfd::FileDialog::new().set_title("Open File").pick_file(),
-                DialogKind::Save => rfd::FileDialog::new().set_title("Save File").save_file(),
+                DialogKind::Open => rfd::FileDialog::new()
+                    .set_title("Open File")
+                    .add_filter("Logos notebook", &["logos"])
+                    .pick_file(),
+                DialogKind::Save => rfd::FileDialog::new()
+                    .set_title("Save File")
+                    .add_filter("Logos notebook", &["logos"])
+                    .set_file_name("untitled.logos")
+                    .save_file(),
             };
             let _ = tx.send(result);
         });
@@ -41,4 +48,20 @@ impl FileDialog {
             Err(mpsc::TryRecvError::Disconnected) => DialogResult::Cancelled,
         }
     }
+}
+
+/// Show a modal error dialog. Spawned on a background thread so it doesn't
+/// block the winit event loop — the user can dismiss it whenever, the app
+/// keeps responding in the meantime.
+pub fn show_error(title: &str, message: &str) {
+    let title = title.to_string();
+    let message = message.to_string();
+    std::thread::spawn(move || {
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title(&title)
+            .set_description(&message)
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    });
 }

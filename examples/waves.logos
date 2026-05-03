@@ -1,0 +1,17 @@
+logos_version := 0.1
+
+cells := [
+  (
+    plot_color := (0.8431, 0.2471, 0.1922, 1.0000),
+    content := (
+        f(x,i) := (
+        	sum := 0
+        	for j in 1..i (
+        		sum := sum + sin(j*2*t+x/j)
+        	)
+        	sum
+        )
+        plot(y = f(x, 10))
+    ),
+  ),
+]

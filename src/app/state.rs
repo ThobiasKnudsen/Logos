@@ -4,7 +4,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::CursorIcon;
 
 use crate::editor::autocomplete;
-use crate::file_dialog::{DialogKind, FileDialog};
+use crate::file_dialog::{self, DialogKind, FileDialog};
 use crate::notebook::{CellMessage, CellState};
 use crate::render::{CellInfo, TabInfo};
 use crate::ui::theme::{self, font_family, fonts};
@@ -595,6 +595,13 @@ impl AppState {
                         Some(p) => p,
                         None => {
                             log::error!("Example {filename} not found alongside binary");
+                            file_dialog::show_error(
+                                "Example missing",
+                                &format!(
+                                    "Could not find {} next to the Logos binary or in the working directory.",
+                                    filename
+                                ),
+                            );
                             return;
                         }
                     };
@@ -605,6 +612,10 @@ impl AppState {
                         Ok(new_idx) => self.switch_tab_axis(old, new_idx),
                         Err(e) => {
                             log::error!("Failed to load example {}: {}", path.display(), e);
+                            file_dialog::show_error(
+                                "Cannot load example",
+                                &format!("{}\n\n{}", path.display(), e),
+                            );
                             return;
                         }
                     }
@@ -760,6 +771,17 @@ impl AppState {
                 } else if self.session.active_tab().file_path.is_some() {
                     if let Err(e) = self.session.active_tab_mut().save() {
                         log::error!("Save failed: {}", e);
+                        let path = self
+                            .session
+                            .active_tab()
+                            .file_path
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default();
+                        file_dialog::show_error(
+                            "Cannot save file",
+                            &format!("{}\n\n{}", path, e),
+                        );
                     }
                     self.sync_active_tab();
                 } else if self.pending_dialog.is_none() {
