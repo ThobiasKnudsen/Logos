@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use glyphon::{
-    Attrs, Buffer as TextBuffer, Cache, Family, FontSystem, Metrics, Shaping, SwashCache,
+    Attrs, Buffer as TextBuffer, Cache, Family, FontSystem, Metrics, Shaping, Style, SwashCache,
     TextAtlas, TextRenderer,
 };
 use wgpu::{
@@ -75,6 +75,15 @@ impl Renderer {
                 font_system.db_mut().load_font_data(bytes.to_vec());
             }
         }
+        // Chrome-only fonts (the "Λ" logo and the italic face used for
+        // untitled tab labels). Registered once but never selected through
+        // the Fonts menu.
+        font_system
+            .db_mut()
+            .load_font_data(font_family::LOGO_FONT_DATA.to_vec());
+        font_system
+            .db_mut()
+            .load_font_data(font_family::ITALIC_CHROME_FONT_DATA.to_vec());
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let viewport = glyphon::Viewport::new(&device, &cache);
@@ -87,6 +96,13 @@ impl Renderer {
             .map(|name| Self::create_label(&mut font_system, fonts::menu_size(), name))
             .collect();
 
+        let logo_label = Self::create_label_with_family(
+            &mut font_system,
+            fonts::logo_size(),
+            "\u{039B}",
+            font_family::LOGO_FONT_FAMILY,
+        );
+
         let status_label = Self::create_label(
             &mut font_system,
             fonts::status_size(),
@@ -98,6 +114,16 @@ impl Renderer {
         let win_min_label = Self::create_label(&mut font_system, fonts::menu_size(), "\u{2500}");
         let win_max_label = Self::create_label(&mut font_system, fonts::menu_size(), "\u{25A1}");
         let win_close_label = Self::create_label(&mut font_system, fonts::menu_size(), "\u{00D7}");
+
+        let feedback_label =
+            Self::create_label(&mut font_system, fonts::menu_size(), "Help us improve!");
+
+        let color_picker_labels = [
+            Self::create_label(&mut font_system, fonts::small_size(), "R"),
+            Self::create_label(&mut font_system, fonts::small_size(), "G"),
+            Self::create_label(&mut font_system, fonts::small_size(), "B"),
+            Self::create_label(&mut font_system, fonts::small_size(), "A"),
+        ];
 
         let rect_renderer = RectRenderer::new(&device, swapchain_format);
         let shader_pipeline = ShaderPipelineManager::new(&device, swapchain_format);
@@ -139,8 +165,14 @@ impl Renderer {
         );
         let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("composite_sampler"),
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            // Linear instead of Nearest: scene/overlay textures should
+            // match the surface 1:1, but on fractional-DPI scale factors
+            // (e.g. 1.25, 1.5) the composite UV→texel mapping can land
+            // a hair off-center, which Nearest snaps to a single texel
+            // (visible "pixelation" on glyph edges). Linear is cheap
+            // and gives a clean blend across the half-texel boundary.
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
         let composite_bind_group_layout =
@@ -287,6 +319,8 @@ impl Renderer {
             cached_status_text: String::new(),
             menu_item_labels,
             menu_item_rects: Vec::new(),
+            logo_label,
+            logo_rect: zero_rect,
             dropdown_item_labels: Vec::new(),
             dropdown_shortcut_labels: Vec::new(),
             dropdown_bg: zero_rect,
@@ -305,6 +339,11 @@ impl Renderer {
             win_min_label,
             win_max_label,
             win_close_label,
+            feedback_label,
+            feedback_button_rect: zero_rect,
+            color_picker_bg: zero_rect,
+            color_picker_sliders: [zero_rect, zero_rect, zero_rect, zero_rect],
+            color_picker_labels,
             ac_active: false,
             ac_bg: zero_rect,
             ac_item_rects: Vec::new(),
@@ -435,6 +474,20 @@ impl Renderer {
             Self::create_label(&mut self.font_system, fonts::menu_size(), "\u{25A1}");
         self.win_close_label =
             Self::create_label(&mut self.font_system, fonts::menu_size(), "\u{00D7}");
+        self.feedback_label =
+            Self::create_label(&mut self.font_system, fonts::menu_size(), "Help us improve!");
+        self.logo_label = Self::create_label_with_family(
+            &mut self.font_system,
+            fonts::logo_size(),
+            "\u{039B}",
+            font_family::LOGO_FONT_FAMILY,
+        );
+        self.color_picker_labels = [
+            Self::create_label(&mut self.font_system, fonts::small_size(), "R"),
+            Self::create_label(&mut self.font_system, fonts::small_size(), "G"),
+            Self::create_label(&mut self.font_system, fonts::small_size(), "B"),
+            Self::create_label(&mut self.font_system, fonts::small_size(), "A"),
+        ];
 
         for buf in &mut self.cell_buffers {
             buf.set_metrics(
@@ -497,9 +550,45 @@ impl Renderer {
     }
 
     pub(super) fn create_label(font_system: &mut FontSystem, size: f32, text: &str) -> TextBuffer {
+        let family = font_family::active_family();
+        Self::create_label_with_family(font_system, size, text, family)
+    }
+
+    /// Build a label using the dedicated italic chrome family. Used for
+    /// untitled tab names so they read as "draft / unsaved" at a glance
+    /// versus saved files which display upright in the user's code font.
+    /// The italic family ships only an italic face — there is no upright
+    /// fallback to accidentally select.
+    pub(super) fn create_label_italic(
+        font_system: &mut FontSystem,
+        size: f32,
+        text: &str,
+    ) -> TextBuffer {
         let mut buf = TextBuffer::new(font_system, Metrics::new(size, size * 1.4));
         buf.set_size(font_system, Some(2000.0), Some(size * 2.0));
-        let family = font_family::active_family();
+        buf.set_text(
+            font_system,
+            text,
+            Attrs::new()
+                .family(Family::Name(font_family::ITALIC_CHROME_FONT_FAMILY))
+                .style(Style::Italic),
+            Shaping::Advanced,
+        );
+        buf.shape_until_scroll(font_system, false);
+        buf
+    }
+
+    /// Build a label that bypasses the user's selected font family —
+    /// needed for chrome glyphs that always want a specific face (e.g. the
+    /// Greek-display "Λ" logo).
+    pub(super) fn create_label_with_family(
+        font_system: &mut FontSystem,
+        size: f32,
+        text: &str,
+        family: &str,
+    ) -> TextBuffer {
+        let mut buf = TextBuffer::new(font_system, Metrics::new(size, size * 1.4));
+        buf.set_size(font_system, Some(2000.0), Some(size * 2.0));
         buf.set_text(
             font_system,
             text,

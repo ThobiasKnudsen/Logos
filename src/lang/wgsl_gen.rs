@@ -192,13 +192,23 @@ pub fn generate(ast: &Ir) -> Result<String, String> {
         let corner_code = ctx.emit_bool_with_corners(expr)?;
         shader.push_str(&format!("    let _result = {};\n", corner_code));
         shader.push_str("    let _shade = select(0.0, 1.0, _result);\n");
-        shader.push_str("    return vec4<f32>(u.primary_color.rgb * _shade, _shade);\n");
+        // Pipeline blends with premultiplied alpha, so the RGB output must
+        // be pre-multiplied by both shade and the user-chosen alpha — else
+        // RGB dominates regardless of alpha.
+        shader.push_str(
+            "    let _a = _shade * u.primary_color.a;\n    return vec4<f32>(u.primary_color.rgb * _a, _a);\n",
+        );
     } else {
         // Numeric expressions: clamp to [0, 1] grayscale
         let expr_code = ctx.emit_expr(expr)?;
         shader.push_str(&format!("    let _result = {};\n", expr_code));
         shader.push_str("    let _shade = clamp(_result, 0.0, 1.0);\n");
-        shader.push_str("    return vec4<f32>(u.primary_color.rgb * _shade, _shade);\n");
+        // Pipeline blends with premultiplied alpha, so the RGB output must
+        // be pre-multiplied by both shade and the user-chosen alpha — else
+        // RGB dominates regardless of alpha.
+        shader.push_str(
+            "    let _a = _shade * u.primary_color.a;\n    return vec4<f32>(u.primary_color.rgb * _a, _a);\n",
+        );
     }
     shader.push_str("}\n");
 

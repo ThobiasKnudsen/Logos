@@ -29,9 +29,9 @@ impl Renderer {
         tabs: &[TabInfo],
         tab_bar_rect: Rect,
     ) -> Option<(Vec<TabHitRect>, Rect)> {
-        let new_info: Vec<(String, bool, bool)> = tabs
+        let new_info: Vec<(String, bool, bool, bool)> = tabs
             .iter()
-            .map(|t| (t.name.clone(), t.is_active, t.is_modified))
+            .map(|t| (t.name.clone(), t.is_active, t.is_modified, t.is_untitled))
             .collect();
         if new_info == self.cached_tab_info {
             return None;
@@ -53,7 +53,11 @@ impl Renderer {
         let dot_area = tab_dot_pad() + dot_w + tab_dot_pad();
 
         for tab in tabs {
-            let label = Self::create_label(&mut self.font_system, fonts::ui_size(), &tab.name);
+            let label = if tab.is_untitled {
+                Self::create_label_italic(&mut self.font_system, fonts::ui_size(), &tab.name)
+            } else {
+                Self::create_label(&mut self.font_system, fonts::ui_size(), &tab.name)
+            };
             let text_w = Self::measure_label_width(&label);
             let close_label =
                 Self::create_label(&mut self.font_system, fonts::ui_size(), "\u{2715}");

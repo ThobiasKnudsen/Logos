@@ -28,6 +28,7 @@ impl Renderer {
         is_dragging_split: bool,
         open_menu: Option<usize>,
         render_area: &RenderAreaParams,
+        color_picker_color: Option<theme::Rgba>,
     ) {
         self.viewport.update(
             &self.queue,
@@ -486,6 +487,30 @@ impl Renderer {
         }
         if hover == HoverTarget::WinBtnClose {
             ui_rects.push(rect_from(win_controls.close, t.close_button_hover));
+        }
+
+        // "Help us improve!" feedback button — bright accent outline so it
+        // stands out next to the OS-style window controls.
+        if self.feedback_button_rect.w > 0.0 && self.feedback_button_rect.h > 0.0 {
+            let r = self.feedback_button_rect;
+            let radius = r.h / 2.0;
+            let outline = (1.5 * fonts::scale()).max(1.0);
+            ui_rects.push(rect_rounded(
+                Rect {
+                    x: r.x - outline,
+                    y: r.y - outline,
+                    w: r.w + outline * 2.0,
+                    h: r.h + outline * 2.0,
+                },
+                t.accent_primary,
+                radius + outline,
+            ));
+            let inner = if hover == HoverTarget::FeedbackButton {
+                t.bg_hover
+            } else {
+                t.bg_primary
+            };
+            ui_rects.push(rect_rounded(r, inner, radius));
         }
 
         if self.dropdown_active {
@@ -959,6 +984,39 @@ impl Renderer {
             }
         }
 
+        // "Λ" logo, drawn directly on the title bar with no plate behind
+        // it. To synthesize a heavier stroke without bundling a separate
+        // bold face, the same TextBuffer is rasterized four times at small
+        // sub-pixel offsets — one per cardinal direction. Each pass blends
+        // additively against the title-bar background, thickening every
+        // stroke by ~1 px while keeping cosmic-text's anti-aliasing intact.
+        if self.logo_rect.w > 0.0 {
+            let r = self.logo_rect;
+            let text_w = Self::measure_label_width(&self.logo_label);
+            let line_h = fonts::logo_size() * 1.4;
+            let cx = r.x + (r.w - text_w) / 2.0;
+            let cy = r.y + (r.h - line_h) / 2.0;
+            let bounds = TextBounds {
+                left: r.x as i32,
+                top: r.y as i32,
+                right: (r.x + r.w) as i32,
+                bottom: (r.y + r.h) as i32,
+            };
+            let color = t.text_primary.to_glyphon();
+            let off = 0.5 * fonts::scale();
+            for (dx, dy) in [(0.0, 0.0), (off, 0.0), (-off, 0.0), (0.0, off), (0.0, -off)] {
+                text_areas.push(TextArea {
+                    buffer: &self.logo_label,
+                    left: cx + dx,
+                    top: cy + dy,
+                    scale: 1.0,
+                    bounds,
+                    default_color: color,
+                    custom_glyphs: &[],
+                });
+            }
+        }
+
         let menu_right = win_controls.minimize.x;
         for (i, label) in self.menu_item_labels.iter().enumerate() {
             if i >= self.menu_item_rects.len() {
@@ -1002,6 +1060,28 @@ impl Renderer {
                     bottom: (rect.y + rect.h) as i32,
                 },
                 default_color: t.text_primary.to_glyphon(),
+                custom_glyphs: &[],
+            });
+        }
+
+        if self.feedback_button_rect.w > 0.0 && self.feedback_button_rect.h > 0.0 {
+            let r = self.feedback_button_rect;
+            let label_w = Self::measure_label_width(&self.feedback_label);
+            let line_h = fonts::menu_size() * 1.4;
+            let cx = r.x + (r.w - label_w) / 2.0;
+            let cy = r.y + (r.h - line_h) / 2.0;
+            text_areas.push(TextArea {
+                buffer: &self.feedback_label,
+                left: cx,
+                top: cy,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: r.x as i32,
+                    top: r.y as i32,
+                    right: (r.x + r.w) as i32,
+                    bottom: (r.y + r.h) as i32,
+                },
+                default_color: t.accent_primary.to_glyphon(),
                 custom_glyphs: &[],
             });
         }
@@ -1258,20 +1338,26 @@ impl Renderer {
         // Grid + zero lines render through the inversion overlay so their
         // color adapts to whatever plot is underneath. Two visual strengths:
         // weak (regular grid) and strong (zero axis), encoded in alpha.
+        //
+        // Lines are rendered as pixel-snapped, integer-thickness rects:
+        // sub-pixel positions / sub-1-px widths cause the rasterizer to
+        // spread coverage across two pixel columns at low alpha, which makes
+        // grid lines visually flicker as zoom changes. Snapping to the
+        // device pixel grid keeps every line at full opacity at every scale.
         let grid_color = [1.0_f32, 1.0, 1.0, 0.7];
         let zero_color = [1.0_f32, 1.0, 1.0, 1.0];
-        let grid_th = spacing::line_thickness();
-        let zero_th = grid_th * 2.0;
+        let grid_th = spacing::line_thickness().round().max(1.0);
+        let zero_th = (grid_th * 2.0).round().max(2.0);
         let mut overlay_grid_rects: Vec<RectInstance> = Vec::new();
         if x_range > f32::EPSILON {
             for tick in &x_ticks {
                 let t_ = (tick - render_area.axis_x_min) / x_range;
                 let sx = rp.x + t_ * rp.w;
                 if sx >= rp.x && sx <= rp.x + rp.w {
-                    let is_zero = tick.abs() < f32::EPSILON;
+                    let is_zero = tick.abs() < x_step * 0.5;
                     let w = if is_zero { zero_th } else { grid_th };
                     overlay_grid_rects.push(RectInstance {
-                        x: sx - w / 2.0,
+                        x: (sx - w / 2.0).round(),
                         y: rp.y,
                         w,
                         h: rp.h,
@@ -1287,11 +1373,11 @@ impl Renderer {
                 let t_ = (tick - render_area.axis_y_min) / y_range;
                 let sy = rp.y + rp.h - t_ * rp.h;
                 if sy >= rp.y && sy <= rp.y + rp.h {
-                    let is_zero = tick.abs() < f32::EPSILON;
+                    let is_zero = tick.abs() < y_step * 0.5;
                     let h = if is_zero { zero_th } else { grid_th };
                     overlay_grid_rects.push(RectInstance {
                         x: rp.x,
-                        y: sy - h / 2.0,
+                        y: (sy - h / 2.0).round(),
                         w: rp.w,
                         h,
                         color: if is_zero { zero_color } else { grid_color },
@@ -1450,6 +1536,95 @@ impl Renderer {
                 default_color: cursor_text_color,
                 custom_glyphs: &[],
             });
+        }
+
+        // Color picker — pushed onto the late cursor-overlay collections so
+        // the popup paints on top of cell editor text instead of letting it
+        // bleed through.
+        if let Some(color) = color_picker_color {
+            if self.color_picker_bg.w > 0.0 && self.color_picker_bg.h > 0.0 {
+                let bg = self.color_picker_bg;
+                let radius = 6.0 * fonts::scale();
+                cursor_bg_rects.push(rect_rounded(
+                    Rect {
+                        x: bg.x - 1.0,
+                        y: bg.y - 1.0,
+                        w: bg.w + 2.0,
+                        h: bg.h + 2.0,
+                    },
+                    t.dropdown_separator,
+                    radius + 1.0,
+                ));
+                cursor_bg_rects.push(rect_rounded(bg, t.dropdown_bg, radius));
+
+                let channel_values = [color.r, color.g, color.b, color.a];
+                let channel_colors = [
+                    [1.0_f32, 0.3, 0.3, 1.0], // R
+                    [0.3, 1.0, 0.3, 1.0],     // G
+                    [0.3, 0.5, 1.0, 1.0],     // B
+                    [0.85, 0.85, 0.85, 1.0],  // A
+                ];
+                for (i, track) in self.color_picker_sliders.iter().enumerate() {
+                    let mut dim = channel_colors[i];
+                    dim[3] = 0.25;
+                    cursor_bg_rects.push(RectInstance {
+                        x: track.x,
+                        y: track.y,
+                        w: track.w,
+                        h: track.h,
+                        color: dim,
+                        corner_radius: track.w * 0.5,
+                        _padding: [0.0; 3],
+                    });
+                    let v = channel_values[i] as f32 / 255.0;
+                    let fill_h = (track.h * v).round();
+                    if fill_h > 0.0 {
+                        cursor_bg_rects.push(RectInstance {
+                            x: track.x,
+                            y: track.y + track.h - fill_h,
+                            w: track.w,
+                            h: fill_h,
+                            color: channel_colors[i],
+                            corner_radius: track.w * 0.5,
+                            _padding: [0.0; 3],
+                        });
+                    }
+                    let thumb_h = (4.0 * fonts::scale()).round().max(2.0);
+                    let thumb_w = track.w + 4.0 * fonts::scale();
+                    let thumb_y = (track.y + track.h - fill_h - thumb_h * 0.5).round();
+                    cursor_bg_rects.push(RectInstance {
+                        x: (track.x - 2.0 * fonts::scale()).round(),
+                        y: thumb_y,
+                        w: thumb_w,
+                        h: thumb_h,
+                        color: t.text_primary.to_f32_array(),
+                        corner_radius: thumb_h * 0.5,
+                        _padding: [0.0; 3],
+                    });
+                }
+
+                let picker_bounds = TextBounds {
+                    left: bg.x as i32,
+                    top: bg.y as i32,
+                    right: (bg.x + bg.w) as i32,
+                    bottom: (bg.y + bg.h) as i32,
+                };
+                for (i, track) in self.color_picker_sliders.iter().enumerate() {
+                    let label = &self.color_picker_labels[i];
+                    let label_w = Self::measure_label_width(label);
+                    let cx = track.x + (track.w - label_w) / 2.0;
+                    let cy = track.y + track.h + 4.0 * fonts::scale();
+                    cursor_text_areas.push(TextArea {
+                        buffer: label,
+                        left: cx,
+                        top: cy,
+                        scale: 1.0,
+                        bounds: picker_bounds,
+                        default_color: t.text_secondary.to_glyphon(),
+                        custom_glyphs: &[],
+                    });
+                }
+            }
         }
 
         self.text_renderer

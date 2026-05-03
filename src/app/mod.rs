@@ -22,7 +22,7 @@ mod state;
 
 pub(crate) use menus::{
     dynamic_menu_count, dynamic_menu_label, menu_items, resolve_example_path, MenuItemDef,
-    FONTS_MENU_INDEX, MENU_NAMES, THEME_MENU_INDEX,
+    FONTS_MENU_INDEX, HELP_MENU_INDEX, MENU_NAMES, THEME_MENU_INDEX,
 };
 use render_area::RenderAreaState;
 
@@ -39,6 +39,13 @@ pub(crate) enum HoverTarget {
     WinBtnClose,
     MenuItem(usize),
     DropdownItem(usize),
+    FeedbackButton,
+    /// One of the four vertical sliders inside the open color-picker popup.
+    /// Channel index: 0 = R, 1 = G, 2 = B, 3 = A.
+    ColorPickerSlider(u8),
+    /// Inside the color-picker popup but not on a slider — keeps clicks from
+    /// dismissing the popup.
+    ColorPickerArea,
     VScrollThumb,
     CellEditor(usize),
     CellPlayButton(usize),
@@ -131,6 +138,20 @@ struct AppState {
     menu_item_rects: Vec<Rect>,
     open_menu: Option<usize>,
     dropdown_item_rects: Vec<Rect>,
+    feedback_button_rect: Rect,
+
+    /// `Some(cell_index)` while the RGBA color-picker popup is anchored to
+    /// that cell's color button.
+    open_color_picker: Option<usize>,
+    /// `Some(channel)` while the user is actively dragging a slider thumb;
+    /// `None` between drags. Channel index: 0 = R, 1 = G, 2 = B, 3 = A.
+    color_picker_drag: Option<u8>,
+    /// Timestamp at which the cursor first left both the picker and any
+    /// color button. The picker auto-closes after `COLOR_PICKER_HOVER_GRACE`
+    /// has elapsed since this moment, giving the user time to traverse the
+    /// gap between button and popup. Reset to `None` whenever hover lands
+    /// back inside.
+    color_picker_hover_left_at: Option<Instant>,
 
     render_area: RenderAreaState,
 
@@ -154,6 +175,11 @@ struct AppState {
 
 const DOUBLE_CLICK_MS: u128 = 400;
 const SCROLL_LINE_PIXELS: f32 = 40.0;
+/// Grace period between the cursor leaving the picker/color-button area
+/// and the picker auto-closing. Long enough to traverse the visual gap
+/// between the button and the popup without the popup vanishing.
+pub(crate) const COLOR_PICKER_HOVER_GRACE: std::time::Duration =
+    std::time::Duration::from_millis(200);
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;

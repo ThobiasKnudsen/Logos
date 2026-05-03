@@ -93,6 +93,15 @@ impl ApplicationHandler for App {
             menu_item_rects: Vec::new(),
             open_menu: None,
             dropdown_item_rects: Vec::new(),
+            feedback_button_rect: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            },
+            open_color_picker: None,
+            color_picker_drag: None,
+            color_picker_hover_left_at: None,
             render_area: RenderAreaState::default(),
             clipboard: arboard::Clipboard::new().ok(),
             autocomplete: AutocompleteState::new(),
@@ -158,7 +167,11 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 state.cursor_position = (position.x as f32, position.y as f32);
 
-                if state.is_dragging_v_scroll {
+                if let Some(channel) = state.color_picker_drag {
+                    state.update_color_picker_value_at(channel, state.cursor_position.1);
+                    state.window.request_redraw();
+                    return;
+                } else if state.is_dragging_v_scroll {
                     state
                         .renderer
                         .set_v_scroll_from_drag(state.cursor_position.1, state.scroll_drag_offset);
@@ -281,6 +294,7 @@ impl ApplicationHandler for App {
                     }
                 } else {
                     state.recompute_hover();
+                    state.maybe_close_color_picker_on_hover();
                 }
             }
 
@@ -361,15 +375,18 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // Right-click on the color button steps the seed backward.
-            // The color button is the only right-click consumer right now.
+            // Right-click on the color button opens the RGBA slider popup
+            // anchored under that button. The color button is the only
+            // right-click consumer right now.
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,
                 ..
             } => {
                 if let HoverTarget::CellColorButton(i) = state.hover_target {
-                    state.cycle_cell_color(i, -1);
+                    state.open_color_picker = Some(i);
+                    state.color_picker_drag = None;
+                    state.sync_active_tab();
                 }
             }
 
@@ -381,6 +398,15 @@ impl ApplicationHandler for App {
                 state.mouse_press_target = state.hover_target;
 
                 match state.hover_target {
+                    HoverTarget::ColorPickerSlider(channel) => {
+                        state.color_picker_drag = Some(channel);
+                        state.update_color_picker_value_at(channel, state.cursor_position.1);
+                        event_loop.set_control_flow(ControlFlow::Poll);
+                    }
+                    HoverTarget::ColorPickerArea => {
+                        // Click on the picker bg but outside any slider — no-op,
+                        // just keeps the popup open.
+                    }
                     HoverTarget::WindowEdge(dir) => {
                         if let Err(e) = state.window.drag_resize_window(dir) {
                             log::warn!("drag_resize_window failed: {}", e);
@@ -539,6 +565,14 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                if state.color_picker_drag.is_some() {
+                    state.color_picker_drag = None;
+                    if state.pending_dialog.is_none() {
+                        event_loop.set_control_flow(ControlFlow::Wait);
+                    }
+                    state.recompute_hover();
+                    return;
+                }
                 if state.is_any_drag_active() {
                     let was_v_scroll = state.is_dragging_v_scroll;
                     state.is_dragging_split = false;
@@ -573,6 +607,10 @@ impl ApplicationHandler for App {
                     }
                     HoverTarget::WinBtnMaximize => {
                         state.toggle_maximize();
+                        return;
+                    }
+                    HoverTarget::FeedbackButton => {
+                        state.do_open_feedback_url();
                         return;
                     }
                     _ => {}
@@ -656,6 +694,13 @@ impl ApplicationHandler for App {
                     }
                     HoverTarget::CellColorButton(i) => {
                         state.cycle_cell_color(i, 1);
+                        // If the picker is open, follow the click to this
+                        // cell so the sliders mirror the new color and the
+                        // popup re-anchors to the right button.
+                        if state.open_color_picker.is_some() {
+                            state.open_color_picker = Some(i);
+                            state.sync_active_tab();
+                        }
                     }
                     HoverTarget::CellEditor(_) => {}
                     HoverTarget::CellCopyButton(i) => {
@@ -695,6 +740,9 @@ impl ApplicationHandler for App {
                             state.renderer.remove_cell_shader(cell.id);
                         }
                         state.session.active_tab_mut().remove_cell(i);
+                        // Cell removal shifts indices, so the picker can no
+                        // longer trust its anchor — drop it.
+                        state.close_color_picker();
                         state.invalidate_lang_cache();
                         state.sync_active_tab();
                     }
@@ -715,6 +763,10 @@ impl ApplicationHandler for App {
                 }
 
                 if key_event.logical_key == Key::Named(NamedKey::Escape) {
+                    if state.open_color_picker.is_some() {
+                        state.close_color_picker();
+                        return;
+                    }
                     if state.autocomplete.active {
                         state.dismiss_autocomplete();
                         state.window.request_redraw();
@@ -909,6 +961,14 @@ impl ApplicationHandler for App {
                     mouse_uv,
                 };
 
+                let picker_color = state.open_color_picker.and_then(|i| {
+                    state
+                        .session
+                        .active_tab()
+                        .cells()
+                        .get(i)
+                        .map(|c| c.plot_color)
+                });
                 state.renderer.render(
                     &state.cached_layout,
                     state.hover_target,
@@ -916,6 +976,7 @@ impl ApplicationHandler for App {
                     state.is_dragging_split,
                     state.open_menu,
                     &render_params,
+                    picker_color,
                 );
             }
 
@@ -951,6 +1012,10 @@ impl ApplicationHandler for App {
             state.window.request_redraw();
         }
 
+        // Color-picker hover-out grace timer. Run before the wait/poll
+        // arbitration so a still-pending deadline can override `Wait`.
+        let picker_deadline = state.tick_color_picker_timer();
+
         if state.renderer.has_active_shaders() || state.reduce_service.borrow().has_pending() {
             const TARGET_FRAME_TIME: std::time::Duration = std::time::Duration::from_micros(16_667);
             let elapsed = state.last_frame_time.elapsed();
@@ -962,7 +1027,11 @@ impl ApplicationHandler for App {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(wait_until));
             }
         } else if !state.is_any_drag_active() && state.pending_dialog.is_none() {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            if let Some(deadline) = picker_deadline {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            } else {
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
         }
 
         if let Some(dialog) = &state.pending_dialog {

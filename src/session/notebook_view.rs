@@ -67,10 +67,7 @@ impl NotebookView {
             ));
         }
         let contents = fs::read_to_string(path)?;
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Unknown".into());
+        let name = display_name_for_path(path);
         let mut notebook = build_notebook(reduce);
         let cells = parse_logos(&contents)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -163,10 +160,7 @@ impl NotebookView {
         });
         let content = serialize_logos(cells);
         fs::write(&path, content)?;
-        self.name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Unknown".into());
+        self.name = display_name_for_path(&path);
         self.file_path = Some(path);
         self.is_modified = false;
         Ok(())
@@ -199,6 +193,24 @@ fn ensure_logos_extension(path: &Path) -> PathBuf {
     } else {
         path.with_extension("logos")
     }
+}
+
+/// Display name for a notebook file path: the file's stem when the extension
+/// is `.logos` (the only on-disk format), otherwise the full file name. Keeps
+/// tab labels and status text uncluttered without losing info for stray
+/// non-`.logos` files.
+pub(crate) fn display_name_for_path(path: &Path) -> String {
+    let fallback = || {
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Unknown".into())
+    };
+    if !is_logos_path(path) {
+        return fallback();
+    }
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(fallback)
 }
 
 /// Construct a `Notebook` wired to the shared REDUCE service if one is

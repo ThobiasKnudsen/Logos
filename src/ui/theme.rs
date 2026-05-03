@@ -140,6 +140,10 @@ const fn alpha(c: Rgba, a: u8) -> Rgba {
 pub struct Theme {
     pub bg_primary: Rgba,
     pub bg_secondary: Rgba,
+    /// Canvas-style tone (notebook surface, active tab, render area).
+    /// Same value as the JSON theme's `tertiary_bg`. Exposed so chrome
+    /// accents (e.g. the logo plate) can match the canvas explicitly.
+    pub bg_tertiary: Rgba,
     pub bg_elevated: Rgba,
     pub bg_hover: Rgba,
     pub border: Rgba,
@@ -277,6 +281,7 @@ impl JsonTheme {
         Theme {
             bg_primary: pb,
             bg_secondary: sb,
+            bg_tertiary: tb,
             bg_elevated: sb,
             bg_hover: self.hover_bg,
             border: sl,
@@ -603,6 +608,12 @@ pub mod fonts {
     pub fn menu_size() -> f32 {
         BASE_MENU * scale()
     }
+    /// Glyph size for the chrome "Λ" logo. Slightly larger than the
+    /// menu text so the logo reads as a logo rather than another menu
+    /// word.
+    pub fn logo_size() -> f32 {
+        BASE_MENU * scale() * 1.5
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -625,6 +636,21 @@ pub mod font_family {
         /// Raw bytes of every weight to load into the FontSystem at startup.
         pub font_data: &'static [&'static [u8]],
     }
+
+    /// "Λ" logo font: GFS Didot Regular. Greek-first Didot revival, what
+    /// the user picked when they first saw the lambda render. Loaded as a
+    /// chrome-only family — never selected through the Fonts menu.
+    pub const LOGO_FONT_FAMILY: &str = "GFS Didot";
+    pub const LOGO_FONT_DATA: &[u8] = include_bytes!("../../assets/fonts/GFSDidot-Regular.ttf");
+
+    /// Italic font for chrome accents (untitled tab labels, etc.). Bundled
+    /// because the user-selectable code fonts (Geist Mono, JuliaMono via
+    /// our shipped weights) do not include an italic file, and `fontdb`
+    /// does not synthesize italics — without a real italic face glyphon
+    /// silently falls back to upright.
+    pub const ITALIC_CHROME_FONT_FAMILY: &str = "Source Code Pro";
+    pub const ITALIC_CHROME_FONT_DATA: &[u8] =
+        include_bytes!("../../assets/fonts/SourceCodePro-Italic.ttf");
 
     pub const FAMILIES: &[FontFamily] = &[
         FontFamily {

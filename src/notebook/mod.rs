@@ -20,7 +20,7 @@ mod reduce_simplifier;
 mod shader;
 
 pub use cell::{CellMessage, CellOutcome, CellState, NotebookCell};
-pub use diagnostic::{Diagnostic, Span};
+pub use diagnostic::{Diagnostic, Severity, Span};
 pub use reduce_backend::{ReduceBackend, SharedReduce};
 pub use reduce_simplifier::ReduceSimplifier;
 pub use shader::{DispatchKind, ShaderSpec};
@@ -950,10 +950,7 @@ impl Notebook {
         s
     }
 
-    /// Flat list of `(cell_index, diagnostic)` across every cell. Cheap
-    /// snapshot for a top-level "show all errors" view; the UI doesn't
-    /// bind to this yet.
-    #[allow(dead_code)]
+    /// Flat list of `(cell_index, diagnostic)` across every cell.
     pub fn diagnostics(&self) -> Vec<(usize, &Diagnostic)> {
         let mut out = Vec::new();
         for (i, cell) in self.cells.iter().enumerate() {

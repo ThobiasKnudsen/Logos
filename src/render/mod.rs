@@ -63,6 +63,10 @@ pub struct TabInfo {
     pub name: String,
     pub is_active: bool,
     pub is_modified: bool,
+    /// Tab represents a notebook never saved to disk. The chrome renders
+    /// untitled labels in italic so they're visually distinct from saved
+    /// files (which all share the simple stem-only display name).
+    pub is_untitled: bool,
 }
 
 /// Hit-test rectangles returned by update_tab_bar for mouse handling.
@@ -160,16 +164,37 @@ pub(crate) fn compute_nice_step(range: f32, max_ticks: usize) -> f32 {
 }
 
 /// Generate tick positions for an axis given a fixed step.
+///
+/// Each tick is computed as `i * step` rather than by repeated addition,
+/// so values do not accumulate floating-point drift across iterations and
+/// the tick at index 0 (when 0 is in range) lands exactly on 0.0 — needed
+/// by the zero-axis renderer to draw a thicker line. Computation is done
+/// in f64 internally so axes with large absolute values stay precise.
 pub(crate) fn generate_ticks(axis_min: f32, axis_max: f32, step: f32) -> Vec<f32> {
-    if step <= f32::EPSILON {
-        return vec![];
+    if !(step > f32::EPSILON) || !axis_min.is_finite() || !axis_max.is_finite() {
+        return Vec::new();
     }
-    let first = (axis_min / step).ceil() * step;
-    let mut ticks = Vec::new();
-    let mut v = first;
-    while v <= axis_max + step * 0.001 {
-        ticks.push(v);
-        v += step;
+    let step_f64 = step as f64;
+    let min_f64 = axis_min as f64;
+    let max_f64 = axis_max as f64;
+    // Index of the first tick at or above axis_min, and the last tick at
+    // or below axis_max (with a tiny tolerance so f32→f64 round-trip noise
+    // does not shave off the boundary tick).
+    let tol = step_f64 * 1e-3;
+    let i0 = ((min_f64 - tol) / step_f64).ceil() as i64;
+    let i1 = ((max_f64 + tol) / step_f64).floor() as i64;
+    if i1 < i0 {
+        return Vec::new();
+    }
+    // Guard against pathological inputs: callers double `step` until the
+    // count fits within their cap, but we must not allocate gigabytes for
+    // the first oversized probe. Cap at `MAX_PROBE`; the caller sees a
+    // length larger than its tick cap and keeps doubling until it fits.
+    const MAX_PROBE: i64 = 2048;
+    let count = (i1 - i0).saturating_add(1).min(MAX_PROBE);
+    let mut ticks = Vec::with_capacity(count as usize);
+    for i in i0..i0 + count {
+        ticks.push((i as f64 * step_f64) as f32);
     }
     ticks
 }
@@ -282,6 +307,12 @@ pub struct Renderer {
     pub(crate) menu_item_labels: Vec<TextBuffer>,
     pub(crate) menu_item_rects: Vec<Rect>,
 
+    /// "Λ" logo at the top-left of the title bar. Geometry recomputed every
+    /// `sync_active_tab` so it tracks zoom, but the label survives until
+    /// `rebuild_labels` (zoom change) recreates it.
+    pub(crate) logo_label: TextBuffer,
+    pub(crate) logo_rect: Rect,
+
     pub(crate) dropdown_item_labels: Vec<TextBuffer>,
     pub(crate) dropdown_shortcut_labels: Vec<TextBuffer>,
     pub(crate) dropdown_bg: Rect,
@@ -289,7 +320,7 @@ pub struct Renderer {
     pub(crate) dropdown_active: bool,
     pub(crate) dropdown_active_item: Option<usize>,
 
-    pub(crate) cached_tab_info: Vec<(String, bool, bool)>,
+    pub(crate) cached_tab_info: Vec<(String, bool, bool, bool)>,
     pub(crate) tab_labels: Vec<TextBuffer>,
     pub(crate) tab_close_labels: Vec<TextBuffer>,
     pub(crate) tab_modified: Vec<bool>,
@@ -302,6 +333,18 @@ pub struct Renderer {
     pub(crate) win_min_label: TextBuffer,
     pub(crate) win_max_label: TextBuffer,
     pub(crate) win_close_label: TextBuffer,
+
+    pub(crate) feedback_label: TextBuffer,
+    pub(crate) feedback_button_rect: Rect,
+
+    /// Background rect of the open color-picker popup. Zero-sized when the
+    /// picker is closed; the renderer skips drawing the picker in that case.
+    pub(crate) color_picker_bg: Rect,
+    /// Track rects of the four vertical sliders inside the picker, in
+    /// channel order: [R, G, B, A]. Used for both rendering and hit-testing.
+    pub(crate) color_picker_sliders: [Rect; 4],
+    /// One label per channel ("R", "G", "B", "A") drawn under each track.
+    pub(crate) color_picker_labels: [TextBuffer; 4],
 
     pub(crate) ac_active: bool,
     pub(crate) ac_bg: Rect,
@@ -504,4 +547,51 @@ pub(crate) fn clip_bounds_for_dropdown(
         right,
         bottom,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_ticks_includes_exact_zero_when_in_range() {
+        // -1.0 to 1.0 with step 0.25 must contain exactly 0.0 (bit-equal).
+        let t = generate_ticks(-1.0, 1.0, 0.25);
+        assert!(
+            t.iter().any(|&v| v == 0.0),
+            "expected exact 0.0 in {:?}",
+            t
+        );
+    }
+
+    #[test]
+    fn generate_ticks_no_drift_over_long_range() {
+        // 1000 ticks of step 0.1 — the last tick must be exactly at axis_max.
+        let t = generate_ticks(0.0, 100.0, 0.1);
+        assert_eq!(t.len(), 1001);
+        assert_eq!(*t.first().unwrap(), 0.0);
+        // Allow a tiny f32 error since 0.1 is not f32-representable.
+        assert!((t.last().unwrap() - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn generate_ticks_count_matches_inclusive_bounds() {
+        // -2..=2 step 1 → five ticks.
+        let t = generate_ticks(-2.0, 2.0, 1.0);
+        assert_eq!(t, vec![-2.0, -1.0, 0.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn generate_ticks_rejects_invalid_step() {
+        assert!(generate_ticks(0.0, 1.0, 0.0).is_empty());
+        assert!(generate_ticks(0.0, 1.0, -1.0).is_empty());
+    }
+
+    #[test]
+    fn generate_ticks_caps_pathological_count() {
+        // Tiny step over a big range would naively yield millions of ticks.
+        // Capped at MAX_PROBE so callers don't OOM on the first probe.
+        let t = generate_ticks(0.0, 1.0, 1e-9);
+        assert!(t.len() <= 2048);
+    }
 }

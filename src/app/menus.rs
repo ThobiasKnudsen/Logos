@@ -12,6 +12,8 @@ pub(crate) const MENU_NAMES: &[&str] =
 pub(crate) const THEME_MENU_INDEX: usize = 4;
 /// Index of the Fonts menu in `MENU_NAMES`.
 pub(crate) const FONTS_MENU_INDEX: usize = 5;
+/// Index of the Help menu in `MENU_NAMES`.
+pub(crate) const HELP_MENU_INDEX: usize = 6;
 
 const MENU_FILE_ITEMS: &[MenuItemDef] = &[
     MenuItemDef {
@@ -101,6 +103,13 @@ pub(super) const MENU_EXAMPLES_ITEMS: &[MenuItemDef] = &[
     },
 ];
 
+const MENU_HELP_ITEMS: &[MenuItemDef] = &[
+    MenuItemDef {
+        label: "Copy Diagnostics",
+        shortcut: "",
+    },
+];
+
 /// File names of each shipped example, parallel to `MENU_EXAMPLES_ITEMS`.
 /// Resolved to a real path at click-time by `resolve_example_path`, which
 /// looks for an `examples/` folder deployed next to the binary (and falls
@@ -185,6 +194,7 @@ pub(crate) fn menu_items(index: usize) -> &'static [MenuItemDef] {
         1 => MENU_EDIT_ITEMS,
         2 => MENU_VIEW_ITEMS,
         3 => MENU_EXAMPLES_ITEMS,
+        i if i == HELP_MENU_INDEX => MENU_HELP_ITEMS,
         _ => &[],
     }
 }

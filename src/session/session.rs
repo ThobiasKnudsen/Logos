@@ -8,6 +8,11 @@ use crate::lang::reduce::service::ReduceService;
 
 use super::NotebookView;
 
+/// Default name used for every notebook that has not been saved to disk.
+/// All untitled tabs share this name; the chrome distinguishes them by
+/// rendering it in italic.
+pub const UNTITLED_NAME: &str = "Untitled";
+
 /// Factory that produces a fresh GPU dispatcher per notebook. The closure
 /// captures whatever GPU handles the renderer exposes (typically
 /// `Arc<Device>` + `Arc<Queue>`); each call clones them into a new
@@ -21,7 +26,6 @@ pub type GpuFactory = Box<dyn Fn() -> Box<dyn GpuDispatch>>;
 pub struct Session {
     pub tabs: Vec<NotebookView>,
     pub active_index: usize,
-    untitled_counter: usize,
     reduce: Option<Rc<RefCell<ReduceService>>>,
     gpu_factory: Option<GpuFactory>,
 }
@@ -34,23 +38,20 @@ impl Session {
         reduce: Option<Rc<RefCell<ReduceService>>>,
         gpu_factory: Option<GpuFactory>,
     ) -> Self {
-        let mut first = NotebookView::new_untitled("Untitled 1".into(), reduce.clone());
+        let mut first = NotebookView::new_untitled(UNTITLED_NAME.into(), reduce.clone());
         if let Some(f) = &gpu_factory {
             first.notebook.set_gpu(f());
         }
         Self {
             tabs: vec![first],
             active_index: 0,
-            untitled_counter: 1,
             reduce,
             gpu_factory,
         }
     }
 
     pub fn new_tab(&mut self) -> usize {
-        self.untitled_counter += 1;
-        let name = format!("Untitled {}", self.untitled_counter);
-        let mut view = NotebookView::new_untitled(name, self.reduce.clone());
+        let mut view = NotebookView::new_untitled(UNTITLED_NAME.into(), self.reduce.clone());
         if let Some(f) = &self.gpu_factory {
             view.notebook.set_gpu(f());
         }
@@ -89,9 +90,7 @@ impl Session {
         }
         self.tabs.remove(index);
         if self.tabs.is_empty() {
-            self.untitled_counter += 1;
-            let name = format!("Untitled {}", self.untitled_counter);
-            let mut view = NotebookView::new_untitled(name, self.reduce.clone());
+            let mut view = NotebookView::new_untitled(UNTITLED_NAME.into(), self.reduce.clone());
             if let Some(f) = &self.gpu_factory {
                 view.notebook.set_gpu(f());
             }

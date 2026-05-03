@@ -5,13 +5,15 @@ use winit::window::CursorIcon;
 
 use crate::editor::autocomplete;
 use crate::file_dialog::{self, DialogKind, FileDialog};
-use crate::notebook::{CellMessage, CellState};
+use crate::notebook::{CellMessage, CellState, Severity};
 use crate::render::{CellInfo, TabInfo};
 use crate::ui::theme::{self, font_family, fonts};
 
+pub(super) const FEEDBACK_URL: &str = "https://example.com";
+
 use super::cas::format_shader_error;
 use super::menus::{active_font_index, active_theme_index, resolve_example_path, EXAMPLE_FILENAMES};
-use super::{FONTS_MENU_INDEX, THEME_MENU_INDEX};
+use super::{FONTS_MENU_INDEX, HELP_MENU_INDEX, THEME_MENU_INDEX};
 use super::render_area::{MouseZone, RenderAreaState};
 use super::{
     compute_win_control_rects, detect_mouse_zone, edge_resize_direction, line_col_from,
@@ -80,6 +82,7 @@ impl AppState {
                 name: t.name.clone(),
                 is_active: i == self.session.active_index,
                 is_modified: t.is_modified,
+                is_untitled: t.file_path.is_none(),
             })
             .collect();
 
@@ -93,10 +96,54 @@ impl AppState {
 
         self.win_control_rects = compute_win_control_rects(&self.cached_layout.title_bar);
 
-        self.menu_item_rects = self.renderer.update_menu_items(
-            self.cached_layout.title_bar,
-            self.win_control_rects.minimize.x,
-        );
+        let title_bar = self.cached_layout.title_bar;
+        let win_min_x = self.win_control_rects.minimize.x;
+
+        // Logo first so the menu bar knows where it can start.
+        self.renderer.update_logo(title_bar);
+
+        // Reserve horizontal space for the feedback button when capping
+        // the menu bar, so menus + button + win-controls all coexist.
+        let feedback_w = self.renderer.feedback_button_intrinsic_width();
+        let gap = crate::ui::theme::spacing::xs();
+        let menus_cap = (win_min_x - feedback_w - gap * 2.0).max(title_bar.x);
+
+        self.menu_item_rects = self.renderer.update_menu_items(title_bar, menus_cap);
+
+        let menus_right = self
+            .menu_item_rects
+            .last()
+            .map(|r| r.x + r.w)
+            .unwrap_or(title_bar.x + crate::ui::theme::spacing::sm());
+
+        self.feedback_button_rect =
+            self.renderer
+                .update_feedback_button(title_bar, menus_right, win_min_x);
+
+        // Color-picker geometry: anchored under the open cell's color
+        // button, follows the cell as scroll / resize moves it. Closes
+        // automatically if the source cell has gone away.
+        if let Some(idx) = self.open_color_picker {
+            let anchor = self
+                .cell_layouts
+                .iter()
+                .find(|cl| cl.cell_index == idx)
+                .map(|cl| cl.color_button);
+            match anchor {
+                Some(anchor_rect) => {
+                    let viewport_w = self.cached_layout.title_bar.w
+                        + self.cached_layout.title_bar.x;
+                    self.renderer.update_color_picker(anchor_rect, viewport_w);
+                }
+                None => {
+                    self.open_color_picker = None;
+                    self.color_picker_drag = None;
+                    self.renderer.clear_color_picker();
+                }
+            }
+        } else {
+            self.renderer.clear_color_picker();
+        }
         let ui_chrome_us = t2.elapsed().as_micros();
 
         let t3 = Instant::now();
@@ -107,8 +154,7 @@ impl AppState {
         let name = tab
             .file_path
             .as_ref()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
+            .map(|p| crate::session::display_name_for_path(p))
             .unwrap_or_else(|| tab.name.clone());
         let modified = if tab.is_modified { " [modified]" } else { "" };
         self.renderer.update_status(&format!(
@@ -142,6 +188,22 @@ impl AppState {
             {
                 self.set_hover(HoverTarget::WindowEdge(dir));
                 return;
+            }
+        }
+
+        if self.open_color_picker.is_some() {
+            let slider_rects = self.renderer.color_picker_slider_rects();
+            for (idx, r) in slider_rects.iter().enumerate() {
+                if r.w > 0.0 && point_in_rect(mx, my, r) {
+                    self.set_hover(HoverTarget::ColorPickerSlider(idx as u8));
+                    return;
+                }
+            }
+            if let Some(bg) = self.renderer.color_picker_bg_rect() {
+                if point_in_rect(mx, my, &bg) {
+                    self.set_hover(HoverTarget::ColorPickerArea);
+                    return;
+                }
             }
         }
 
@@ -199,6 +261,13 @@ impl AppState {
         }
         if point_in_rect(mx, my, &wc.minimize) {
             self.set_hover(HoverTarget::WinBtnMinimize);
+            return;
+        }
+
+        if self.feedback_button_rect.w > 0.0
+            && point_in_rect(mx, my, &self.feedback_button_rect)
+        {
+            self.set_hover(HoverTarget::FeedbackButton);
             return;
         }
 
@@ -319,7 +388,9 @@ impl AppState {
                 | HoverTarget::CellCopyButton(_)
                 | HoverTarget::CellOutputCopyButton(_)
                 | HoverTarget::CellOutputToggle(_)
-                | HoverTarget::AutocompleteItem(_) => CursorIcon::Pointer,
+                | HoverTarget::AutocompleteItem(_)
+                | HoverTarget::FeedbackButton
+                | HoverTarget::ColorPickerSlider(_) => CursorIcon::Pointer,
                 HoverTarget::RenderArea => match self.render_area.mouse_zone {
                     MouseZone::Center => {
                         if self.render_area.is_dragging {
@@ -415,7 +486,11 @@ impl AppState {
     }
 
     /// Save current axis bounds to old tab, restore from new tab (or reset to default).
+    /// Switch the active tab, persisting the previous tab's axis bounds so
+    /// flipping back restores the same view. Also dismisses any color
+    /// picker since its anchor cell belongs to the outgoing tab.
     pub(super) fn switch_tab_axis(&mut self, old_tab: usize, new_tab: usize) {
+        self.close_color_picker();
         if let Some(tab) = self.session.tabs.get_mut(old_tab) {
             tab.axis_bounds = Some([
                 self.render_area.axis_x_min,
@@ -628,7 +703,28 @@ impl AppState {
             (m, i) if m == FONTS_MENU_INDEX => {
                 self.select_font(i);
             }
+            (m, 0) if m == HELP_MENU_INDEX => {
+                self.do_copy_diagnostics();
+            }
             _ => {}
+        }
+    }
+
+    /// Aggregate every cell diagnostic across every open tab into a plain-text
+    /// report and place it on the system clipboard.
+    pub(super) fn do_copy_diagnostics(&mut self) {
+        let report = format_diagnostics_report(&self.session);
+        if let Some(cb) = self.clipboard.as_mut() {
+            if let Err(e) = cb.set_text(&report) {
+                log::error!("Failed to copy diagnostics to clipboard: {e}");
+            }
+        }
+    }
+
+    /// Open the feedback URL in the user's default browser.
+    pub(super) fn do_open_feedback_url(&self) {
+        if let Err(e) = open_url(FEEDBACK_URL) {
+            log::error!("Failed to open feedback URL {FEEDBACK_URL}: {e}");
         }
     }
 
@@ -909,6 +1005,95 @@ impl AppState {
         }
     }
 
+    /// Update the hover-out grace timer. While hover is on the picker or
+    /// any color button, the timer is cleared. The first frame after hover
+    /// leaves both, the timer is started; `tick_color_picker_timer` then
+    /// closes the picker once `COLOR_PICKER_HOVER_GRACE` has elapsed.
+    /// Drag-in-progress always cancels the timer so the popup stays.
+    pub(super) fn maybe_close_color_picker_on_hover(&mut self) {
+        if self.open_color_picker.is_none() {
+            self.color_picker_hover_left_at = None;
+            return;
+        }
+        if self.color_picker_drag.is_some() {
+            self.color_picker_hover_left_at = None;
+            return;
+        }
+        let inside_picker = matches!(
+            self.hover_target,
+            HoverTarget::ColorPickerArea | HoverTarget::ColorPickerSlider(_)
+        );
+        let on_color_button = matches!(self.hover_target, HoverTarget::CellColorButton(_));
+        if inside_picker || on_color_button {
+            self.color_picker_hover_left_at = None;
+        } else if self.color_picker_hover_left_at.is_none() {
+            self.color_picker_hover_left_at = Some(Instant::now());
+        }
+    }
+
+    /// Drive the hover-out grace timer; close the picker once the grace
+    /// period has elapsed. Returns `Some(deadline)` if the timer is still
+    /// pending so the event loop can schedule a wakeup.
+    pub(super) fn tick_color_picker_timer(&mut self) -> Option<Instant> {
+        let started = self.color_picker_hover_left_at?;
+        let deadline = started + super::COLOR_PICKER_HOVER_GRACE;
+        if Instant::now() >= deadline {
+            self.close_color_picker();
+            self.color_picker_hover_left_at = None;
+            None
+        } else {
+            Some(deadline)
+        }
+    }
+
+    pub(super) fn close_color_picker(&mut self) {
+        if self.open_color_picker.is_none() {
+            return;
+        }
+        self.open_color_picker = None;
+        self.color_picker_drag = None;
+        self.color_picker_hover_left_at = None;
+        self.renderer.clear_color_picker();
+        self.window.request_redraw();
+    }
+
+    /// Set the indicated channel of the open picker's cell color from a
+    /// vertical mouse position inside that channel's slider track. No-op
+    /// if the picker is closed or the channel is out of range.
+    pub(super) fn update_color_picker_value_at(&mut self, channel: u8, mouse_y: f32) {
+        let Some(cell_index) = self.open_color_picker else {
+            return;
+        };
+        let tracks = self.renderer.color_picker_slider_rects();
+        let Some(track) = tracks.get(channel as usize).copied() else {
+            return;
+        };
+        if track.h <= 0.0 {
+            return;
+        }
+        // Sliders fill from the bottom: y = track.bottom → 0, y = track.top → 255.
+        let t = ((track.y + track.h - mouse_y) / track.h).clamp(0.0, 1.0);
+        let value = (t * 255.0).round() as u8;
+
+        let tab = self.session.active_tab_mut();
+        if cell_index >= tab.notebook.len() {
+            return;
+        }
+        let cell = tab.notebook.cell_mut(cell_index);
+        match channel {
+            0 => cell.plot_color.r = value,
+            1 => cell.plot_color.g = value,
+            2 => cell.plot_color.b = value,
+            3 => cell.plot_color.a = value,
+            _ => return,
+        }
+        let cell_id = cell.id;
+        let new_color = cell.plot_color.to_f32_array();
+        tab.mark_modified();
+        self.renderer.set_cell_primary_color(cell_id, new_color);
+        self.sync_active_tab();
+    }
+
     /// Step the cell's color seed by `delta` (positive = next, negative =
     /// previous), recompute its plot color, and push the new color to any
     /// already-running shaders without recompiling.
@@ -934,5 +1119,85 @@ impl AppState {
         let cell = self.session.active_tab_mut().cell_mut(cell_index);
         cell.outcome.message = None;
         self.sync_active_tab();
+    }
+}
+
+fn severity_label(s: &Severity) -> &'static str {
+    match s {
+        Severity::Error => "error",
+    }
+}
+
+fn format_diagnostics_report(session: &crate::session::Session) -> String {
+    let mut total = 0usize;
+    let mut body = String::new();
+    for tab in &session.tabs {
+        let diags = tab.notebook.diagnostics();
+        if diags.is_empty() {
+            continue;
+        }
+        let path_suffix = tab
+            .file_path
+            .as_ref()
+            .map(|p| format!(" ({})", p.display()))
+            .unwrap_or_default();
+        body.push_str(&format!("[Tab: {}{}]\n", tab.name, path_suffix));
+        for (cell_idx, d) in diags {
+            total += 1;
+            body.push_str(&format!(
+                "  Cell {}, line {}:{} \u{2014} {}: {}\n",
+                cell_idx + 1,
+                d.span.start_line + 1,
+                d.span.start_col + 1,
+                severity_label(&d.severity),
+                d.message,
+            ));
+        }
+        body.push('\n');
+    }
+
+    let mut report = String::new();
+    report.push_str("Logos diagnostics\n");
+    report.push_str("=================\n");
+    if total == 0 {
+        report.push_str("No diagnostics. Everything looks clean!\n");
+    } else {
+        report.push_str(&format!(
+            "Total: {} diagnostic(s) across {} tab(s)\n\n",
+            total,
+            session.tabs.len(),
+        ));
+        report.push_str(&body);
+    }
+    report
+}
+
+/// Open `url` in the user's default browser. Best-effort: errors on
+/// unsupported platforms or missing handlers are returned to the caller.
+fn open_url(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open").arg(url).spawn()?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn()?;
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()?;
+        return Ok(());
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = url;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "open_url not supported on this platform",
+        ))
     }
 }

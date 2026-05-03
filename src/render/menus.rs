@@ -21,10 +21,138 @@ impl Renderer {
             .shape_until_scroll(&mut self.font_system, false);
     }
 
+    /// Intrinsic width of the "Help us improve!" button (text + padding),
+    /// used by the caller to reserve space for it when laying out menus.
+    pub fn feedback_button_intrinsic_width(&self) -> f32 {
+        Self::measure_label_width(&self.feedback_label) + menu_item_pad() * 2.0
+    }
+
+    /// Layout the color-picker popup anchored under `anchor` (the cell's
+    /// color button). Stores the bg + per-channel slider track rects on
+    /// `self` so the renderer can hit-test and draw them. Returns the bg.
+    pub fn update_color_picker(&mut self, anchor: Rect, viewport_w: f32) -> Rect {
+        let s = fonts::scale();
+        let pad = 8.0 * s;
+        let track_w = 18.0 * s;
+        let track_h = 110.0 * s;
+        let gap = 8.0 * s;
+        let label_h = fonts::small_size() * 1.4;
+        let label_gap = 4.0 * s;
+
+        let n = self.color_picker_sliders.len() as f32;
+        let bg_w = pad * 2.0 + track_w * n + gap * (n - 1.0);
+        let bg_h = pad * 2.0 + track_h + label_gap + label_h;
+
+        // Anchor under the color button. Clamp inside the viewport so the
+        // picker never spills off the right edge.
+        let mut x = anchor.x;
+        if x + bg_w > viewport_w {
+            x = (viewport_w - bg_w).max(0.0);
+        }
+        let y = anchor.y + anchor.h + 4.0 * s;
+
+        self.color_picker_bg = Rect {
+            x,
+            y,
+            w: bg_w,
+            h: bg_h,
+        };
+
+        for i in 0..self.color_picker_sliders.len() {
+            self.color_picker_sliders[i] = Rect {
+                x: x + pad + (track_w + gap) * i as f32,
+                y: y + pad,
+                w: track_w,
+                h: track_h,
+            };
+        }
+
+        self.color_picker_bg
+    }
+
+    /// Reset color-picker geometry to zero. Renderer skips drawing and
+    /// hit-tests fall through to the chrome below when the picker is closed.
+    pub fn clear_color_picker(&mut self) {
+        let z = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+        };
+        self.color_picker_bg = z;
+        self.color_picker_sliders = [z, z, z, z];
+    }
+
+    /// Background rect of the open color-picker, or `None` if closed.
+    pub fn color_picker_bg_rect(&self) -> Option<Rect> {
+        if self.color_picker_bg.w > 0.0 && self.color_picker_bg.h > 0.0 {
+            Some(self.color_picker_bg)
+        } else {
+            None
+        }
+    }
+
+    /// Slider track rects in channel order [R, G, B, A].
+    pub fn color_picker_slider_rects(&self) -> [Rect; 4] {
+        self.color_picker_sliders
+    }
+
+    /// Layout the "Help us improve!" button centered horizontally between
+    /// the rightmost menu item and the window-control buttons.
+    pub fn update_feedback_button(
+        &mut self,
+        title_bar: Rect,
+        menus_right: f32,
+        win_min_x: f32,
+    ) -> Rect {
+        let pad = menu_item_pad();
+        let gap = spacing::xs();
+        let inset = spacing::xs();
+
+        let text_w = Self::measure_label_width(&self.feedback_label);
+        let intrinsic_w = text_w + pad * 2.0;
+        let available = (win_min_x - menus_right - gap * 2.0).max(0.0);
+        let w = intrinsic_w.min(available);
+        let h = (title_bar.h - inset * 2.0).max(0.0);
+        let center = (menus_right + win_min_x) / 2.0;
+        let x = (center - w / 2.0)
+            .max(menus_right + gap)
+            .min((win_min_x - gap - w).max(menus_right + gap));
+        let y = title_bar.y + inset;
+
+        self.feedback_button_rect = Rect { x, y, w, h };
+        self.feedback_button_rect
+    }
+
+    /// Place the "Λ" logo at the top-left of the title bar as a square so
+    /// the chrome can render a circular `bg_secondary` plate behind the
+    /// glyph. Stores the rect on `self` and returns it so callers can lay
+    /// out menus to its right.
+    pub fn update_logo(&mut self, title_bar: Rect) -> Rect {
+        let inset = 3.0 * fonts::scale();
+        let side = (title_bar.h - inset * 2.0).max(0.0);
+        let x = title_bar.x + spacing::sm();
+        let y = title_bar.y + inset;
+        self.logo_rect = Rect {
+            x,
+            y,
+            w: side,
+            h: side,
+        };
+        self.logo_rect
+    }
+
     /// Update menu item positions from title bar rect. Returns hit rects.
     pub fn update_menu_items(&mut self, title_bar: Rect, win_ctrl_start_x: f32) -> Vec<Rect> {
         let mut rects = Vec::with_capacity(app::MENU_NAMES.len());
-        let mut x = title_bar.x + spacing::sm();
+        // Start just past the logo when present (only a hair of breathing
+        // room between the lambda plate and "File"), falling back to the
+        // bare title-bar padding when the logo geometry is zeroed.
+        let mut x = if self.logo_rect.w > 0.0 {
+            self.logo_rect.x + self.logo_rect.w + spacing::xs()
+        } else {
+            title_bar.x + spacing::sm()
+        };
         let y = title_bar.y;
         let h = title_bar.h;
 
