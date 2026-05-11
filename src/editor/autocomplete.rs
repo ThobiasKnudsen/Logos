@@ -184,9 +184,17 @@ pub fn prefix_at_cursor(text: &str, cursor_byte: usize) -> Option<(&str, usize)>
 }
 
 /// LaTeX command → Unicode symbol mapping.
-/// Each entry: (latex_command, unicode_symbol)
+///
+/// Every entry must lex as a valid Logos token — the gate is the
+/// `every_latex_symbol_substitution_lexes` test in `src/notebook/tests.rs`.
+/// Codepoints in Unicode's "Sm" (Math Symbol) class are *not* `is_alphabetic`
+/// and have no explicit case in `src/lang/lexer.rs`, so they would produce
+/// "Unexpected character" the moment a user types the trigger. To add a new
+/// substitution: either pick a codepoint the lexer already handles (Greek
+/// letters lex as identifiers; π/ℯ/τ are numeric constants; ×/÷/−/≤/≥/≠/√/∫
+/// have explicit cases), or first extend `src/lang/lexer.rs` to recognize it.
 pub const LATEX_SYMBOLS: &[(&str, &str)] = &[
-    // Lowercase Greek letters
+    // Lowercase Greek letters — lex as identifiers (`is_alphabetic`)
     ("\\alpha", "\u{03B1}"),   // α
     ("\\beta", "\u{03B2}"),    // β
     ("\\gamma", "\u{03B3}"),   // γ
@@ -201,10 +209,10 @@ pub const LATEX_SYMBOLS: &[(&str, &str)] = &[
     ("\\mu", "\u{03BC}"),      // μ
     ("\\nu", "\u{03BD}"),      // ν
     ("\\xi", "\u{03BE}"),      // ξ
-    ("\\pi", "\u{03C0}"),      // π
+    ("\\pi", "\u{03C0}"),      // π — numeric constant (lexer: Number(PI))
     ("\\rho", "\u{03C1}"),     // ρ
     ("\\sigma", "\u{03C3}"),   // σ
-    ("\\tau", "\u{03C4}"),     // τ
+    ("\\tau", "\u{03C4}"),     // τ — numeric constant (lexer: Number(TAU))
     ("\\upsilon", "\u{03C5}"), // υ
     ("\\phi", "\u{03C6}"),     // φ
     ("\\chi", "\u{03C7}"),     // χ
@@ -221,109 +229,25 @@ pub const LATEX_SYMBOLS: &[(&str, &str)] = &[
     ("\\Phi", "\u{03A6}"),    // Φ
     ("\\Psi", "\u{03A8}"),    // Ψ
     ("\\Omega", "\u{03A9}"),  // Ω
-    // Constants
-    ("\\euler", "\u{212F}"),      // ℯ
-    ("\\derivative", "\u{2146}"), // ⅆ (differential d) (Euler's number)
-    // Math operators
-    ("\\int", "\u{222B}"),     // ∫
-    ("\\sum", "\u{2211}"),     // ∑
-    ("\\prod", "\u{220F}"),    // ∏
-    ("\\partial", "\u{2202}"), // ∂
-    ("\\nabla", "\u{2207}"),   // ∇
-    ("\\sqrt", "\u{221A}"),    // √
-    ("\\infty", "\u{221E}"),   // ∞
-    ("\\pm", "\u{00B1}"),      // ±
-    ("\\mp", "\u{2213}"),      // ∓
-    ("\\times", "\u{00D7}"),   // ×
-    ("\\div", "\u{00F7}"),     // ÷
-    ("\\cdot", "\u{22C5}"),    // ⋅
-    ("\\circ", "\u{2218}"),    // ∘ (function composition)
-    ("\\oplus", "\u{2295}"),   // ⊕ (direct sum / XOR)
-    ("\\otimes", "\u{2297}"),  // ⊗ (tensor product)
-    ("\\odot", "\u{2299}"),    // ⊙ (circled dot)
-    ("\\cdots", "\u{22EF}"),   // ⋯ (midline ellipsis)
-    ("\\ldots", "\u{2026}"),   // … (horizontal ellipsis)
-    ("\\cross", "\u{2A2F}"),   // ⨯ (cross product)
-    // Arrows
-    ("\\to", "\u{2192}"),             // →
-    ("\\leftarrow", "\u{2190}"),      // ←
-    ("\\rightarrow", "\u{2192}"),     // →
-    ("\\Leftarrow", "\u{21D0}"),      // ⇐
-    ("\\Rightarrow", "\u{21D2}"),     // ⇒
-    ("\\leftrightarrow", "\u{2194}"), // ↔
-    ("\\Leftrightarrow", "\u{21D4}"), // ⇔
-    ("\\uparrow", "\u{2191}"),        // ↑
-    ("\\downarrow", "\u{2193}"),      // ↓
-    ("\\Uparrow", "\u{21D1}"),        // ⇑
-    ("\\Downarrow", "\u{21D3}"),      // ⇓
-    ("\\mapsto", "\u{21A6}"),         // ↦
-    ("\\implies", "\u{21D2}"),        // ⇒ (alias for \Rightarrow)
-    ("\\iff", "\u{21D4}"),            // ⇔ (if and only if)
-    ("\\hookrightarrow", "\u{21AA}"), // ↪
-    // Relations
-    ("\\leq", "\u{2264}"),      // ≤
-    ("\\le", "\u{2264}"),       // ≤ (alias)
-    ("\\geq", "\u{2265}"),      // ≥
-    ("\\ge", "\u{2265}"),       // ≥ (alias)
-    ("\\neq", "\u{2260}"),      // ≠
-    ("\\approx", "\u{2248}"),   // ≈
-    ("\\equiv", "\u{2261}"),    // ≡
-    ("\\sim", "\u{223C}"),      // ∼
-    ("\\simeq", "\u{2243}"),    // ≃
-    ("\\cong", "\u{2245}"),     // ≅
-    ("\\propto", "\u{221D}"),   // ∝
-    ("\\ll", "\u{226A}"),       // ≪ (much less than)
-    ("\\gg", "\u{226B}"),       // ≫ (much greater than)
-    ("\\prec", "\u{227A}"),     // ≺
-    ("\\succ", "\u{227B}"),     // ≻
-    ("\\perp", "\u{22A5}"),     // ⊥ (perpendicular)
-    ("\\parallel", "\u{2225}"), // ∥
-    // Set theory
-    ("\\in", "\u{2208}"),       // ∈
-    ("\\notin", "\u{2209}"),    // ∉
-    ("\\subset", "\u{2282}"),   // ⊂
-    ("\\supset", "\u{2283}"),   // ⊃
-    ("\\subseteq", "\u{2286}"), // ⊆
-    ("\\supseteq", "\u{2287}"), // ⊇
-    ("\\cup", "\u{222A}"),      // ∪ (union)
-    ("\\cap", "\u{2229}"),      // ∩ (intersection)
-    ("\\setminus", "\u{2216}"), // ∖ (set difference)
-    // Logic
-    ("\\forall", "\u{2200}"),   // ∀
-    ("\\exists", "\u{2203}"),   // ∃
-    ("\\nexists", "\u{2204}"),  // ∄
-    ("\\emptyset", "\u{2205}"), // ∅
-    ("\\neg", "\u{00AC}"),      // ¬
-    ("\\wedge", "\u{2227}"),    // ∧ (logical and)
-    ("\\vee", "\u{2228}"),      // ∨ (logical or)
-    ("\\bot", "\u{22A5}"),      // ⊥ (bottom / false)
-    ("\\top", "\u{22A4}"),      // ⊤ (top / true)
-    ("\\vdash", "\u{22A2}"),    // ⊢ (turnstile)
-    ("\\models", "\u{22A8}"),   // ⊨ (models)
-    // Brackets
-    ("\\lfloor", "\u{230A}"), // ⌊
-    ("\\rfloor", "\u{230B}"), // ⌋
-    ("\\lceil", "\u{2308}"),  // ⌈
-    ("\\rceil", "\u{2309}"),  // ⌉
-    ("\\langle", "\u{27E8}"), // ⟨
-    ("\\rangle", "\u{27E9}"), // ⟩
-    // Math constants & misc
-    ("\\hbar", "\u{210F}"),       // ℏ (reduced Planck)
-    ("\\ell", "\u{2113}"),        // ℓ (script l)
-    ("\\aleph", "\u{2135}"),      // ℵ
-    ("\\wp", "\u{2118}"),         // ℘ (Weierstrass p)
-    ("\\Re", "\u{211C}"),         // ℜ (real part)
-    ("\\Im", "\u{2111}"),         // ℑ (imaginary part)
-    ("\\prime", "\u{2032}"),      // ′
-    ("\\degree", "\u{00B0}"),     // °
-    ("\\angle", "\u{2220}"),      // ∠
-    ("\\triangle", "\u{25B3}"),   // △
-    ("\\therefore", "\u{2234}"),  // ∴
-    ("\\because", "\u{2235}"),    // ∵
-    ("\\star", "\u{22C6}"),       // ⋆
-    ("\\dagger", "\u{2020}"),     // †
-    ("\\ddagger", "\u{2021}"),    // ‡
-    ("\\complement", "\u{2201}"), // ∁
+    // Math constants — lexer maps to specific identifiers or numbers
+    ("\\euler", "\u{212F}"),      // ℯ (Number(E))
+    ("\\derivative", "\u{2146}"), // ⅆ (Identifier "derivative" → REDUCE `df`)
+    // CAS/math operators — explicit lexer cases in src/lang/lexer.rs
+    ("\\int", "\u{222B}"),     // ∫ (Identifier "integral" → REDUCE `int`)
+    ("\\sum", "\u{2211}"),     // ∑ (Identifier "sum")
+    ("\\prod", "\u{220F}"),    // ∏ (Identifier "prod")
+    ("\\partial", "\u{2202}"), // ∂ (Identifier "partial" → REDUCE `df`)
+    ("\\nabla", "\u{2207}"),   // ∇ (Identifier "nabla")
+    ("\\sqrt", "\u{221A}"),    // √ (Builtin "sqrt")
+    ("\\infty", "\u{221E}"),   // ∞ (Identifier "infinity")
+    ("\\times", "\u{00D7}"),   // × (Star — binary multiply)
+    ("\\div", "\u{00F7}"),     // ÷ (Slash — binary divide)
+    // Relations — explicit lexer cases (Lte/Gte/Neq)
+    ("\\leq", "\u{2264}"), // ≤
+    ("\\le", "\u{2264}"),  // ≤ (alias)
+    ("\\geq", "\u{2265}"), // ≥
+    ("\\ge", "\u{2265}"),  // ≥ (alias)
+    ("\\neq", "\u{2260}"), // ≠
 ];
 
 /// Build candidate list for LaTeX symbol completion.

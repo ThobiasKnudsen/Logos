@@ -1166,38 +1166,39 @@ fn latex_infinity_lexes_as_identifier() {
     }
 }
 
-// ── Documenting the gap ────────────────────────────────────────────────────
-// The LATEX_SYMBOLS table contains many entries whose Unicode value is class
-// "Sm" (Math Symbol), which is NOT `is_alphabetic`. The lexer has no explicit
-// case for these, so they fall through to "Unexpected character". The
-// autocomplete inserts them anyway. This test snapshots the current set of
-// broken substitutions so a future fix (extending the lexer, or trimming the
-// table) updates this list deliberately.
+// ── Coverage gate ──────────────────────────────────────────────────────────
+// Every entry in the autocomplete LATEX_SYMBOLS table must produce text the
+// lexer can tokenize. Inserting a codepoint the lexer rejects creates a
+// broken cell the moment the user types the trigger — `\to` → `→` and the
+// next keystroke produces "Unexpected character". This test fails if anyone
+// adds a substitution whose Unicode value isn't lexable. Fix is either:
+//   (a) trim the entry from LATEX_SYMBOLS, or
+//   (b) extend the lexer to accept the codepoint (preferred when a real
+//       semantic mapping exists, e.g. `≤` → Lte).
 
 #[test]
-fn latex_substitutions_without_lexer_support_fail_to_lex() {
-    // Each codepoint is what autocomplete inserts. Listed here for visibility;
-    // if you add lexer support for one, remove it from this list.
-    let unlexable = [        '→', '←', '⇒', '⇐', '↔', '⇔', '↑', '↓', '⇑', '⇓', '↦', '↪',
-        '≈', '≡', '∼', '≃', '≅', '∝', '≪', '≫', '≺', '≻', '⊥', '∥',
-        '∈', '∉', '⊂', '⊃', '⊆', '⊇', '∪', '∩', '∖',
-        '∀', '∃', '∄', '∅', '¬', '∧', '∨',
-        '⋅', '∘', '⊕', '⊗', '⊙', '⋯', '…', '⨯',
-        '±', '∓',
-    ];
-    for ch in unlexable {
-        let mut nb = null_notebook();
-        let i = add_and_play(&mut nb, &format!("print({})", ch));
-        let msgs = diag_messages(&nb, i);
-        assert!(
-            msgs.iter().any(|m| m.contains("Unexpected character")),
-            "{} (U+{:04X}) was expected to fail with 'Unexpected character' \
-             but produced no such diagnostic; \
-             either the lexer was extended (good — remove from list) \
-             or it's failing differently. Diagnostics: {:?}",
-            ch,
-            ch as u32,
-            msgs,
-        );
+fn every_latex_symbol_substitution_lexes() {
+    use crate::editor::autocomplete::LATEX_SYMBOLS;
+    use crate::lang::lexer::Lexer;
+
+    let mut broken: Vec<String> = Vec::new();
+    for &(cmd, sym) in LATEX_SYMBOLS {
+        // Lex the bare substitution. Identifier-class codepoints would be
+        // accepted as a token; operators/relations have explicit lexer cases.
+        // Anything else triggers "Unexpected character".
+        let mut lex = Lexer::new(sym);
+        if let Err(e) = lex.tokenize() {
+            broken.push(format!(
+                "{cmd} → {sym:?} (U+{:04X}): {e}",
+                sym.chars().next().map(|c| c as u32).unwrap_or(0),
+            ));
+        }
     }
+    assert!(
+        broken.is_empty(),
+        "LATEX_SYMBOLS contains {} substitution(s) the lexer rejects. \
+         Either remove from the table or extend the lexer.\n  {}",
+        broken.len(),
+        broken.join("\n  "),
+    );
 }
