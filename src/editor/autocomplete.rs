@@ -233,7 +233,7 @@ pub const LATEX_SYMBOLS: &[(&str, &str)] = &[
     ("\\euler", "\u{212F}"),      // ℯ (Number(E))
     ("\\derivative", "\u{2146}"), // ⅆ (Identifier "derivative" → REDUCE `df`)
     // CAS/math operators — explicit lexer cases in src/lang/lexer.rs
-    ("\\int", "\u{222B}"),     // ∫ (Identifier "integral" → REDUCE `int`)
+    ("\\integral", "\u{222B}"), // ∫ (Identifier "integral" → REDUCE `int`)
     ("\\sum", "\u{2211}"),     // ∑ (Identifier "sum")
     ("\\prod", "\u{220F}"),    // ∏ (Identifier "prod")
     ("\\partial", "\u{2202}"), // ∂ (Identifier "partial" → REDUCE `df`)
@@ -249,6 +249,40 @@ pub const LATEX_SYMBOLS: &[(&str, &str)] = &[
     ("\\ge", "\u{2265}"),  // ≥ (alias)
     ("\\neq", "\u{2260}"), // ≠
 ];
+
+/// If the user just typed a non-identifier delimiter character and the
+/// `\command` immediately before it matches a `LATEX_SYMBOLS` entry
+/// exactly, return the byte range to replace and the Unicode substitution.
+/// Returns `None` if no auto-substitution should fire.
+///
+/// Caller (event handler) replaces `text[range_start..cursor]` — i.e. the
+/// command *plus the trigger character* — with `symbol + trigger`, leaving
+/// the cursor after the trigger. Bundling both in one replace keeps the
+/// cursor position correct without separate bookkeeping.
+///
+/// Trigger characters are everything that is neither alphanumeric, `_`, nor
+/// `\`: space, paren, comma, operator chars, newline, etc.
+pub fn latex_auto_substitute(
+    text: &str,
+    cursor: usize,
+) -> Option<(usize, &'static str)> {
+    if cursor == 0 || cursor > text.len() {
+        return None;
+    }
+    let trigger = text[..cursor].chars().next_back()?;
+    if trigger.is_alphanumeric() || trigger == '_' || trigger == '\\' {
+        return None;
+    }
+    let before_trigger = cursor - trigger.len_utf8();
+    let (prefix, prefix_start) = prefix_at_cursor(text, before_trigger)?;
+    if !prefix.starts_with('\\') || prefix.len() < 2 {
+        return None;
+    }
+    LATEX_SYMBOLS
+        .iter()
+        .find(|&&(cmd, _)| cmd == prefix)
+        .map(|&(_, sym)| (prefix_start, sym))
+}
 
 /// Build candidate list for LaTeX symbol completion.
 pub fn symbol_candidates() -> Vec<Candidate> {
@@ -450,7 +484,7 @@ mod tests {
             .any(|c| c.label == "\u{03C0}" && c.filter_key.as_deref() == Some("\\pi")));
         assert!(syms
             .iter()
-            .any(|c| c.label == "\u{222B}" && c.filter_key.as_deref() == Some("\\int")));
+            .any(|c| c.label == "\u{222B}" && c.filter_key.as_deref() == Some("\\integral")));
     }
 
     #[test]
@@ -461,6 +495,88 @@ mod tests {
         assert!(state.active);
         assert!(state.candidates.iter().any(|c| c.label == "\u{03C0}")); // π via \pi
         assert!(!state.candidates.iter().any(|c| c.label == "\u{03B1}")); // α (\alpha) should not match
+    }
+
+    // ── latex_auto_substitute ────────────────────────────────────────────
+    //
+    // Pure-function gate: given the buffer state right after the user typed
+    // a character, decide whether a `\command<delimiter>` just completed and
+    // what to substitute. Caller (event handler) does the actual edit.
+
+    fn assert_substitute(text: &str, want_prefix_start: usize, want_symbol: &str) {
+        let cursor = text.len();
+        let got = latex_auto_substitute(text, cursor);
+        assert_eq!(
+            got,
+            Some((want_prefix_start, want_symbol)),
+            "expected substitution at {} → {:?} for {:?}; got {:?}",
+            want_prefix_start, want_symbol, text, got,
+        );
+    }
+
+    fn assert_no_substitute(text: &str) {
+        let cursor = text.len();
+        let got = latex_auto_substitute(text, cursor);
+        assert!(
+            got.is_none(),
+            "expected no substitution for {:?}; got {:?}",
+            text, got,
+        );
+    }
+
+    #[test]
+    fn auto_substitute_fires_on_space_after_complete_command() {
+        // The user-reported case: `\integral ` (with the renamed command).
+        assert_substitute("\\integral ", 0, "\u{222B}"); // ∫
+    }
+
+    #[test]
+    fn auto_substitute_fires_on_paren_after_complete_command() {
+        // `\integral(...)` — the trigger is `(`.
+        assert_substitute("\\integral(", 0, "\u{222B}");
+    }
+
+    #[test]
+    fn auto_substitute_fires_mid_text() {
+        // Substitution must work in the middle of a line, not just at start.
+        assert_substitute("x + \\pi ", 4, "\u{03C0}"); // π
+    }
+
+    #[test]
+    fn auto_substitute_does_not_fire_on_letter() {
+        // Letter continues the command; the user is still typing.
+        assert_no_substitute("\\integ");
+        assert_no_substitute("\\integra");
+    }
+
+    #[test]
+    fn auto_substitute_does_not_fire_without_backslash() {
+        // `pi ` (no backslash) is just an identifier followed by space.
+        assert_no_substitute("pi ");
+    }
+
+    #[test]
+    fn auto_substitute_does_not_fire_on_bare_backslash() {
+        // Single `\` followed by space — not a real command.
+        assert_no_substitute("\\ ");
+    }
+
+    #[test]
+    fn auto_substitute_does_not_fire_for_unknown_command() {
+        // `\nope` isn't in LATEX_SYMBOLS, so the trigger should not match.
+        assert_no_substitute("\\nope ");
+    }
+
+    #[test]
+    fn auto_substitute_le_alias_still_fires() {
+        // `\le` is an alias for ≤. After my rename of `\int` → `\integral`,
+        // `\le` and `\leq` are the only remaining prefix collision: typing
+        // `\le<space>` substitutes to ≤. Users who want `\leq` must type it
+        // in one go (the next char would still need to be the q, then a
+        // delimiter — the system handles `\leq<space>` correctly because
+        // `\le<q>` does not auto-substitute, q is alphanumeric).
+        assert_substitute("\\le ", 0, "\u{2264}"); // ≤
+        assert_substitute("\\leq ", 0, "\u{2264}"); // ≤
     }
 
     #[test]

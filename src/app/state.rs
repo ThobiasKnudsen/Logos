@@ -601,6 +601,39 @@ impl AppState {
         self.sync_active_tab();
     }
 
+    /// If the user just typed a non-identifier delimiter character and the
+    /// LaTeX-style prefix immediately before it exactly matches a
+    /// `LATEX_SYMBOLS` entry, replace that prefix with its Unicode
+    /// substitution — so typing `\integral(` directly produces `∫(`. The
+    /// delimiter character is preserved at the same logical cursor
+    /// position. The actual matching logic lives in
+    /// `autocomplete::latex_auto_substitute` so it's unit-testable as a
+    /// pure function.
+    pub(super) fn try_auto_complete_latex_command(&mut self) -> bool {
+        let cell = self.session.active_tab().active_cell();
+        let text = cell.buffer.text();
+        let cursor = cell.buffer.cursor_byte_offset();
+        let Some((prefix_start, symbol)) =
+            autocomplete::latex_auto_substitute(text, cursor)
+        else {
+            return false;
+        };
+        // The trigger character is the last char before the cursor —
+        // `latex_auto_substitute` already verified it's a single delimiter.
+        // We keep it in the replacement so the cursor lands right after it.
+        let trigger = text[..cursor].chars().next_back().unwrap();
+        let end_of_prefix = cursor - trigger.len_utf8();
+        let trigger_str = &text[end_of_prefix..cursor];
+        let replacement = format!("{symbol}{trigger_str}");
+        self.session
+            .active_tab_mut()
+            .active_cell_mut()
+            .buffer
+            .replace_range(prefix_start, cursor, &replacement);
+        self.session.active_tab_mut().mark_modified();
+        true
+    }
+
     pub(super) fn handle_menu_action(
         &mut self,
         event_loop: &ActiveEventLoop,

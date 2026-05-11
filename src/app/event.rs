@@ -891,14 +891,23 @@ impl ApplicationHandler for App {
                         }
                         if let Some(ref text) = key_event.text {
                             for c in text.chars() {
-                                if !c.is_control() {
-                                    state
-                                        .session
-                                        .active_tab_mut()
-                                        .active_cell_mut()
-                                        .buffer
-                                        .insert(c);
+                                if c.is_control() {
+                                    continue;
                                 }
+                                state
+                                    .session
+                                    .active_tab_mut()
+                                    .active_cell_mut()
+                                    .buffer
+                                    .insert(c);
+                                // After each char, see if the user just
+                                // completed a `\command` followed by a
+                                // non-identifier delimiter — if so, convert
+                                // the command to its Unicode symbol in
+                                // place. Means `\integral(` produces `∫(`
+                                // without ever showing or accepting the
+                                // autocomplete popup.
+                                state.try_auto_complete_latex_command();
                             }
                             true
                         } else {
