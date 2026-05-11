@@ -21,8 +21,8 @@ mod render_area;
 mod state;
 
 pub(crate) use menus::{
-    dynamic_menu_count, dynamic_menu_label, menu_items, resolve_example_path, MenuItemDef,
-    FONTS_MENU_INDEX, HELP_MENU_INDEX, MENU_NAMES, THEME_MENU_INDEX,
+    dynamic_menu_count, dynamic_menu_label, menu_items, MenuItemDef, FONTS_MENU_INDEX,
+    HELP_MENU_INDEX, MENU_NAMES, THEME_MENU_INDEX,
 };
 use render_area::RenderAreaState;
 

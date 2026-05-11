@@ -12,7 +12,7 @@ use crate::ui::theme::{self, font_family, fonts};
 pub(super) const FEEDBACK_URL: &str = "https://example.com";
 
 use super::cas::format_shader_error;
-use super::menus::{active_font_index, active_theme_index, resolve_example_path, EXAMPLE_FILENAMES};
+use super::menus::{active_font_index, active_theme_index, example_path};
 use super::{FONTS_MENU_INDEX, HELP_MENU_INDEX, THEME_MENU_INDEX};
 use super::render_area::{MouseZone, RenderAreaState};
 use super::{
@@ -665,37 +665,25 @@ impl AppState {
                 self.do_zoom(|_| fonts::reset_zoom());
             }
             (3, i) => {
-                if let Some(&filename) = EXAMPLE_FILENAMES.get(i) {
-                    let path = match resolve_example_path(filename) {
-                        Some(p) => p,
-                        None => {
-                            log::error!("Example {filename} not found alongside binary");
-                            file_dialog::show_error(
-                                "Example missing",
-                                &format!(
-                                    "Could not find {} next to the Logos binary or in the working directory.",
-                                    filename
-                                ),
-                            );
-                            return;
-                        }
-                    };
-                    let old = self.session.active_index;
-                    let old_id = self.session.tabs[old].tab_id;
-                    self.renderer.stash_tab_shaders(old_id);
-                    match self.session.open_file(&path) {
-                        Ok(new_idx) => self.switch_tab_axis(old, new_idx),
-                        Err(e) => {
-                            log::error!("Failed to load example {}: {}", path.display(), e);
-                            file_dialog::show_error(
-                                "Cannot load example",
-                                &format!("{}\n\n{}", path.display(), e),
-                            );
-                            return;
-                        }
+                let Some(path) = example_path(i) else {
+                    log::error!("Example index {i} out of range");
+                    return;
+                };
+                let old = self.session.active_index;
+                let old_id = self.session.tabs[old].tab_id;
+                self.renderer.stash_tab_shaders(old_id);
+                match self.session.open_file(&path) {
+                    Ok(new_idx) => self.switch_tab_axis(old, new_idx),
+                    Err(e) => {
+                        log::error!("Failed to load example {}: {}", path.display(), e);
+                        file_dialog::show_error(
+                            "Cannot load example",
+                            &format!("{}\n\n{}", path.display(), e),
+                        );
+                        return;
                     }
-                    self.sync_active_tab();
                 }
+                self.sync_active_tab();
             }
             (m, i) if m == THEME_MENU_INDEX => {
                 self.select_theme(i);

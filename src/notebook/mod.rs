@@ -178,8 +178,22 @@ fn collect_top_bindings(ir: &Ir, before_idx: Option<usize>) -> Vec<(String, Ir)>
     let limit = before_idx.unwrap_or(stmts.len()).min(stmts.len());
     let mut bindings = Vec::new();
     for stmt in stmts.iter().take(limit) {
-        if let Ir::Binding { name, value, .. } = stmt {
-            bindings.push((name.clone(), value.as_ref().clone()));
+        match stmt {
+            // Plain `name := value` — `name` resolves to `value` everywhere.
+            Ir::Binding { name, value, .. } => {
+                bindings.push((name.clone(), value.as_ref().clone()));
+            }
+            // `f(x) := body` — parses as `FunctionDef`, not `Binding`. The
+            // entire FunctionDef is the binding for `f`; `substitute_idents`
+            // looks it up by name on `Apply { callee: User("f"), … }` and
+            // beta-reduces the call. Without this entry, CAS subtrees that
+            // reference user functions go to REDUCE with the call still
+            // present (`int(f(x), x)`) — REDUCE then asks the user to
+            // declare `f` as an operator.
+            Ir::FunctionDef { name, .. } => {
+                bindings.push((name.clone(), stmt.clone()));
+            }
+            _ => {}
         }
     }
     bindings
@@ -547,6 +561,18 @@ impl Notebook {
         }
 
         if !own_plots.is_empty() {
+            // If the cell contains a CAS subtree (e.g. `F(x) := ∫(...)` whose
+            // body is referenced by `plot(y = F(x))`), run the iterative-CAS
+            // path before WGSL gen. Otherwise the unresolved `integral(...)` /
+            // `df(...)` leaks into the shader and naga rejects it. When all
+            // CAS resolves, `compile_after_simplify` re-routes through
+            // `handle_plots`.
+            if let Ok(cell_ir) = self.cells[idx].cached_ir() {
+                if let Some(cas_path) = translate::find_cas_path(&cell_ir) {
+                    self.submit_cas_at(idx, &cell_ir, cas_path);
+                    return;
+                }
+            }
             self.handle_plots(idx, &own_plots, &combined, &snapshot);
             return;
         }
@@ -557,6 +583,17 @@ impl Notebook {
 
         // No print/plot. Try the interpreter for parallel/array cells.
         if lang::needs_interpreter(&combined) {
+            // Same shape as the plot branch: if there's a CAS subtree the
+            // interpreter can't lower (e.g. `F(x) := ∫(...)` referenced by an
+            // array/parallel cell), run the iterative-CAS path first. Once
+            // it resolves, `compile_after_simplify` re-enters this branch
+            // through its own dispatch.
+            if let Ok(cell_ir) = self.cells[idx].cached_ir() {
+                if let Some(cas_path) = translate::find_cas_path(&cell_ir) {
+                    self.submit_cas_at(idx, &cell_ir, cas_path);
+                    return;
+                }
+            }
             match interpreter::eval(&combined, self.gpu.as_ref()) {
                 Ok(val) => {
                     self.cells[idx].outcome.message =
@@ -882,6 +919,25 @@ impl Notebook {
         if !own_plots.is_empty() {
             let snapshot = self.cells[idx].buffer.text().to_string();
             self.handle_plots(idx, &own_plots, &combined, &snapshot);
+            return;
+        }
+
+        // If the original cell wanted the interpreter (parallel/array/index),
+        // resume there now that CAS is resolved. Without this, an array cell
+        // referencing a function with a CAS body would route through WGSL gen
+        // after simplification instead of evaluating.
+        if lang::needs_interpreter(&combined) {
+            let snapshot = self.cells[idx].buffer.text().to_string();
+            match interpreter::eval(&combined, self.gpu.as_ref()) {
+                Ok(val) => {
+                    self.cells[idx].outcome.message =
+                        Some(CellMessage::Computed(format!("{}", val)));
+                    self.cells[idx].outcome.program_ir = Some(combined);
+                    self.cells[idx].state = CellState::Playing;
+                    self.cells[idx].last_played_text = Some(snapshot);
+                }
+                Err(e) => self.set_runtime_error(idx, e, &snapshot),
+            }
             return;
         }
 

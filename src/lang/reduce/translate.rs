@@ -679,4 +679,64 @@ mod tests {
         let ir = parse_ir("pdf + adf");
         assert_eq!(detect_unevaluated_cas_ir(&ir), None);
     }
+
+    // ── User-function inlining before REDUCE submission ──────────
+    //
+    // When the user writes
+    //     e := 2.718
+    //     f(x) := x*e^(x²)
+    //     F(x) := ∫(f(x), x)
+    //     plot(y = F(x))
+    // the notebook's `submit_cas_at` calls `substitute_idents` on the
+    // CAS subtree with `e` and `f` in scope, then ships the result to
+    // REDUCE. Real REDUCE rejects an `f(x)` reference with
+    //     "Declare f operator? (Y or N)"
+    // because `substitute_idents` (src/lang/ir.rs:617) only replaces
+    // `Ir::Identifier` nodes — it does NOT beta-reduce
+    // `Ir::Apply { callee: User("f"), … }` against `f`'s FunctionDef.
+    //
+    // This test pins the expected post-substitution shape: the
+    // submitted REDUCE text must not contain a bare `f(` call. It
+    // currently FAILS — see issue #16 for the fix (either beta-reduce
+    // user-function calls during substitution, or have the translator
+    // emit `operator f, F;` declarations in the context).
+
+    #[test]
+    fn user_function_call_is_inlined_before_reduce_submission() {
+        use crate::lang::ir::Ir;
+
+        // Build the CAS subtree and the bindings the way `submit_cas_at`
+        // does — without going through the notebook plumbing.
+        let cas_subtree = parse_ir("int(f(x), x)");
+        let f_def = Ir::FunctionDef {
+            name: "f".to_string(),
+            params: vec!["x".to_string()],
+            body: Box::new(parse_ir("x*e^(x^2)")),
+            span: (0, 0),
+        };
+        let bindings = vec![
+            (
+                "e".to_string(),
+                Ir::Number {
+                    value: 2.718,
+                    span: (0, 0),
+                },
+            ),
+            ("f".to_string(), f_def),
+        ];
+
+        let submitted_ir = cas_subtree.substitute_idents(&bindings);
+        let submitted_text = submitted_ir.to_source();
+        let reduce_text = to_reduce(&submitted_text);
+
+        // What REDUCE actually sees:
+        //   bug-present: "int(f(x), x)"  → REDUCE asks to declare `f` an operator
+        //   bug-fixed:   "int(x*2.718**(x**2), x)"  → REDUCE integrates.
+        assert!(
+            !reduce_text.contains("f("),
+            "user-defined function `f` must be inlined before REDUCE submission;\n\
+             got submitted text: {}",
+            reduce_text,
+        );
+    }
 }

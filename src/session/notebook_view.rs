@@ -333,26 +333,38 @@ mod tests {
     #[test]
     fn shipped_examples_open_through_from_file() {
         // Hit the same code path the Examples menu uses — `from_file` on
-        // the actual files in examples/ — and verify each ends up with at
-        // least one cell of non-empty content.
-        for filename in &[
-            "gradient.logos",
-            "ripple.logos",
-            "mandlebrot.logos",
-            "warp.logos",
-            "monte_carlo.logos",
-            "waves.logos",
-        ] {
-            let path = crate::app::resolve_example_path(filename)
-                .unwrap_or_else(|| panic!("could not resolve example {filename}"));
+        // every `.logos` file in `examples/` — and verify each ends up with
+        // at least one cell of non-empty content. Iterates the directory so
+        // newly-added examples are covered automatically.
+        let examples_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let entries = std::fs::read_dir(&examples_dir)
+            .unwrap_or_else(|e| panic!("read_dir({}): {}", examples_dir.display(), e));
+        let mut found = 0;
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension().is_none_or(|x| x != "logos") {
+                continue;
+            }
+            found += 1;
             let view = NotebookView::from_file(&path, None)
                 .unwrap_or_else(|e| panic!("from_file({}) failed: {}", path.display(), e));
-            assert!(view.notebook.len() >= 1, "{filename}: expected at least one cell");
+            assert!(
+                view.notebook.len() >= 1,
+                "{}: expected at least one cell",
+                path.display(),
+            );
             assert!(
                 !view.cell(0).buffer.text().is_empty(),
-                "{filename}: cell 0 content is empty"
+                "{}: cell 0 content is empty",
+                path.display(),
             );
         }
+        assert!(
+            found > 0,
+            "no `.logos` files found in {}",
+            examples_dir.display(),
+        );
     }
 
     #[test]

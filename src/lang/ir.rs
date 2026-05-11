@@ -619,17 +619,63 @@ fn substitute_idents_inner(node: &Ir, bindings: &[(String, Ir)]) -> Ir {
         Ir::Identifier { name, .. } => {
             for (b_name, b_value) in bindings {
                 if b_name == name {
+                    // Function bindings (`f(x) := …` → FunctionDef in
+                    // `collect_top_bindings`) are expanded on `Apply`, not
+                    // on bare identifier references. Skip them here so
+                    // `f` (as a value) doesn't get rewritten to its
+                    // FunctionDef.
+                    if matches!(b_value, Ir::FunctionDef { .. }) {
+                        continue;
+                    }
                     return b_value.clone();
                 }
             }
             node.clone()
         }
         Ir::Number { .. } | Ir::BoolLit { .. } => node.clone(),
-        Ir::Apply { callee, args, span } => Ir::Apply {
-            callee: callee.clone(),
-            args: args.iter().map(|a| substitute_idents_inner(a, bindings)).collect(),
-            span: *span,
-        },
+        Ir::Apply { callee, args, span } => {
+            // First substitute identifiers inside each argument expression
+            // (in the *call-site* scope — these are not yet inside the
+            // function body).
+            let new_args: Vec<Ir> = args
+                .iter()
+                .map(|a| substitute_idents_inner(a, bindings))
+                .collect();
+            // If the callee names a user-defined function we can see, inline
+            // its body with parameters bound to the (already-substituted)
+            // arguments. Required so CAS subtrees like `int(f(x), x)` reach
+            // REDUCE as a closed-form expression instead of `int(f(x), x)`
+            // with `f` left undeclared. Self-recursion is broken by skipping
+            // the function's own name in the recursive binding list; mutual
+            // recursion is not handled and would infinite-loop here (today
+            // no Logos surface lets a user write it).
+            if let Callee::User(name) = callee {
+                if let Some(binding_value) =
+                    bindings.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+                {
+                    if let Ir::FunctionDef { params, body, .. } = binding_value {
+                        if params.len() == new_args.len() {
+                            let mut inlined: Vec<(String, Ir)> = params
+                                .iter()
+                                .zip(new_args.iter())
+                                .map(|(p, a)| (p.clone(), a.clone()))
+                                .collect();
+                            for (n, v) in bindings {
+                                if n != name && !params.contains(n) {
+                                    inlined.push((n.clone(), v.clone()));
+                                }
+                            }
+                            return substitute_idents_inner(body, &inlined);
+                        }
+                    }
+                }
+            }
+            Ir::Apply {
+                callee: callee.clone(),
+                args: new_args,
+                span: *span,
+            }
+        }
         Ir::Tuple { items, span } => Ir::Tuple {
             items: items.iter().map(|a| substitute_idents_inner(a, bindings)).collect(),
             span: *span,

@@ -8,7 +8,12 @@ pub(crate) struct MenuItemDef {
 pub(crate) const MENU_NAMES: &[&str] =
     &["File", "Edit", "View", "Examples", "Theme", "Fonts", "Help"];
 
-/// Index of the Theme menu in `MENU_NAMES` — the first dynamic menu.
+/// Index of the Examples menu in `MENU_NAMES` — populated dynamically from
+/// the runtime examples directory (see `examples_menu_count` /
+/// `examples_menu_label`). New `.logos` files dropped into `examples/`
+/// appear automatically; no rebuild needed.
+pub(crate) const EXAMPLES_MENU_INDEX: usize = 3;
+/// Index of the Theme menu in `MENU_NAMES`.
 pub(crate) const THEME_MENU_INDEX: usize = 4;
 /// Index of the Fonts menu in `MENU_NAMES`.
 pub(crate) const FONTS_MENU_INDEX: usize = 5;
@@ -76,33 +81,6 @@ const MENU_VIEW_ITEMS: &[MenuItemDef] = &[
     },
 ];
 
-pub(super) const MENU_EXAMPLES_ITEMS: &[MenuItemDef] = &[
-    MenuItemDef {
-        label: "Gradient",
-        shortcut: "",
-    },
-    MenuItemDef {
-        label: "Ripple",
-        shortcut: "",
-    },
-    MenuItemDef {
-        label: "Mandelbrot",
-        shortcut: "",
-    },
-    MenuItemDef {
-        label: "Warp",
-        shortcut: "",
-    },
-    MenuItemDef {
-        label: "Monte Carlo",
-        shortcut: "",
-    },
-    MenuItemDef {
-        label: "Waves",
-        shortcut: "",
-    },
-];
-
 const MENU_HELP_ITEMS: &[MenuItemDef] = &[
     MenuItemDef {
         label: "Copy Diagnostics",
@@ -110,29 +88,26 @@ const MENU_HELP_ITEMS: &[MenuItemDef] = &[
     },
 ];
 
-/// File names of each shipped example, parallel to `MENU_EXAMPLES_ITEMS`.
-/// Resolved to a real path at click-time by `resolve_example_path`, which
-/// looks for an `examples/` folder deployed next to the binary (and falls
-/// back to a few dev-tree locations so `cargo run` still works).
-pub(super) const EXAMPLE_FILENAMES: &[&str] = &[
-    "gradient.logos",
-    "ripple.logos",
-    "mandlebrot.logos",
-    "warp.logos",
-    "monte_carlo.logos",
-    "waves.logos",
-];
+/// One discovered example file, paired with its menu label and absolute path.
+/// Built once at startup by walking the same root candidates as
+/// `examples_dir()`; new `.logos` files appear only after restart.
+struct ExampleEntry {
+    label: String,
+    path: std::path::PathBuf,
+}
 
-/// Resolve an example file name to an absolute path. The expected production
-/// layout is `<exe_dir>/examples/<name>`; for `cargo run` the binary lives at
-/// `target/<profile>/logos`, so we also try walking up to the repo root and
-/// the current working directory.
-pub(crate) fn resolve_example_path(filename: &str) -> Option<std::path::PathBuf> {
+static EXAMPLES_CACHE: std::sync::OnceLock<Vec<ExampleEntry>> =
+    std::sync::OnceLock::new();
+
+/// Candidate `examples/` directories, in priority order. Production deploys
+/// place the folder next to the binary; for `cargo run` the binary lives at
+/// `target/<profile>/logos`, so the repo root (two parents up) is also tried;
+/// finally we fall back to the current working directory.
+fn examples_dir_candidates() -> Vec<std::path::PathBuf> {
     let mut roots: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             roots.push(dir.to_path_buf());
-            // `target/<profile>/logos` → repo root is two parents up.
             if let Some(p) = dir.parent().and_then(|p| p.parent()) {
                 roots.push(p.to_path_buf());
             }
@@ -141,13 +116,73 @@ pub(crate) fn resolve_example_path(filename: &str) -> Option<std::path::PathBuf>
     if let Ok(cwd) = std::env::current_dir() {
         roots.push(cwd);
     }
-    for root in roots {
-        let candidate = root.join("examples").join(filename);
-        if candidate.is_file() {
-            return Some(candidate);
+    roots.into_iter().map(|r| r.join("examples")).collect()
+}
+
+/// "monte_carlo" → "Monte Carlo"; "gradient" → "Gradient". Splits on `_` and
+/// title-cases each word so the menu reads naturally. Underscores are the
+/// expected naming convention for multi-word example files.
+fn stem_to_label(stem: &str) -> String {
+    stem.split('_')
+        .filter(|s| !s.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn discover_examples() -> Vec<ExampleEntry> {
+    for dir in examples_dir_candidates() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut items: Vec<ExampleEntry> = entries
+            .filter_map(Result::ok)
+            .filter(|e| {
+                e.file_type().map(|t| t.is_file()).unwrap_or(false)
+                    && e.path().extension().is_some_and(|x| x == "logos")
+            })
+            .filter_map(|e| {
+                let path = e.path();
+                let stem = path.file_stem()?.to_string_lossy().to_string();
+                Some(ExampleEntry {
+                    label: stem_to_label(&stem),
+                    path,
+                })
+            })
+            .collect();
+        if !items.is_empty() {
+            items.sort_by(|a, b| a.label.cmp(&b.label));
+            return items;
         }
     }
-    None
+    Vec::new()
+}
+
+fn examples_cache() -> &'static [ExampleEntry] {
+    EXAMPLES_CACHE.get_or_init(discover_examples).as_slice()
+}
+
+pub(crate) fn examples_menu_count() -> usize {
+    examples_cache().len()
+}
+
+pub(crate) fn examples_menu_label(idx: usize) -> String {
+    examples_cache()
+        .get(idx)
+        .map(|e| e.label.clone())
+        .unwrap_or_default()
+}
+
+/// Absolute path to the example file at `idx`, ready to load through the
+/// session's `open_file`. `None` if the index is out of range.
+pub(crate) fn example_path(idx: usize) -> Option<std::path::PathBuf> {
+    examples_cache().get(idx).map(|e| e.path.clone())
 }
 
 /// Dynamic theme menu items built from themes.json at runtime.
@@ -174,17 +209,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_menu_example_resolves_to_a_real_file() {
-        for &filename in EXAMPLE_FILENAMES {
-            let resolved = resolve_example_path(filename)
-                .unwrap_or_else(|| panic!("could not resolve {filename}"));
+    fn examples_directory_is_discovered_and_nonempty_in_dev_tree() {
+        // Sanity: running from a checkout, the `examples/` folder should be
+        // discovered. Production may legitimately ship without it.
+        let entries = examples_cache();
+        assert!(
+            !entries.is_empty(),
+            "no .logos files found in any `examples/` candidate; \
+             checked: {:?}",
+            examples_dir_candidates(),
+        );
+        for entry in entries {
             assert!(
-                resolved.is_file(),
-                "{filename} resolved to {} which is not a file",
-                resolved.display()
+                entry.path.is_file(),
+                "discovered entry {:?} is not a real file",
+                entry.path,
             );
         }
-        assert_eq!(EXAMPLE_FILENAMES.len(), MENU_EXAMPLES_ITEMS.len());
+    }
+
+    #[test]
+    fn stem_to_label_title_cases_snake_case() {
+        assert_eq!(stem_to_label("gradient"), "Gradient");
+        assert_eq!(stem_to_label("monte_carlo"), "Monte Carlo");
+        assert_eq!(stem_to_label("a_b_c"), "A B C");
+        assert_eq!(stem_to_label(""), "");
     }
 }
 
@@ -193,8 +242,10 @@ pub(crate) fn menu_items(index: usize) -> &'static [MenuItemDef] {
         0 => MENU_FILE_ITEMS,
         1 => MENU_EDIT_ITEMS,
         2 => MENU_VIEW_ITEMS,
-        3 => MENU_EXAMPLES_ITEMS,
         i if i == HELP_MENU_INDEX => MENU_HELP_ITEMS,
+        // Examples is dynamic — see `examples_menu_count` /
+        // `examples_menu_label`. `menu_items` for it returns &[] so the
+        // renderer takes the dynamic branch in `dynamic_menu_count`.
         _ => &[],
     }
 }
@@ -226,10 +277,11 @@ pub(super) fn active_font_index() -> usize {
     font_family::active_index()
 }
 
-/// Number of items in a dynamic menu (Theme/Fonts) — used by the renderer.
-/// Returns 0 for non-dynamic menus.
+/// Number of items in a dynamic menu (Examples/Theme/Fonts) — used by the
+/// renderer. Returns `None` for non-dynamic menus.
 pub(crate) fn dynamic_menu_count(menu_index: usize) -> Option<usize> {
     match menu_index {
+        EXAMPLES_MENU_INDEX => Some(examples_menu_count()),
         THEME_MENU_INDEX => Some(theme_menu_count()),
         FONTS_MENU_INDEX => Some(font_menu_count()),
         _ => None,
@@ -239,6 +291,7 @@ pub(crate) fn dynamic_menu_count(menu_index: usize) -> Option<usize> {
 /// Label for a dynamic-menu item. Caller must ensure `menu_index` is dynamic.
 pub(crate) fn dynamic_menu_label(menu_index: usize, item_index: usize) -> String {
     match menu_index {
+        EXAMPLES_MENU_INDEX => examples_menu_label(item_index),
         THEME_MENU_INDEX => theme_menu_label(item_index),
         FONTS_MENU_INDEX => font_menu_label(item_index),
         _ => String::new(),

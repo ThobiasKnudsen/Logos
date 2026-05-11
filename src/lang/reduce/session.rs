@@ -872,6 +872,90 @@ mod tests {
             assert!(r.contains("log"), "int(1/x,x): {}", r);
         }
 
+        // ── Integration: user-facing surface ────────────────────
+        //
+        // These mirror what the notebook's `submit_cas_at` actually ships
+        // to REDUCE for typical user code. Specifically, the test case from
+        //   e := 2.718
+        //   f(x) := x*e^(x²)
+        //   F(x) := ∫(f(x), x)
+        //   plot(y = F(x))
+        // After `substitute_idents` beta-reduces `f(x)` and substitutes `e`,
+        // the submitted text becomes `int(x*2.718**(x**2), x)`. This used
+        // to fail with "Declare f operator?" when `f` was not inlined; now
+        // REDUCE produces a closed-form expression in `x`.
+
+        // Simple power: int(x, x) — must contain x^2 (the antiderivative).
+        {
+            let r = session.simplify("int(x, x)").expect("int(x, x) failed");
+            assert!(
+                r.contains("x^2"),
+                "int(x, x): expected x^2 term, got: {}",
+                r,
+            );
+        }
+
+        // Linear-times-Gaussian-shape: int(x*exp(x^2), x) — closed-form
+        // antiderivative is (1/2)*exp(x^2). REDUCE may print this as
+        // `e^(x^2)/2`, `exp(x^2)/2`, etc.; we check the structural pieces.
+        {
+            let r = session
+                .simplify("int(x*exp(x**2), x)")
+                .expect("int(x*exp(x²),x) failed");
+            assert!(
+                r.contains("x^2") && (r.contains("e^") || r.contains("exp")),
+                "int(x*exp(x²),x): expected closed form in x² and exp, got: {}",
+                r,
+            );
+        }
+
+        // The exact form the notebook submits for the user's integral cell
+        // after inlining `f` and substituting `e`. Must produce a closed
+        // form — and crucially must NOT contain the unresolved `int(` head,
+        // since that would signal REDUCE gave up.
+        {
+            let r = session
+                .simplify("int(x*2.718**(x**2), x)")
+                .expect("int(x*2.718**(x²),x) failed");
+            assert!(
+                !r.starts_with("int(") && !r.contains(" int("),
+                "REDUCE returned an unevaluated integral: {}",
+                r,
+            );
+            assert!(
+                r.contains("x"),
+                "result should still reference x: {}",
+                r,
+            );
+        }
+
+        // ── Differentiation: user-facing surface ────────────────
+
+        // ∂(sin(x), x) → cos(x). Already covered above in section 3 via
+        // `df(sin(x), x)`; repeating here under the user-surface heading.
+        assert_simplify_eq(&session, "df(sin(x), x)", "cos(x)");
+
+        // df with composed user-style expression after inlining: a constant
+        // factor and a chain rule. df(2.718 * sin(x^2), x) → 2.718 * 2x * cos(x²).
+        // REDUCE converts decimals to exact rationals (2.718 → 1359/500), so we
+        // don't pin the literal — just check the structural pieces: a cos(x^2)
+        // factor and an `x` factor from the chain rule.
+        {
+            let r = session
+                .simplify("df(2.718*sin(x**2), x)")
+                .expect("df(2.718*sin(x²), x) failed");
+            assert!(
+                r.contains("cos(x^2)"),
+                "df(2.718*sin(x²), x): expected cos(x²) factor, got: {}",
+                r,
+            );
+            assert!(
+                r.contains("*x") || r.contains("x*"),
+                "df(2.718*sin(x²), x): expected x factor (chain rule), got: {}",
+                r,
+            );
+        }
+
         // ── Solve ───────────────────────────────────────────────
         {
             let r = session

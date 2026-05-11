@@ -1,0 +1,13 @@
+logos_version := 0.1
+
+cells := [
+  (
+    plot_color := (0.9176, 0.4431, 0.1608, 1.0000),
+    content := (
+        e :=2.718
+        f(x) :=x*e^(x²)
+        F(x) :=∫(f(x), x)
+        plot(y >=F(x))
+    ),
+  ),
+]

@@ -19,6 +19,19 @@ use super::{CellMessage, CellOutcome, Notebook, ReduceBackend, ReduceSimplifier,
 // CSL). Tests that need to drive REDUCE round-trips use a mock backend
 // the test directly controls.
 
+/// One captured submission to the mock REDUCE backend. Tests inspect these
+/// via `MockReduce::submissions_for` to assert on what *would have been sent*
+/// to real REDUCE — closing the gap where the mock only stubbed responses
+/// and silently swallowed bad submissions.
+#[derive(Clone, Debug)]
+struct MockSubmission {
+    #[allow(dead_code)]
+    cell_id: usize,
+    #[allow(dead_code)]
+    context: Vec<String>,
+    expression: String,
+}
+
 #[derive(Default)]
 struct MockState {
     /// Submitted requests waiting for `respond_to(cell_id, …)`.
@@ -26,6 +39,10 @@ struct MockState {
     /// Queued responses ready for `try_recv`.
     inbox: VecDeque<ReduceResponse>,
     next_request_id: u64,
+    /// Every submission ever received, in submission order. Tests use this
+    /// to verify what REDUCE *would have seen* — not just what the mock
+    /// replied with.
+    submissions: Vec<MockSubmission>,
 }
 
 #[derive(Clone, Default)]
@@ -48,14 +65,30 @@ impl MockReduce {
             result,
         });
     }
+    /// All submissions made for `cell_id`, in submission order.
+    fn submissions_for(&self, cell_id: usize) -> Vec<MockSubmission> {
+        self.state
+            .lock()
+            .unwrap()
+            .submissions
+            .iter()
+            .filter(|s| s.cell_id == cell_id)
+            .cloned()
+            .collect()
+    }
 }
 
 impl ReduceBackend for MockReduce {
-    fn submit(&mut self, cell_id: usize, _context: Vec<String>, _expr: String) -> u64 {
+    fn submit(&mut self, cell_id: usize, context: Vec<String>, expression: String) -> u64 {
         let mut s = self.state.lock().unwrap();
         let id = s.next_request_id;
         s.next_request_id += 1;
         s.inflight.insert(cell_id, id);
+        s.submissions.push(MockSubmission {
+            cell_id,
+            context,
+            expression,
+        });
         id
     }
     fn try_recv(&mut self) -> Option<ReduceResponse> {
@@ -565,6 +598,160 @@ fn plot_and_print_in_same_cell_both_appear_in_outcome() {
 }
 
 #[test]
+fn plot_with_user_function_body_inlines_call_before_reduce() {
+    // User's exact bug report from this session: defining `F(x) := ∫(f(x), x)`
+    // with `f` and `e` as prior bindings used to ship `int(f(x), x)` to REDUCE,
+    // which rejected it with "Declare f operator? (Y or N)" because `f` was
+    // undeclared. The fix (ir.rs `substitute_idents_inner`) beta-reduces user
+    // function calls during CAS substitution, so the submitted text contains
+    // the inlined body — `f(...)` and `e` are gone.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        e := 2.718
+        f(x) := x*e^(x²)
+        F(x) := ∫(f(x), x)
+        plot(y = F(x))
+        "#,
+    );
+    let cell_id = nb.cell(i).id;
+    let subs = mock.submissions_for(cell_id);
+    assert_eq!(subs.len(), 1, "expected one submission; got {:?}", subs);
+    let expr = &subs[0].expression;
+    assert!(
+        !expr.contains("f("),
+        "user function `f` must be inlined before REDUCE submission;\n\
+         got: {}",
+        expr,
+    );
+    assert!(
+        !expr.contains(" e ") && !expr.contains("(e)") && !expr.contains(",e"),
+        "constant `e` must be substituted with its value;\n\
+         got: {}",
+        expr,
+    );
+    assert!(
+        expr.contains("2.718"),
+        "submitted text should contain the value of `e` (2.718);\n\
+         got: {}",
+        expr,
+    );
+}
+
+#[test]
+fn plot_routes_through_cas_when_function_body_contains_integral() {
+    // Regression for: a cell with a function binding whose body contains a
+    // CAS call AND a `plot(...)` of that function would skip the iterative-
+    // CAS path and feed `integral(...)` straight to WGSL gen. Naga rejected
+    // the resulting shader with "no definition in scope for identifier:
+    // 'integral'", surfaced to the user as
+    //   "Undefined function or variable 'integral'".
+    //
+    // After the fix, the cell parks on `Pending` waiting for REDUCE; when the
+    // simplifier responds, the splice into `effective_ir` makes F's body
+    // WGSL-compatible, and `compile_after_simplify` produces the shader.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        e := 2.718
+        f(x) := x*e^(x²)
+        F(x) := ∫(f(x), x)
+        plot(y = F(x))
+        "#,
+    );
+    let cell_id = nb.cell(i).id;
+    assert!(
+        matches!(nb.cell(i).outcome.message, Some(CellMessage::Pending)),
+        "cell should park on Pending while the CAS round-trip runs; got {:?}",
+        nb.cell(i).outcome.message,
+    );
+    assert!(
+        nb.cell(i).outcome.shaders.is_empty(),
+        "shader must not be emitted before CAS resolves",
+    );
+
+    // REDUCE-style answer: any well-formed expression in x that WGSL accepts.
+    mock.respond_to(cell_id, Ok("x*x".to_string()));
+    nb.tick();
+
+    let outcome = &nb.cell(i).outcome;
+    // No "Undefined function or variable 'integral'" error.
+    for d in &outcome.diagnostics {
+        assert!(
+            !d.message.contains("'integral'"),
+            "unsubstituted integral leaked to WGSL gen: {}",
+            d.message,
+        );
+    }
+    assert!(
+        !outcome.shaders.is_empty(),
+        "plot shader should be emitted after CAS resolves; diagnostics: {:?}",
+        outcome.diagnostics,
+    );
+    let s = &outcome.shaders[0];
+    assert!(
+        !s.wgsl.contains("integral("),
+        "WGSL must not reference `integral(`; got:\n{}",
+        s.wgsl,
+    );
+    validate_wgsl(&s.wgsl).expect("wgsl validates");
+}
+
+#[test]
+fn interpreter_path_routes_through_cas_when_function_body_contains_integral() {
+    // Same shape as `plot_routes_through_cas_…` but for the interpreter path:
+    // a cell whose top-level expression triggers `needs_interpreter` (array
+    // literal here) AND references a function whose body contains a CAS
+    // call. Before the fix, the interpreter dispatch ran `interpreter::eval`
+    // directly on the unresolved IR and bailed on the unknown `integral`
+    // callee. The fix routes through `submit_cas_at` first; after the splice,
+    // `compile_after_simplify` resumes the interpreter branch.
+    let (mut nb, mock) = mock_reduce_notebook();
+    // Array-literal cell that triggers `needs_interpreter` and references
+    // a function whose body contains a CAS call. The trailing expression
+    // (`g`) makes the cell's final value the array itself, not Void.
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        F(x) := ∫(x, x)
+        g := [F(1.0), F(2.0)]
+        g
+        "#,
+    );
+    let cell_id = nb.cell(i).id;
+    assert!(
+        matches!(nb.cell(i).outcome.message, Some(CellMessage::Pending)),
+        "cell should park on Pending while the CAS round-trip runs; got {:?}",
+        nb.cell(i).outcome.message,
+    );
+
+    mock.respond_to(cell_id, Ok("x*x/2".to_string()));
+    nb.tick();
+
+    let outcome = &nb.cell(i).outcome;
+    for d in &outcome.diagnostics {
+        assert!(
+            !d.message.contains("'integral'") && !d.message.contains("Unknown function: integral"),
+            "unsubstituted integral leaked past CAS resolution: {}",
+            d.message,
+        );
+    }
+    match &outcome.message {
+        Some(CellMessage::Computed(s)) => assert!(
+            s.contains('[') && s.contains(']'),
+            "expected array-shaped Computed value; got {}",
+            s,
+        ),
+        other => panic!(
+            "expected Computed after CAS resolves, got {:?}\ndiagnostics: {:?}",
+            other, outcome.diagnostics
+        ),
+    }
+}
+
+#[test]
 fn play_auto_runs_earlier_cells_jupyter_style() {
     let mut nb = null_notebook();
     let a = nb.add_cell("f := x²");
@@ -630,33 +817,77 @@ fn stop_transitions_state_to_stopped() {
 
 #[test]
 fn examples_render_through_notebook() {
-    let files: &[(&str, &str)] = &[
-        ("gradient", include_str!("../../examples/gradient.logos")),
-        ("ripple", include_str!("../../examples/ripple.logos")),
-        ("mandlebrot", include_str!("../../examples/mandlebrot.logos")),
-        ("warp", include_str!("../../examples/warp.logos")),
-        ("monte_carlo", include_str!("../../examples/monte_carlo.logos")),
-        ("waves", include_str!("../../examples/waves.logos")),
-    ];
-    for (name, file) in files {
-        let cells = crate::lang::notebook_format::parse_logos(file)
+    // Walk `examples/` at test time — any `.logos` file in the directory is
+    // covered automatically without editing this list. CARGO_MANIFEST_DIR is
+    // set by Cargo to the project root, so this works from `cargo test`
+    // regardless of working directory.
+    let examples_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let entries = std::fs::read_dir(&examples_dir)
+        .unwrap_or_else(|e| panic!("read_dir({}): {}", examples_dir.display(), e));
+
+    let mut found = 0;
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.extension().is_none_or(|x| x != "logos") {
+            continue;
+        }
+        found += 1;
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let file = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{name}: read_to_string failed: {e}"));
+
+        let cells = crate::lang::notebook_format::parse_logos(&file)
             .unwrap_or_else(|e| panic!("{name}: parse_logos failed: {e}"));
-        for cell in cells {
+
+        for (idx, cell) in cells.into_iter().enumerate() {
             let mut nb = null_notebook();
             let i = nb.add_cell(&cell.content);
             nb.play(i);
             let nbcell = nb.cell(i);
-            assert!(
-                !nbcell.outcome.shaders.is_empty(),
-                "{name}: expected at least one shader, got message={:?}",
+
+            // Snapshot the outcome's invariants — every example cell must:
+            //   (a) produce no error diagnostics, ever,
+            //   (b) either emit at least one validated shader, OR park on
+            //       `Pending` because it has CAS work that needs a real
+            //       symbolic backend (this test uses `null_notebook`'s
+            //       `NoSimplifier`, so CAS-bearing examples like
+            //       `integral.logos` legitimately stay Pending here — they
+            //       resolve to shaders against the production REDUCE).
+            for d in &nbcell.outcome.diagnostics {
+                panic!(
+                    "{name} cell[{idx}]: diagnostic raised: {:?}\nsource:\n{}",
+                    d, cell.content,
+                );
+            }
+            let is_pending = matches!(
                 nbcell.outcome.message,
+                Some(CellMessage::Pending),
             );
+            if !is_pending {
+                assert!(
+                    !nbcell.outcome.shaders.is_empty(),
+                    "{name} cell[{idx}]: expected at least one shader or Pending; \
+                     message={:?}\nsource:\n{}",
+                    nbcell.outcome.message,
+                    cell.content,
+                );
+            }
             for s in &nbcell.outcome.shaders {
-                validate_wgsl(&s.wgsl)
-                    .unwrap_or_else(|e| panic!("{name}: WGSL invalid: {e}"));
+                validate_wgsl(&s.wgsl).unwrap_or_else(|e| {
+                    panic!("{name} cell[{idx}]: WGSL invalid: {e}\nsource:\n{}", cell.content)
+                });
             }
         }
     }
+    assert!(
+        found > 0,
+        "no `.logos` files found in {}",
+        examples_dir.display(),
+    );
 }
 
 #[test]
@@ -669,4 +900,304 @@ fn remove_cell_drops_pending_reduce() {
     assert_eq!(nb.len(), 0);
     // Notebook-side pending entry is cleared (mock backend may still hold
     // the in-flight handle, but Notebook would ignore any stale response).
+}
+
+// ─── LaTeX-symbol substitutions ────────────────────────────────────────────
+//
+// Verify every Unicode codepoint the autocomplete LATEX_SYMBOLS table inserts
+// (src/editor/autocomplete.rs) is actually usable end-to-end through Notebook.
+// Tests are grouped by the lexer's semantic category — what TokenType the
+// codepoint produces.
+//
+// Runtime layer asserted on: `CellMessage::Computed(String)` (the interpreter's
+// formatted print output). For CAS-only symbols (∫, ∑, ∂, …) a mock REDUCE
+// supplies the simplified response synchronously and the joined Computed text
+// is checked.
+
+fn computed(nb: &super::Notebook, idx: usize) -> String {
+    match &nb.cell(idx).outcome.message {
+        Some(CellMessage::Computed(s)) => s.clone(),
+        Some(other) => panic!(
+            "expected Computed, got {:?}\ndiagnostics: {:?}",
+            other,
+            nb.cell(idx).outcome.diagnostics,
+        ),
+        None => panic!(
+            "no message set\ndiagnostics: {:?}",
+            nb.cell(idx).outcome.diagnostics,
+        ),
+    }
+}
+
+fn diag_messages(nb: &super::Notebook, idx: usize) -> Vec<String> {
+    nb.cell(idx)
+        .outcome
+        .diagnostics
+        .iter()
+        .map(|d| d.message.clone())
+        .collect()
+}
+
+// ── Numeric constants ──────────────────────────────────────────────────────
+// Lexer maps these codepoints directly to `TokenType::Number(_)`.
+
+#[test]
+fn latex_pi_evaluates_to_pi_constant() {
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "print(π)");
+    assert_eq!(computed(&nb, i), std::f64::consts::PI.to_string());
+}
+
+#[test]
+fn latex_euler_evaluates_to_e_constant() {
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "print(ℯ)");
+    assert_eq!(computed(&nb, i), std::f64::consts::E.to_string());
+}
+
+// ── Unicode binary operators ───────────────────────────────────────────────
+// × → Star, ÷ → Slash, − → Minus. These should behave identically to the
+// ASCII *, /, -.
+
+#[test]
+fn latex_times_multiplies() {
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "print(3 × 4)");
+    assert_eq!(computed(&nb, i), "12");
+}
+
+#[test]
+fn latex_div_divides() {
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "print(8 ÷ 2)");
+    assert_eq!(computed(&nb, i), "4");
+}
+
+#[test]
+fn latex_unicode_minus_subtracts() {
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "print(5 − 3)");
+    assert_eq!(computed(&nb, i), "2");
+}
+
+// ── Relation operators ─────────────────────────────────────────────────────
+// ≤ → Lte, ≥ → Gte, ≠ → Neq. Same tokens as their ASCII two-char forms.
+
+#[test]
+fn latex_leq_compares() {
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "print(3 ≤ 4)");
+    assert_eq!(computed(&nb, i), "true");
+}
+
+#[test]
+fn latex_geq_compares() {
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "print(4 ≥ 3)");
+    assert_eq!(computed(&nb, i), "true");
+}
+
+#[test]
+fn latex_neq_compares() {
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "print(3 ≠ 4)");
+    assert_eq!(computed(&nb, i), "true");
+}
+
+// ── Builtin-mapped symbols ─────────────────────────────────────────────────
+// √ → Builtin("sqrt"); superscript digits → Builtin("pow{n}"); ² → square,
+// ³ → cube.
+
+#[test]
+fn latex_sqrt_computes() {
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "print(√(16))");
+    assert_eq!(computed(&nb, i), "4");
+}
+
+#[test]
+fn latex_superscript_squares() {
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "print(3²)");
+    assert_eq!(computed(&nb, i), "9");
+}
+
+#[test]
+fn latex_superscript_cubes() {
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "print(2³)");
+    assert_eq!(computed(&nb, i), "8");
+}
+
+#[test]
+fn latex_superscript_digits_4_through_9() {
+    let cases = [
+        ("2⁴", "16"),
+        ("2⁵", "32"),
+        ("2⁶", "64"),
+        ("2⁷", "128"),
+        ("2⁸", "256"),
+        ("2⁹", "512"),
+    ];
+    for (src, want) in cases {
+        let mut nb = null_notebook();
+        let i = add_and_play(&mut nb, &format!("print({})", src));
+        assert_eq!(computed(&nb, i), want, "input: {}", src);
+    }
+}
+
+// ── Greek letters as user identifiers ──────────────────────────────────────
+// Greek codepoints (except π/τ which are number constants) are `is_alphabetic`
+// per Unicode and lex as ordinary `Identifier(_)` tokens — user code can bind
+// them like any other name.
+
+#[test]
+fn latex_lowercase_greek_letters_bind_as_identifiers() {
+    // Skip π (number constant) and τ (number constant). The rest of the
+    // lowercase Greek alphabet should round-trip as identifiers.
+    let chars = ['α', 'β', 'γ', 'δ', 'ε', 'ζ', 'η', 'θ', 'ι', 'κ', 'λ', 'μ',
+                 'ν', 'ξ', 'ρ', 'σ', 'υ', 'φ', 'χ', 'ψ', 'ω'];
+    for (n, ch) in chars.iter().enumerate() {
+        let mut nb = null_notebook();
+        let src = format!("{} := {}\nprint({})", ch, n + 1, ch);
+        let i = add_and_play(&mut nb, &src);
+        assert_eq!(
+            computed(&nb, i),
+            (n + 1).to_string(),
+            "Greek letter {} did not round-trip",
+            ch,
+        );
+    }
+}
+
+#[test]
+fn latex_uppercase_greek_letters_bind_as_identifiers() {
+    let chars = ['Γ', 'Δ', 'Θ', 'Λ', 'Ξ', 'Π', 'Σ', 'Φ', 'Ψ', 'Ω'];
+    for (n, ch) in chars.iter().enumerate() {
+        let mut nb = null_notebook();
+        let src = format!("{} := {}\nprint({})", ch, n + 1, ch);
+        let i = add_and_play(&mut nb, &src);
+        assert_eq!(
+            computed(&nb, i),
+            (n + 1).to_string(),
+            "Greek letter {} did not round-trip",
+            ch,
+        );
+    }
+}
+
+// ── CAS-only identifiers ───────────────────────────────────────────────────
+// ∫ → Identifier("integral"), ∑ → "sum", ∏ → "prod", ∂ → "partial",
+// ⅆ → "derivative", ∇ → "nabla". The translator in
+// src/lang/reduce/translate.rs maps these to REDUCE's int/df/etc. Each test
+// drives a mock REDUCE response so we can assert the final Computed string
+// without taking REDUCE's process-global CSL state.
+
+#[test]
+fn latex_integral_routes_through_cas() {
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "print(∫(sin(x), x))");
+    let cell_id = nb.cell(i).id;
+    assert!(
+        matches!(nb.cell(i).outcome.message, Some(CellMessage::Pending)),
+        "∫ must park on Pending; got {:?}",
+        nb.cell(i).outcome.message,
+    );
+    // Assert on the submitted REDUCE text, not just the canned response. The
+    // mock previously discarded `expression`, so a malformed submission could
+    // pass undetected as long as the canned reply was well-formed. With the
+    // capture in place, this test verifies the translator actually emits
+    // `int(...)` (not `integral(...)` — the lexer's display name).
+    let subs = mock.submissions_for(cell_id);
+    assert_eq!(subs.len(), 1, "expected one submission, got {:?}", subs);
+    assert!(
+        subs[0].expression.contains("int(sin(x)"),
+        "submitted text should contain `int(sin(x)…)`; got {:?}",
+        subs[0].expression,
+    );
+    mock.respond_to(cell_id, Ok("-cos(x)".to_string()));
+    nb.tick();
+    assert_eq!(computed(&nb, i), "-cos(x)");
+}
+
+#[test]
+fn latex_derivative_routes_through_cas() {
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "print(ⅆ(sin(x), x))");
+    let cell_id = nb.cell(i).id;
+    assert!(
+        matches!(nb.cell(i).outcome.message, Some(CellMessage::Pending)),
+        "ⅆ must park on Pending; got {:?}",
+        nb.cell(i).outcome.message,
+    );
+    mock.respond_to(cell_id, Ok("cos(x)".to_string()));
+    nb.tick();
+    assert_eq!(computed(&nb, i), "cos(x)");
+}
+
+#[test]
+fn latex_partial_routes_through_cas() {
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "print(∂(sin(x), x))");
+    let cell_id = nb.cell(i).id;
+    assert!(
+        matches!(nb.cell(i).outcome.message, Some(CellMessage::Pending)),
+        "∂ must park on Pending; got {:?}",
+        nb.cell(i).outcome.message,
+    );
+    mock.respond_to(cell_id, Ok("cos(x)".to_string()));
+    nb.tick();
+    assert_eq!(computed(&nb, i), "cos(x)");
+}
+
+#[test]
+fn latex_infinity_lexes_as_identifier() {
+    // ∞ → Identifier("infinity"). No binding to "infinity" exists at runtime,
+    // so this should NOT produce a Computed value — but it MUST lex cleanly
+    // (no "Unexpected character" diagnostic). This pins the lexer's contract.
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "print(∞)");
+    for msg in diag_messages(&nb, i) {
+        assert!(
+            !msg.contains("Unexpected character"),
+            "∞ must lex without 'Unexpected character'; got: {}",
+            msg,
+        );
+    }
+}
+
+// ── Documenting the gap ────────────────────────────────────────────────────
+// The LATEX_SYMBOLS table contains many entries whose Unicode value is class
+// "Sm" (Math Symbol), which is NOT `is_alphabetic`. The lexer has no explicit
+// case for these, so they fall through to "Unexpected character". The
+// autocomplete inserts them anyway. This test snapshots the current set of
+// broken substitutions so a future fix (extending the lexer, or trimming the
+// table) updates this list deliberately.
+
+#[test]
+fn latex_substitutions_without_lexer_support_fail_to_lex() {
+    // Each codepoint is what autocomplete inserts. Listed here for visibility;
+    // if you add lexer support for one, remove it from this list.
+    let unlexable = [        '→', '←', '⇒', '⇐', '↔', '⇔', '↑', '↓', '⇑', '⇓', '↦', '↪',
+        '≈', '≡', '∼', '≃', '≅', '∝', '≪', '≫', '≺', '≻', '⊥', '∥',
+        '∈', '∉', '⊂', '⊃', '⊆', '⊇', '∪', '∩', '∖',
+        '∀', '∃', '∄', '∅', '¬', '∧', '∨',
+        '⋅', '∘', '⊕', '⊗', '⊙', '⋯', '…', '⨯',
+        '±', '∓',
+    ];
+    for ch in unlexable {
+        let mut nb = null_notebook();
+        let i = add_and_play(&mut nb, &format!("print({})", ch));
+        let msgs = diag_messages(&nb, i);
+        assert!(
+            msgs.iter().any(|m| m.contains("Unexpected character")),
+            "{} (U+{:04X}) was expected to fail with 'Unexpected character' \
+             but produced no such diagnostic; \
+             either the lexer was extended (good — remove from list) \
+             or it's failing differently. Diagnostics: {:?}",
+            ch,
+            ch as u32,
+            msgs,
+        );
+    }
 }
