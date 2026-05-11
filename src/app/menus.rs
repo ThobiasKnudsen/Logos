@@ -89,15 +89,23 @@ const MENU_HELP_ITEMS: &[MenuItemDef] = &[
 ];
 
 /// One discovered example file, paired with its menu label and absolute path.
-/// Built once at startup by walking the same root candidates as
-/// `examples_dir()`; new `.logos` files appear only after restart.
+/// Refreshed every time the user opens the Examples menu — drop a `.logos`
+/// file into `examples/` and it appears on the next menu open, without
+/// restarting the app.
 struct ExampleEntry {
     label: String,
     path: std::path::PathBuf,
 }
 
-static EXAMPLES_CACHE: std::sync::OnceLock<Vec<ExampleEntry>> =
+/// Snapshot of the last directory scan. `examples_menu_count` rescans into
+/// this (the entry point per dropdown open); `examples_menu_label` and
+/// `example_path` read it within the same open so indices stay consistent.
+static EXAMPLES_CACHE: std::sync::OnceLock<std::sync::Mutex<Vec<ExampleEntry>>> =
     std::sync::OnceLock::new();
+
+fn examples_cache_mutex() -> &'static std::sync::Mutex<Vec<ExampleEntry>> {
+    EXAMPLES_CACHE.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
 
 /// Candidate `examples/` directories, in priority order. Production deploys
 /// place the folder next to the binary; for `cargo run` the binary lives at
@@ -164,16 +172,22 @@ fn discover_examples() -> Vec<ExampleEntry> {
     Vec::new()
 }
 
-fn examples_cache() -> &'static [ExampleEntry] {
-    EXAMPLES_CACHE.get_or_init(discover_examples).as_slice()
-}
-
+/// Re-scan `examples/` and return the new count. Called once per dropdown
+/// open by the renderer, so a `.logos` file added since the last open shows
+/// up immediately — no app restart needed. Subsequent
+/// `examples_menu_label` / `example_path` calls in the same open read the
+/// snapshot this populated.
 pub(crate) fn examples_menu_count() -> usize {
-    examples_cache().len()
+    let fresh = discover_examples();
+    let mut cache = examples_cache_mutex().lock().unwrap();
+    *cache = fresh;
+    cache.len()
 }
 
 pub(crate) fn examples_menu_label(idx: usize) -> String {
-    examples_cache()
+    examples_cache_mutex()
+        .lock()
+        .unwrap()
         .get(idx)
         .map(|e| e.label.clone())
         .unwrap_or_default()
@@ -182,7 +196,11 @@ pub(crate) fn examples_menu_label(idx: usize) -> String {
 /// Absolute path to the example file at `idx`, ready to load through the
 /// session's `open_file`. `None` if the index is out of range.
 pub(crate) fn example_path(idx: usize) -> Option<std::path::PathBuf> {
-    examples_cache().get(idx).map(|e| e.path.clone())
+    examples_cache_mutex()
+        .lock()
+        .unwrap()
+        .get(idx)
+        .map(|e| e.path.clone())
 }
 
 /// Dynamic theme menu items built from themes.json at runtime.
@@ -212,20 +230,43 @@ mod tests {
     fn examples_directory_is_discovered_and_nonempty_in_dev_tree() {
         // Sanity: running from a checkout, the `examples/` folder should be
         // discovered. Production may legitimately ship without it.
-        let entries = examples_cache();
+        let entries = discover_examples();
         assert!(
             !entries.is_empty(),
             "no .logos files found in any `examples/` candidate; \
              checked: {:?}",
             examples_dir_candidates(),
         );
-        for entry in entries {
+        for entry in &entries {
             assert!(
                 entry.path.is_file(),
                 "discovered entry {:?} is not a real file",
                 entry.path,
             );
         }
+    }
+
+    #[test]
+    fn examples_menu_count_rescans_on_each_call() {
+        // The cache is refreshed every time `examples_menu_count` is called,
+        // so a new `.logos` file would show up on the next menu open. We
+        // simulate by populating the cache with stale entries, then calling
+        // count() and verifying it overwrote them.
+        {
+            let mut cache = examples_cache_mutex().lock().unwrap();
+            cache.clear();
+            cache.push(ExampleEntry {
+                label: "Stale".to_string(),
+                path: std::path::PathBuf::from("/nonexistent/stale.logos"),
+            });
+        }
+        let count = examples_menu_count();
+        let cache = examples_cache_mutex().lock().unwrap();
+        assert_eq!(cache.len(), count);
+        assert!(
+            !cache.iter().any(|e| e.label == "Stale"),
+            "stale entry should have been replaced by the rescan",
+        );
     }
 
     #[test]
