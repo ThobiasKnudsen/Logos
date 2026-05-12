@@ -12,7 +12,7 @@ cells := [
             sum
         )
 
-        plot(y = NumericIntegral(t ↦ t*t, 0, x, 0.01))
+        plot(y = NumericIntegral(x ↦ x, 0, x, 0.01))
     ),
   ),
 ]
