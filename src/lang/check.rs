@@ -11,9 +11,9 @@
 //! signatures — that's how `+` works on `(Num, Num) → Num` and
 //! `(VecN, VecN) → VecN` without special-casing the operator.
 //!
-//! No caller is wired in yet — the pass is available for `compile()` and the
-//! notebook to start using once we trust it. That separation lets us land
-//! the checker without risking regressions in the existing pipeline.
+//! Wired into `lang::compile` and the notebook's plot / whole-cell compile
+//! paths via `lang::type_check`, which formats the resulting `TypeError`
+//! into a `Line N, Col M:` message using `format_error_at`.
 
 use std::collections::HashMap;
 
@@ -104,6 +104,11 @@ fn infer(node: &Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
         Ir::Identifier { name, span } => env
             .get_var(name)
             .cloned()
+            // Function names used as values (e.g. `N_integral(sq, 0, x, d)` —
+            // `sq` referenced as a function pointer) aren't proper values yet.
+            // Accept them as `Unknown` so type-checking still completes;
+            // codegen separately rejects unrepresentable higher-order uses.
+            .or_else(|| env.get_func(name).map(|_| Type::Unknown))
             .ok_or_else(|| TypeError::new(*span, format!("undefined variable `{}`", name))),
 
         Ir::Apply { callee, args, span } => infer_apply(callee, args, *span, env),
@@ -189,6 +194,19 @@ fn infer(node: &Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
                     ),
                 )
             })
+        }
+
+        Ir::Lambda { params, body, .. } => {
+            // Type-check the body in a child scope where each lambda param
+            // is a fresh numeric. The lambda itself doesn't have a useful
+            // value type — codegen lifts it to a synthetic function before
+            // anything tries to use it — so we report `Unknown`.
+            let mut child = env.child();
+            for p in params {
+                child.vars.insert(p.clone(), Type::Num);
+            }
+            let _body_ty = infer(body, &mut child)?;
+            Ok(Type::Unknown)
         }
 
         Ir::FunctionDef {
@@ -401,6 +419,35 @@ fn infer_apply(
                 ),
             )),
             Err(BuiltinResolveErr::NoMatch) => {
+                // If an arithmetic op was applied to a tuple, point at the
+                // tuple itself rather than printing a generic overload-
+                // resolution failure. Don't speculate about intent — just
+                // state the mismatch.
+                let is_arith = matches!(
+                    op,
+                    BuiltinOp::Add
+                        | BuiltinOp::Sub
+                        | BuiltinOp::Mul
+                        | BuiltinOp::Div
+                        | BuiltinOp::Mod
+                        | BuiltinOp::Pow
+                        | BuiltinOp::Neg
+                );
+                if is_arith {
+                    if let Some(idx) = arg_types.iter().position(|t| matches!(t, Type::Tuple(_))) {
+                        let n = match &arg_types[idx] {
+                            Type::Tuple(items) => items.len(),
+                            _ => 0,
+                        };
+                        return Err(TypeError::new(
+                            args[idx].span(),
+                            format!(
+                                "expected a scalar, found a {}-element tuple",
+                                n
+                            ),
+                        ));
+                    }
+                }
                 let arg_str: Vec<String> = arg_types.iter().map(|t| t.display()).collect();
                 Err(TypeError::new(
                     span,
@@ -413,10 +460,23 @@ fn infer_apply(
             }
         },
         Callee::User(name) => {
-            let (params, ret) = env
-                .get_func(name)
-                .cloned()
-                .ok_or_else(|| TypeError::new(span, format!("undefined function `{}`", name)))?;
+            // Function-typed parameters (e.g. `N_integral(f, x0, x1, d)` where
+            // `f` is called as `f(i*d)` inside the body) land as variables in
+            // the env, not as functions — the inference pass hasn't carried
+            // their arity through yet. Accept the call with an unknown
+            // signature so higher-order user functions still type-check.
+            let (params, ret) = match env.get_func(name).cloned() {
+                Some(sig) => sig,
+                None if env.get_var(name).is_some() => {
+                    return Ok(Type::Unknown);
+                }
+                None => {
+                    return Err(TypeError::new(
+                        span,
+                        format!("undefined function `{}`", name),
+                    ));
+                }
+            };
             if params.len() != arg_types.len() {
                 return Err(TypeError::new(
                     span,
@@ -704,6 +764,24 @@ mod tests {
         assert_eq!(check_str("x + y * 2").unwrap(), Type::Num);
         assert_eq!(check_str("x ^ 2").unwrap(), Type::Num);
         assert_eq!(check_str("-x").unwrap(), Type::Num);
+    }
+
+    #[test]
+    fn arithmetic_on_tuple_reports_tuple_arity() {
+        // Whenever a tuple lands as an arithmetic operand the message should
+        // describe the actual mismatch (scalar expected, n-tuple found) and
+        // not speculate about what operator the user might have meant.
+        let err = check_str("x / (1, 2)").unwrap_err();
+        assert!(
+            err.message.contains("expected a scalar"),
+            "got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("2-element tuple"),
+            "got: {}",
+            err.message
+        );
     }
 
     #[test]

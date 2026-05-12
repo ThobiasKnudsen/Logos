@@ -66,6 +66,9 @@ fn token_color(ty: &TokenType) -> Rgba {
         // Binding operator
         TokenType::Colon => theme.operator,
 
+        // Lambda introducer
+        TokenType::Mapsto => theme.operator,
+
         // Punctuation
         TokenType::LParen
         | TokenType::RParen

@@ -7,6 +7,7 @@
 //! `NotebookView` instead.
 
 use std::cell::RefCell;
+use std::time::Instant;
 
 use crate::editor::Buffer;
 use crate::lang::ir::Ir;
@@ -107,6 +108,10 @@ pub struct NotebookCell {
     /// moment. Used to detect "needs replay" — UI compares against current
     /// `buffer.text()`.
     pub last_played_text: Option<String>,
+    /// Most recent edit timestamp, set by the app's keystroke handler and
+    /// cleared by the auto-rerun pass once the cell has been re-played.
+    /// Drives the "edit, then 200ms of quiet, then auto-replay" UX.
+    pub last_edit_at: Option<Instant>,
     pub(super) ir_cache: RefCell<Option<(String, Ir)>>,
     /// Post-simplification IR for this cell. Set by the iterative-CAS path
     /// after the symbolic simplifier returns IR that's been spliced into
@@ -131,6 +136,7 @@ impl NotebookCell {
             output_collapsed: false,
             contracted_editor_h: None,
             last_played_text: None,
+            last_edit_at: None,
             ir_cache: RefCell::new(None),
             effective_ir: None,
         }

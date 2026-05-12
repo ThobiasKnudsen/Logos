@@ -1,0 +1,18 @@
+logos_version := 0.1
+
+cells := [
+  (
+    plot_color := (0.4275, 0.7137, 0.9412, 1.0000),
+    content := (
+        NumericIntegral(f, x0, x1, d) := (
+            sum := 0
+            for i in x0/d..x1/d (
+                sum := sum + f(i*d)*d
+            )
+            sum
+        )
+
+        plot(y = NumericIntegral(t ↦ t*t, 0, x, 0.01))
+    ),
+  ),
+]

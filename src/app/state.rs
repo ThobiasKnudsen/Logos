@@ -613,23 +613,14 @@ impl AppState {
         let cell = self.session.active_tab().active_cell();
         let text = cell.buffer.text();
         let cursor = cell.buffer.cursor_byte_offset();
-        let Some((prefix_start, symbol)) =
-            autocomplete::latex_auto_substitute(text, cursor)
-        else {
+        let Some(sub) = autocomplete::latex_auto_substitute(text, cursor) else {
             return false;
         };
-        // The trigger character is the last char before the cursor —
-        // `latex_auto_substitute` already verified it's a single delimiter.
-        // We keep it in the replacement so the cursor lands right after it.
-        let trigger = text[..cursor].chars().next_back().unwrap();
-        let end_of_prefix = cursor - trigger.len_utf8();
-        let trigger_str = &text[end_of_prefix..cursor];
-        let replacement = format!("{symbol}{trigger_str}");
         self.session
             .active_tab_mut()
             .active_cell_mut()
             .buffer
-            .replace_range(prefix_start, cursor, &replacement);
+            .replace_range(sub.start, sub.end, &sub.replacement);
         self.session.active_tab_mut().mark_modified();
         true
     }

@@ -195,6 +195,63 @@ fn idle_cell_is_not_stale() {
 }
 
 #[test]
+fn auto_rerun_fires_after_quiet_period() {
+    use std::time::{Duration, Instant};
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "plot(y = sin(x))");
+    let edit_time = Instant::now();
+    nb.set_text(i, "plot(y = cos(x))");
+    nb.mark_edited(i, edit_time);
+    let replayed = nb.tick_auto_rerun(edit_time + Duration::from_millis(50));
+    assert!(
+        replayed.is_empty(),
+        "should not replay within the quiet period"
+    );
+    let replayed = nb.tick_auto_rerun(edit_time + Duration::from_millis(250));
+    assert_eq!(replayed, vec![i], "should replay after quiet period");
+    assert!(!nb.cell(i).is_stale());
+    assert!(nb.cell(i).outcome.shaders[0].wgsl.contains("cos("));
+}
+
+#[test]
+fn auto_rerun_resets_when_user_keeps_typing() {
+    use std::time::{Duration, Instant};
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "plot(y = x)");
+    let t0 = Instant::now();
+    nb.set_text(i, "plot(y = x+1)");
+    nb.mark_edited(i, t0);
+    nb.set_text(i, "plot(y = x+2)");
+    nb.mark_edited(i, t0 + Duration::from_millis(150));
+    let replayed = nb.tick_auto_rerun(t0 + Duration::from_millis(200));
+    assert!(
+        replayed.is_empty(),
+        "continued typing should reset the quiet window"
+    );
+    let replayed = nb.tick_auto_rerun(t0 + Duration::from_millis(400));
+    assert_eq!(replayed, vec![i]);
+}
+
+#[test]
+fn auto_rerun_deadline_reports_next_wake() {
+    use std::time::{Duration, Instant};
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "plot(y = x)");
+    let t0 = Instant::now();
+    nb.set_text(i, "plot(y = x+1)");
+    nb.mark_edited(i, t0);
+    let deadline = nb
+        .next_auto_rerun_deadline(t0)
+        .expect("should have a pending deadline");
+    assert_eq!(deadline, t0 + super::Notebook::AUTO_RERUN_QUIET_PERIOD);
+    nb.tick_auto_rerun(t0 + Duration::from_millis(250));
+    assert!(
+        nb.next_auto_rerun_deadline(Instant::now()).is_none(),
+        "no pending deadline after replay"
+    );
+}
+
+#[test]
 fn plot_emits_shader_and_validates_under_naga() {
     let mut nb = null_notebook();
     let i = add_and_play(
@@ -843,8 +900,11 @@ fn examples_render_through_notebook() {
         let cells = crate::lang::notebook_format::parse_logos(&file)
             .unwrap_or_else(|e| panic!("{name}: parse_logos failed: {e}"));
 
+        // Cells in a single example share scope (later cells can reference
+        // functions defined earlier — see `statistikk.logos`). Mirror that
+        // by playing each cell in the *same* notebook, sequentially.
+        let mut nb = null_notebook();
         for (idx, cell) in cells.into_iter().enumerate() {
-            let mut nb = null_notebook();
             let i = nb.add_cell(&cell.content);
             nb.play(i);
             let nbcell = nb.cell(i);

@@ -229,6 +229,15 @@ pub enum Ir {
         span: Span,
     },
 
+    /// Anonymous function: `x |-> body` or `(a, b) |-> body`.
+    /// Only meaningful as an argument to a higher-order user function — the
+    /// codegen's specialization pass lifts it into a synthetic FunctionDef.
+    Lambda {
+        params: Vec<String>,
+        body: Box<Ir>,
+        span: Span,
+    },
+
     /// For loop: `for i in 0..n ( body )` — sequential CPU execution
     ForLoop {
         var: String,
@@ -306,6 +315,7 @@ impl Ir {
             | Ir::Block { span, .. }
             | Ir::IfExpr { span, .. }
             | Ir::FunctionDef { span, .. }
+            | Ir::Lambda { span, .. }
             | Ir::ForLoop { span, .. }
             | Ir::WhileLoop { span, .. }
             | Ir::PropertyAccess { span, .. }
@@ -368,6 +378,7 @@ impl Ir {
                 v
             }
             Ir::FunctionDef { body, .. } => vec![body],
+            Ir::Lambda { body, .. } => vec![body],
             Ir::ForLoop { range, body, .. } => vec![range, body],
             Ir::WhileLoop { condition, body, .. } => vec![condition, body],
             Ir::PropertyAccess { object, .. } => vec![object],
@@ -722,6 +733,11 @@ fn substitute_idents_inner(node: &Ir, bindings: &[(String, Ir)]) -> Ir {
             body: Box::new(substitute_idents_inner(body, bindings)),
             span: *span,
         },
+        Ir::Lambda { params, body, span } => Ir::Lambda {
+            params: params.clone(),
+            body: Box::new(substitute_idents_inner(body, bindings)),
+            span: *span,
+        },
         Ir::ForLoop {
             var, range, body, span,
         } => Ir::ForLoop {
@@ -848,6 +864,22 @@ fn write_ir(out: &mut String, ir: &Ir, wrap_binary: bool) {
                 out.push_str(p);
             }
             out.push_str(") := ");
+            write_ir(out, body, false);
+        }
+        Ir::Lambda { params, body, .. } => {
+            if params.len() == 1 {
+                out.push_str(&params[0]);
+            } else {
+                out.push('(');
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(p);
+                }
+                out.push(')');
+            }
+            out.push_str(" |-> ");
             write_ir(out, body, false);
         }
         Ir::ForLoop {

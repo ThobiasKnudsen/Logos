@@ -269,7 +269,47 @@ impl Parser {
     // --- Expression parsing with precedence climbing ---
 
     fn parse_expr(&mut self) -> Result<Ir, String> {
-        self.parse_or()
+        let lhs = self.parse_or()?;
+        if self.peek().ty != TokenType::Mapsto {
+            return Ok(lhs);
+        }
+        // Lambda: `x |-> body` or `(a, b, ...) |-> body`. The LHS must be a
+        // bare identifier or a tuple of identifiers — anything else is a
+        // syntax error pointing at the LHS.
+        let params: Vec<String> = match &lhs {
+            Ir::Identifier { name, .. } => vec![name.clone()],
+            Ir::Tuple { items, .. } => {
+                let mut acc = Vec::with_capacity(items.len());
+                for item in items {
+                    match item {
+                        Ir::Identifier { name, .. } => acc.push(name.clone()),
+                        _ => {
+                            return Err(super::format_error_at(
+                                &self.source,
+                                item.span().0,
+                                "lambda parameter must be a bare identifier",
+                            ));
+                        }
+                    }
+                }
+                acc
+            }
+            _ => {
+                return Err(super::format_error_at(
+                    &self.source,
+                    lhs.span().0,
+                    "left-hand side of `|->` must be an identifier or a tuple of identifiers",
+                ));
+            }
+        };
+        self.advance(); // consume |->
+        let body = self.parse_expr()?; // right-associative
+        let span = join(lhs.span(), body.span());
+        Ok(Ir::Lambda {
+            params,
+            body: Box::new(body),
+            span,
+        })
     }
 
     fn parse_or(&mut self) -> Result<Ir, String> {
@@ -448,6 +488,41 @@ impl Parser {
                             args,
                             span: join(start_span, rparen_span),
                         };
+                    } else if matches!(expr, Ir::Lambda { .. }) {
+                        // IIFE: `(t |-> t*t)(x)`. Lower into a block that
+                        // binds the lambda to a fresh name and then calls
+                        // that name — the existing lambda-binding lift in
+                        // wgsl_gen turns the binding into a real FunctionDef
+                        // so no new codegen plumbing is needed.
+                        let lambda_span = expr.span();
+                        let synth_name = format!("_iife_{}_{}", lambda_span.0, lambda_span.1);
+                        let start_span = lambda_span;
+                        self.advance(); // consume '('
+                        let args = self.parse_arg_list()?;
+                        let rparen_span = self.peek().span;
+                        self.expect(TokenType::RParen)?;
+                        let call_span = join(start_span, rparen_span);
+                        let lambda = std::mem::replace(
+                            &mut expr,
+                            Ir::Number {
+                                value: 0.0,
+                                span: lambda_span,
+                            },
+                        );
+                        let binding = Ir::Binding {
+                            name: synth_name.clone(),
+                            value: Box::new(lambda),
+                            span: lambda_span,
+                        };
+                        let call = Ir::Apply {
+                            callee: Callee::User(synth_name),
+                            args,
+                            span: call_span,
+                        };
+                        expr = Ir::Block {
+                            items: vec![binding, call],
+                            span: call_span,
+                        };
                     } else {
                         break;
                     }
@@ -589,22 +664,55 @@ impl Parser {
                 }
 
                 // Parse a block: comma or newline separated statements inside parens.
-                // Could be: (expr), (a, b, c) tuple, or (binding, binding, result) block
+                // Could be: (expr), (a, b, c) tuple, or (binding, binding, result) block.
+                //
+                // Between items we require a comma or newline — except after
+                // statement-like nodes (bindings, function/for/while, index/tuple
+                // assignment), which are self-terminating. Without this check,
+                // typos like `(2σ²)` silently parsed as the 2-tuple `(2, σ²)`.
                 let mut items = vec![self.parse_block_item()?];
-                self.skip_newlines();
 
-                // Continue parsing items separated by commas and/or newlines
-                while self.peek().ty != TokenType::RParen && !self.at_end() {
-                    // Consume optional comma separator
+                loop {
+                    let mut saw_separator = false;
+                    if self.peek().ty == TokenType::Newline {
+                        self.skip_newlines();
+                        saw_separator = true;
+                    }
                     if self.peek().ty == TokenType::Comma {
                         self.advance();
+                        self.skip_newlines();
+                        saw_separator = true;
                     }
-                    self.skip_newlines();
-                    if self.peek().ty == TokenType::RParen {
-                        break; // trailing comma/newline
+                    if self.peek().ty == TokenType::RParen || self.at_end() {
+                        break;
+                    }
+                    let prev_is_statement = matches!(
+                        items.last(),
+                        Some(Ir::Binding { .. })
+                            | Some(Ir::FunctionDef { .. })
+                            | Some(Ir::ForLoop { .. })
+                            | Some(Ir::WhileLoop { .. })
+                            | Some(Ir::IndexAssign { .. })
+                            | Some(Ir::TupleBinding { .. })
+                    );
+                    if !saw_separator && !prev_is_statement {
+                        let tok = self.peek();
+                        let snippet = self
+                            .source
+                            .get(tok.span.0..tok.span.1)
+                            .filter(|s| !s.is_empty())
+                            .map(|s| format!("`{}`", s))
+                            .unwrap_or_else(|| tok.ty.to_string());
+                        return Err(super::format_error_at(
+                            &self.source,
+                            tok.span.0,
+                            &format!(
+                                "expected ',', newline, or ')' after expression; found {}",
+                                snippet
+                            ),
+                        ));
                     }
                     items.push(self.parse_block_item()?);
-                    self.skip_newlines();
                 }
                 let rparen_span = self.peek().span;
                 self.expect(TokenType::RParen)?;
@@ -1007,6 +1115,53 @@ mod tests {
         let tokens = lexer.tokenize().unwrap();
         let mut parser = Parser::new(tokens, input.to_string());
         parser.parse().unwrap()
+    }
+
+    fn parse_result(input: &str) -> Result<Ir, String> {
+        let mut lexer = Lexer::new(input);
+        let tokens = lexer.tokenize().map_err(|e| e.to_string())?;
+        let mut parser = Parser::new(tokens, input.to_string());
+        parser.parse()
+    }
+
+    #[test]
+    fn adjacent_expressions_in_parens_are_a_syntax_error() {
+        // `(2σ²)` previously parsed as the 2-tuple `(2, σ²)` because the
+        // parens loop accepted comma-less items. Now it must error and
+        // point at the gap rather than silently form a tuple.
+        let err = parse_result("(2\u{03C3}\u{00B2})").unwrap_err();
+        assert!(err.contains("expected"), "got: {}", err);
+        assert!(err.contains(','), "got: {}", err);
+    }
+
+    #[test]
+    fn two_pi_in_parens_reports_what_was_seen() {
+        // `(2π)` is the same shape: two adjacent number-yielding tokens
+        // (`2` and π lexed as a numeric literal). Print the actual error
+        // so we can see what the user gets.
+        let err = parse_result("(2\u{03C0})").unwrap_err();
+        eprintln!("--- (2π) error ---\n{}\n--- end ---", err);
+        assert!(err.contains("expected"), "got: {}", err);
+    }
+
+    #[test]
+    fn newline_separated_items_in_parens_still_parse() {
+        // Block syntax — bindings + final expression separated by newlines.
+        let ast = parse_result("(a := 1\nb := 2\na + b)").expect("should parse");
+        match ast {
+            Ir::Block { items, .. } => assert_eq!(items.len(), 3),
+            other => panic!("expected Block, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn statement_then_expression_needs_no_separator() {
+        // Imperative one-liners like `(sum := 0 for i in 0..10 (...) sum)`
+        // omit separators after self-terminating statements (bindings, for
+        // loops). The parser must still accept this shape.
+        let ast = parse_result("(sum := 0 for i in 0..10 (sum := sum + i) sum)")
+            .expect("should parse");
+        assert!(matches!(ast, Ir::Block { .. }));
     }
 
     #[test]

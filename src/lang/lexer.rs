@@ -127,6 +127,17 @@ impl<'a> Lexer<'a> {
         let start = self.pos;
         let ch = self.peek().unwrap();
 
+        // The three-character mapsto `|->` lexes to the same token as `↦`.
+        // Must check before two-char `->` would (no such op today, but keep
+        // it ahead of single-char `|` if/when that's added).
+        if self.starts_with("|->") {
+            self.pos += 3;
+            return Ok(Token {
+                ty: TokenType::Mapsto,
+                span: (start, self.pos),
+            });
+        }
+
         // Two-character operators (must check before single-char)
         if let Some(ty) = self.try_two_char_op() {
             return Ok(Token {
@@ -409,6 +420,14 @@ impl<'a> Lexer<'a> {
                 span: (start, self.pos),
             });
         }
+        if ch == '\u{21A6}' {
+            // ↦ — same lexical entity as `|->`.
+            self.advance();
+            return Ok(Token {
+                ty: TokenType::Mapsto,
+                span: (start, self.pos),
+            });
+        }
         // Superscript digits 0,1,4-9
         if let Some(exp) = match ch {
             '\u{2070}' => Some("0"),
@@ -635,6 +654,7 @@ fn is_unicode_math_symbol(c: char) -> bool {
         | '\u{2264}' // ≤
         | '\u{2265}' // ≥
         | '\u{2260}' // ≠
+        | '\u{21A6}' // ↦ mapsto
         | '\u{2070}' // ⁰
         | '\u{00B9}' // ¹
         | '\u{2074}' // ⁴

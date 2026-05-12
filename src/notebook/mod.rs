@@ -431,6 +431,70 @@ impl Notebook {
         updated
     }
 
+    /// Mark a cell as just-edited. Sets `last_edit_at = now`, which the
+    /// auto-rerun pass watches to decide when 200ms of quiet has elapsed.
+    /// Called by the app's keystroke handler after each text-changing input.
+    pub fn mark_edited(&mut self, idx: usize, now: std::time::Instant) {
+        if let Some(cell) = self.cells.get_mut(idx) {
+            cell.last_edit_at = Some(now);
+        }
+    }
+
+    /// Time the cell must have been idle (no further edits) before the
+    /// auto-rerun pass replays it. Long enough that a normal burst of typing
+    /// doesn't trigger redundant compiles, short enough that the user
+    /// perceives the plot as "live."
+    pub const AUTO_RERUN_QUIET_PERIOD: std::time::Duration =
+        std::time::Duration::from_millis(200);
+
+    /// Replay every cell that has been edited and then idle for at least
+    /// `AUTO_RERUN_QUIET_PERIOD`. Returns the cell indices that were replayed
+    /// so the caller can resync UI state for them.
+    pub fn tick_auto_rerun(&mut self, now: std::time::Instant) -> Vec<usize> {
+        let ready: Vec<usize> = self
+            .cells
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, cell)| {
+                let edited_at = cell.last_edit_at?;
+                let elapsed = now.saturating_duration_since(edited_at);
+                if elapsed >= Self::AUTO_RERUN_QUIET_PERIOD && cell.is_stale() {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for &idx in &ready {
+            self.cells[idx].last_edit_at = None;
+            self.play(idx);
+        }
+        ready
+    }
+
+    /// Earliest wake-up time the app loop should wait until for the next
+    /// pending auto-rerun. Returns `None` when no cell is awaiting replay.
+    /// The app uses this to set `ControlFlow::WaitUntil` so 200ms of editor
+    /// silence actually fires the rerun without the user having to nudge
+    /// another event.
+    pub fn next_auto_rerun_deadline(
+        &self,
+        now: std::time::Instant,
+    ) -> Option<std::time::Instant> {
+        let _ = now;
+        self.cells
+            .iter()
+            .filter_map(|cell| {
+                let edited_at = cell.last_edit_at?;
+                if cell.is_stale() {
+                    Some(edited_at + Self::AUTO_RERUN_QUIET_PERIOD)
+                } else {
+                    None
+                }
+            })
+            .min()
+    }
+
     /// True if there's at least one REDUCE round-trip outstanding. Tests
     /// use this to drive their poll loops; production checks the shared
     /// `ReduceService::has_pending` directly.
@@ -769,6 +833,10 @@ impl Notebook {
         let mut last_ir: Option<Ir> = None;
         for &plot_idx in plot_indices {
             let plot_ir = lang::build_plot_ir(combined, plot_idx);
+            if let Err(e) = crate::lang::type_check(&plot_ir, snapshot) {
+                self.set_runtime_error(idx, e, snapshot);
+                return;
+            }
             match crate::lang::wgsl_gen::generate(&plot_ir) {
                 Ok(wgsl) => {
                     shaders.push(ShaderSpec {
@@ -944,6 +1012,11 @@ impl Notebook {
         // No plot calls — fall back to whole-cell compile so cells like
         // `int(x²,x)` that simplify to a raw expression still render as a
         // grayscale fragment shader.
+        let cell_source = self.cells[idx].buffer.text().to_string();
+        if let Err(e) = crate::lang::type_check(&combined, &cell_source) {
+            self.set_runtime_error(idx, e, &cell_source);
+            return;
+        }
         match crate::lang::wgsl_gen::generate(&combined) {
             Ok(wgsl) => {
                 self.cells[idx].outcome.shaders = vec![ShaderSpec {

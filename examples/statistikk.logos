@@ -1,0 +1,38 @@
+logos_version := 0.1
+
+cells := [
+  (
+    plot_color := (0.8667, 0.5294, 0.1333, 1.0000),
+    content := (
+        Normal(μ, σ, x) :=(1/(σ*√(2*π)))*exp(-(x-μ)²/(2*σ²))
+        f_X(x) :=Normal(2, 3, x)
+        f_Y(x) :=Normal(-1, 4, x)
+        NumericIntegral(f, x0, x1, d) :=(
+        	sum :=0
+        	for i in x0/d..min(x,x1)/d (
+        		sum :=sum + f(i*d)*d
+        	)
+        	sum
+        )
+        plot(y=NumericIntegral(f_Y, -10, 10, 0.1))
+    ),
+  ),
+  (
+    plot_color := (0.9490, 0.4353, 0.2510, 1.0000),
+    content := (
+        plot(y=f_X(x))
+    ),
+  ),
+  (
+    plot_color := (0.6471, 0.8471, 0.2431, 1.0000),
+    content := (
+        plot(y=f_Y(x))
+    ),
+  ),
+  (
+    plot_color := (0.6118, 0.4471, 0.9216, 1.0000),
+    content := (
+        plot(y=f_Y(x)+f_X(x))
+    ),
+  ),
+]

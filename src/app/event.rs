@@ -919,6 +919,16 @@ impl ApplicationHandler for App {
                 if changed {
                     let key_start = Instant::now();
                     state.session.active_tab_mut().mark_modified();
+                    // Stamp the active cell so the auto-rerun loop knows the
+                    // user just typed. The actual replay fires from
+                    // AboutToWait after 200ms of further silence.
+                    let active_cell_idx =
+                        state.session.active_tab().active_cell_index;
+                    state
+                        .session
+                        .active_tab_mut()
+                        .notebook
+                        .mark_edited(active_cell_idx, key_start);
                     log::debug!(
                         "[perf] --- KEYSTROKE --- (1st sync: text changed, no highlight spans yet)"
                     );
@@ -1013,6 +1023,26 @@ impl ApplicationHandler for App {
             needs_redraw = true;
         }
 
+        // Auto-rerun: any cell that's been edited and idle long enough
+        // gets replayed without the user pressing play.
+        let now = Instant::now();
+        let auto_played = state
+            .session
+            .active_tab_mut()
+            .notebook
+            .tick_auto_rerun(now);
+        if !auto_played.is_empty() {
+            for cell_idx in &auto_played {
+                state.sync_cell_from_notebook(*cell_idx);
+            }
+            needs_redraw = true;
+        }
+        let auto_rerun_deadline = state
+            .session
+            .active_tab()
+            .notebook
+            .next_auto_rerun_deadline(now);
+
         if needs_redraw {
             state.sync_active_tab();
             if state.autocomplete.active {
@@ -1036,10 +1066,13 @@ impl ApplicationHandler for App {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(wait_until));
             }
         } else if !state.is_any_drag_active() && state.pending_dialog.is_none() {
-            if let Some(deadline) = picker_deadline {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
-            } else {
-                event_loop.set_control_flow(ControlFlow::Wait);
+            let earliest = [picker_deadline, auto_rerun_deadline]
+                .into_iter()
+                .flatten()
+                .min();
+            match earliest {
+                Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
+                None => event_loop.set_control_flow(ControlFlow::Wait),
             }
         }
 

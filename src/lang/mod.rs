@@ -267,7 +267,17 @@ pub fn parse(source: &str) -> Result<Ir, String> {
     p.parse()
 }
 
-/// Compile source code through the full pipeline: lex → parse → WGSL gen.
+/// Type-check an IR tree, formatting any error with source-location context.
+/// Production callers run this between parse and codegen so that semantic
+/// mistakes surface as `Line N, Col M: ...` messages instead of opaque GPU
+/// shader-validation errors.
+pub fn type_check(ir: &Ir, source: &str) -> Result<(), String> {
+    check::check(ir)
+        .map(|_| ())
+        .map_err(|e| format_error_at(source, e.span.0, &e.message))
+}
+
+/// Compile source code through the full pipeline: lex → parse → type check → WGSL gen.
 /// Returns the complete WGSL shader source string.
 ///
 /// Currently only used by integration tests; production callers go through
@@ -278,6 +288,7 @@ pub fn compile(source: &str) -> Result<String, String> {
     let tokens = lex.tokenize()?;
     let mut parser = parser::Parser::new(tokens, source.to_string());
     let ir = parser.parse()?;
+    type_check(&ir, source)?;
     wgsl_gen::generate(&ir)
 }
 

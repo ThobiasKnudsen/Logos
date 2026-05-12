@@ -50,6 +50,9 @@ pub enum TokenType {
     // Binding
     Colon, // := (binding/definition operator)
 
+    // Lambda introducer — `|->` and `↦` both lex to this single token.
+    Mapsto,
+
     // Punctuation
     LParen,
     RParen,
@@ -101,6 +104,7 @@ impl fmt::Display for TokenType {
             TokenType::Lte => write!(f, "'<='"),
             TokenType::Gte => write!(f, "'>='"),
             TokenType::Colon => write!(f, "':='"),
+            TokenType::Mapsto => write!(f, "'↦'"),
             TokenType::LParen => write!(f, "'('"),
             TokenType::RParen => write!(f, "')'"),
             TokenType::LBracket => write!(f, "'['"),

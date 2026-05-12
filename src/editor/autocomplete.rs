@@ -247,28 +247,67 @@ pub const LATEX_SYMBOLS: &[(&str, &str)] = &[
     ("\\le", "\u{2264}"),  // ≤ (alias)
     ("\\geq", "\u{2265}"), // ≥
     ("\\ge", "\u{2265}"),  // ≥ (alias)
-    ("\\neq", "\u{2260}"), // ≠
+    ("\\neq", "\u{2260}"),    // ≠
+    ("\\mapsto", "\u{21A6}"), // ↦ — same lexical token as `|->`
 ];
 
-/// If the user just typed a non-identifier delimiter character and the
-/// `\command` immediately before it matches a `LATEX_SYMBOLS` entry
-/// exactly, return the byte range to replace and the Unicode substitution.
-/// Returns `None` if no auto-substitution should fire.
+/// Multi-character substitutions where the entire sequence (no `\` prefix,
+/// the *final* keystroke is what triggers the swap, and that keystroke is
+/// itself part of the pattern). Unlike `LATEX_SYMBOLS`, the trigger is
+/// consumed by the substitution rather than preserved after it.
 ///
-/// Caller (event handler) replaces `text[range_start..cursor]` — i.e. the
-/// command *plus the trigger character* — with `symbol + trigger`, leaving
-/// the cursor after the trigger. Bundling both in one replace keeps the
-/// cursor position correct without separate bookkeeping.
+/// Each entry is `(source, replacement)`. The lexer must accept both spellings
+/// — `|->` and the chosen Unicode — as equivalent tokens; this table only
+/// shapes what ends up in the buffer.
+pub const TEXT_SUBSTITUTIONS: &[(&str, &str)] = &[
+    ("|->", "\u{21A6}"), // ↦
+    ("<=", "\u{2264}"),  // ≤   (lexer also accepts `<=`)
+    (">=", "\u{2265}"),  // ≥   (lexer also accepts `>=`)
+    ("!=", "\u{2260}"),  // ≠   (lexer also accepts `!=`)
+];
+
+/// Result of an auto-substitution check: replace `text[start..end]` with
+/// `replacement`. Returned by `latex_auto_substitute` so callers don't need
+/// to know whether the trigger character was consumed by the pattern (as in
+/// `|->`) or preserved after it (as in `\int<space>`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutoSubstitute {
+    pub start: usize,
+    pub end: usize,
+    pub replacement: String,
+}
+
+/// If the user just typed a character that completes a known substitution
+/// pattern, return the range to replace and what to put there. Two kinds
+/// of patterns are recognized:
 ///
-/// Trigger characters are everything that is neither alphanumeric, `_`, nor
-/// `\`: space, paren, comma, operator chars, newline, etc.
-pub fn latex_auto_substitute(
-    text: &str,
-    cursor: usize,
-) -> Option<(usize, &'static str)> {
+///   1. `\command<delimiter>` from `LATEX_SYMBOLS` — the trigger delimiter
+///      is preserved after the replacement (so `\int(` → `∫(`).
+///   2. Self-contained sequences from `TEXT_SUBSTITUTIONS` like `|->` —
+///      the final character is part of the pattern and is consumed by the
+///      replacement (so `|->` → `↦`).
+///
+/// Returns `None` if neither kind of pattern matches at the cursor.
+pub fn latex_auto_substitute(text: &str, cursor: usize) -> Option<AutoSubstitute> {
     if cursor == 0 || cursor > text.len() {
         return None;
     }
+
+    // Self-contained text substitutions first — the trigger keystroke is
+    // the *last* char of the pattern, so we just look at the suffix of the
+    // text ending at the cursor.
+    for &(pattern, sym) in TEXT_SUBSTITUTIONS {
+        if text[..cursor].ends_with(pattern) {
+            return Some(AutoSubstitute {
+                start: cursor - pattern.len(),
+                end: cursor,
+                replacement: sym.to_string(),
+            });
+        }
+    }
+
+    // `\command<delimiter>` patterns. The trigger has to be a non-identifier
+    // delimiter; if it's a letter, the user is still typing.
     let trigger = text[..cursor].chars().next_back()?;
     if trigger.is_alphanumeric() || trigger == '_' || trigger == '\\' {
         return None;
@@ -278,10 +317,16 @@ pub fn latex_auto_substitute(
     if !prefix.starts_with('\\') || prefix.len() < 2 {
         return None;
     }
-    LATEX_SYMBOLS
+    let sym = LATEX_SYMBOLS
         .iter()
         .find(|&&(cmd, _)| cmd == prefix)
-        .map(|&(_, sym)| (prefix_start, sym))
+        .map(|&(_, sym)| sym)?;
+    let trigger_str = &text[before_trigger..cursor];
+    Some(AutoSubstitute {
+        start: prefix_start,
+        end: cursor,
+        replacement: format!("{sym}{trigger_str}"),
+    })
 }
 
 /// Build candidate list for LaTeX symbol completion.
@@ -506,9 +551,18 @@ mod tests {
     fn assert_substitute(text: &str, want_prefix_start: usize, want_symbol: &str) {
         let cursor = text.len();
         let got = latex_auto_substitute(text, cursor);
+        // The pre-existing `\command<trigger>` callers expect the trigger
+        // preserved after the symbol; build that comparison value here so
+        // existing tests don't have to spell it out.
+        let trigger = &text[(cursor - text[..cursor].chars().next_back().map_or(0, char::len_utf8))..cursor];
+        let expected = AutoSubstitute {
+            start: want_prefix_start,
+            end: cursor,
+            replacement: format!("{want_symbol}{trigger}"),
+        };
         assert_eq!(
             got,
-            Some((want_prefix_start, want_symbol)),
+            Some(expected),
             "expected substitution at {} → {:?} for {:?}; got {:?}",
             want_prefix_start, want_symbol, text, got,
         );
@@ -559,6 +613,38 @@ mod tests {
     fn auto_substitute_does_not_fire_on_bare_backslash() {
         // Single `\` followed by space — not a real command.
         assert_no_substitute("\\ ");
+    }
+
+    #[test]
+    fn auto_substitute_rewrites_pipe_arrow_to_mapsto() {
+        // `|->` is a self-contained pattern: the final `>` keystroke is part
+        // of the match and gets consumed by the substitution.
+        let text = "x |->";
+        let cursor = text.len();
+        let got = latex_auto_substitute(text, cursor).expect("should substitute");
+        assert_eq!(got.start, 2); // start of `|`
+        assert_eq!(got.end, cursor);
+        assert_eq!(got.replacement, "\u{21A6}"); // ↦
+    }
+
+    #[test]
+    fn auto_substitute_pipe_arrow_does_not_fire_on_partial_pattern() {
+        // `|-` alone is not a match — substitution waits for `>`.
+        assert_no_substitute("x |-");
+    }
+
+    #[test]
+    fn auto_substitute_rewrites_comparison_operators() {
+        // Each completes on its final ASCII keystroke and is consumed entirely.
+        for (ascii, unicode) in [("<=", "\u{2264}"), (">=", "\u{2265}"), ("!=", "\u{2260}")] {
+            let text = format!("a {}", ascii);
+            let cursor = text.len();
+            let got = latex_auto_substitute(&text, cursor)
+                .unwrap_or_else(|| panic!("should substitute {:?}", ascii));
+            assert_eq!(got.start, cursor - ascii.len());
+            assert_eq!(got.end, cursor);
+            assert_eq!(got.replacement, unicode);
+        }
     }
 
     #[test]
