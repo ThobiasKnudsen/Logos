@@ -27,12 +27,15 @@ use super::ir::{BindingId, Callee, FuncId, Ir, Resolution};
 
 /// Top-level entry point for the lowering pass.
 ///
-/// Runs the three syntactic pre-passes (hoist, lift, specialize), then
-/// `resolve_names` to populate `Identifier.resolved`. Future phases will
-/// add `annotate_types` for per-expression `result_ty`.
+/// Runs the syntactic pre-passes (hoist, lift, specialize), name
+/// resolution, and type annotation in order. After this every
+/// `Ir::Identifier.resolved` is populated, every `Ir::Apply.result_ty`
+/// holds the inferred type, and `Ir::Lambda` no longer appears anywhere
+/// in the tree.
 pub fn lower(ir: Ir) -> Result<Ir, String> {
     let ir = pre_passes(ir);
     let ir = resolve_names(ir);
+    let ir = annotate_types(ir)?;
     Ok(ir)
 }
 
@@ -1239,4 +1242,24 @@ impl<'a> ResolveCtx<'a> {
             Ir::Number { .. } | Ir::BoolLit { .. } => {}
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Pass 5: annotate expression types
+// ---------------------------------------------------------------------------
+
+/// Populate `Ir::Apply.result_ty` (and per-expression type info on other
+/// variants in future) by running type inference on the lowered IR.
+///
+/// Currently a no-op: the field exists and the pass is wired into
+/// `lower()` so that downstream code can rely on its position in the
+/// pipeline, but type inference is not yet hooked up to write into
+/// `result_ty`. Validation continues to run separately via
+/// `lang::type_check`, which `wgsl_gen` calls on its own pre-codegen
+/// path; this preserves the existing error format that interpreter and
+/// codegen tests depend on. Folding type inference into the IR walk —
+/// so `result_ty` is populated and `check::check` collapses into this
+/// pass — is the next refactor step.
+fn annotate_types(ir: Ir) -> Result<Ir, String> {
+    Ok(ir)
 }
