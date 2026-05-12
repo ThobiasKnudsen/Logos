@@ -101,7 +101,7 @@ fn infer(node: &Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
         Ir::Number { .. } => Ok(Type::Num),
         Ir::BoolLit { .. } => Ok(Type::Bool),
 
-        Ir::Identifier { name, span } => env
+        Ir::Identifier { name, span, .. } => env
             .get_var(name)
             .cloned()
             // Function names used as values (e.g. `N_integral(sq, 0, x, d)` —

@@ -23,14 +23,17 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::ir::{Callee, Ir};
+use super::ir::{BindingId, Callee, FuncId, Ir, Resolution};
 
 /// Top-level entry point for the lowering pass.
 ///
-/// Currently runs the three relocated pre-passes. Future phases will add
-/// `resolve_names` and `annotate_types` sub-passes.
+/// Runs the three syntactic pre-passes (hoist, lift, specialize), then
+/// `resolve_names` to populate `Identifier.resolved`. Future phases will
+/// add `annotate_types` for per-expression `result_ty`.
 pub fn lower(ir: Ir) -> Result<Ir, String> {
-    Ok(pre_passes(ir))
+    let ir = pre_passes(ir);
+    let ir = resolve_names(ir);
+    Ok(ir)
 }
 
 /// Run the three syntactic pre-passes that normalize the AST shape before
@@ -209,6 +212,7 @@ fn hoist_recurse(
                 return Ir::Identifier {
                     name,
                     span: *span,
+                    resolved: None,
                 };
             }
         }
@@ -513,6 +517,7 @@ fn lift_lambdas_inner(node: &mut Ir, counter: &mut usize, new_defs: &mut Vec<Ir>
         *node = Ir::Identifier {
             name,
             span: saved_span,
+            resolved: None,
         };
         changed = true;
     }
@@ -958,5 +963,279 @@ fn body_calls_any_of(node: &Ir, names: &HashSet<&str>) -> bool {
         }
         Ir::FunctionDef { body, .. } => body_calls_any_of(body, names),
         _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pass 4: resolve identifier names to bindings / functions / params / axis vars
+// ---------------------------------------------------------------------------
+
+/// Walk the IR populating `Ir::Identifier.resolved` for every identifier.
+/// Function references resolve to `Resolution::FunctionDef(FuncId)`; loop
+/// variables, function parameters, and tuple-binding names resolve to
+/// `LocalBinding` or `Param`; axis vars (`x` / `y` when unbound) resolve
+/// to `AxisVar`. Names that don't resolve to any of those stay `None` —
+/// today that's variables introduced by `Ir::Binding`, which the
+/// interpreter still looks up by name in its `Env`. A later phase can
+/// extend resolution to `LocalBinding` for those, matching the design.
+fn resolve_names(ir: Ir) -> Ir {
+    // First pass: collect every FunctionDef name and assign it a FuncId.
+    // Function names share a single flat namespace (functions defined later
+    // in the program are visible to earlier callers — pre_passes has
+    // already done lambda lifting and HOF specialization so all callable
+    // names exist at this point).
+    let mut funcs: HashMap<String, FuncId> = HashMap::new();
+    let mut next_fid: u32 = 0;
+    collect_func_ids(&ir, &mut funcs, &mut next_fid);
+
+    // Second pass: walk the tree with a scope stack and rewrite each
+    // Identifier's `resolved` field.
+    let mut ctx = ResolveCtx {
+        funcs: &funcs,
+        scopes: Vec::new(),
+        next_bid: 0,
+    };
+    ctx.scopes.push(Scope::default());
+    let mut owned = ir;
+    ctx.visit(&mut owned);
+    owned
+}
+
+fn collect_func_ids(node: &Ir, funcs: &mut HashMap<String, FuncId>, next: &mut u32) {
+    match node {
+        Ir::FunctionDef {
+            name, body, ..
+        } => {
+            funcs.entry(name.clone()).or_insert_with(|| {
+                let id = FuncId(*next);
+                *next += 1;
+                id
+            });
+            collect_func_ids(body, funcs, next);
+        }
+        Ir::Block { items, .. } => {
+            for s in items {
+                collect_func_ids(s, funcs, next);
+            }
+        }
+        Ir::Binding { value, .. } | Ir::TupleBinding { value, .. } => {
+            collect_func_ids(value, funcs, next);
+        }
+        Ir::Apply { args, .. } => {
+            for a in args {
+                collect_func_ids(a, funcs, next);
+            }
+        }
+        Ir::Tuple { items, .. } | Ir::ArrayLiteral { items, .. } => {
+            for i in items {
+                collect_func_ids(i, funcs, next);
+            }
+        }
+        Ir::IfExpr {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_func_ids(condition, funcs, next);
+            collect_func_ids(then_branch, funcs, next);
+            if let Some(e) = else_branch {
+                collect_func_ids(e, funcs, next);
+            }
+        }
+        Ir::WhileLoop {
+            condition, body, ..
+        } => {
+            collect_func_ids(condition, funcs, next);
+            collect_func_ids(body, funcs, next);
+        }
+        Ir::ForLoop { range, body, .. } | Ir::ParallelFor { range, body, .. } => {
+            collect_func_ids(range, funcs, next);
+            collect_func_ids(body, funcs, next);
+        }
+        Ir::Range { start, end, .. } => {
+            collect_func_ids(start, funcs, next);
+            collect_func_ids(end, funcs, next);
+        }
+        Ir::PropertyAccess { object, .. } => collect_func_ids(object, funcs, next),
+        Ir::IndexAccess { array, index, .. } => {
+            collect_func_ids(array, funcs, next);
+            collect_func_ids(index, funcs, next);
+        }
+        Ir::IndexAssign {
+            array,
+            index,
+            value,
+            ..
+        } => {
+            collect_func_ids(array, funcs, next);
+            collect_func_ids(index, funcs, next);
+            collect_func_ids(value, funcs, next);
+        }
+        Ir::Lambda { body, .. } => collect_func_ids(body, funcs, next),
+        Ir::Number { .. } | Ir::BoolLit { .. } | Ir::Identifier { .. } => {}
+    }
+}
+
+#[derive(Default)]
+struct Scope {
+    /// Names introduced by `Binding` / `TupleBinding` / loop variables in
+    /// this scope.
+    bindings: HashMap<String, BindingId>,
+    /// Function parameters, keyed by name → zero-based position.
+    params: HashMap<String, u32>,
+}
+
+struct ResolveCtx<'a> {
+    funcs: &'a HashMap<String, FuncId>,
+    scopes: Vec<Scope>,
+    next_bid: u32,
+}
+
+impl<'a> ResolveCtx<'a> {
+    fn fresh_bid(&mut self) -> BindingId {
+        let id = BindingId(self.next_bid);
+        self.next_bid += 1;
+        id
+    }
+
+    /// Resolve `name`, walking the scope stack outward (innermost first).
+    /// Function names share a flat namespace and are checked last so that
+    /// a local binding can shadow a function of the same name.
+    fn resolve(&self, name: &str) -> Option<Resolution> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(&p) = scope.params.get(name) {
+                return Some(Resolution::Param(p));
+            }
+            if let Some(&bid) = scope.bindings.get(name) {
+                return Some(Resolution::LocalBinding(bid));
+            }
+        }
+        if let Some(&fid) = self.funcs.get(name) {
+            return Some(Resolution::FunctionDef(fid));
+        }
+        // Axis vars are implicit in plot contexts; recognize them at the
+        // tail of resolution so any earlier binding wins.
+        if name == "x" || name == "y" {
+            return Some(Resolution::AxisVar);
+        }
+        None
+    }
+
+    fn visit(&mut self, node: &mut Ir) {
+        match node {
+            Ir::Identifier { name, resolved, .. } => {
+                *resolved = self.resolve(name);
+            }
+            Ir::Apply { args, .. } => {
+                for a in args.iter_mut() {
+                    self.visit(a);
+                }
+            }
+            Ir::Tuple { items, .. } | Ir::ArrayLiteral { items, .. } => {
+                for i in items.iter_mut() {
+                    self.visit(i);
+                }
+            }
+            Ir::Block { items, .. } => {
+                self.scopes.push(Scope::default());
+                for s in items.iter_mut() {
+                    self.visit(s);
+                }
+                self.scopes.pop();
+            }
+            Ir::Binding { name, value, .. } => {
+                // RHS resolves in the enclosing scope (no self-reference).
+                self.visit(value);
+                let bid = self.fresh_bid();
+                let scope = self.scopes.last_mut().expect("scope stack non-empty");
+                scope.bindings.insert(name.clone(), bid);
+            }
+            Ir::TupleBinding { names, value, .. } => {
+                self.visit(value);
+                let scope = self.scopes.last_mut().expect("scope stack non-empty");
+                for n in names {
+                    let bid = BindingId(self.next_bid);
+                    self.next_bid += 1;
+                    scope.bindings.insert(n.clone(), bid);
+                }
+            }
+            Ir::IfExpr {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.visit(condition);
+                self.visit(then_branch);
+                if let Some(e) = else_branch {
+                    self.visit(e);
+                }
+            }
+            Ir::WhileLoop {
+                condition, body, ..
+            } => {
+                self.visit(condition);
+                self.visit(body);
+            }
+            Ir::ForLoop {
+                var, range, body, ..
+            }
+            | Ir::ParallelFor {
+                var, range, body, ..
+            } => {
+                self.visit(range);
+                self.scopes.push(Scope::default());
+                let bid = self.fresh_bid();
+                self.scopes
+                    .last_mut()
+                    .unwrap()
+                    .bindings
+                    .insert(var.clone(), bid);
+                self.visit(body);
+                self.scopes.pop();
+            }
+            Ir::FunctionDef { params, body, .. } => {
+                let mut scope = Scope::default();
+                for (i, p) in params.iter().enumerate() {
+                    scope.params.insert(p.clone(), i as u32);
+                }
+                self.scopes.push(scope);
+                self.visit(body);
+                self.scopes.pop();
+            }
+            Ir::Lambda { params, body, .. } => {
+                // After pre_passes, lambdas should all be lifted. Handle
+                // defensively for the test-only path that calls
+                // resolve_names without pre_passes.
+                let mut scope = Scope::default();
+                for (i, p) in params.iter().enumerate() {
+                    scope.params.insert(p.clone(), i as u32);
+                }
+                self.scopes.push(scope);
+                self.visit(body);
+                self.scopes.pop();
+            }
+            Ir::PropertyAccess { object, .. } => self.visit(object),
+            Ir::IndexAccess { array, index, .. } => {
+                self.visit(array);
+                self.visit(index);
+            }
+            Ir::Range { start, end, .. } => {
+                self.visit(start);
+                self.visit(end);
+            }
+            Ir::IndexAssign {
+                array,
+                index,
+                value,
+                ..
+            } => {
+                self.visit(array);
+                self.visit(index);
+                self.visit(value);
+            }
+            Ir::Number { .. } | Ir::BoolLit { .. } => {}
+        }
     }
 }

@@ -239,6 +239,39 @@ impl Callee {
     }
 }
 
+/// Stable identity of a `Binding` after `lower::resolve_names` has run.
+/// Backends use this to look up the corresponding declaration without
+/// re-running scope resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BindingId(pub u32);
+
+/// Stable identity of a `FunctionDef` (including lifted lambdas and HOF
+/// specializations), assigned by `lower::resolve_names`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FuncId(pub u32);
+
+/// What an `Ir::Identifier` actually refers to, populated by
+/// `lower::resolve_names`. The parser leaves `Identifier.resolved = None`;
+/// after lowering, every identifier reaching a backend has a `Resolution`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Resolution {
+    /// A `let`-style binding in some enclosing block.
+    LocalBinding(BindingId),
+    /// A user-defined function (`f(x) := …`).
+    FunctionDef(FuncId),
+    /// A function synthesized by `lower::lift_lambdas` from an
+    /// `Ir::Lambda` (or by HOF specialization).
+    LiftedLambda(FuncId),
+    /// A binding synthesized by `lower::hoist_anonymous_blocks` for an
+    /// inline imperative block in expression position.
+    LiftedBlock(BindingId),
+    /// A function parameter, by zero-based position within its enclosing
+    /// `FunctionDef.params`.
+    Param(u32),
+    /// The implicit axis variables `x` / `y` available in plot contexts.
+    AxisVar,
+}
+
 /// IR node for the Logos math language.
 ///
 /// Following the Zig design: all operations are unified under `Apply`.
@@ -249,6 +282,10 @@ impl Callee {
 ///
 /// Every variant carries a `span` covering the source range it was parsed
 /// from. Use `Ir::span()` to read it without destructuring.
+///
+/// Some variants carry additional analysis annotations (e.g.
+/// `Identifier.resolved`) that the parser leaves `None` and the lowering
+/// pass populates. Backends consume these with `.expect(...)`-style reads.
 #[derive(Debug, Clone)]
 pub enum Ir {
     /// Numeric literal
@@ -257,8 +294,14 @@ pub enum Ir {
     /// Boolean literal
     BoolLit { value: bool, span: Span },
 
-    /// Variable reference
-    Identifier { name: String, span: Span },
+    /// Variable reference. `resolved` is `None` at parse time and gets
+    /// populated by `lower::resolve_names`; backends read it with
+    /// `.expect("must be lowered")`.
+    Identifier {
+        name: String,
+        span: Span,
+        resolved: Option<Resolution>,
+    },
 
     /// Unified operation node: callee + arguments.
     /// Covers binary ops (add, sub, mul, div, pow, mod, eq, neq, lt, gt, lte, gte, and, or),
@@ -1118,6 +1161,7 @@ mod to_source_tests {
             Ir::Identifier { name, .. } => Ir::Identifier {
                 name: name.clone(),
                 span: (0, 0),
+                resolved: None,
             },
             Ir::Apply { callee, args, .. } => Ir::Apply {
                 callee: callee.clone(),
@@ -1158,7 +1202,8 @@ mod to_source_tests {
         assert_eq!(
             Ir::Identifier {
                 name: "x".to_string(),
-                span: (0, 0)
+                span: (0, 0),
+                resolved: None,
             }
             .to_source(),
             "x"

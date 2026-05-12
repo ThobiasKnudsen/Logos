@@ -18,12 +18,13 @@ use std::collections::{HashMap, HashSet};
 ///   (equality → curve straddling, inequalities → all-corners-agree)
 /// - For numeric expressions: clamps to [0, 1] grayscale
 pub fn generate(ast: &Ir) -> Result<String, String> {
-    // Run the shared lowering pre-passes: hoist anonymous imperative
+    // Run the shared lowering pipeline: hoist anonymous imperative
     // blocks, lift lambdas into synthetic FunctionDefs, specialize
-    // higher-order function calls. After this, the AST contains no
-    // Lambda nodes and no calls to user functions with first-class
-    // function arguments — both invariants WGSL codegen relies on.
-    let owned_ast = super::lower::pre_passes(ast.clone());
+    // higher-order function calls, and resolve identifier references.
+    // After this, the AST contains no Lambda nodes and no calls to
+    // user functions with first-class function arguments — both
+    // invariants WGSL codegen relies on.
+    let owned_ast = super::lower::lower(ast.clone())?;
     let ast: &Ir = &owned_ast;
 
     let mut ctx = GenContext::new();

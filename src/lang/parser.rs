@@ -622,6 +622,7 @@ impl Parser {
                 Ok(Ir::Identifier {
                     name,
                     span: tok_span,
+                    resolved: None,
                 })
             }
             TokenType::AxisVar(name) => {
@@ -629,6 +630,7 @@ impl Parser {
                 Ok(Ir::Identifier {
                     name,
                     span: tok_span,
+                    resolved: None,
                 })
             }
             TokenType::Builtin(name) => {
@@ -647,6 +649,7 @@ impl Parser {
                     Ok(Ir::Identifier {
                         name,
                         span: tok_span,
+                        resolved: None,
                     })
                 }
             }
@@ -965,6 +968,7 @@ impl Parser {
                     Ok(Ir::Identifier {
                         name: cast_name,
                         span: cast_span,
+                        resolved: None,
                     })
                 }
             }
