@@ -21,8 +21,8 @@ use crate::ui::theme::{fonts, spacing, split};
 use super::cas::WgpuGpuDispatch;
 use super::render_area::{MouseZone, RenderAreaState};
 use super::{
-    detect_mouse_zone, point_in_rect, win_pos, App, AppState, HoverTarget, WindowControlRects,
-    DOUBLE_CLICK_MS, SCROLL_LINE_PIXELS,
+    detect_mouse_zone, point_in_rect, win_pos, ActiveDrag, App, AppState, HoverTarget,
+    WindowControlRects, DOUBLE_CLICK_MS, SCROLL_LINE_PIXELS,
 };
 
 impl ApplicationHandler for App {
@@ -72,21 +72,7 @@ impl ApplicationHandler for App {
             hover_target: HoverTarget::None,
             mouse_press_target: HoverTarget::None,
             split_left_width: split::DEFAULT_LEFT_WIDTH,
-            is_dragging_split: false,
-            is_dragging_v_scroll: false,
-            scroll_drag_offset: 0.0,
-            is_dragging_editor: false,
-            editor_drag_cell: None,
-            is_dragging_cell_resize: false,
-            cell_resize_index: None,
-            cell_resize_start_y: 0.0,
-            cell_resize_start_h: 0.0,
-            is_dragging_cell_h_scroll: false,
-            cell_h_scroll_index: None,
-            cell_h_scroll_drag_offset: 0.0,
-            is_dragging_cell_v_scroll: false,
-            cell_v_scroll_index: None,
-            cell_v_scroll_drag_offset: 0.0,
+            active_drag: ActiveDrag::None,
             win_control_rects: WindowControlRects::default(),
             is_maximized: false,
             last_title_click: None,
@@ -100,7 +86,6 @@ impl ApplicationHandler for App {
                 h: 0.0,
             },
             open_color_picker: None,
-            color_picker_drag: None,
             color_picker_hover_left_at: None,
             render_area: RenderAreaState::default(),
             clipboard: arboard::Clipboard::new().ok(),
@@ -167,18 +152,18 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 state.cursor_position = (position.x as f32, position.y as f32);
 
-                if let Some(channel) = state.color_picker_drag {
+                if let ActiveDrag::ColorPickerSlider { channel } = state.active_drag {
                     state.update_color_picker_value_at(channel, state.cursor_position.1);
                     state.window.request_redraw();
                     return;
-                } else if state.is_dragging_v_scroll {
+                } else if let ActiveDrag::VScroll { offset } = state.active_drag {
                     state
                         .renderer
-                        .set_v_scroll_from_drag(state.cursor_position.1, state.scroll_drag_offset);
+                        .set_v_scroll_from_drag(state.cursor_position.1, offset);
                     state.sync_active_tab();
                     state.dismiss_autocomplete();
                     state.window.request_redraw();
-                } else if state.is_dragging_split {
+                } else if matches!(state.active_drag, ActiveDrag::Split) {
                     let content_x = state.cached_layout.left_pane.x;
                     let desired_width = state.cursor_position.0 - content_x;
 
@@ -234,63 +219,57 @@ impl ApplicationHandler for App {
 
                     state.render_area.last_drag_pos = (mx, my);
                     state.window.request_redraw();
-                } else if state.is_dragging_cell_resize {
-                    if let Some(idx) = state.cell_resize_index {
-                        let delta_y = state.cursor_position.1 - state.cell_resize_start_y;
-                        let new_h = state.cell_resize_start_h + delta_y;
-                        let text_pad = spacing::sm();
-                        let min_h = fonts::editor_line_height() + text_pad * 2.0;
-                        let content_h = state
-                            .cell_layouts
-                            .iter()
-                            .find(|cl| cl.cell_index == idx)
-                            .map(|cl| cl.content_height)
-                            .unwrap_or(new_h);
-                        let natural_h = content_h + text_pad * 2.0;
-                        let clamped = new_h.clamp(min_h, natural_h);
-                        let tab = state.session.active_tab_mut();
-                        if idx < tab.cells().len() {
-                            if (clamped - natural_h).abs() < 1.0 {
-                                tab.cell_mut(idx).contracted_editor_h = None;
-                            } else {
-                                tab.cell_mut(idx).contracted_editor_h = Some(clamped);
-                            }
+                } else if let ActiveDrag::CellResize { cell: idx, start_y, start_h } =
+                    state.active_drag
+                {
+                    let delta_y = state.cursor_position.1 - start_y;
+                    let new_h = start_h + delta_y;
+                    let text_pad = spacing::sm();
+                    let min_h = fonts::editor_line_height() + text_pad * 2.0;
+                    let content_h = state
+                        .cell_layouts
+                        .iter()
+                        .find(|cl| cl.cell_index == idx)
+                        .map(|cl| cl.content_height)
+                        .unwrap_or(new_h);
+                    let natural_h = content_h + text_pad * 2.0;
+                    let clamped = new_h.clamp(min_h, natural_h);
+                    let tab = state.session.active_tab_mut();
+                    if idx < tab.cells().len() {
+                        if (clamped - natural_h).abs() < 1.0 {
+                            tab.cell_mut(idx).contracted_editor_h = None;
+                        } else {
+                            tab.cell_mut(idx).contracted_editor_h = Some(clamped);
                         }
-                        state.sync_active_tab();
-                        state.window.request_redraw();
                     }
-                } else if state.is_dragging_cell_h_scroll {
-                    if let Some(idx) = state.cell_h_scroll_index {
-                        state.renderer.set_editor_h_scroll_from_drag(
-                            idx,
-                            state.cursor_position.0,
-                            state.cell_h_scroll_drag_offset,
-                        );
+                    state.sync_active_tab();
+                    state.window.request_redraw();
+                } else if let ActiveDrag::CellHScroll { cell: idx, offset } = state.active_drag {
+                    state.renderer.set_editor_h_scroll_from_drag(
+                        idx,
+                        state.cursor_position.0,
+                        offset,
+                    );
+                    state.sync_active_tab();
+                    state.window.request_redraw();
+                } else if let ActiveDrag::CellVScroll { cell: idx, offset } = state.active_drag {
+                    state.renderer.set_editor_v_scroll_from_drag(
+                        idx,
+                        state.cursor_position.1,
+                        offset,
+                    );
+                    state.sync_active_tab();
+                    state.window.request_redraw();
+                } else if let ActiveDrag::Editor { cell: cell_idx } = state.active_drag {
+                    let (mx, my) = state.cursor_position;
+                    if let Some(byte_offset) = state.renderer.hit_test_cell(cell_idx, mx, my) {
+                        state
+                            .session
+                            .active_tab_mut()
+                            .cell_mut(cell_idx)
+                            .buffer
+                            .set_cursor_byte_extend(byte_offset);
                         state.sync_active_tab();
-                        state.window.request_redraw();
-                    }
-                } else if state.is_dragging_cell_v_scroll {
-                    if let Some(idx) = state.cell_v_scroll_index {
-                        state.renderer.set_editor_v_scroll_from_drag(
-                            idx,
-                            state.cursor_position.1,
-                            state.cell_v_scroll_drag_offset,
-                        );
-                        state.sync_active_tab();
-                        state.window.request_redraw();
-                    }
-                } else if state.is_dragging_editor {
-                    if let Some(cell_idx) = state.editor_drag_cell {
-                        let (mx, my) = state.cursor_position;
-                        if let Some(byte_offset) = state.renderer.hit_test_cell(cell_idx, mx, my) {
-                            state
-                                .session
-                                .active_tab_mut()
-                                .cell_mut(cell_idx)
-                                .buffer
-                                .set_cursor_byte_extend(byte_offset);
-                            state.sync_active_tab();
-                        }
                     }
                 } else {
                     state.recompute_hover();
@@ -385,7 +364,7 @@ impl ApplicationHandler for App {
             } => {
                 if let HoverTarget::CellColorButton(i) = state.hover_target {
                     state.open_color_picker = Some(i);
-                    state.color_picker_drag = None;
+                    state.active_drag = ActiveDrag::None;
                     state.sync_active_tab();
                 }
             }
@@ -399,7 +378,7 @@ impl ApplicationHandler for App {
 
                 match state.hover_target {
                     HoverTarget::ColorPickerSlider(channel) => {
-                        state.color_picker_drag = Some(channel);
+                        state.active_drag = ActiveDrag::ColorPickerSlider { channel };
                         state.update_color_picker_value_at(channel, state.cursor_position.1);
                         event_loop.set_control_flow(ControlFlow::Poll);
                     }
@@ -414,15 +393,16 @@ impl ApplicationHandler for App {
                     }
                     HoverTarget::SplitHandle => {
                         state.close_menu();
-                        state.is_dragging_split = true;
+                        state.active_drag = ActiveDrag::Split;
                         state.window.set_cursor(CursorIcon::ColResize);
                         event_loop.set_control_flow(ControlFlow::Poll);
                     }
                     HoverTarget::VScrollThumb => {
                         state.close_menu();
                         if let Some(thumb) = state.renderer.v_thumb_rect() {
-                            state.is_dragging_v_scroll = true;
-                            state.scroll_drag_offset = state.cursor_position.1 - thumb.y;
+                            state.active_drag = ActiveDrag::VScroll {
+                                offset: state.cursor_position.1 - thumb.y,
+                            };
                             event_loop.set_control_flow(ControlFlow::Poll);
                         }
                     }
@@ -485,8 +465,7 @@ impl ApplicationHandler for App {
                             }
                         }
                         state.session.active_tab_mut().set_active_cell(i);
-                        state.is_dragging_editor = true;
-                        state.editor_drag_cell = Some(i);
+                        state.active_drag = ActiveDrag::Editor { cell: i };
                         event_loop.set_control_flow(ControlFlow::Poll);
                         state.sync_active_tab();
                     }
@@ -513,43 +492,46 @@ impl ApplicationHandler for App {
                     }
                     HoverTarget::CellResizeHandle(i) => {
                         state.close_menu();
-                        state.is_dragging_cell_resize = true;
-                        state.cell_resize_index = Some(i);
-                        state.cell_resize_start_y = state.cursor_position.1;
                         let editor_h = state
                             .cell_layouts
                             .iter()
                             .find(|cl| cl.cell_index == i)
                             .map(|cl| cl.editor.h)
                             .unwrap_or(100.0);
-                        state.cell_resize_start_h = editor_h;
+                        state.active_drag = ActiveDrag::CellResize {
+                            cell: i,
+                            start_y: state.cursor_position.1,
+                            start_h: editor_h,
+                        };
                         state.window.set_cursor(CursorIcon::NsResize);
                         event_loop.set_control_flow(ControlFlow::Poll);
                     }
                     HoverTarget::CellEditorHScrollThumb(i) => {
                         state.close_menu();
-                        state.is_dragging_cell_h_scroll = true;
-                        state.cell_h_scroll_index = Some(i);
                         let thumb_x = state
                             .cell_layouts
                             .iter()
                             .find(|cl| cl.cell_index == i)
                             .map(|cl| cl.editor_h_scrollbar_thumb.x)
                             .unwrap_or(0.0);
-                        state.cell_h_scroll_drag_offset = state.cursor_position.0 - thumb_x;
+                        state.active_drag = ActiveDrag::CellHScroll {
+                            cell: i,
+                            offset: state.cursor_position.0 - thumb_x,
+                        };
                         event_loop.set_control_flow(ControlFlow::Poll);
                     }
                     HoverTarget::CellEditorVScrollThumb(i) => {
                         state.close_menu();
-                        state.is_dragging_cell_v_scroll = true;
-                        state.cell_v_scroll_index = Some(i);
                         let thumb_y = state
                             .cell_layouts
                             .iter()
                             .find(|cl| cl.cell_index == i)
                             .map(|cl| cl.editor_v_scrollbar_thumb.y)
                             .unwrap_or(0.0);
-                        state.cell_v_scroll_drag_offset = state.cursor_position.1 - thumb_y;
+                        state.active_drag = ActiveDrag::CellVScroll {
+                            cell: i,
+                            offset: state.cursor_position.1 - thumb_y,
+                        };
                         event_loop.set_control_flow(ControlFlow::Poll);
                     }
                     _ => {
@@ -565,8 +547,8 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
-                if state.color_picker_drag.is_some() {
-                    state.color_picker_drag = None;
+                if matches!(state.active_drag, ActiveDrag::ColorPickerSlider { .. }) {
+                    state.active_drag = ActiveDrag::None;
                     if state.pending_dialog.is_none() {
                         event_loop.set_control_flow(ControlFlow::Wait);
                     }
@@ -574,18 +556,9 @@ impl ApplicationHandler for App {
                     return;
                 }
                 if state.is_any_drag_active() {
-                    let was_v_scroll = state.is_dragging_v_scroll;
-                    state.is_dragging_split = false;
-                    state.is_dragging_v_scroll = false;
+                    let was_v_scroll = matches!(state.active_drag, ActiveDrag::VScroll { .. });
+                    state.active_drag = ActiveDrag::None;
                     state.render_area.is_dragging = false;
-                    state.is_dragging_editor = false;
-                    state.editor_drag_cell = None;
-                    state.is_dragging_cell_resize = false;
-                    state.cell_resize_index = None;
-                    state.is_dragging_cell_h_scroll = false;
-                    state.cell_h_scroll_index = None;
-                    state.is_dragging_cell_v_scroll = false;
-                    state.cell_v_scroll_index = None;
                     if state.pending_dialog.is_none() {
                         event_loop.set_control_flow(ControlFlow::Wait);
                     }
@@ -992,7 +965,7 @@ impl ApplicationHandler for App {
                     &state.cached_layout,
                     state.hover_target,
                     &state.win_control_rects,
-                    state.is_dragging_split,
+                    matches!(state.active_drag, ActiveDrag::Split),
                     state.open_menu,
                     &render_params,
                     picker_color,

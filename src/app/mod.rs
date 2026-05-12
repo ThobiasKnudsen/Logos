@@ -90,6 +90,42 @@ struct App {
     state: Option<AppState>,
 }
 
+/// Which interactive drag the user is currently performing, if any.
+///
+/// Only one drag is active at a time, so encoding the choice as a single
+/// enum makes that invariant unrepresentable as a bug: the seven previous
+/// `is_dragging_*` bools and their companion index/offset fields could in
+/// principle all be `true` simultaneously, which never made sense. Variant
+/// payloads carry the per-drag state inline.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ActiveDrag {
+    None,
+    /// Pane splitter (between left and right panes).
+    Split,
+    /// Left-pane vertical scrollbar thumb. `offset` is the cursor's y-delta
+    /// from the thumb top at mouse-down.
+    VScroll { offset: f32 },
+    /// Selecting text inside a cell editor.
+    Editor { cell: usize },
+    /// Resizing a cell's bottom edge. `start_y` is the cursor y at
+    /// mouse-down; `start_h` is the editor height at that instant.
+    CellResize { cell: usize, start_y: f32, start_h: f32 },
+    /// Horizontal scrollbar within a cell. `offset` is the cursor's x-delta
+    /// from the thumb left at mouse-down.
+    CellHScroll { cell: usize, offset: f32 },
+    /// Vertical scrollbar within a cell. `offset` is the cursor's y-delta
+    /// from the thumb top at mouse-down.
+    CellVScroll { cell: usize, offset: f32 },
+    /// Color-picker slider thumb. `channel`: 0 = R, 1 = G, 2 = B, 3 = A.
+    ColorPickerSlider { channel: u8 },
+}
+
+impl ActiveDrag {
+    pub(crate) fn is_active(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
 struct AppState {
     renderer: Renderer,
     session: Session,
@@ -109,26 +145,10 @@ struct AppState {
     mouse_press_target: HoverTarget,
 
     split_left_width: f32,
-    is_dragging_split: bool,
 
-    is_dragging_v_scroll: bool,
-    scroll_drag_offset: f32,
-
-    is_dragging_editor: bool,
-    editor_drag_cell: Option<usize>,
-
-    is_dragging_cell_resize: bool,
-    cell_resize_index: Option<usize>,
-    cell_resize_start_y: f32,
-    cell_resize_start_h: f32,
-
-    is_dragging_cell_h_scroll: bool,
-    cell_h_scroll_index: Option<usize>,
-    cell_h_scroll_drag_offset: f32,
-
-    is_dragging_cell_v_scroll: bool,
-    cell_v_scroll_index: Option<usize>,
-    cell_v_scroll_drag_offset: f32,
+    /// The current drag operation, if any. Replaces seven previous
+    /// `is_dragging_*` bools plus their companion index/offset fields.
+    active_drag: ActiveDrag,
 
     win_control_rects: WindowControlRects,
     is_maximized: bool,
@@ -141,11 +161,9 @@ struct AppState {
     feedback_button_rect: Rect,
 
     /// `Some(cell_index)` while the RGBA color-picker popup is anchored to
-    /// that cell's color button.
+    /// that cell's color button. Independent of `active_drag` — the popup
+    /// can be open without the user actively dragging a slider.
     open_color_picker: Option<usize>,
-    /// `Some(channel)` while the user is actively dragging a slider thumb;
-    /// `None` between drags. Channel index: 0 = R, 1 = G, 2 = B, 3 = A.
-    color_picker_drag: Option<u8>,
     /// Timestamp at which the cursor first left both the picker and any
     /// color button. The picker auto-closes after `COLOR_PICKER_HOVER_GRACE`
     /// has elapsed since this moment, giving the user time to traverse the

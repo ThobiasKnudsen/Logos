@@ -17,7 +17,7 @@ use super::{FONTS_MENU_INDEX, HELP_MENU_INDEX, THEME_MENU_INDEX};
 use super::render_area::{MouseZone, RenderAreaState};
 use super::{
     compute_win_control_rects, detect_mouse_zone, edge_resize_direction, line_col_from,
-    point_in_rect, win_pos, AppState, HoverTarget,
+    point_in_rect, win_pos, ActiveDrag, AppState, HoverTarget,
 };
 
 impl AppState {
@@ -137,7 +137,7 @@ impl AppState {
                 }
                 None => {
                     self.open_color_picker = None;
-                    self.color_picker_drag = None;
+                    self.active_drag = ActiveDrag::None;
                     self.renderer.clear_color_picker();
                 }
             }
@@ -965,15 +965,10 @@ impl AppState {
         self.renderer.set_maximized_icon(self.is_maximized);
     }
 
-    /// Returns true if any drag operation is in progress.
+    /// Returns true if any drag operation is in progress. `render_area`
+    /// owns its own pan/zoom drag flag separately from `active_drag`.
     pub(super) fn is_any_drag_active(&self) -> bool {
-        self.is_dragging_split
-            || self.is_dragging_v_scroll
-            || self.render_area.is_dragging
-            || self.is_dragging_editor
-            || self.is_dragging_cell_resize
-            || self.is_dragging_cell_h_scroll
-            || self.is_dragging_cell_v_scroll
+        self.active_drag.is_active() || self.render_area.is_dragging
     }
 
     /// Drive cell execution through the headless `Notebook` engine, then
@@ -1027,7 +1022,7 @@ impl AppState {
             self.color_picker_hover_left_at = None;
             return;
         }
-        if self.color_picker_drag.is_some() {
+        if matches!(self.active_drag, ActiveDrag::ColorPickerSlider { .. }) {
             self.color_picker_hover_left_at = None;
             return;
         }
@@ -1063,7 +1058,9 @@ impl AppState {
             return;
         }
         self.open_color_picker = None;
-        self.color_picker_drag = None;
+        if matches!(self.active_drag, ActiveDrag::ColorPickerSlider { .. }) {
+            self.active_drag = ActiveDrag::None;
+        }
         self.color_picker_hover_left_at = None;
         self.renderer.clear_color_picker();
         self.window.request_redraw();
