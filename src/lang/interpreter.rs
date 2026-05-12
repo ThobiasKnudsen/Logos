@@ -183,9 +183,15 @@ impl GpuDispatch for CpuFallback {
 
 /// Evaluate an IR subtree, returning the final value.
 /// `gpu` provides GPU dispatch for parallel for; use `CpuFallback` if no GPU.
+///
+/// Runs the shared lowering pipeline first so the interpreter consumes the
+/// same normalized IR as wgsl_gen. After lowering: no `Ir::Lambda` nodes
+/// (they're lifted into synthetic FunctionDefs); HOF calls are monomorphized;
+/// every `Ir::Identifier` has its `resolved` field populated.
 pub fn eval(ast: &Ir, gpu: &dyn GpuDispatch) -> Result<Value, String> {
+    let lowered = super::lower::lower(ast.clone())?;
     let mut env = Env::new();
-    eval_node(ast, &mut env, gpu)
+    eval_node(&lowered, &mut env, gpu)
 }
 
 // ---------------------------------------------------------------------------
@@ -289,17 +295,10 @@ fn eval_node(node: &Ir, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Value, S
             Ok(Value::Void)
         }
 
-        Ir::Lambda { .. } => {
-            // Lambdas only have meaning as HOF arguments and are lifted to
-            // synthetic function defs by `lower::lift_lambdas` before any
-            // backend sees the IR. If one reaches the interpreter, the
-            // lowering pass missed it.
-            Err(
-                "internal: unlifted lambda reached the interpreter (should have been \
-                 specialized into a synthetic function def by wgsl_gen)"
-                    .to_string(),
-            )
-        }
+        Ir::Lambda { .. } => unreachable!(
+            "Ir::Lambda reached the interpreter: lower::lift_lambdas should have replaced \
+             every Lambda with a synthetic FunctionDef + Identifier reference before now"
+        ),
 
         Ir::IfExpr {
             condition,
