@@ -1,13 +1,13 @@
 //! Background REDUCE service.
 //!
-//! Runs a single `ReduceSession` on a dedicated thread, serving
+//! Runs a single `CslSession` on a dedicated thread, serving
 //! simplification requests from the main UI thread via channels.
 
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::thread;
 
-use super::session::ReduceSession;
+use super::csl::CslSession;
 
 /// Maximum length of REDUCE output before truncation.
 const MAX_OUTPUT_LEN: usize = 2000;
@@ -168,7 +168,7 @@ impl ReduceService {
 /// Worker thread main loop.
 fn worker_loop(req_rx: mpsc::Receiver<ReduceRequest>, resp_tx: mpsc::Sender<ReduceResponse>) {
     // Initialize REDUCE on this thread
-    let session = match ReduceSession::new() {
+    let session = match CslSession::new() {
         Ok(s) => s,
         Err(e) => {
             log::error!("Failed to initialize REDUCE session: {}", e);

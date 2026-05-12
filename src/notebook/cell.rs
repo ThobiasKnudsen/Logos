@@ -151,9 +151,7 @@ impl NotebookCell {
     }
 
     /// True iff the cell has been played and its text has changed since.
-    /// Idle cells are never stale; a stale cell shows the replay affordance.
-    /// (UI replay-button binding is future work; tests cover this today.)
-    #[allow(dead_code)]
+    /// Idle cells are never stale; the auto-rerun pass watches this.
     pub fn is_stale(&self) -> bool {
         match &self.last_played_text {
             Some(t) => t.as_str() != self.buffer.text(),

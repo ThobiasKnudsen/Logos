@@ -634,10 +634,10 @@ impl ApplicationHandler for App {
 
                 for (i, hit) in state.tab_hit_rects.iter().enumerate() {
                     if point_in_rect(mx, my, &hit.full) {
-                        let old = state.session.active_index;
+                        let old = state.session.active_index();
                         if old != i {
-                            let old_id = state.session.tabs[old].tab_id;
-                            let new_id = state.session.tabs[i].tab_id;
+                            let old_id = state.session.tabs()[old].tab_id;
+                            let new_id = state.session.tabs()[i].tab_id;
                             state.renderer.stash_tab_shaders(old_id);
                             state.renderer.restore_tab_shaders(new_id);
                             state.switch_tab_axis(old, i);
@@ -646,7 +646,7 @@ impl ApplicationHandler for App {
                         // Clear in-flight REDUCE bookkeeping on both ends —
                         // shared service and the (now-inactive) tab's notebook.
                         state.reduce_service.borrow_mut().clear_pending();
-                        if let Some(prev) = state.session.tabs.get_mut(old) {
+                        if let Some(prev) = state.session.tab_mut(old) {
                             prev.notebook.clear_pending();
                         }
                         state.invalidate_lang_cache();
@@ -656,8 +656,8 @@ impl ApplicationHandler for App {
                 }
 
                 if point_in_rect(mx, my, &state.plus_button_rect) {
-                    let old = state.session.active_index;
-                    let old_id = state.session.tabs[old].tab_id;
+                    let old = state.session.active_index();
+                    let old_id = state.session.tabs()[old].tab_id;
                     state.renderer.stash_tab_shaders(old_id);
                     let new_idx = state.session.new_tab();
                     state.switch_tab_axis(old, new_idx);
@@ -1088,8 +1088,8 @@ impl ApplicationHandler for App {
                     }
                     match kind {
                         DialogKind::Open => {
-                            let old = state.session.active_index;
-                            let old_id = state.session.tabs[old].tab_id;
+                            let old = state.session.active_index();
+                            let old_id = state.session.tabs()[old].tab_id;
                             state.renderer.stash_tab_shaders(old_id);
                             if let Err(e) = state.session.open_file(&path) {
                                 log::error!("Failed to open file: {}", e);
@@ -1098,7 +1098,7 @@ impl ApplicationHandler for App {
                                     &format!("{}\n\n{}", path.display(), e),
                                 );
                             } else {
-                                let new_idx = state.session.active_index;
+                                let new_idx = state.session.active_index();
                                 state.switch_tab_axis(old, new_idx);
                             }
                         }

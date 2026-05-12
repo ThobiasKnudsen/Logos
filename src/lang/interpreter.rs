@@ -143,7 +143,6 @@ pub trait GpuDispatch {
 }
 
 /// CPU fallback: runs the parallel for on CPU (no GPU needed).
-#[allow(dead_code)]
 pub struct CpuFallback;
 
 impl GpuDispatch for CpuFallback {

@@ -24,8 +24,8 @@ pub type GpuFactory = Box<dyn Fn() -> Box<dyn GpuDispatch>>;
 /// the GPU dispatcher factory so each new `NotebookView` is wired up the
 /// same way.
 pub struct Session {
-    pub tabs: Vec<NotebookView>,
-    pub active_index: usize,
+    tabs: Vec<NotebookView>,
+    active_index: usize,
     reduce: Option<Rc<RefCell<ReduceService>>>,
     gpu_factory: Option<GpuFactory>,
 }
@@ -76,6 +76,18 @@ impl Session {
 
     pub fn active_tab_mut(&mut self) -> &mut NotebookView {
         &mut self.tabs[self.active_index]
+    }
+
+    pub fn active_index(&self) -> usize {
+        self.active_index
+    }
+
+    pub fn tabs(&self) -> &[NotebookView] {
+        &self.tabs
+    }
+
+    pub fn tab_mut(&mut self, idx: usize) -> Option<&mut NotebookView> {
+        self.tabs.get_mut(idx)
     }
 
     pub fn set_active(&mut self, index: usize) {

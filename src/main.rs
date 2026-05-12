@@ -1,16 +1,7 @@
-mod app;
-mod editor;
-mod file_dialog;
-mod lang;
-mod notebook;
-mod render;
-mod session;
-mod ui;
-
 fn main() {
     env_logger::init();
     install_panic_hook();
-    if let Err(e) = app::run() {
+    if let Err(e) = logos::app::run() {
         log::error!("fatal: {e}");
         std::process::exit(1);
     }

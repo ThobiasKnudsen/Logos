@@ -1,6 +1,6 @@
 //! Safe wrapper around the CSL/REDUCE FFI.
 //!
-//! `ReduceSession` owns a single CSL instance. It must only be used from
+//! `CslSession` owns a single CSL instance. It must only be used from
 //! one thread (CSL is not thread-safe). The background service in
 //! `service.rs` ensures this by running all calls on a dedicated thread.
 
@@ -49,11 +49,11 @@ extern "C" fn writer_callback(ch: c_int) -> c_int {
 }
 
 /// A single REDUCE/CSL session. NOT Send or Sync — must stay on one thread.
-pub struct ReduceSession {
+pub struct CslSession {
     _not_send: std::marker::PhantomData<*mut ()>,
 }
 
-impl ReduceSession {
+impl CslSession {
     /// Initialize CSL and load the REDUCE image.
     ///
     /// This is expensive (~50-200ms). Call once, reuse for all simplifications.
@@ -186,7 +186,7 @@ impl ReduceSession {
         // Drain all startup and warmup output
         OUTPUT_BUF.with(|buf| buf.borrow_mut().clear());
 
-        Ok(ReduceSession {
+        Ok(CslSession {
             _not_send: std::marker::PhantomData,
         })
     }
@@ -328,7 +328,7 @@ impl ReduceSession {
     }
 }
 
-impl Drop for ReduceSession {
+impl Drop for CslSession {
     fn drop(&mut self) {
         unsafe {
             ffi::reduce_ffi_cslfinish(Some(writer_callback));
@@ -345,7 +345,7 @@ mod tests {
     // All tests must live in a single #[test] function that shares one session.
 
     /// Helper: assert the REDUCE result exactly equals `expected`.
-    fn assert_simplify_eq(session: &ReduceSession, input: &str, expected: &str) {
+    fn assert_simplify_eq(session: &CslSession, input: &str, expected: &str) {
         let result = session
             .simplify(input)
             .unwrap_or_else(|e| panic!("simplify({:?}) failed: {}", input, e));
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_reduce_session() {
-        let session = ReduceSession::new().expect("Failed to create REDUCE session");
+        let session = CslSession::new().expect("Failed to create REDUCE session");
 
         // ═══════════════════════════════════════════════════════════
         // 1. NUMERIC ARITHMETIC

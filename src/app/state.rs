@@ -75,12 +75,12 @@ impl AppState {
         let t2 = Instant::now();
         let tab_infos: Vec<TabInfo> = self
             .session
-            .tabs
+            .tabs()
             .iter()
             .enumerate()
             .map(|(i, t)| TabInfo {
                 name: t.name.clone(),
-                is_active: i == self.session.active_index,
+                is_active: i == self.session.active_index(),
                 is_modified: t.is_modified,
                 is_untitled: t.file_path.is_none(),
             })
@@ -446,11 +446,11 @@ impl AppState {
     /// pipelines can't keep rendering, and pending REDUCE work is discarded
     /// so we don't keep redrawing for a tab that no longer exists.
     pub(super) fn close_tab_at(&mut self, idx: usize) {
-        if idx >= self.session.tabs.len() {
+        if idx >= self.session.tabs().len() {
             return;
         }
-        let was_active = idx == self.session.active_index;
-        let closing_id = self.session.tabs[idx].tab_id;
+        let was_active = idx == self.session.active_index();
+        let closing_id = self.session.tabs()[idx].tab_id;
         if was_active {
             // The active tab's pipelines live in the renderer's active list,
             // not in `stashed`, so dropping `stashed[id]` is not enough.
@@ -463,10 +463,10 @@ impl AppState {
         }
         self.session.close_tab(idx);
         if was_active {
-            let new_idx = self.session.active_index;
-            let new_id = self.session.tabs[new_idx].tab_id;
+            let new_idx = self.session.active_index();
+            let new_id = self.session.tabs()[new_idx].tab_id;
             self.renderer.restore_tab_shaders(new_id);
-            if let Some(tab) = self.session.tabs.get(new_idx) {
+            if let Some(tab) = self.session.tabs().get(new_idx) {
                 if let Some([xmin, xmax, ymin, ymax]) = tab.axis_bounds {
                     self.render_area.axis_x_min = xmin;
                     self.render_area.axis_x_max = xmax;
@@ -482,7 +482,7 @@ impl AppState {
     /// Convenience for paths that always close the currently-active tab
     /// (Ctrl+W, File → Close Tab).
     pub(super) fn close_active_tab(&mut self) {
-        self.close_tab_at(self.session.active_index);
+        self.close_tab_at(self.session.active_index());
     }
 
     /// Save current axis bounds to old tab, restore from new tab (or reset to default).
@@ -491,7 +491,7 @@ impl AppState {
     /// picker since its anchor cell belongs to the outgoing tab.
     pub(super) fn switch_tab_axis(&mut self, old_tab: usize, new_tab: usize) {
         self.close_color_picker();
-        if let Some(tab) = self.session.tabs.get_mut(old_tab) {
+        if let Some(tab) = self.session.tab_mut(old_tab) {
             tab.axis_bounds = Some([
                 self.render_area.axis_x_min,
                 self.render_area.axis_x_max,
@@ -499,7 +499,7 @@ impl AppState {
                 self.render_area.axis_y_max,
             ]);
         }
-        if let Some(tab) = self.session.tabs.get(new_tab) {
+        if let Some(tab) = self.session.tabs().get(new_tab) {
             if let Some([xmin, xmax, ymin, ymax]) = tab.axis_bounds {
                 self.render_area.axis_x_min = xmin;
                 self.render_area.axis_x_max = xmax;
@@ -634,8 +634,8 @@ impl AppState {
         self.close_menu();
         match (menu_idx, item_idx) {
             (0, 0) => {
-                let old = self.session.active_index;
-                let old_id = self.session.tabs[old].tab_id;
+                let old = self.session.active_index();
+                let old_id = self.session.tabs()[old].tab_id;
                 self.renderer.stash_tab_shaders(old_id);
                 let new_idx = self.session.new_tab();
                 self.switch_tab_axis(old, new_idx);
@@ -693,8 +693,8 @@ impl AppState {
                     log::error!("Example index {i} out of range");
                     return;
                 };
-                let old = self.session.active_index;
-                let old_id = self.session.tabs[old].tab_id;
+                let old = self.session.active_index();
+                let old_id = self.session.tabs()[old].tab_id;
                 self.renderer.stash_tab_shaders(old_id);
                 match self.session.open_file(&path) {
                     Ok(new_idx) => self.switch_tab_axis(old, new_idx),
@@ -855,8 +855,8 @@ impl AppState {
         match key {
             Key::Character(c) if c.as_str() == "n" => {
                 self.close_menu();
-                let old = self.session.active_index;
-                let old_id = self.session.tabs[old].tab_id;
+                let old = self.session.active_index();
+                let old_id = self.session.tabs()[old].tab_id;
                 self.renderer.stash_tab_shaders(old_id);
                 let new_idx = self.session.new_tab();
                 self.switch_tab_axis(old, new_idx);
@@ -1143,7 +1143,7 @@ fn severity_label(s: &Severity) -> &'static str {
 fn format_diagnostics_report(session: &crate::session::Session) -> String {
     let mut total = 0usize;
     let mut body = String::new();
-    for tab in &session.tabs {
+    for tab in session.tabs() {
         let diags = tab.notebook.diagnostics();
         if diags.is_empty() {
             continue;
@@ -1177,7 +1177,7 @@ fn format_diagnostics_report(session: &crate::session::Session) -> String {
         report.push_str(&format!(
             "Total: {} diagnostic(s) across {} tab(s)\n\n",
             total,
-            session.tabs.len(),
+            session.tabs().len(),
         ));
         report.push_str(&body);
     }

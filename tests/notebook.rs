@@ -8,13 +8,15 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use crate::lang::reduce::service::ReduceResponse;
-use crate::lang::symbolic::NoSimplifier;
-
-use super::{CellMessage, CellOutcome, Notebook, ReduceBackend, ReduceSimplifier, ShaderSpec};
+use logos::lang::reduce::service::ReduceResponse;
+use logos::lang::symbolic::NoSimplifier;
+use logos::notebook::{
+    CellMessage, CellOutcome, CellState, Notebook, ReduceBackend, ReduceSimplifier, Severity,
+    ShaderSpec,
+};
 
 // REDUCE's CSL has process-global state and crashes on re-init, so even
-// `--test-threads=1` can't safely combine multiple `ReduceSession::new()`
+// `--test-threads=1` can't safely combine multiple `CslSession::new()`
 // calls in one binary (the existing `test_reduce_session` already takes
 // CSL). Tests that need to drive REDUCE round-trips use a mock backend
 // the test directly controls.
@@ -243,7 +245,7 @@ fn auto_rerun_deadline_reports_next_wake() {
     let deadline = nb
         .next_auto_rerun_deadline(t0)
         .expect("should have a pending deadline");
-    assert_eq!(deadline, t0 + super::Notebook::AUTO_RERUN_QUIET_PERIOD);
+    assert_eq!(deadline, t0 + Notebook::AUTO_RERUN_QUIET_PERIOD);
     nb.tick_auto_rerun(t0 + Duration::from_millis(250));
     assert!(
         nb.next_auto_rerun_deadline(Instant::now()).is_none(),
@@ -264,7 +266,7 @@ fn plot_emits_shader_and_validates_under_naga() {
     assert!(s.wgsl.contains("@fragment"));
     assert!(s.wgsl.contains("sin("));
     validate_wgsl(&s.wgsl).expect("wgsl validates");
-    assert!(matches!(nb.cell(i).state, super::CellState::Playing));
+    assert!(matches!(nb.cell(i).state, CellState::Playing));
 }
 
 #[test]
@@ -390,13 +392,13 @@ fn typing_anonymous_block_oneliner_never_hangs() {
     for end in 0..=full.len() {
         let prefix = &full[..end];
         let start = Instant::now();
-        let mut lex = crate::lang::lexer::Lexer::new(prefix);
+        let mut lex = logos::lang::lexer::Lexer::new(prefix);
         if let Ok(tokens) = lex.tokenize() {
             let mut parser =
-                crate::lang::parser::Parser::new(tokens, prefix.to_string());
+                logos::lang::parser::Parser::new(tokens, prefix.to_string());
             let _ = parser.parse(); // ok or err — we only care it returns
         }
-        let _ = crate::lang::highlight::highlight(prefix);
+        let _ = logos::lang::highlight::highlight(prefix);
         assert!(
             start.elapsed() < Duration::from_millis(500),
             "lex+parse+highlight took {:?} on prefix {:?} (len {})",
@@ -815,8 +817,8 @@ fn play_auto_runs_earlier_cells_jupyter_style() {
     let b = nb.add_cell("plot(y = f)");
     nb.play(b);
     // Earlier cell should also be Playing now.
-    assert!(matches!(nb.cell(a).state, super::CellState::Playing));
-    assert!(matches!(nb.cell(b).state, super::CellState::Playing));
+    assert!(matches!(nb.cell(a).state, CellState::Playing));
+    assert!(matches!(nb.cell(b).state, CellState::Playing));
 }
 
 #[test]
@@ -825,13 +827,13 @@ fn replay_stops_later_playing_cells() {
     let a = nb.add_cell("f := x²");
     let b = nb.add_cell("plot(y = f)");
     nb.play(b);
-    assert!(matches!(nb.cell(b).state, super::CellState::Playing));
+    assert!(matches!(nb.cell(b).state, CellState::Playing));
 
     nb.set_text(a, "f := x³");
     nb.replay(a);
     // Later cell that was playing must be stopped now.
-    assert!(matches!(nb.cell(b).state, super::CellState::Stopped));
-    assert!(matches!(nb.cell(a).state, super::CellState::Playing));
+    assert!(matches!(nb.cell(b).state, CellState::Stopped));
+    assert!(matches!(nb.cell(a).state, CellState::Playing));
 }
 
 #[test]
@@ -846,7 +848,7 @@ fn parse_error_is_stored_as_diagnostic_with_span() {
     let diags = &nb.cell(i).outcome.diagnostics;
     assert!(!diags.is_empty(), "expected at least one diagnostic");
     let d = &diags[0];
-    assert!(matches!(d.severity, super::diagnostic::Severity::Error));
+    assert!(matches!(d.severity, Severity::Error));
     // Span at minimum points somewhere in the source.
     assert!(d.span.start_line == 0 || d.span.end_line >= d.span.start_line);
 }
@@ -867,9 +869,9 @@ fn token_colors_populated_after_play() {
 fn stop_transitions_state_to_stopped() {
     let mut nb = null_notebook();
     let i = add_and_play(&mut nb, "plot(y = x²)");
-    assert!(matches!(nb.cell(i).state, super::CellState::Playing));
+    assert!(matches!(nb.cell(i).state, CellState::Playing));
     nb.stop(i);
-    assert!(matches!(nb.cell(i).state, super::CellState::Stopped));
+    assert!(matches!(nb.cell(i).state, CellState::Stopped));
 }
 
 #[test]
@@ -897,7 +899,7 @@ fn examples_render_through_notebook() {
         let file = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("{name}: read_to_string failed: {e}"));
 
-        let cells = crate::lang::notebook_format::parse_logos(&file)
+        let cells = logos::lang::notebook_format::parse_logos(&file)
             .unwrap_or_else(|e| panic!("{name}: parse_logos failed: {e}"));
 
         // Cells in a single example share scope (later cells can reference
@@ -974,7 +976,7 @@ fn remove_cell_drops_pending_reduce() {
 // supplies the simplified response synchronously and the joined Computed text
 // is checked.
 
-fn computed(nb: &super::Notebook, idx: usize) -> String {
+fn computed(nb: &Notebook, idx: usize) -> String {
     match &nb.cell(idx).outcome.message {
         Some(CellMessage::Computed(s)) => s.clone(),
         Some(other) => panic!(
@@ -989,7 +991,7 @@ fn computed(nb: &super::Notebook, idx: usize) -> String {
     }
 }
 
-fn diag_messages(nb: &super::Notebook, idx: usize) -> Vec<String> {
+fn diag_messages(nb: &Notebook, idx: usize) -> Vec<String> {
     nb.cell(idx)
         .outcome
         .diagnostics
@@ -1238,8 +1240,8 @@ fn latex_infinity_lexes_as_identifier() {
 
 #[test]
 fn every_latex_symbol_substitution_lexes() {
-    use crate::editor::autocomplete::LATEX_SYMBOLS;
-    use crate::lang::lexer::Lexer;
+    use logos::editor::autocomplete::LATEX_SYMBOLS;
+    use logos::lang::lexer::Lexer;
 
     let mut broken: Vec<String> = Vec::new();
     for &(cmd, sym) in LATEX_SYMBOLS {

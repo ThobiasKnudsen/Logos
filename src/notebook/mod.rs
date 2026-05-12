@@ -23,11 +23,7 @@ pub use cell::{CellMessage, CellOutcome, CellState, NotebookCell};
 pub use diagnostic::{Diagnostic, Severity, Span};
 pub use reduce_backend::{ReduceBackend, SharedReduce};
 pub use reduce_simplifier::ReduceSimplifier;
-pub use shader::{DispatchKind, ShaderSpec};
-// `Severity`, `Access`, `BindingSpec`, `ScalarType`, `SizeSpec` stay in
-// their sub-modules. Re-export them at this level once a consumer (UI
-// renderer for diagnostics, parallel/Monte-Carlo emission for bindings)
-// actually wants them.
+pub use shader::ShaderSpec;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -293,13 +289,6 @@ impl Notebook {
         self.cells.len()
     }
 
-    /// Currently only used by tests; here as the obvious counterpart to
-    /// `len()`.
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.cells.is_empty()
-    }
-
     pub fn cell(&self, idx: usize) -> &NotebookCell {
         &self.cells[idx]
     }
@@ -345,10 +334,9 @@ impl Notebook {
 
     // ─── writes ────────────────────────────────────────────────────────────
 
-    /// Replace a cell's text. Currently only used by tests; the UI
-    /// mutates the buffer directly via `cell_mut().buffer`. Kept as the
-    /// programmatic equivalent so non-UI callers (CLI, scripts) don't
-    /// have to know about `Buffer`.
+    /// Replace a cell's text. The UI mutates the buffer directly via
+    /// `cell_mut().buffer`; this is the programmatic equivalent for tests
+    /// that drive the notebook without going through `Buffer`.
     #[allow(dead_code)]
     pub fn set_text(&mut self, idx: usize, text: &str) {
         if idx >= self.cells.len() {
@@ -356,17 +344,6 @@ impl Notebook {
         }
         self.cells[idx].buffer.set_text(text);
         self.cells[idx].invalidate_ir();
-    }
-
-    /// Programmatic plot-color setter. Currently no UI binding (color is
-    /// fixed at cell creation); kept as obvious public API for future
-    /// theme/colorbar wiring.
-    #[allow(dead_code)]
-    pub fn set_plot_color(&mut self, idx: usize, color: Rgba) {
-        if idx >= self.cells.len() {
-            return;
-        }
-        self.cells[idx].plot_color = color;
     }
 
     /// Replace the GPU dispatcher used by the interpreter for
@@ -395,7 +372,7 @@ impl Notebook {
 
     /// Re-run cell `idx`. Stops every later cell that's currently playing —
     /// the user is acknowledging that downstream results may now be invalid.
-    /// (The UI doesn't bind a "replay" button yet; tests cover this.)
+    /// The UI doesn't bind a replay button yet; tests drive this directly.
     #[allow(dead_code)]
     pub fn replay(&mut self, idx: usize) {
         if idx >= self.cells.len() {
@@ -839,11 +816,7 @@ impl Notebook {
             }
             match crate::lang::wgsl_gen::generate(&plot_ir) {
                 Ok(wgsl) => {
-                    shaders.push(ShaderSpec {
-                        wgsl,
-                        dispatch: DispatchKind::Fragment,
-                        bindings: Vec::new(),
-                    });
+                    shaders.push(ShaderSpec { wgsl });
                     last_ir = Some(plot_ir);
                 }
                 Err(e) => {
@@ -1019,11 +992,7 @@ impl Notebook {
         }
         match crate::lang::wgsl_gen::generate(&combined) {
             Ok(wgsl) => {
-                self.cells[idx].outcome.shaders = vec![ShaderSpec {
-                    wgsl,
-                    dispatch: DispatchKind::Fragment,
-                    bindings: Vec::new(),
-                }];
+                self.cells[idx].outcome.shaders = vec![ShaderSpec { wgsl }];
                 self.cells[idx].outcome.program_ir = Some(combined);
                 self.cells[idx].state = CellState::Playing;
                 self.cells[idx].last_played_text = Some(self.cells[idx].buffer.text().to_string());
@@ -1091,5 +1060,3 @@ impl Notebook {
     }
 }
 
-#[cfg(test)]
-mod tests;

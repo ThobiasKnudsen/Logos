@@ -280,9 +280,9 @@ pub fn type_check(ir: &Ir, source: &str) -> Result<(), String> {
 /// Compile source code through the full pipeline: lex → parse → type check → WGSL gen.
 /// Returns the complete WGSL shader source string.
 ///
-/// Currently only used by integration tests; production callers go through
-/// `Notebook` which keeps the IR around (see `program_ir`).
-#[allow(dead_code)]
+/// Production callers go through `Notebook` which keeps the IR around
+/// (see `program_ir`); this end-to-end convenience exists for tests.
+#[cfg(test)]
 pub fn compile(source: &str) -> Result<String, String> {
     let mut lex = lexer::Lexer::new(source);
     let tokens = lex.tokenize()?;
