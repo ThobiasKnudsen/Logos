@@ -1318,8 +1318,9 @@ impl Renderer {
             self.axis_label_buffers[i].set_text(
                 &mut self.font_system,
                 &text,
-                Attrs::new().family(Family::Name(mono_family)),
+                &Attrs::new().family(Family::Name(mono_family)),
                 Shaping::Advanced,
+                None,
             );
             self.axis_label_buffers[i].shape_until_scroll(&mut self.font_system, false);
         }
@@ -1328,8 +1329,9 @@ impl Renderer {
             self.axis_label_buffers[MAX_AXIS_LABELS + i].set_text(
                 &mut self.font_system,
                 &text,
-                Attrs::new().family(Family::Name(mono_family)),
+                &Attrs::new().family(Family::Name(mono_family)),
                 Shaping::Advanced,
+                None,
             );
             self.axis_label_buffers[MAX_AXIS_LABELS + i]
                 .shape_until_scroll(&mut self.font_system, false);
@@ -1474,8 +1476,9 @@ impl Renderer {
             self.cursor_x_label.set_text(
                 &mut self.font_system,
                 &cx_text,
-                Attrs::new().family(Family::Name(mono_family)),
+                &Attrs::new().family(Family::Name(mono_family)),
                 Shaping::Advanced,
+                None,
             );
             self.cursor_x_label
                 .shape_until_scroll(&mut self.font_system, false);
@@ -1487,8 +1490,9 @@ impl Renderer {
             self.cursor_y_label.set_text(
                 &mut self.font_system,
                 &cy_text,
-                Attrs::new().family(Family::Name(mono_family)),
+                &Attrs::new().family(Family::Name(mono_family)),
                 Shaping::Advanced,
+                None,
             );
             self.cursor_y_label
                 .shape_until_scroll(&mut self.font_system, false);
@@ -1651,7 +1655,16 @@ impl Renderer {
             )
             .unwrap();
 
-        let frame = self.surface.get_current_texture().unwrap();
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            // Recoverable transient states — skip this frame; next one will
+            // re-acquire after the OS catches up.
+            wgpu::CurrentSurfaceTexture::Timeout
+            | wgpu::CurrentSurfaceTexture::Occluded
+            | wgpu::CurrentSurfaceTexture::Outdated => return,
+            other => panic!("surface acquire failed: {:?}", other),
+        };
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
         let mut encoder = self
             .device
@@ -1662,6 +1675,7 @@ impl Renderer {
                 label: Some("main_pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &self.scene_view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Clear(t.bg_primary.to_wgpu()),
@@ -1671,6 +1685,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             self.rect_renderer
@@ -1705,6 +1720,7 @@ impl Renderer {
                 label: Some("scene_axis_pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &self.scene_view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Load,
@@ -1714,6 +1730,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             self.axis_text_renderer
@@ -1726,6 +1743,7 @@ impl Renderer {
                 label: Some("overlay_pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &self.overlay_view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -1735,6 +1753,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             self.overlay_rect_renderer
@@ -1746,6 +1765,7 @@ impl Renderer {
                 label: Some("composite_pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Clear(wgpu::Color::BLACK),
@@ -1755,6 +1775,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             pass.set_pipeline(&self.composite_pipeline);
@@ -1779,6 +1800,7 @@ impl Renderer {
                 label: Some("cursor_overlay_pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Load,
@@ -1788,6 +1810,7 @@ impl Renderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             self.cursor_rect_renderer

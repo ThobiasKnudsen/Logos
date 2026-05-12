@@ -154,8 +154,9 @@ impl Renderer {
                     self.cell_output_buffers[i].set_text(
                         &mut self.font_system,
                         output_text_ref,
-                        Attrs::new().family(Family::Name(mono_family)),
+                        &Attrs::new().family(Family::Name(mono_family)),
                         Shaping::Advanced,
+                        None,
                     );
                     self.cell_output_buffers[i].shape_until_scroll(&mut self.font_system, false);
                 }

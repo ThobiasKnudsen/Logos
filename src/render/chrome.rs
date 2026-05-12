@@ -17,8 +17,9 @@ impl Renderer {
         self.status_label.set_text(
             &mut self.font_system,
             text,
-            Attrs::new().family(Family::Name(family)),
+            &Attrs::new().family(Family::Name(family)),
             Shaping::Advanced,
+            None,
         );
         self.status_label
             .shape_until_scroll(&mut self.font_system, false);

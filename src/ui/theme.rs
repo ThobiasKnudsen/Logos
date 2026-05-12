@@ -657,8 +657,12 @@ pub mod font_family {
             name: "Geist Mono",
             family: "Geist Mono",
             font_data: &[
-                include_bytes!("../../assets/fonts/GeistMono-Regular.ttf"),
-                include_bytes!("../../assets/fonts/GeistMono-Bold.ttf"),
+                // Geist Mono is loaded from $OUT_DIR/GeistMono-*.ttf because
+                // build.rs patches its broken multi-character ligature
+                // metrics (see font_patch.rs). The unmodified source files
+                // live in assets/fonts/.
+                include_bytes!(concat!(env!("OUT_DIR"), "/GeistMono-Regular.ttf")),
+                include_bytes!(concat!(env!("OUT_DIR"), "/GeistMono-Bold.ttf")),
             ],
         },
         FontFamily {

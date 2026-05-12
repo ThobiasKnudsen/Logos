@@ -24,7 +24,7 @@ impl Renderer {
     pub async fn new(window: Arc<Window>) -> Self {
         let physical_size = window.inner_size();
 
-        let instance = Instance::new(InstanceDescriptor::default());
+        let instance = Instance::new(InstanceDescriptor::new_without_display_handle());
         let surface = instance
             .create_surface(window.clone())
             .expect("create surface");
@@ -38,7 +38,7 @@ impl Renderer {
             .unwrap();
         log::info!("GPU: {}", adapter.get_info().name);
         let (device, queue) = adapter
-            .request_device(&DeviceDescriptor::default(), None)
+            .request_device(&DeviceDescriptor::default())
             .await
             .unwrap();
         let device = Arc::new(device);
@@ -214,21 +214,21 @@ impl Renderer {
         let composite_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("composite_pl"),
-                bind_group_layouts: &[&composite_bind_group_layout],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[Some(&composite_bind_group_layout)],
+                immediate_size: 0,
             });
         let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("composite_pipeline"),
             layout: Some(&composite_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &composite_shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &composite_shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: swapchain_format,
                     blend: None,
@@ -242,7 +242,7 @@ impl Renderer {
             },
             depth_stencil: None,
             multisample: MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
         let composite_bind_group = Self::create_composite_bind_group(
@@ -569,10 +569,11 @@ impl Renderer {
         buf.set_text(
             font_system,
             text,
-            Attrs::new()
+            &Attrs::new()
                 .family(Family::Name(font_family::ITALIC_CHROME_FONT_FAMILY))
                 .style(Style::Italic),
             Shaping::Advanced,
+            None,
         );
         buf.shape_until_scroll(font_system, false);
         buf
@@ -592,8 +593,9 @@ impl Renderer {
         buf.set_text(
             font_system,
             text,
-            Attrs::new().family(Family::Name(family)),
+            &Attrs::new().family(Family::Name(family)),
             Shaping::Advanced,
+            None,
         );
         buf.shape_until_scroll(font_system, false);
         buf

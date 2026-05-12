@@ -42,12 +42,12 @@ pub fn dispatch(
     let wgsl = compute_gen::generate(request)?;
 
     // 2. Create shader module
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let shader_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("compute_shader"),
         source: wgpu::ShaderSource::Wgsl(wgsl.clone().into()),
     });
-    if let Some(err) = pollster::block_on(device.pop_error_scope()) {
+    if let Some(err) = pollster::block_on(shader_scope.pop()) {
         return Err(format!(
             "Compute shader error: {}\n\n--- WGSL ---\n{}",
             err, wgsl
@@ -164,20 +164,20 @@ pub fn dispatch(
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("compute_pipeline_layout"),
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[],
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: 0,
     });
 
-    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let pipeline_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("compute_pipeline"),
         layout: Some(&pipeline_layout),
         module: &module,
-        entry_point: "main",
+        entry_point: Some("main"),
         compilation_options: Default::default(),
         cache: None,
     });
-    if let Some(err) = pollster::block_on(device.pop_error_scope()) {
+    if let Some(err) = pollster::block_on(pipeline_scope.pop()) {
         return Err(format!("Compute pipeline creation error: {}", err));
     }
 
@@ -240,7 +240,9 @@ pub fn dispatch(
         });
         receivers.push(rx);
     }
-    device.poll(wgpu::Maintain::Wait);
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| format!("Device poll error: {:?}", e))?;
 
     let mut results = Vec::with_capacity(request.readwrite_arrays.len());
     for (i, (name, _)) in request.readwrite_arrays.iter().enumerate() {

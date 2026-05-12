@@ -90,7 +90,7 @@ impl Renderer {
             let line_start = line_byte_starts[idx];
             let line_end = line_start + line_text.len();
 
-            let mut attrs_list = AttrsList::new(default_attrs);
+            let mut attrs_list = AttrsList::new(&default_attrs);
             for span in spans {
                 if span.end <= line_start || span.start >= line_end {
                     continue;
@@ -98,13 +98,13 @@ impl Renderer {
                 let local_start = span.start.saturating_sub(line_start);
                 let local_end = (span.end - line_start).min(line_text.len());
                 if local_start < local_end {
-                    let a = default_attrs.color(GlyphonColor::rgba(
+                    let a = default_attrs.clone().color(GlyphonColor::rgba(
                         span.color.r,
                         span.color.g,
                         span.color.b,
                         span.color.a,
                     ));
-                    attrs_list.add_span(local_start..local_end, a);
+                    attrs_list.add_span(local_start..local_end, &a);
                 }
             }
             replacement.push(BufferLine::new(

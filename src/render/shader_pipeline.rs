@@ -139,8 +139,8 @@ impl ShaderPipelineManager {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shader_pipeline_layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
 
         Self {
@@ -183,7 +183,7 @@ impl ShaderPipelineManager {
         wgsl_source: &str,
     ) -> Result<(), String> {
         // Push an error scope so wgpu returns errors instead of panicking.
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let shader_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let fragment_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cell_fragment_shader"),
@@ -191,7 +191,7 @@ impl ShaderPipelineManager {
         });
 
         // Check for shader compilation errors before proceeding.
-        if let Some(err) = pollster::block_on(device.pop_error_scope()) {
+        if let Some(err) = pollster::block_on(shader_scope.pop()) {
             return Err(format!("{}", err));
         }
 
@@ -212,20 +212,20 @@ impl ShaderPipelineManager {
         });
 
         // Push another scope for pipeline creation (catches entry point errors, etc.)
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipeline_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("cell_shader_pipeline"),
             layout: Some(&self.pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &self.vertex_shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &fragment_shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: self.surface_format,
                     blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
@@ -239,11 +239,11 @@ impl ShaderPipelineManager {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
-        if let Some(err) = pollster::block_on(device.pop_error_scope()) {
+        if let Some(err) = pollster::block_on(pipeline_scope.pop()) {
             return Err(format!("{}", err));
         }
 
@@ -360,6 +360,7 @@ impl ShaderPipelineManager {
                     label: Some("shader_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: surface_view,
+                        depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Load, // preserve existing UI
@@ -369,6 +370,7 @@ impl ShaderPipelineManager {
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
 
                 pass.set_scissor_rect(sx, sy, sw, sh);

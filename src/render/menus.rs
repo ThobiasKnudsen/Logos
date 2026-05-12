@@ -14,8 +14,9 @@ impl Renderer {
         self.win_max_label.set_text(
             &mut self.font_system,
             icon,
-            Attrs::new().family(Family::Name(family)),
+            &Attrs::new().family(Family::Name(family)),
             Shaping::Advanced,
+            None,
         );
         self.win_max_label
             .shape_until_scroll(&mut self.font_system, false);

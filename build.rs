@@ -1,6 +1,22 @@
 use std::env;
+use std::path::PathBuf;
+
+mod font_patch;
 
 fn main() {
+    // Patch Geist Mono's broken multi-character ligature metrics (`:=`, `!=`,
+    // `<=`, `->`, etc.) into $OUT_DIR. The source TTFs in assets/fonts/ stay
+    // untouched. The Rust code reads the patched files via include_bytes!
+    // from $OUT_DIR. See font_patch.rs for the rationale.
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    for name in ["GeistMono-Regular.ttf", "GeistMono-Bold.ttf"] {
+        let in_path = format!("assets/fonts/{}", name);
+        println!("cargo:rerun-if-changed={}", in_path);
+        let bytes = std::fs::read(&in_path).expect("read font");
+        let patched = font_patch::patch_geist_mono(&bytes);
+        std::fs::write(out_dir.join(name), patched).expect("write patched font");
+    }
+
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
 

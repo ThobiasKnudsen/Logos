@@ -6,8 +6,8 @@ rust-version = "1.83"
 
 [dependencies]
 winit = "0.30"
-wgpu = "22"
-glyphon = "0.6"
+wgpu = "29"
+glyphon = "0.11"
 pollster = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
 taffy = "0.7"
@@ -19,7 +19,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
-naga = { version = "22", features = ["wgsl-in"] }
+naga = { version = "29", features = ["wgsl-in"] }
 
 [build-dependencies]
 cc = "1"
+read-fonts = "0.36"
+write-fonts = "0.44"
