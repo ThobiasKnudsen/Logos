@@ -291,9 +291,9 @@ fn eval_node(node: &Ir, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Value, S
 
         Ir::Lambda { .. } => {
             // Lambdas only have meaning as HOF arguments and are lifted to
-            // synthetic function defs by `wgsl_gen::specialize_higher_order_calls`
-            // before reaching codegen. If one reaches the interpreter, the
-            // surrounding pass missed it.
+            // synthetic function defs by `lower::lift_lambdas` before any
+            // backend sees the IR. If one reaches the interpreter, the
+            // lowering pass missed it.
             Err(
                 "internal: unlifted lambda reached the interpreter (should have been \
                  specialized into a synthetic function def by wgsl_gen)"
