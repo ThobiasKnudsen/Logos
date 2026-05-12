@@ -22,14 +22,32 @@
 /// formatter, refactorings) can map IR nodes back to their source range.
 pub type Span = (usize, usize);
 
-/// Generate `BuiltinOp` and its name↔op bridges from a single table.
+/// How a builtin maps to WGSL source. Drives the generic dispatch in
+/// `wgsl_gen::emit_apply_builtin`; ops whose lowering doesn't fit one of
+/// the shape variants get `Custom` and stay in the per-op branch.
+#[derive(Debug, Clone, Copy)]
+pub enum WgslLowering {
+    /// `(a OP b)` — binary infix. Used for `+`, `==`, `&&`, etc.
+    Infix(&'static str),
+    /// `OP(a)` — unary prefix. Used for `!`, `-`.
+    Prefix(&'static str),
+    /// `name(arg, arg, ...)` — direct WGSL call. Covers ordinary math
+    /// functions, casts (`f32(x)`), and vector constructors (`vec3<f32>(...)`)
+    /// since they all share the call syntax.
+    Call(&'static str),
+    /// Per-op logic in `wgsl_gen` (e.g. `pow` with int specialization,
+    /// `atan`'s 1-or-2-arg overloads, builtins with no fragment semantics).
+    Custom,
+}
+
+/// Generate `BuiltinOp` and its lookup tables from a single table.
 ///
-/// Each row is `Variant => "surface_name";`. The expansion produces the enum
-/// plus `name()` / `from_name()` using `match`, so the surface↔variant
-/// mapping is exhaustive at compile time and adding a new builtin is a
-/// one-line change with no risk of forgetting the reverse direction.
+/// Each row is `Variant => "surface_name", <WgslLowering>;`. The expansion
+/// produces the enum plus `name()` / `from_name()` / `wgsl_lowering()` using
+/// `match`, so every mapping is exhaustive at compile time and adding a new
+/// builtin is a one-line change with no risk of forgetting one direction.
 macro_rules! define_builtins {
-    ( $( $variant:ident => $name:literal );* $(;)? ) => {
+    ( $( $variant:ident => $name:literal, $wgsl:expr );* $(;)? ) => {
         /// Known built-in operations and functions in the Logos language.
         ///
         /// Anything the parser, type system, or any backend recognizes by
@@ -58,92 +76,102 @@ macro_rules! define_builtins {
                     _ => None,
                 }
             }
+
+            /// How this op lowers to WGSL. The wgsl_gen Apply dispatcher
+            /// handles `Infix`/`Prefix`/`Call` generically; `Custom` ops
+            /// fall through to per-op branches.
+            pub fn wgsl_lowering(self) -> WgslLowering {
+                match self {
+                    $( Self::$variant => $wgsl, )*
+                }
+            }
         }
     }
 }
 
 define_builtins! {
-    // Arithmetic
-    Add  => "add";
-    Sub  => "sub";
-    Mul  => "mul";
-    Div  => "div";
-    Mod  => "mod";
-    Pow  => "pow";
-    Neg  => "neg";
+    // Arithmetic — `mod` uses a custom modulo formula, `pow` has an int
+    // specialization for cheap repeated multiplication of `x²` etc.
+    Add  => "add", WgslLowering::Infix("+");
+    Sub  => "sub", WgslLowering::Infix("-");
+    Mul  => "mul", WgslLowering::Infix("*");
+    Div  => "div", WgslLowering::Infix("/");
+    Mod  => "mod", WgslLowering::Custom;
+    Pow  => "pow", WgslLowering::Custom;
+    Neg  => "neg", WgslLowering::Prefix("-");
 
     // Comparison
-    Eq   => "eq";
-    Neq  => "neq";
-    Lt   => "lt";
-    Gt   => "gt";
-    Lte  => "lte";
-    Gte  => "gte";
+    Eq   => "eq",  WgslLowering::Infix("==");
+    Neq  => "neq", WgslLowering::Infix("!=");
+    Lt   => "lt",  WgslLowering::Infix("<");
+    Gt   => "gt",  WgslLowering::Infix(">");
+    Lte  => "lte", WgslLowering::Infix("<=");
+    Gte  => "gte", WgslLowering::Infix(">=");
 
     // Logical
-    And  => "and";
-    Or   => "or";
-    Not  => "not";
+    And  => "and", WgslLowering::Infix("&&");
+    Or   => "or",  WgslLowering::Infix("||");
+    Not  => "not", WgslLowering::Prefix("!");
 
-    // Trig
-    Sin  => "sin";
-    Cos  => "cos";
-    Tan  => "tan";
-    Asin => "asin";
-    Acos => "acos";
-    Atan => "atan";
-    Sinh => "sinh";
-    Cosh => "cosh";
-    Tanh => "tanh";
+    // Trig — `atan` is overloaded (1 or 2 args).
+    Sin  => "sin",  WgslLowering::Call("sin");
+    Cos  => "cos",  WgslLowering::Call("cos");
+    Tan  => "tan",  WgslLowering::Call("tan");
+    Asin => "asin", WgslLowering::Call("asin");
+    Acos => "acos", WgslLowering::Call("acos");
+    Atan => "atan", WgslLowering::Custom;
+    Sinh => "sinh", WgslLowering::Call("sinh");
+    Cosh => "cosh", WgslLowering::Call("cosh");
+    Tanh => "tanh", WgslLowering::Call("tanh");
 
-    // Exp/log
-    Log   => "log";
-    Log2  => "log2";
-    Log10 => "log10";
-    Exp   => "exp";
-    Exp2  => "exp2";
+    // Exp/log — `log10` is expanded to `log2(x) / log2(10)`.
+    Log   => "log",   WgslLowering::Call("log");
+    Log2  => "log2",  WgslLowering::Call("log2");
+    Log10 => "log10", WgslLowering::Custom;
+    Exp   => "exp",   WgslLowering::Call("exp");
+    Exp2  => "exp2",  WgslLowering::Call("exp2");
 
     // Misc unary math
-    Sqrt  => "sqrt";
-    Abs   => "abs";
-    Sign  => "sign";
-    Floor => "floor";
-    Ceil  => "ceil";
-    Round => "round";
-    Fract => "fract";
+    Sqrt  => "sqrt",  WgslLowering::Call("sqrt");
+    Abs   => "abs",   WgslLowering::Call("abs");
+    Sign  => "sign",  WgslLowering::Call("sign");
+    Floor => "floor", WgslLowering::Call("floor");
+    Ceil  => "ceil",  WgslLowering::Call("ceil");
+    Round => "round", WgslLowering::Call("round");
+    Fract => "fract", WgslLowering::Call("fract");
 
     // Binary math
-    Min  => "min";
-    Max  => "max";
-    Step => "step";
+    Min  => "min",  WgslLowering::Call("min");
+    Max  => "max",  WgslLowering::Call("max");
+    Step => "step", WgslLowering::Call("step");
 
     // Ternary math
-    Clamp      => "clamp";
-    Mix        => "mix";
-    Smoothstep => "smoothstep";
+    Clamp      => "clamp",      WgslLowering::Call("clamp");
+    Mix        => "mix",        WgslLowering::Call("mix");
+    Smoothstep => "smoothstep", WgslLowering::Call("smoothstep");
 
     // Vector math
-    Length    => "length";
-    Normalize => "normalize";
-    Dot       => "dot";
-    Cross     => "cross";
+    Length    => "length",    WgslLowering::Call("length");
+    Normalize => "normalize", WgslLowering::Call("normalize");
+    Dot       => "dot",       WgslLowering::Call("dot");
+    Cross     => "cross",     WgslLowering::Call("cross");
 
     // Constructors
-    Vec2 => "vec2";
-    Vec3 => "vec3";
-    Vec4 => "vec4";
+    Vec2 => "vec2", WgslLowering::Call("vec2<f32>");
+    Vec3 => "vec3", WgslLowering::Call("vec3<f32>");
+    Vec4 => "vec4", WgslLowering::Call("vec4<f32>");
 
-    // Casts
-    F32 => "f32";
-    F64 => "f64";
-    I32 => "i32";
+    // Casts — `f64` lowers to `f32` since WGSL has no f64.
+    F32 => "f32", WgslLowering::Call("f32");
+    F64 => "f64", WgslLowering::Call("f32");
+    I32 => "i32", WgslLowering::Call("i32");
 
     // Array
-    Len => "len";
+    Len => "len", WgslLowering::Custom;
 
-    // Actions (have side effects in the cell pipeline)
-    Print => "print";
-    Plot  => "plot";
+    // Actions (have side effects in the cell pipeline; not fragment-shader-emittable)
+    Print => "print", WgslLowering::Custom;
+    Plot  => "plot",  WgslLowering::Custom;
 }
 
 /// Resolved callee of an `Apply` node.

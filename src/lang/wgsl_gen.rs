@@ -1,4 +1,4 @@
-use super::ir::{BuiltinOp, Callee, Ir};
+use super::ir::{BuiltinOp, Callee, Ir, WgslLowering};
 use std::collections::{HashMap, HashSet};
 
 // The for-loop guard's upper bound is loaded from the `max_loop_iter` uniform
@@ -1383,43 +1383,28 @@ impl GenContext {
             }
         };
 
+        // Generic shapes (infix, prefix, call) are driven by the per-op
+        // `WgslLowering` in `ir.rs`. The few ops whose lowering doesn't fit a
+        // shape (`mod`, `pow`, `atan`, `log10`, action ops) carry `Custom`
+        // and fall through to the explicit arms below.
+        match op.wgsl_lowering() {
+            WgslLowering::Infix(s) => {
+                return Ok(format!("({} {} {})", emitted[0], s, emitted[1]));
+            }
+            WgslLowering::Prefix(s) => {
+                return Ok(format!("{}({})", s, emitted[0]));
+            }
+            WgslLowering::Call(name) => {
+                return Ok(format!("{}({})", name, emitted.join(", ")));
+            }
+            WgslLowering::Custom => {}
+        }
+
         match op {
-            // Binary infix operators
-            BuiltinOp::Add => Ok(format!("({} + {})", emitted[0], emitted[1])),
-            BuiltinOp::Sub => Ok(format!("({} - {})", emitted[0], emitted[1])),
-            BuiltinOp::Mul => Ok(format!("({} * {})", emitted[0], emitted[1])),
-            BuiltinOp::Div => Ok(format!("({} / {})", emitted[0], emitted[1])),
             BuiltinOp::Mod => Ok(format!(
                 "((({} % {}) + {}) % {})",
                 emitted[0], emitted[1], emitted[1], emitted[1]
             )),
-
-            // Comparison
-            BuiltinOp::Eq => Ok(format!("({} == {})", emitted[0], emitted[1])),
-            BuiltinOp::Neq => Ok(format!("({} != {})", emitted[0], emitted[1])),
-            BuiltinOp::Lt => Ok(format!("({} < {})", emitted[0], emitted[1])),
-            BuiltinOp::Gt => Ok(format!("({} > {})", emitted[0], emitted[1])),
-            BuiltinOp::Lte => Ok(format!("({} <= {})", emitted[0], emitted[1])),
-            BuiltinOp::Gte => Ok(format!("({} >= {})", emitted[0], emitted[1])),
-
-            // Logical
-            BuiltinOp::And => Ok(format!("({} && {})", emitted[0], emitted[1])),
-            BuiltinOp::Or => Ok(format!("({} || {})", emitted[0], emitted[1])),
-            BuiltinOp::Not => Ok(format!("!({})", emitted[0])),
-
-            // Unary
-            BuiltinOp::Neg => Ok(format!("-({})", emitted[0])),
-
-            // Pure unary math — direct WGSL mapping
-            BuiltinOp::Sin | BuiltinOp::Cos | BuiltinOp::Tan
-            | BuiltinOp::Asin | BuiltinOp::Acos
-            | BuiltinOp::Sinh | BuiltinOp::Cosh | BuiltinOp::Tanh
-            | BuiltinOp::Log | BuiltinOp::Log2 | BuiltinOp::Exp | BuiltinOp::Exp2
-            | BuiltinOp::Sqrt | BuiltinOp::Abs | BuiltinOp::Sign
-            | BuiltinOp::Floor | BuiltinOp::Ceil | BuiltinOp::Round | BuiltinOp::Fract
-            | BuiltinOp::Length | BuiltinOp::Normalize => {
-                Ok(format!("{}({})", op.name(), emitted[0]))
-            }
 
             // atan is overloaded: 1 arg → atan, 2 args → atan2
             BuiltinOp::Atan => match args.len() {
@@ -1447,31 +1432,14 @@ impl GenContext {
                 Ok(format!("pow({}, {})", emitted[0], emitted[1]))
             }
 
-            // Pure binary math
-            BuiltinOp::Min | BuiltinOp::Max | BuiltinOp::Step
-            | BuiltinOp::Dot | BuiltinOp::Cross => {
-                Ok(format!("{}({}, {})", op.name(), emitted[0], emitted[1]))
-            }
-
-            // Pure ternary math
-            BuiltinOp::Clamp | BuiltinOp::Mix | BuiltinOp::Smoothstep => Ok(format!(
-                "{}({}, {}, {})",
-                op.name(),
-                emitted[0], emitted[1], emitted[2]
-            )),
-
-            // Type constructors / casts
-            BuiltinOp::F32 | BuiltinOp::F64 => Ok(format!("f32({})", emitted[0])),
-            BuiltinOp::I32 => Ok(format!("i32({})", emitted[0])),
-            BuiltinOp::Vec2 => Ok(format!("vec2<f32>({})", emitted.join(", "))),
-            BuiltinOp::Vec3 => Ok(format!("vec3<f32>({})", emitted.join(", "))),
-            BuiltinOp::Vec4 => Ok(format!("vec4<f32>({})", emitted.join(", "))),
-
             // No fragment-shader semantics for these.
             BuiltinOp::Len | BuiltinOp::Print | BuiltinOp::Plot => Err(format!(
                 "Builtin '{}' is not supported in fragment shaders",
                 op.name()
             )),
+
+            // Every other op carries Infix/Prefix/Call and is handled above.
+            _ => unreachable!("op {:?} returned Custom lowering but has no explicit arm", op),
         }
     }
 
