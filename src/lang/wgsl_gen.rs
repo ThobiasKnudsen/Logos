@@ -1907,6 +1907,7 @@ fn substitute_params(body: &Ir, params: &[String], args: &[Ir]) -> Ir {
             callee,
             args: func_args,
             span,
+            result_ty: None,
         } => {
             // Don't substitute the function name, only its arguments
             let new_args = func_args
@@ -1917,6 +1918,7 @@ fn substitute_params(body: &Ir, params: &[String], args: &[Ir]) -> Ir {
                 callee: callee.clone(),
                 args: new_args,
                 span: *span,
+                result_ty: None,
             }
         }
         Ir::Block { items: stmts, span } => Ir::Block {

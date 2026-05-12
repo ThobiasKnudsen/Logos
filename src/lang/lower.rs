@@ -224,13 +224,14 @@ fn hoist_recurse(
             items: hoist_block_stmts(items, counter, prepended),
             span: *span,
         },
-        Ir::Apply { callee, args, span } => Ir::Apply {
+        Ir::Apply { callee, args, span, .. } => Ir::Apply {
             callee: callee.clone(),
             args: args
                 .iter()
                 .map(|a| hoist_recurse(a, true, counter, prepended))
                 .collect(),
             span: *span,
+            result_ty: None,
         },
         Ir::Tuple { items, span } => Ir::Tuple {
             items: items
@@ -591,7 +592,7 @@ fn rewrite_hof_calls(
 ) -> bool {
     let mut changed = false;
     match node {
-        Ir::Apply { callee, args, span } => {
+        Ir::Apply { callee, args, span, .. } => {
             for a in args.iter_mut() {
                 changed |= rewrite_hof_calls(a, defs, hof_indices, cache, new_defs);
             }

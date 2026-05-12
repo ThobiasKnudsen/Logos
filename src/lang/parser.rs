@@ -322,6 +322,7 @@ impl Parser {
                 callee: Callee::Builtin(BuiltinOp::Or),
                 args: vec![left, right],
                 span,
+                result_ty: None,
             };
         }
         Ok(left)
@@ -337,6 +338,7 @@ impl Parser {
                 callee: Callee::Builtin(BuiltinOp::And),
                 args: vec![left, right],
                 span,
+                result_ty: None,
             };
         }
         Ok(left)
@@ -361,6 +363,7 @@ impl Parser {
                 callee: Callee::Builtin(op),
                 args: vec![left, right],
                 span,
+                result_ty: None,
             };
         }
         Ok(left)
@@ -397,6 +400,7 @@ impl Parser {
                 callee: Callee::Builtin(op),
                 args: vec![left, right],
                 span,
+                result_ty: None,
             };
         }
         Ok(left)
@@ -418,6 +422,7 @@ impl Parser {
                 callee: Callee::Builtin(op),
                 args: vec![left, right],
                 span,
+                result_ty: None,
             };
         }
         Ok(left)
@@ -434,6 +439,7 @@ impl Parser {
                 callee: Callee::Builtin(BuiltinOp::Pow),
                 args: vec![base, exp],
                 span,
+                result_ty: None,
             })
         } else {
             Ok(base)
@@ -450,6 +456,7 @@ impl Parser {
                 callee: Callee::Builtin(BuiltinOp::Neg),
                 args: vec![operand],
                 span,
+                result_ty: None,
             });
         }
         if self.peek().ty == TokenType::Not {
@@ -461,6 +468,7 @@ impl Parser {
                 callee: Callee::Builtin(BuiltinOp::Not),
                 args: vec![operand],
                 span,
+                result_ty: None,
             });
         }
         self.parse_postfix()
@@ -487,6 +495,7 @@ impl Parser {
                             callee: Callee::from_name(name),
                             args,
                             span: join(start_span, rparen_span),
+                            result_ty: None,
                         };
                     } else if matches!(expr, Ir::Lambda { .. }) {
                         // IIFE: `(t |-> t*t)(x)`. Lower into a block that
@@ -518,6 +527,7 @@ impl Parser {
                             callee: Callee::User(synth_name),
                             args,
                             span: call_span,
+                            result_ty: None,
                         };
                         expr = Ir::Block {
                             items: vec![binding, call],
@@ -584,6 +594,7 @@ impl Parser {
                             },
                         ],
                         span,
+                        result_ty: None,
                     };
                 }
                 _ => break,
@@ -644,6 +655,7 @@ impl Parser {
                         callee: Callee::from_name(name),
                         args,
                         span: join(tok_span, rparen_span),
+                        result_ty: None,
                     })
                 } else {
                     Ok(Ir::Identifier {
@@ -963,6 +975,7 @@ impl Parser {
                         callee: Callee::from_name(cast_name),
                         args,
                         span: join(cast_span, rparen_span),
+                        result_ty: None,
                     })
                 } else {
                     Ok(Ir::Identifier {

@@ -306,10 +306,17 @@ pub enum Ir {
     /// Unified operation node: callee + arguments.
     /// Covers binary ops (add, sub, mul, div, pow, mod, eq, neq, lt, gt, lte, gte, and, or),
     /// unary ops (neg, not), and function calls (sin, cos, etc.)
+    ///
+    /// `result_ty` is `None` at parse time and gets populated by
+    /// `lower::annotate_types`; backends read it with `.expect(...)`.
+    /// Boxed so the variant stays small and the parser's recursion guard
+    /// at `MAX_RECURSION_DEPTH` doesn't overflow the test stack on deeply
+    /// nested input.
     Apply {
         callee: Callee,
         args: Vec<Ir>,
         span: Span,
+        result_ty: Option<Box<Type>>,
     },
 
     /// Tuple literal: (a, b, c)
@@ -551,11 +558,11 @@ fn replace_at_path_inner(node: Ir, path: &[usize], replacement: Ir) -> Option<Ir
     let head = path[0];
     let tail = &path[1..];
     match node {
-        Ir::Apply { callee, mut args, span } => {
+        Ir::Apply { callee, mut args, span, result_ty } => {
             let child = args.get(head)?.clone();
             let new_child = replace_at_path_inner(child, tail, replacement)?;
             args[head] = new_child;
-            Some(Ir::Apply { callee, args, span })
+            Some(Ir::Apply { callee, args, span, result_ty })
         }
         Ir::Tuple { mut items, span } => {
             let child = items.get(head)?.clone();
@@ -756,7 +763,7 @@ fn substitute_idents_inner(node: &Ir, bindings: &[(String, Ir)]) -> Ir {
             node.clone()
         }
         Ir::Number { .. } | Ir::BoolLit { .. } => node.clone(),
-        Ir::Apply { callee, args, span } => {
+        Ir::Apply { callee, args, span, .. } => {
             // First substitute identifiers inside each argument expression
             // (in the *call-site* scope — these are not yet inside the
             // function body).
@@ -797,6 +804,7 @@ fn substitute_idents_inner(node: &Ir, bindings: &[(String, Ir)]) -> Ir {
                 callee: callee.clone(),
                 args: new_args,
                 span: *span,
+                result_ty: None,
             }
         }
         Ir::Tuple { items, span } => Ir::Tuple {
@@ -1167,6 +1175,7 @@ mod to_source_tests {
                 callee: callee.clone(),
                 args: args.iter().map(strip_spans).collect(),
                 span: (0, 0),
+                result_ty: None,
             },
             Ir::Tuple { items, .. } => Ir::Tuple {
                 items: items.iter().map(strip_spans).collect(),

@@ -226,6 +226,7 @@ fn fold_equation(ir: Ir) -> (Ir, bool) {
         callee: Callee::Builtin(BuiltinOp::Eq),
         args,
         span,
+        result_ty: None,
     } = ir
     {
         if args.len() == 2 {
@@ -237,6 +238,7 @@ fn fold_equation(ir: Ir) -> (Ir, bool) {
                     callee: Callee::Builtin(BuiltinOp::Sub),
                     args: vec![lhs, rhs],
                     span,
+                    result_ty: None,
                 },
                 true,
             );
@@ -247,6 +249,7 @@ fn fold_equation(ir: Ir) -> (Ir, bool) {
                 callee: Callee::Builtin(BuiltinOp::Eq),
                 args,
                 span,
+                result_ty: None,
             },
             false,
         );

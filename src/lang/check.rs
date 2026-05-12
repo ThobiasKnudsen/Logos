@@ -111,7 +111,7 @@ fn infer(node: &Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
             .or_else(|| env.get_func(name).map(|_| Type::Unknown))
             .ok_or_else(|| TypeError::new(*span, format!("undefined variable `{}`", name))),
 
-        Ir::Apply { callee, args, span } => infer_apply(callee, args, *span, env),
+        Ir::Apply { callee, args, span, .. } => infer_apply(callee, args, *span, env),
 
         Ir::Tuple { items, .. } => {
             let item_types: Result<Vec<_>, _> = items.iter().map(|i| infer(i, env)).collect();
