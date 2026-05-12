@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::ir::{BuiltinOp, Callee, Ir};
+use super::ir::{BuiltinOp, Callee, EvalImpl, Ir};
 
 const MAX_LOOP_ITERATIONS: usize = 10_000;
 
@@ -453,11 +453,21 @@ fn eval_apply(
         .map(|a| eval_node(a, env, gpu))
         .collect::<Result<_, _>>()?;
 
+    // Generic shapes — match the per-op classification in ir.rs.
+    match op.eval_impl() {
+        EvalImpl::UnaryF(f) => {
+            return Ok(Value::F64(f(vals[0].as_f64()?)));
+        }
+        EvalImpl::BinaryF(f) => {
+            return Ok(Value::F64(f(vals[0].as_f64()?, vals[1].as_f64()?)));
+        }
+        EvalImpl::CmpF(f) => {
+            return Ok(Value::Bool(f(vals[0].as_f64()?, vals[1].as_f64()?)));
+        }
+        EvalImpl::Custom => {}
+    }
+
     match op {
-        // Binary arithmetic
-        BuiltinOp::Add => bin_f64(&vals, |a, b| a + b),
-        BuiltinOp::Sub => bin_f64(&vals, |a, b| a - b),
-        BuiltinOp::Mul => bin_f64(&vals, |a, b| a * b),
         BuiltinOp::Div => {
             let (a, b) = (vals[0].as_f64()?, vals[1].as_f64()?);
             if b == 0.0 {
@@ -472,53 +482,11 @@ fn eval_apply(
             }
             Ok(Value::F64(a % b))
         }
-        BuiltinOp::Pow => bin_f64(&vals, |a, b| a.powf(b)),
 
-        // Comparison
-        BuiltinOp::Eq => bin_cmp(&vals, |a, b| (a - b).abs() < 1e-10),
-        BuiltinOp::Neq => bin_cmp(&vals, |a, b| (a - b).abs() >= 1e-10),
-        BuiltinOp::Lt => bin_cmp(&vals, |a, b| a < b),
-        BuiltinOp::Gt => bin_cmp(&vals, |a, b| a > b),
-        BuiltinOp::Lte => bin_cmp(&vals, |a, b| a <= b),
-        BuiltinOp::Gte => bin_cmp(&vals, |a, b| a >= b),
-
-        // Logical
         BuiltinOp::And => Ok(Value::Bool(vals[0].as_bool()? && vals[1].as_bool()?)),
         BuiltinOp::Or => Ok(Value::Bool(vals[0].as_bool()? || vals[1].as_bool()?)),
         BuiltinOp::Not => Ok(Value::Bool(!vals[0].as_bool()?)),
 
-        // Unary
-        BuiltinOp::Neg => Ok(Value::F64(-vals[0].as_f64()?)),
-
-        // Math builtins (1 arg)
-        BuiltinOp::Sin => un_f64(&vals, f64::sin),
-        BuiltinOp::Cos => un_f64(&vals, f64::cos),
-        BuiltinOp::Tan => un_f64(&vals, f64::tan),
-        BuiltinOp::Asin => un_f64(&vals, f64::asin),
-        BuiltinOp::Acos => un_f64(&vals, f64::acos),
-        BuiltinOp::Atan => un_f64(&vals, f64::atan),
-        BuiltinOp::Sinh => un_f64(&vals, f64::sinh),
-        BuiltinOp::Cosh => un_f64(&vals, f64::cosh),
-        BuiltinOp::Tanh => un_f64(&vals, f64::tanh),
-        BuiltinOp::Log => un_f64(&vals, f64::ln),
-        BuiltinOp::Log2 => un_f64(&vals, f64::log2),
-        BuiltinOp::Log10 => un_f64(&vals, f64::log10),
-        BuiltinOp::Exp => un_f64(&vals, f64::exp),
-        BuiltinOp::Exp2 => un_f64(&vals, f64::exp2),
-        BuiltinOp::Floor => un_f64(&vals, f64::floor),
-        BuiltinOp::Ceil => un_f64(&vals, f64::ceil),
-        BuiltinOp::Round => un_f64(&vals, f64::round),
-        BuiltinOp::Fract => un_f64(&vals, f64::fract),
-        BuiltinOp::Abs => un_f64(&vals, f64::abs),
-        BuiltinOp::Sign => un_f64(&vals, f64::signum),
-        BuiltinOp::Sqrt => un_f64(&vals, f64::sqrt),
-
-        // 2-arg builtins
-        BuiltinOp::Min => bin_f64(&vals, f64::min),
-        BuiltinOp::Max => bin_f64(&vals, f64::max),
-        BuiltinOp::Step => bin_f64(&vals, |edge, x| if x < edge { 0.0 } else { 1.0 }),
-
-        // 3-arg builtins
         BuiltinOp::Clamp => {
             let (x, lo, hi) = (vals[0].as_f64()?, vals[1].as_f64()?, vals[2].as_f64()?);
             Ok(Value::F64(x.clamp(lo, hi)))
@@ -533,13 +501,11 @@ fn eval_apply(
             Ok(Value::F64(t * t * (3.0 - 2.0 * t)))
         }
 
-        // Array builtins
         BuiltinOp::Len => match &vals[0] {
             Value::Array(a) => Ok(Value::F64(a.len() as f64)),
             _ => Err("len() expects an array".to_string()),
         },
 
-        // Type cast
         BuiltinOp::F32 | BuiltinOp::F64 => Ok(Value::F64(vals[0].as_f64()?)),
         BuiltinOp::I32 => Ok(Value::F64((vals[0].as_f64()? as i32) as f64)),
 
@@ -557,19 +523,10 @@ fn eval_apply(
         | BuiltinOp::Vec2 | BuiltinOp::Vec3 | BuiltinOp::Vec4 => {
             Err(format!("Builtin '{}' not supported in interpreter", op.name()))
         }
+
+        // Every other op carries a non-Custom EvalImpl and is handled above.
+        _ => unreachable!("op {:?} returned Custom eval_impl but has no explicit arm", op),
     }
-}
-
-fn un_f64(vals: &[Value], f: fn(f64) -> f64) -> Result<Value, String> {
-    Ok(Value::F64(f(vals[0].as_f64()?)))
-}
-
-fn bin_f64(vals: &[Value], f: fn(f64, f64) -> f64) -> Result<Value, String> {
-    Ok(Value::F64(f(vals[0].as_f64()?, vals[1].as_f64()?)))
-}
-
-fn bin_cmp(vals: &[Value], f: fn(f64, f64) -> bool) -> Result<Value, String> {
-    Ok(Value::Bool(f(vals[0].as_f64()?, vals[1].as_f64()?)))
 }
 
 // ---------------------------------------------------------------------------

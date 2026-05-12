@@ -40,14 +40,33 @@ pub enum WgslLowering {
     Custom,
 }
 
+/// How a builtin evaluates on the CPU interpreter. Drives the generic
+/// dispatch in `interpreter::eval_builtin`; ops with non-`f64` arguments,
+/// arity > 2, special error paths, or no interpreter support get `Custom`.
+#[derive(Debug, Clone, Copy)]
+pub enum EvalImpl {
+    /// `fn(x: f64) -> f64`. Unary numeric — `sin`, `sqrt`, `abs`, `neg`, …
+    UnaryF(fn(f64) -> f64),
+    /// `fn(a: f64, b: f64) -> f64`. Binary numeric — `+`, `*`, `pow`,
+    /// `min`, `max`, `step`.
+    BinaryF(fn(f64, f64) -> f64),
+    /// `fn(a: f64, b: f64) -> bool`. Binary numeric comparison — `<`, `>=`,
+    /// `==`, `!=`, etc. (`Eq`/`Neq` use an epsilon tolerance.)
+    CmpF(fn(f64, f64) -> bool),
+    /// Per-op logic in `interpreter` (bool args, ternary math, casts, array
+    /// ops, action ops, and vector ops which are not yet supported on CPU).
+    Custom,
+}
+
 /// Generate `BuiltinOp` and its lookup tables from a single table.
 ///
-/// Each row is `Variant => "surface_name", <WgslLowering>;`. The expansion
-/// produces the enum plus `name()` / `from_name()` / `wgsl_lowering()` using
-/// `match`, so every mapping is exhaustive at compile time and adding a new
-/// builtin is a one-line change with no risk of forgetting one direction.
+/// Each row is `Variant => "surface_name", <WgslLowering>, <EvalImpl>;`.
+/// The expansion produces the enum plus `name()` / `from_name()` /
+/// `wgsl_lowering()` / `eval_impl()` using `match`, so every mapping is
+/// exhaustive at compile time and adding a new builtin is a one-line
+/// change with no risk of forgetting one direction.
 macro_rules! define_builtins {
-    ( $( $variant:ident => $name:literal, $wgsl:expr );* $(;)? ) => {
+    ( $( $variant:ident => $name:literal, $wgsl:expr, $eval:expr );* $(;)? ) => {
         /// Known built-in operations and functions in the Logos language.
         ///
         /// Anything the parser, type system, or any backend recognizes by
@@ -85,93 +104,107 @@ macro_rules! define_builtins {
                     $( Self::$variant => $wgsl, )*
                 }
             }
+
+            /// How this op evaluates on the CPU interpreter. The interpreter
+            /// dispatcher handles `UnaryF`/`BinaryF`/`CmpF` generically;
+            /// `Custom` ops fall through to per-op branches.
+            pub fn eval_impl(self) -> EvalImpl {
+                match self {
+                    $( Self::$variant => $eval, )*
+                }
+            }
         }
     }
 }
 
 define_builtins! {
     // Arithmetic — `mod` uses a custom modulo formula, `pow` has an int
-    // specialization for cheap repeated multiplication of `x²` etc.
-    Add  => "add", WgslLowering::Infix("+");
-    Sub  => "sub", WgslLowering::Infix("-");
-    Mul  => "mul", WgslLowering::Infix("*");
-    Div  => "div", WgslLowering::Infix("/");
-    Mod  => "mod", WgslLowering::Custom;
-    Pow  => "pow", WgslLowering::Custom;
-    Neg  => "neg", WgslLowering::Prefix("-");
+    // specialization for cheap repeated multiplication of `x²` etc. `div`
+    // and `mod` need runtime divide-by-zero checks on CPU.
+    Add  => "add", WgslLowering::Infix("+"),  EvalImpl::BinaryF(|a, b| a + b);
+    Sub  => "sub", WgslLowering::Infix("-"),  EvalImpl::BinaryF(|a, b| a - b);
+    Mul  => "mul", WgslLowering::Infix("*"),  EvalImpl::BinaryF(|a, b| a * b);
+    Div  => "div", WgslLowering::Infix("/"),  EvalImpl::Custom;
+    Mod  => "mod", WgslLowering::Custom,      EvalImpl::Custom;
+    Pow  => "pow", WgslLowering::Custom,      EvalImpl::BinaryF(f64::powf);
+    Neg  => "neg", WgslLowering::Prefix("-"), EvalImpl::UnaryF(|x| -x);
 
-    // Comparison
-    Eq   => "eq",  WgslLowering::Infix("==");
-    Neq  => "neq", WgslLowering::Infix("!=");
-    Lt   => "lt",  WgslLowering::Infix("<");
-    Gt   => "gt",  WgslLowering::Infix(">");
-    Lte  => "lte", WgslLowering::Infix("<=");
-    Gte  => "gte", WgslLowering::Infix(">=");
+    // Comparison — `Eq`/`Neq` use an epsilon tolerance to keep float plots
+    // robust to ULP-level noise.
+    Eq   => "eq",  WgslLowering::Infix("=="), EvalImpl::CmpF(|a, b| (a - b).abs() < 1e-10);
+    Neq  => "neq", WgslLowering::Infix("!="), EvalImpl::CmpF(|a, b| (a - b).abs() >= 1e-10);
+    Lt   => "lt",  WgslLowering::Infix("<"),  EvalImpl::CmpF(|a, b| a < b);
+    Gt   => "gt",  WgslLowering::Infix(">"),  EvalImpl::CmpF(|a, b| a > b);
+    Lte  => "lte", WgslLowering::Infix("<="), EvalImpl::CmpF(|a, b| a <= b);
+    Gte  => "gte", WgslLowering::Infix(">="), EvalImpl::CmpF(|a, b| a >= b);
 
-    // Logical
-    And  => "and", WgslLowering::Infix("&&");
-    Or   => "or",  WgslLowering::Infix("||");
-    Not  => "not", WgslLowering::Prefix("!");
+    // Logical — bool args, can't reuse the f64 dispatchers.
+    And  => "and", WgslLowering::Infix("&&"), EvalImpl::Custom;
+    Or   => "or",  WgslLowering::Infix("||"), EvalImpl::Custom;
+    Not  => "not", WgslLowering::Prefix("!"), EvalImpl::Custom;
 
-    // Trig — `atan` is overloaded (1 or 2 args).
-    Sin  => "sin",  WgslLowering::Call("sin");
-    Cos  => "cos",  WgslLowering::Call("cos");
-    Tan  => "tan",  WgslLowering::Call("tan");
-    Asin => "asin", WgslLowering::Call("asin");
-    Acos => "acos", WgslLowering::Call("acos");
-    Atan => "atan", WgslLowering::Custom;
-    Sinh => "sinh", WgslLowering::Call("sinh");
-    Cosh => "cosh", WgslLowering::Call("cosh");
-    Tanh => "tanh", WgslLowering::Call("tanh");
+    // Trig — WGSL's `atan` is overloaded (1 or 2 args); the CPU interpreter
+    // handles only the 1-arg form.
+    Sin  => "sin",  WgslLowering::Call("sin"),  EvalImpl::UnaryF(f64::sin);
+    Cos  => "cos",  WgslLowering::Call("cos"),  EvalImpl::UnaryF(f64::cos);
+    Tan  => "tan",  WgslLowering::Call("tan"),  EvalImpl::UnaryF(f64::tan);
+    Asin => "asin", WgslLowering::Call("asin"), EvalImpl::UnaryF(f64::asin);
+    Acos => "acos", WgslLowering::Call("acos"), EvalImpl::UnaryF(f64::acos);
+    Atan => "atan", WgslLowering::Custom,       EvalImpl::UnaryF(f64::atan);
+    Sinh => "sinh", WgslLowering::Call("sinh"), EvalImpl::UnaryF(f64::sinh);
+    Cosh => "cosh", WgslLowering::Call("cosh"), EvalImpl::UnaryF(f64::cosh);
+    Tanh => "tanh", WgslLowering::Call("tanh"), EvalImpl::UnaryF(f64::tanh);
 
-    // Exp/log — `log10` is expanded to `log2(x) / log2(10)`.
-    Log   => "log",   WgslLowering::Call("log");
-    Log2  => "log2",  WgslLowering::Call("log2");
-    Log10 => "log10", WgslLowering::Custom;
-    Exp   => "exp",   WgslLowering::Call("exp");
-    Exp2  => "exp2",  WgslLowering::Call("exp2");
+    // Exp/log — WGSL's `log10` is expanded to `log2(x) / log2(10)`; the
+    // CPU interpreter uses the native `f64::log10`.
+    Log   => "log",   WgslLowering::Call("log"),  EvalImpl::UnaryF(f64::ln);
+    Log2  => "log2",  WgslLowering::Call("log2"), EvalImpl::UnaryF(f64::log2);
+    Log10 => "log10", WgslLowering::Custom,       EvalImpl::UnaryF(f64::log10);
+    Exp   => "exp",   WgslLowering::Call("exp"),  EvalImpl::UnaryF(f64::exp);
+    Exp2  => "exp2",  WgslLowering::Call("exp2"), EvalImpl::UnaryF(f64::exp2);
 
     // Misc unary math
-    Sqrt  => "sqrt",  WgslLowering::Call("sqrt");
-    Abs   => "abs",   WgslLowering::Call("abs");
-    Sign  => "sign",  WgslLowering::Call("sign");
-    Floor => "floor", WgslLowering::Call("floor");
-    Ceil  => "ceil",  WgslLowering::Call("ceil");
-    Round => "round", WgslLowering::Call("round");
-    Fract => "fract", WgslLowering::Call("fract");
+    Sqrt  => "sqrt",  WgslLowering::Call("sqrt"),  EvalImpl::UnaryF(f64::sqrt);
+    Abs   => "abs",   WgslLowering::Call("abs"),   EvalImpl::UnaryF(f64::abs);
+    Sign  => "sign",  WgslLowering::Call("sign"),  EvalImpl::UnaryF(f64::signum);
+    Floor => "floor", WgslLowering::Call("floor"), EvalImpl::UnaryF(f64::floor);
+    Ceil  => "ceil",  WgslLowering::Call("ceil"),  EvalImpl::UnaryF(f64::ceil);
+    Round => "round", WgslLowering::Call("round"), EvalImpl::UnaryF(f64::round);
+    Fract => "fract", WgslLowering::Call("fract"), EvalImpl::UnaryF(f64::fract);
 
     // Binary math
-    Min  => "min",  WgslLowering::Call("min");
-    Max  => "max",  WgslLowering::Call("max");
-    Step => "step", WgslLowering::Call("step");
+    Min  => "min",  WgslLowering::Call("min"),  EvalImpl::BinaryF(f64::min);
+    Max  => "max",  WgslLowering::Call("max"),  EvalImpl::BinaryF(f64::max);
+    Step => "step", WgslLowering::Call("step"), EvalImpl::BinaryF(|edge, x| if x < edge { 0.0 } else { 1.0 });
 
-    // Ternary math
-    Clamp      => "clamp",      WgslLowering::Call("clamp");
-    Mix        => "mix",        WgslLowering::Call("mix");
-    Smoothstep => "smoothstep", WgslLowering::Call("smoothstep");
+    // Ternary math — arity 3, doesn't fit the binary dispatchers.
+    Clamp      => "clamp",      WgslLowering::Call("clamp"),      EvalImpl::Custom;
+    Mix        => "mix",        WgslLowering::Call("mix"),        EvalImpl::Custom;
+    Smoothstep => "smoothstep", WgslLowering::Call("smoothstep"), EvalImpl::Custom;
 
-    // Vector math
-    Length    => "length",    WgslLowering::Call("length");
-    Normalize => "normalize", WgslLowering::Call("normalize");
-    Dot       => "dot",       WgslLowering::Call("dot");
-    Cross     => "cross",     WgslLowering::Call("cross");
+    // Vector math — currently no CPU interpreter support.
+    Length    => "length",    WgslLowering::Call("length"),    EvalImpl::Custom;
+    Normalize => "normalize", WgslLowering::Call("normalize"), EvalImpl::Custom;
+    Dot       => "dot",       WgslLowering::Call("dot"),       EvalImpl::Custom;
+    Cross     => "cross",     WgslLowering::Call("cross"),     EvalImpl::Custom;
 
-    // Constructors
-    Vec2 => "vec2", WgslLowering::Call("vec2<f32>");
-    Vec3 => "vec3", WgslLowering::Call("vec3<f32>");
-    Vec4 => "vec4", WgslLowering::Call("vec4<f32>");
+    // Constructors — no CPU representation today.
+    Vec2 => "vec2", WgslLowering::Call("vec2<f32>"), EvalImpl::Custom;
+    Vec3 => "vec3", WgslLowering::Call("vec3<f32>"), EvalImpl::Custom;
+    Vec4 => "vec4", WgslLowering::Call("vec4<f32>"), EvalImpl::Custom;
 
-    // Casts — `f64` lowers to `f32` since WGSL has no f64.
-    F32 => "f32", WgslLowering::Call("f32");
-    F64 => "f64", WgslLowering::Call("f32");
-    I32 => "i32", WgslLowering::Call("i32");
+    // Casts — `f64` lowers to `f32` since WGSL has no f64. CPU keeps
+    // everything as f64 internally; `i32` truncates.
+    F32 => "f32", WgslLowering::Call("f32"), EvalImpl::Custom;
+    F64 => "f64", WgslLowering::Call("f32"), EvalImpl::Custom;
+    I32 => "i32", WgslLowering::Call("i32"), EvalImpl::Custom;
 
     // Array
-    Len => "len", WgslLowering::Custom;
+    Len => "len", WgslLowering::Custom, EvalImpl::Custom;
 
     // Actions (have side effects in the cell pipeline; not fragment-shader-emittable)
-    Print => "print", WgslLowering::Custom;
-    Plot  => "plot",  WgslLowering::Custom;
+    Print => "print", WgslLowering::Custom, EvalImpl::Custom;
+    Plot  => "plot",  WgslLowering::Custom, EvalImpl::Custom;
 }
 
 /// Resolved callee of an `Apply` node.
