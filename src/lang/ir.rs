@@ -349,8 +349,12 @@ pub enum Ir {
     },
 
     /// Anonymous function: `x |-> body` or `(a, b) |-> body`.
-    /// Only meaningful as an argument to a higher-order user function — the
-    /// codegen's specialization pass lifts it into a synthetic FunctionDef.
+    ///
+    /// **Ephemeral**: this variant is produced by the parser and eliminated
+    /// by `lower::lift_lambdas` (which replaces each Lambda with a
+    /// synthetic top-level `FunctionDef` plus an `Identifier` referring to
+    /// it). After `lower::lower()` returns, no `Ir::Lambda` should remain
+    /// in the tree — backends treat it as `unreachable!()`.
     Lambda {
         params: Vec<String>,
         body: Box<Ir>,
