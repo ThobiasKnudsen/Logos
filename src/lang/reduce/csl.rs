@@ -150,8 +150,14 @@ impl CslSession {
         ];
         for stmt in &init_stmts {
             let c = CString::new(*stmt).unwrap();
-            unsafe {
-                ffi::reduce_ffi_process_statement(c.as_ptr());
+            let rc = unsafe { ffi::reduce_ffi_process_statement(c.as_ptr()) };
+            // Failure here corrupts the custom printer setup; subsequent
+            // simplify() output parsing will be wrong, so refuse to proceed.
+            if rc != 0 {
+                return Err(format!(
+                    "REDUCE init statement failed (code {}): {}",
+                    rc, stmt
+                ));
             }
         }
 
@@ -171,16 +177,21 @@ impl CslSession {
         }
         OUTPUT_BUF.with(|buf| buf.borrow_mut().clear());
 
-        // Disable echo so output doesn't contain the input statement
+        // Disable echo so output doesn't contain the input statement.
+        // If this fails, eval()'s output parsing will see input echoed back
+        // and confuse it for results — log so the symptom is traceable.
         let echo = CString::new("echo").unwrap();
-        unsafe {
-            ffi::reduce_ffi_set_switch(echo.as_ptr(), 0);
+        let rc = unsafe { ffi::reduce_ffi_set_switch(echo.as_ptr(), 0) };
+        if rc != 0 && rc != -1 {
+            log::warn!("REDUCE set_switch(echo, off) returned {}; output parsing may include echoed input", rc);
         }
 
-        // Warmup: execute a statement to absorb any remaining init output
+        // Warmup: execute a statement to absorb any remaining init output.
+        // Failure here is benign — OUTPUT_BUF is cleared immediately after.
         let warmup = CString::new("1;").unwrap();
-        unsafe {
-            ffi::reduce_ffi_process_statement(warmup.as_ptr());
+        let rc = unsafe { ffi::reduce_ffi_process_statement(warmup.as_ptr()) };
+        if rc != 0 {
+            log::warn!("REDUCE warmup statement returned {}", rc);
         }
 
         // Drain all startup and warmup output
