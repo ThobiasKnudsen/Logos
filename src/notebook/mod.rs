@@ -812,7 +812,13 @@ impl Notebook {
         let mut shaders = Vec::with_capacity(plot_indices.len());
         let mut last_ir: Option<Ir> = None;
         for &plot_idx in plot_indices {
-            let plot_ir = lang::build_plot_ir(combined, plot_idx);
+            let plot_ir = match lang::build_plot_ir(combined, plot_idx) {
+                Ok(ir) => ir,
+                Err(e) => {
+                    self.set_runtime_error(idx, e, snapshot);
+                    return;
+                }
+            };
             if let Err(e) = crate::lang::type_check(&plot_ir, snapshot) {
                 self.set_runtime_error(idx, e, snapshot);
                 return;

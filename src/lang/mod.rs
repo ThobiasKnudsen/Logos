@@ -197,8 +197,14 @@ pub fn build_print_ir(ir: &Ir, print_index: usize) -> Ir {
 }
 
 /// Build an IR subtree for plotting. Includes all non-action statements
-/// plus the unwrapped inner expression from plot().
-pub fn build_plot_ir(ir: &Ir, plot_index: usize) -> Ir {
+/// plus the canonicalized plot body from `plot(...)`.
+///
+/// The plot's first argument is canonicalized via `canonicalize_plot_body`
+/// so explicit lambdas (`(x) ↦ sin(x)`, `(x, y) ↦ x*y`) and implicit
+/// comparisons (`y = sin(x)`, bare value expressions) all produce the same
+/// downstream shape: a binding to a synthesized helper function plus a
+/// call wired to the canonical axis variables.
+pub fn build_plot_ir(ir: &Ir, plot_index: usize) -> Result<Ir, String> {
     let stmts = match ir {
         Ir::Block { items: stmts, .. } => stmts,
         other => {
@@ -208,11 +214,12 @@ pub fn build_plot_ir(ir: &Ir, plot_index: usize) -> Ir {
                 ..
             } = other
             {
-                if args.len() == 1 {
-                    return args[0].clone();
+                if !args.is_empty() {
+                    let canonical = canonicalize_plot_body(&args[0])?;
+                    return Ok(coalesce_block(canonical, other.span()));
                 }
             }
-            return other.clone();
+            return Ok(other.clone());
         }
     };
 
@@ -225,8 +232,9 @@ pub fn build_plot_ir(ir: &Ir, plot_index: usize) -> Ir {
                 ..
             } = stmt
             {
-                if args.len() == 1 {
-                    result.push(args[0].clone());
+                if !args.is_empty() {
+                    let canonical = canonicalize_plot_body(&args[0])?;
+                    result.extend(canonical);
                 }
             }
             continue;
@@ -241,22 +249,111 @@ pub fn build_plot_ir(ir: &Ir, plot_index: usize) -> Ir {
         result.push(stmt.clone());
     }
 
-    match result.len() {
-        1 => result.remove(0),
+    Ok(coalesce_block(result, ir.span()))
+}
+
+/// Wrap a list of statements as a single `Ir`. One statement returns
+/// directly; zero or many become a `Block` covering their span (falling
+/// back to `fallback_span` when empty).
+fn coalesce_block(mut items: Vec<Ir>, fallback_span: ir::Span) -> Ir {
+    match items.len() {
+        1 => items.remove(0),
         _ => {
-            let span = if result.is_empty() {
-                ir.span()
+            let span = if items.is_empty() {
+                fallback_span
             } else {
                 (
-                    result.first().unwrap().span().0,
-                    result.last().unwrap().span().1,
+                    items.first().unwrap().span().0,
+                    items.last().unwrap().span().1,
                 )
             };
-            Ir::Block {
-                items: result,
-                span,
-            }
+            Ir::Block { items, span }
         }
+    }
+}
+
+/// Canonicalize `plot()`'s first argument into a sequence of IR
+/// statements ending in the plottable result expression.
+///
+/// Accepts three input shapes:
+///
+/// - Explicit 1-arg lambda `(p) ↦ body` — synthesizes a binding
+///   `_plot_fn_<span> := (p) ↦ body` (which `lower::lift_lambdas`
+///   converts to a top-level `FunctionDef`) and emits the result
+///   `y = _plot_fn_<span>(x)` so the implicit-curve corner-checking
+///   path renders it.
+///
+/// - Explicit 2-arg lambda `(p, q) ↦ body` — emits a binding plus a
+///   call `_plot_fn_<span>(x, y)` whose numeric output drives the
+///   2D-surface grayscale path.
+///
+/// - Anything else (implicit comparison `y = sin(x)`, bare expression
+///   like `x*x + y*y`, etc.) — returned as a single-element list with
+///   the expression unchanged. Existing implicit forms keep their
+///   current behaviour.
+///
+/// Errors on lambdas with arity 0 or ≥ 3. ND plots with extras as
+/// tunable parameters are tracked separately (see issue #27).
+///
+/// Wraps the lambda in a binding (instead of substituting axis-var
+/// names into the body) so capture analysis stays correct in the
+/// presence of nested bindings that shadow the lambda's parameter.
+fn canonicalize_plot_body(arg: &Ir) -> Result<Vec<Ir>, String> {
+    let Ir::Lambda { params, span, .. } = arg else {
+        return Ok(vec![arg.clone()]);
+    };
+
+    match params.len() {
+        0 => Err("plot lambda must have at least one parameter".to_string()),
+        n @ (1 | 2) => {
+            let synth_name = format!("_plot_fn_{}_{}", span.0, span.1);
+            let binding = Ir::Binding {
+                name: synth_name.clone(),
+                value: Box::new(arg.clone()),
+                span: *span,
+                value_ty: None,
+            };
+            let axis_args: Vec<Ir> = (0..n)
+                .map(|i| Ir::Identifier {
+                    name: match i {
+                        0 => "x".to_string(),
+                        1 => "y".to_string(),
+                        _ => unreachable!(),
+                    },
+                    span: *span,
+                    resolved: None,
+                })
+                .collect();
+            let call = Ir::Apply {
+                callee: ir::Callee::User(synth_name),
+                args: axis_args,
+                span: *span,
+                result_ty: None,
+            };
+            let result = if n == 1 {
+                // 1D: render `y = f(x)` as a curve via corner-checking.
+                let y_axis = Ir::Identifier {
+                    name: "y".to_string(),
+                    span: *span,
+                    resolved: None,
+                };
+                Ir::Apply {
+                    callee: ir::Callee::Builtin(ir::BuiltinOp::Eq),
+                    args: vec![y_axis, call],
+                    span: *span,
+                    result_ty: None,
+                }
+            } else {
+                // 2D: render `f(x, y)` as a numeric grayscale field.
+                call
+            };
+            Ok(vec![binding, result])
+        }
+        n => Err(format!(
+            "plot lambda with {} parameters is not yet supported; \
+             ND plots beyond 2D require tunable parameter sliders",
+            n
+        )),
     }
 }
 
@@ -604,6 +701,74 @@ mod integration_tests {
         }
         // No panic = success
     }
+
+    /// Compile a `plot(...)` cell's body the same way the notebook does:
+    /// extract via `build_plot_ir`, type-check, then run wgsl_gen.
+    /// Panics with diagnostics on any failure.
+    fn compile_plot(source: &str) -> String {
+        let ir = parse(source).unwrap_or_else(|e| panic!("parse({:?}): {}", source, e));
+        let actions = detect_cell_actions(&ir);
+        let plot_idx = *actions
+            .plots
+            .first()
+            .unwrap_or_else(|| panic!("{:?} has no plot()", source));
+        let plot_ir = build_plot_ir(&ir, plot_idx)
+            .unwrap_or_else(|e| panic!("build_plot_ir({:?}): {}", source, e));
+        type_check(&plot_ir, source)
+            .unwrap_or_else(|e| panic!("type_check({:?}): {}", source, e));
+        let wgsl = wgsl_gen::generate(&plot_ir)
+            .unwrap_or_else(|e| panic!("wgsl_gen({:?}): {}", source, e));
+        validate_wgsl(&wgsl)
+            .unwrap_or_else(|e| panic!("naga validation for {:?}:\n{}", source, e));
+        wgsl
+    }
+
+    /// `plot((x) ↦ sin(x))` and `plot(y = sin(x))` both render the same
+    /// curve: explicit lambda and implicit comparison desugar through
+    /// the same corner-checking codegen path. We don't require byte-
+    /// identical WGSL (the lambda form synthesizes an extra helper
+    /// function), but both must trigger the corner-checking branch and
+    /// emit the same body expression.
+    #[test]
+    fn test_plot_explicit_lambda_matches_implicit_curve() {
+        let lambda_wgsl = compile_plot("plot((x) |-> sin(x))");
+        let implicit_wgsl = compile_plot("plot(y = sin(x))");
+        for wgsl in [&lambda_wgsl, &implicit_wgsl] {
+            assert!(
+                wgsl.contains("x_m") && wgsl.contains("x_p"),
+                "expected corner-checking path; got:\n{}",
+                wgsl
+            );
+            assert!(wgsl.contains("sin("), "missing sin call; got:\n{}", wgsl);
+        }
+    }
+
+    /// 2-arg lambda gives a numeric surface — grayscale path, no
+    /// corner-checking (which would draw an isoline, not a heatmap).
+    #[test]
+    fn test_plot_two_arg_lambda_compiles_as_field() {
+        let wgsl = compile_plot("plot((u, v) |-> u*v)");
+        assert!(
+            !wgsl.contains("x_m"),
+            "2-arg lambda should NOT trigger corner-checking; got:\n{}",
+            wgsl
+        );
+        assert!(
+            wgsl.contains("clamp(") || wgsl.contains("_shade"),
+            "expected numeric grayscale path; got:\n{}",
+            wgsl
+        );
+    }
+
+    /// Lambdas using non-axis parameter names still wire up to the
+    /// canonical axes. `(u) ↦ sin(u)` is the same function as
+    /// `(x) ↦ sin(x)`; capture analysis on the lifted helper takes
+    /// care of the rename via parameter passing.
+    #[test]
+    fn test_plot_lambda_param_can_be_any_name() {
+        let wgsl = compile_plot("plot((u) |-> sin(u))");
+        assert!(wgsl.contains("_plot_fn_"), "expected lifted helper fn");
+    }
 }
 
 #[cfg(test)]
@@ -686,7 +851,7 @@ mod action_tests {
     fn test_build_plot_ir_strips_print() {
         let ir = parse("f := x\nprint(f)\nplot(y=f)").unwrap();
         let actions = detect_cell_actions(&ir);
-        let plot_ir = build_plot_ir(&ir, *actions.plots.last().unwrap());
+        let plot_ir = build_plot_ir(&ir, *actions.plots.last().unwrap()).unwrap();
         if let Ir::Block { items: stmts, .. } = &plot_ir {
             for stmt in stmts {
                 if let Ir::Apply { callee, .. } = stmt {
@@ -698,5 +863,112 @@ mod action_tests {
                 }
             }
         }
+    }
+
+    /// Plot of an explicit 1-arg lambda must desugar into a synthetic
+    /// `_plot_fn_…` binding plus a `y = _plot_fn_…(x)` curve expression.
+    /// Without this shape lift_lambdas would emit a `FunctionDef` but
+    /// nothing in the result position would call it.
+    #[test]
+    fn test_build_plot_ir_one_arg_lambda_desugars_to_curve() {
+        let ir = parse("plot((u) |-> sin(u))").unwrap();
+        let actions = detect_cell_actions(&ir);
+        let plot_ir = build_plot_ir(&ir, actions.plots[0]).unwrap();
+        let Ir::Block { items, .. } = &plot_ir else {
+            panic!("expected Block, got {:?}", plot_ir);
+        };
+        assert_eq!(items.len(), 2, "expected binding + curve, got {:?}", items);
+        let Ir::Binding { name, value, .. } = &items[0] else {
+            panic!("expected Binding first, got {:?}", items[0]);
+        };
+        assert!(name.starts_with("_plot_fn_"), "got name {}", name);
+        assert!(
+            matches!(value.as_ref(), Ir::Lambda { params, .. } if params.len() == 1),
+            "binding value should still be the 1-arg lambda"
+        );
+        let Ir::Apply {
+            callee, args, ..
+        } = &items[1] else {
+            panic!("expected Apply (y = …), got {:?}", items[1]);
+        };
+        assert_eq!(callee.name(), "eq");
+        assert!(matches!(&args[0], Ir::Identifier { name, .. } if name == "y"));
+        let Ir::Apply { callee: inner, args: inner_args, .. } = &args[1] else {
+            panic!("expected inner Apply call, got {:?}", args[1]);
+        };
+        assert_eq!(inner.name(), name);
+        assert_eq!(inner_args.len(), 1);
+        assert!(matches!(&inner_args[0], Ir::Identifier { name, .. } if name == "x"));
+    }
+
+    /// 2-arg lambdas desugar into a numeric field expression — no
+    /// outer `y = …` wrapper, since the result is a scalar at every
+    /// `(x, y)` instead of a curve.
+    #[test]
+    fn test_build_plot_ir_two_arg_lambda_desugars_to_field() {
+        let ir = parse("plot((p, q) |-> p*q)").unwrap();
+        let actions = detect_cell_actions(&ir);
+        let plot_ir = build_plot_ir(&ir, actions.plots[0]).unwrap();
+        let Ir::Block { items, .. } = &plot_ir else {
+            panic!("expected Block, got {:?}", plot_ir);
+        };
+        assert_eq!(items.len(), 2);
+        let Ir::Apply { callee, args, .. } = &items[1] else {
+            panic!("expected call as result, got {:?}", items[1]);
+        };
+        let Ir::Binding { name: bound, .. } = &items[0] else {
+            panic!("expected Binding first");
+        };
+        assert_eq!(callee.name(), bound);
+        assert_eq!(args.len(), 2);
+        assert!(matches!(&args[0], Ir::Identifier { name, .. } if name == "x"));
+        assert!(matches!(&args[1], Ir::Identifier { name, .. } if name == "y"));
+    }
+
+    /// Implicit-comparison and bare-expression forms predate explicit
+    /// lambdas; they must keep flowing through unchanged so the rest of
+    /// the pipeline still sees the same shape it did before.
+    #[test]
+    fn test_build_plot_ir_implicit_comparison_passes_through() {
+        let ir = parse("plot(y = sin(x))").unwrap();
+        let actions = detect_cell_actions(&ir);
+        let plot_ir = build_plot_ir(&ir, actions.plots[0]).unwrap();
+        match &plot_ir {
+            Ir::Apply { callee, .. } => assert_eq!(callee.name(), "eq"),
+            other => panic!("expected single Apply, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_build_plot_ir_bare_expr_passes_through() {
+        let ir = parse("plot(x*x + y*y)").unwrap();
+        let actions = detect_cell_actions(&ir);
+        let plot_ir = build_plot_ir(&ir, actions.plots[0]).unwrap();
+        assert!(
+            matches!(&plot_ir, Ir::Apply { callee, .. } if callee.name() == "add"),
+            "bare expression should remain a single Apply"
+        );
+    }
+
+    /// 0-arg lambdas have no axis to attach to. Pre-empt the cryptic
+    /// downstream error with a clear message at canonicalization time.
+    #[test]
+    fn test_build_plot_ir_zero_arg_lambda_errors() {
+        // `() |-> 5` parses as 0-tuple LHS → 0-param lambda.
+        let ir = parse("plot(() |-> 5)").unwrap();
+        let actions = detect_cell_actions(&ir);
+        let err = build_plot_ir(&ir, actions.plots[0]).unwrap_err();
+        assert!(err.contains("at least one parameter"), "got: {}", err);
+    }
+
+    /// Lambdas with arity ≥ 3 are reserved for the ND-with-tunable-
+    /// parameter-sliders work. They must error cleanly today, not
+    /// silently mis-render.
+    #[test]
+    fn test_build_plot_ir_three_arg_lambda_errors() {
+        let ir = parse("plot((a, b, c) |-> a+b+c)").unwrap();
+        let actions = detect_cell_actions(&ir);
+        let err = build_plot_ir(&ir, actions.plots[0]).unwrap_err();
+        assert!(err.contains("3 parameters"), "got: {}", err);
     }
 }

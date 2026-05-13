@@ -2584,7 +2584,7 @@ step(lower, ny) * step(ny, upper)"#;
         let ir = crate::lang::parse(input).expect("example parses");
         let actions = crate::lang::detect_cell_actions(&ir);
         let plot_idx = actions.plots.first().copied().expect("example has plot()");
-        let plot_ir = crate::lang::build_plot_ir(&ir, plot_idx);
+        let plot_ir = crate::lang::build_plot_ir(&ir, plot_idx).expect("build_plot_ir succeeds");
         let shader = super::generate(&plot_ir).expect("wgsl_gen succeeds");
         // Validate with naga (same validation wgpu does)
         let module = naga::front::wgsl::parse_str(&shader)
