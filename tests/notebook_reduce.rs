@@ -174,4 +174,91 @@ fn examples_render_through_real_reduce() {
             }
         }
     }
+
+    // ── Printer-parens round-trip via the full Notebook path ────────
+    //
+    // The REDUCE infix printer's precedence-aware parenthesization was
+    // the root cause of the `print(∫(x²+2^x, x))` corruption bug. Real
+    // REDUCE through `Notebook → ReduceSimplifier → from_reduce → parse
+    // → to_source` is the full pipeline a user sees. For each expression
+    // below we (a) drive it through that pipeline, then (b) re-submit
+    // the displayed text minus the *known* closed-form answer to real
+    // REDUCE — if the simplification is `"0"`, the printer's
+    // parenthesization preserved the math; any non-zero residual means
+    // the textual form was ambiguous and round-tripped to a different
+    // expression.
+    let identity_cases: &[(&str, &str)] = &[
+        // The user's original bug.
+        ("\u{222B}(x\u{00B2}+2^x, x)", "x^3/3 + 2^x/log(2)"),
+        // Pure rational integral that emits a multi-factor denominator.
+        ("\u{222B}(1/(1+x\u{00B2}), x)", "atan(x)"),
+        // Quotient with mixed numerator — denominator parens critical.
+        ("(a + b)/(c*d)", "(a + b)/(c*d)"),
+        // Derivative of a sum — exercises the print path through CAS.
+        ("\u{2146}(x\u{00B2} + sin(x), x)", "2*x + cos(x)"),
+        // Quotient inside a quotient (exercises right-operand ctx=3).
+        ("a/(b/c)", "a*c/b"),
+        // `^` on a sum (exercises left-operand ctx=5).
+        ("(a + b)^2", "a^2 + 2*a*b + b^2"),
+    ];
+
+    let simplifier =
+        ReduceSimplifier::new(Box::new(SharedReduce::new(service.clone())));
+    let mut nb = Notebook::new(Box::new(simplifier), None);
+    for (src, expected_closed_form) in identity_cases {
+        let label = format!("printer round-trip {:?}", src);
+        let cell_src = format!("print({})", src);
+        let i = nb.add_cell(&cell_src);
+        nb.play(i);
+        pump_until_terminal(&mut nb, i, &label);
+
+        let display = match &nb.cell(i).outcome.message {
+            Some(CellMessage::Computed(s)) => s.clone(),
+            other => panic!(
+                "{label}: expected Computed after real-REDUCE round-trip; got {:?}\n\
+                 diagnostics: {:?}",
+                other,
+                nb.cell(i).outcome.diagnostics,
+            ),
+        };
+
+        // Independently verify the math: subtract the expected closed
+        // form from the displayed text and ask real REDUCE to simplify.
+        // The result must be exactly "0". If it's anything else, the
+        // printer's parens were dropping a factor and the round-trip
+        // lost information.
+        let check_expr = format!("({}) - ({})", display, expected_closed_form);
+        let residual = service
+            .borrow_mut()
+            .submit(usize::MAX, Vec::new(), check_expr.clone());
+        // Drain the response off the worker.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let answer = loop {
+            if let Some(resp) = service.borrow_mut().try_recv() {
+                if resp.request_id == residual {
+                    match resp.result {
+                        Ok(s) => break s.trim().to_string(),
+                        Err(e) => panic!(
+                            "{label}: REDUCE rejected round-trip check {:?}: {}",
+                            check_expr, e,
+                        ),
+                    }
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{label}: round-trip check timed out",
+            );
+            std::thread::sleep(POLL);
+        };
+        assert_eq!(
+            answer, "0",
+            "{label}: printed text {:?} does not round-trip to the closed \
+             form {:?}; REDUCE simplified ({} - {}) to {:?} instead of 0. \
+             This usually means the infix printer dropped a parens \
+             grouping and the textual form was re-parsed as a different \
+             expression.",
+            display, expected_closed_form, display, expected_closed_form, answer,
+        );
+    }
 }

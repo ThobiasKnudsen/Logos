@@ -1148,6 +1148,244 @@ fn nested_cas_fixpoint_iterates_until_fully_resolved() {
 }
 
 #[test]
+fn timed_out_cell_can_be_replayed_cleanly() {
+    // After `tick_with_now` converts a pending submission into an error
+    // diagnostic, the user should be able to play the cell again and have
+    // it start fresh — not inherit the prior Error state, and not refuse
+    // to submit a new request because of stale bookkeeping.
+    use std::time::{Duration, Instant};
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "f := x + 2*x\nprint(f)");
+    let after_timeout = Instant::now() + Notebook::PENDING_TIMEOUT + Duration::from_secs(1);
+    nb.tick_with_now(after_timeout);
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Error(_)),
+    ));
+
+    // Replay — outcome must reset, and a fresh REDUCE submission must
+    // appear on the mock (we count submissions before/after).
+    let subs_before_replay = mock.submissions_for(nb.cell(i).id).len();
+    nb.play(i);
+    assert!(
+        matches!(nb.cell(i).outcome.message, Some(CellMessage::Pending)),
+        "after replay the cell must be Pending on a *new* request, not \
+         stuck on the previous error; got {:?}",
+        nb.cell(i).outcome.message,
+    );
+    let subs_after_replay = mock.submissions_for(nb.cell(i).id).len();
+    assert!(
+        subs_after_replay > subs_before_replay,
+        "replay must produce a fresh REDUCE submission",
+    );
+}
+
+#[test]
+fn editing_pending_cell_drops_stale_response() {
+    // While a cell is parked on Pending, the user types more characters.
+    // The pending entry must be cleared so a late response from the
+    // pre-edit submission can't land on the (now different) cell IR and
+    // either error out or splice unrelated bits into the new text.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "f := x + 2*x\nprint(f)");
+    let cell_id = nb.cell(i).id;
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Pending),
+    ));
+
+    // User edits the cell (no replay yet — the auto-rerun's 200ms quiet
+    // window hasn't fired).
+    nb.set_text(i, "print(3 + 4)");
+
+    // The pre-edit response arrives. Without the fix, this would try to
+    // splice the simplified IR into the new text and either error out or
+    // produce a corrupt state. With the fix, the late response is
+    // silently dropped.
+    mock.respond_to(cell_id, Ok("3*x".to_string()));
+    nb.tick();
+
+    // The cell's outcome should reflect the new text, not the stale
+    // response. (Auto-rerun would normally play; we exercise the
+    // explicit replay path here to keep the test deterministic.)
+    nb.play(i);
+    assert_eq!(
+        match &nb.cell(i).outcome.message {
+            Some(CellMessage::Computed(s)) => s.as_str(),
+            other => panic!("expected Computed after replay, got {:?}", other),
+        },
+        "7",
+    );
+    assert!(
+        nb.cell(i).outcome.diagnostics.is_empty(),
+        "stale-response handling must not raise a diagnostic; got {:?}",
+        nb.cell(i).outcome.diagnostics,
+    );
+}
+
+#[test]
+fn live_keystroke_during_pending_drops_stale_response() {
+    // The live editor doesn't call `set_text`; it mutates `buffer`
+    // directly and notifies the notebook via `mark_edited`. Verify the
+    // same late-response invariant holds on that path: a response that
+    // arrives after the user has resumed typing must be silently
+    // dropped, not spliced into the now-different text.
+    use std::time::Instant;
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "f := x + 2*x\nprint(f)");
+    let cell_id = nb.cell(i).id;
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Pending),
+    ));
+
+    // Simulate the user typing — buffer mutation + mark_edited, *without*
+    // an explicit play.
+    nb.cell_mut(i).buffer.set_text("print(3 + 4)");
+    nb.mark_edited(i, Instant::now());
+
+    // Late response from before the edit.
+    mock.respond_to(cell_id, Ok("3*x".to_string()));
+    nb.tick();
+
+    // Visible state must reflect that the user is now editing, not a
+    // ghost result from the prior submission.
+    assert!(
+        !matches!(
+            nb.cell(i).outcome.message,
+            Some(CellMessage::Computed(_)) | Some(CellMessage::Simplified(_)),
+        ),
+        "late response must not publish a Computed/Simplified message \
+         after the user has begun typing again; got {:?}",
+        nb.cell(i).outcome.message,
+    );
+}
+
+#[test]
+fn stopping_pending_cell_drops_pending_state() {
+    // User hits the red ■ button on a cell that's still waiting on
+    // REDUCE. The cell must transition to Stopped, and a *late* response
+    // must not resurrect the cell to Playing — that would be the worst
+    // kind of UX surprise: "I pressed stop, but the cell came back alive
+    // 30 seconds later."
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "f := x + 2*x\nprint(f)");
+    let cell_id = nb.cell(i).id;
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Pending),
+    ));
+
+    nb.stop(i);
+    assert!(matches!(nb.cell(i).state, CellState::Stopped));
+    let message_at_stop = format!("{:?}", nb.cell(i).outcome.message);
+
+    // Late response from before the stop.
+    mock.respond_to(cell_id, Ok("3*x".to_string()));
+    nb.tick();
+
+    assert!(
+        matches!(nb.cell(i).state, CellState::Stopped),
+        "stop() must remain authoritative against late REDUCE responses; \
+         got state={:?}, message={:?}",
+        nb.cell(i).state,
+        nb.cell(i).outcome.message,
+    );
+    let message_after_response = format!("{:?}", nb.cell(i).outcome.message);
+    assert_eq!(
+        message_at_stop, message_after_response,
+        "outcome.message must NOT change after stop — otherwise a user who \
+         hit ■ would see the result appear anyway when REDUCE finally \
+         answered. Before response: {} / After response: {}",
+        message_at_stop, message_after_response,
+    );
+}
+
+#[test]
+fn reduce_err_response_surfaces_as_diagnostic_not_hang() {
+    // REDUCE can legitimately fail (parser error, unknown operator,
+    // package not loaded). The notebook must convert `Err(msg)` from the
+    // simplifier into a cell-level error diagnostic — not leave the cell
+    // on `…` and not panic.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "F(x) := ∫(x, x)\nplot(y = F(x))");
+    let cell_id = nb.cell(i).id;
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Pending),
+    ));
+
+    mock.respond_to(
+        cell_id,
+        Err("***** Declare wat operator? (Y or N)".to_string()),
+    );
+    let updated = nb.tick();
+    assert_eq!(updated, vec![i]);
+
+    match &nb.cell(i).outcome.message {
+        Some(CellMessage::Error(msg)) => {
+            assert!(
+                msg.contains("operator"),
+                "error diagnostic should surface REDUCE's text; got {:?}",
+                msg,
+            );
+        }
+        other => panic!(
+            "expected Error after REDUCE Err response, got {:?}",
+            other,
+        ),
+    }
+    assert!(
+        nb.cell(i).outcome.shaders.is_empty(),
+        "no shader should emit when CAS resolution fails",
+    );
+}
+
+#[test]
+fn numeric_print_and_print_of_direct_cas_combine_in_order() {
+    // `print(3+4); print(∫(x², x))` — the first print stays on the
+    // interpreter fast path (no REDUCE) and the second submits the CAS
+    // call intact through the print branch's symbolic fallback. The
+    // final joined output must preserve source order.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        print(3 + 4)
+        print(∫(x², x))
+        "#,
+    );
+    let cell_id = nb.cell(i).id;
+    let subs = mock.submissions_for(cell_id);
+    assert_eq!(
+        subs.len(),
+        1,
+        "exactly one REDUCE submission — for the CAS print; got {:?}",
+        subs,
+    );
+    assert!(
+        subs[0].expression.contains("int(") && subs[0].expression.contains("x"),
+        "submission carries the int(...) form; got {:?}",
+        subs[0].expression,
+    );
+
+    mock.respond_to(cell_id, Ok("x^3/3".to_string()));
+    nb.tick();
+    // `to_source` parenthesizes `x^3` because `^` binds tighter than `/`
+    // in Logos but the source pretty-printer wraps every subexpression for
+    // round-trip safety. Assert on structure rather than exact text.
+    let out = computed(&nb, i);
+    let lines: Vec<&str> = out.split('\n').collect();
+    assert_eq!(lines.len(), 2, "expected two output lines; got {:?}", out);
+    assert_eq!(lines[0], "7", "first print is the numeric fast path");
+    assert!(
+        lines[1].contains("x^3") && lines[1].contains("/3"),
+        "second print should be the integral closed form; got {:?}",
+        lines[1],
+    );
+}
+
+#[test]
 fn dead_simplifier_under_real_service_eventually_surfaces_diagnostic() {
     // A `MockReduce` that never responds is the simplest stand-in for the
     // "REDUCE worker is dead" scenario described in #19. Combined with the

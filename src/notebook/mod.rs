@@ -354,6 +354,13 @@ impl Notebook {
         }
         self.cells[idx].buffer.set_text(text);
         self.cells[idx].invalidate_ir();
+        // Drop any pending simplifier round-trip — the path that the
+        // response was going to splice into refers to the old IR, which
+        // no longer matches the buffer text. Without this, a late
+        // response can either splice unrelated bits into the new text or
+        // raise a spurious "splice path no longer valid" diagnostic.
+        let cell_id = self.cells[idx].id;
+        self.pending_simplify.remove(&cell_id);
     }
 
     /// Replace the GPU dispatcher used by the interpreter for
@@ -401,6 +408,12 @@ impl Notebook {
             return;
         }
         self.cells[idx].state = CellState::Stopped;
+        // Forget any in-flight simplifier round-trip for this cell —
+        // otherwise a late REDUCE response would land on a stopped cell
+        // and re-publish a Computed/Simplified message, contradicting
+        // the user's "stop" action.
+        let cell_id = self.cells[idx].id;
+        self.pending_simplify.remove(&cell_id);
     }
 
     /// Drain ready REDUCE responses. Call once per frame (or until
@@ -462,9 +475,20 @@ impl Notebook {
     /// Mark a cell as just-edited. Sets `last_edit_at = now`, which the
     /// auto-rerun pass watches to decide when 200ms of quiet has elapsed.
     /// Called by the app's keystroke handler after each text-changing input.
+    ///
+    /// Also clears any pending-simplifier round-trip on the cell — the
+    /// user's keystroke has invalidated whatever the prior submission's
+    /// splice path was pointing at, so a late response from REDUCE must
+    /// not be allowed to land. `set_text` (the programmatic equivalent)
+    /// does the same; we mirror it here for the live-typing path.
     pub fn mark_edited(&mut self, idx: usize, now: std::time::Instant) {
         if let Some(cell) = self.cells.get_mut(idx) {
             cell.last_edit_at = Some(now);
+            cell.effective_ir = None;
+        }
+        if let Some(cell) = self.cells.get(idx) {
+            let cell_id = cell.id;
+            self.pending_simplify.remove(&cell_id);
         }
     }
 
