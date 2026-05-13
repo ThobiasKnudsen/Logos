@@ -492,4 +492,159 @@ mod tests {
         assert!(wgsl.contains("sin("));
         assert!(wgsl.contains("sqrt("));
     }
+
+    // -----------------------------------------------------------------------
+    // New WGSL paths from the for/range refactor: non-trivial deltas and
+    // multi-dim Cartesian dispatch. These have to naga-validate (the
+    // production app dispatches them to a real wgpu device).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fractional_delta_emits_valid_wgsl() {
+        // `for i in 0..1..0.01 gpu (out[i] := sin(i))` — i is f32 (non-simple
+        // dim). Indexing `out[i]` requires a u32 cast which the emitter
+        // should insert automatically.
+        let body = parse_body("out[i] := sin(i)");
+        let req = ParallelForRequest {
+            dims: vec![DimSpec {
+                var_name: "i".to_string(),
+                start: 0.0,
+                end: 1.0,
+                delta: 0.01,
+            }],
+            body,
+            readwrite_arrays: vec![("out".to_string(), vec![0.0; 100])],
+            readonly_arrays: vec![],
+            scalars: vec![],
+        };
+        let wgsl = generate(&req).unwrap();
+        validate_wgsl(&wgsl).unwrap();
+        // The loop variable should be derived from `start + idx * delta`.
+        assert!(wgsl.contains("f32(gid.x)") && wgsl.contains("0.01"));
+        // Index expression `out[i]` should cast i to u32 since i is f32.
+        assert!(wgsl.contains("u32("));
+    }
+
+    #[test]
+    fn test_nonzero_start_unit_stride_emits_valid_wgsl() {
+        // `for i in 5..15 gpu (out[i-5] := i*i)` — start != 0 so i is f32.
+        let body = parse_body("out[i] := i*i");
+        let req = ParallelForRequest {
+            dims: vec![DimSpec {
+                var_name: "i".to_string(),
+                start: 5.0,
+                end: 15.0,
+                delta: 1.0,
+            }],
+            body,
+            readwrite_arrays: vec![("out".to_string(), vec![0.0; 20])],
+            readonly_arrays: vec![],
+            scalars: vec![],
+        };
+        let wgsl = generate(&req).unwrap();
+        validate_wgsl(&wgsl).unwrap();
+        assert!(wgsl.contains("5") && wgsl.contains("f32(gid.x)"));
+    }
+
+    #[test]
+    fn test_two_dim_dispatch_emits_valid_wgsl() {
+        // `for (i, j) in (0, 0)..(4, 4) gpu (grid[i*4 + j] := i + j)` —
+        // 16 threads, 2-D Cartesian dispatch. gid.x decomposes into
+        // (_idx_i, _idx_j) and the loop variables bind to f32(_idx_*).
+        let body = parse_body("grid[i*4 + j] := i + j");
+        let req = ParallelForRequest {
+            dims: vec![
+                DimSpec {
+                    var_name: "i".to_string(),
+                    start: 0.0,
+                    end: 4.0,
+                    delta: 1.0,
+                },
+                DimSpec {
+                    var_name: "j".to_string(),
+                    start: 0.0,
+                    end: 4.0,
+                    delta: 1.0,
+                },
+            ],
+            body,
+            readwrite_arrays: vec![("grid".to_string(), vec![0.0; 16])],
+            readonly_arrays: vec![],
+            scalars: vec![],
+        };
+        let wgsl = generate(&req).unwrap();
+        validate_wgsl(&wgsl).unwrap();
+        // Multi-dim decomposition.
+        assert!(wgsl.contains("_tid"), "should decompose gid.x: {}", wgsl);
+        assert!(
+            wgsl.contains("_idx_i") && wgsl.contains("_idx_j"),
+            "should bind both axes: {}",
+            wgsl
+        );
+        // 4u as the modulo divisor for the inner axis.
+        assert!(wgsl.contains("% 4u") && wgsl.contains("/ 4u"));
+    }
+
+    #[test]
+    fn test_two_dim_with_delta_emits_valid_wgsl() {
+        // Heterogeneous strides: one axis is unit-stride, the other is
+        // fractional. Both loop vars must be f32 (since the fractional axis
+        // forces it). The naga validator catches any type mismatch.
+        let body = parse_body("out[a] := a + b");
+        let req = ParallelForRequest {
+            dims: vec![
+                DimSpec {
+                    var_name: "a".to_string(),
+                    start: 0.0,
+                    end: 4.0,
+                    delta: 1.0,
+                },
+                DimSpec {
+                    var_name: "b".to_string(),
+                    start: 0.0,
+                    end: 1.0,
+                    delta: 0.25,
+                },
+            ],
+            body,
+            readwrite_arrays: vec![("out".to_string(), vec![0.0; 16])],
+            readonly_arrays: vec![],
+            scalars: vec![],
+        };
+        let wgsl = generate(&req).unwrap();
+        validate_wgsl(&wgsl).unwrap();
+        // Non-simple `b` should derive its value from `start + idx * delta`.
+        assert!(wgsl.contains("0.25"), "delta should appear: {}", wgsl);
+    }
+
+    #[test]
+    fn test_dispatch_count_matches_total_threads() {
+        // `params.len` is bound to `total_threads()` (product of per-axis
+        // counts). Verify the bounds-check uses it correctly.
+        let body = parse_body("grid[i] := i + j");
+        let req = ParallelForRequest {
+            dims: vec![
+                DimSpec {
+                    var_name: "i".to_string(),
+                    start: 0.0,
+                    end: 5.0,
+                    delta: 1.0,
+                },
+                DimSpec {
+                    var_name: "j".to_string(),
+                    start: 0.0,
+                    end: 3.0,
+                    delta: 1.0,
+                },
+            ],
+            body,
+            readwrite_arrays: vec![("grid".to_string(), vec![0.0; 15])],
+            readonly_arrays: vec![],
+            scalars: vec![],
+        };
+        let wgsl = generate(&req).unwrap();
+        validate_wgsl(&wgsl).unwrap();
+        assert!(wgsl.contains("if (gid.x >= params.len)"));
+        assert_eq!(req.total_threads(), 15);
+    }
 }
