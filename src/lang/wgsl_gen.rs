@@ -1,4 +1,4 @@
-use super::ir::{BuiltinOp, Callee, Ir, WgslLowering};
+use super::ir::{BuiltinOp, Callee, Ir, Type, WgslLowering};
 use std::collections::{HashMap, HashSet};
 
 // The for-loop guard's upper bound is loaded from the `max_loop_iter` uniform
@@ -1010,29 +1010,15 @@ impl GenContext {
     }
 
     /// Check if an expression produces a vec type (for shader output detection).
+    ///
+    /// Tuples are still recognized structurally: a 2/3/4-element tuple
+    /// literal lowers to a `vecN<f32>(...)` constructor in WGSL even though
+    /// its IR type is `Tuple(...)` rather than `VecN`. Every other shape
+    /// just reads `Apply.result_ty` (populated by `lower::annotate_types`),
+    /// which already encodes both builtin constructors and user functions
+    /// whose body returns a vec.
     fn result_is_vec(&self, node: &Ir) -> bool {
-        match node {
-            Ir::Tuple { items, .. } => items.len() >= 2,
-            Ir::Apply { callee, .. } => match callee {
-                Callee::Builtin(BuiltinOp::Vec2 | BuiltinOp::Vec3 | BuiltinOp::Vec4) => true,
-                Callee::User(name) => self.vec_functions.contains(name),
-                _ => false,
-            },
-            Ir::IfExpr {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.result_is_vec(then_branch)
-                    || else_branch
-                        .as_ref()
-                        .is_some_and(|e| self.result_is_vec(e))
-            }
-            Ir::Block { items: stmts, .. } => {
-                stmts.last().is_some_and(|s| self.result_is_vec(s))
-            }
-            _ => false,
-        }
+        result_is_vec(node)
     }
 
     /// Return the tuple size of the result expression, if it's a direct tuple literal.
@@ -2017,24 +2003,52 @@ fn block_result_expr_from_stmts(stmts: &[Ir]) -> Option<&Ir> {
     None
 }
 
+/// Free-function form of `result_is_vec` — same predicate, no `GenContext`
+/// dependency now that vec-ness comes off `Apply.result_ty` and the lifted
+/// scope maps no longer enter the decision.
+///
+/// A tuple literal lowers to `vecN<f32>(...)` for N ∈ {2, 3, 4}, and the
+/// type checker assigns it `Type::Tuple(...)`; we treat both shapes
+/// (tuple-literal and tuple-returning user fn) as vec-producing so the
+/// fs_main vec output path is selected uniformly.
+fn result_is_vec(node: &Ir) -> bool {
+    match node {
+        Ir::Tuple { items, .. } => items.len() >= 2,
+        Ir::Apply { result_ty, .. } => match result_ty.as_deref() {
+            Some(Type::Vec2 | Type::Vec3 | Type::Vec4) => true,
+            Some(Type::Tuple(items)) => items.len() >= 2,
+            _ => false,
+        },
+        Ir::IfExpr {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            result_is_vec(then_branch)
+                || else_branch.as_ref().is_some_and(|e| result_is_vec(e))
+        }
+        Ir::Block { items: stmts, .. } => stmts.last().is_some_and(result_is_vec),
+        _ => false,
+    }
+}
+
 fn returns_bool(node: &Ir) -> bool {
     match node {
         Ir::BoolLit { .. } => true,
-        Ir::Apply { callee, .. } => matches!(
-            callee,
-            Callee::Builtin(
-                BuiltinOp::Eq
-                    | BuiltinOp::Neq
-                    | BuiltinOp::Lt
-                    | BuiltinOp::Gt
-                    | BuiltinOp::Lte
-                    | BuiltinOp::Gte
-                    | BuiltinOp::And
-                    | BuiltinOp::Or
-                    | BuiltinOp::Not
-            )
-        ),
+        // Apply's `result_ty` is populated by `lower::annotate_types`. For a
+        // builtin comparison/logical op it's `Bool`; for a user fn it's the
+        // function's inferred return type. Reading it captures both cases in
+        // one line and supersedes the old structural callee match.
+        Ir::Apply { result_ty, .. } => result_ty.as_deref() == Some(&Type::Bool),
         Ir::Block { items: stmts, .. } => stmts.last().is_some_and(returns_bool),
+        Ir::IfExpr {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            returns_bool(then_branch)
+                || else_branch.as_ref().is_some_and(|e| returns_bool(e))
+        }
         _ => false,
     }
 }
