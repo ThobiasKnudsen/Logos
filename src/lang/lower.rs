@@ -1251,15 +1251,61 @@ impl<'a> ResolveCtx<'a> {
 /// Populate `Ir::Apply.result_ty` (and per-expression type info on other
 /// variants in future) by running type inference on the lowered IR.
 ///
-/// Currently a no-op: the field exists and the pass is wired into
-/// `lower()` so that downstream code can rely on its position in the
-/// pipeline, but type inference is not yet hooked up to write into
-/// `result_ty`. Validation continues to run separately via
-/// `lang::type_check`, which `wgsl_gen` calls on its own pre-codegen
-/// path; this preserves the existing error format that interpreter and
-/// codegen tests depend on. Folding type inference into the IR walk —
-/// so `result_ty` is populated and `check::check` collapses into this
-/// pass — is the next refactor step.
-fn annotate_types(ir: Ir) -> Result<Ir, String> {
+/// Shares the inference engine with `check::check` via `check::check_mut`,
+/// so every `Apply` node sees its `result_ty` written as a side effect of
+/// the inference walk. Backends can then read types straight off the IR
+/// instead of re-running their own structural inference passes.
+fn annotate_types(mut ir: Ir) -> Result<Ir, String> {
+    super::check::check_mut(&mut ir).map_err(|e| e.message)?;
     Ok(ir)
+}
+
+#[cfg(test)]
+mod annotate_types_tests {
+    use super::*;
+    use crate::lang::ir::Type;
+    use crate::lang::parse;
+
+    /// Find the first Apply node in `ir` in pre-order traversal.
+    fn first_apply(ir: &Ir) -> Option<&Ir> {
+        if matches!(ir, Ir::Apply { .. }) {
+            return Some(ir);
+        }
+        for child in ir.children() {
+            if let Some(found) = first_apply(child) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn lowering_populates_apply_result_ty() {
+        // `x + 1` parses to `Apply(Add, [x, 1])` whose inferred result is Num.
+        // After `lower()` runs annotate_types, that Apply must carry `result_ty`.
+        let ir = parse("x + 1").expect("parse");
+        let lowered = lower(ir).expect("lower");
+        let apply = first_apply(&lowered).expect("apply node exists");
+        match apply {
+            Ir::Apply { result_ty, .. } => {
+                let ty = result_ty.as_ref().expect("result_ty populated").as_ref();
+                assert_eq!(ty, &Type::Num);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn lowering_populates_bool_comparison_result_ty() {
+        let ir = parse("x = 0").expect("parse");
+        let lowered = lower(ir).expect("lower");
+        let apply = first_apply(&lowered).expect("apply node exists");
+        match apply {
+            Ir::Apply { result_ty, .. } => {
+                let ty = result_ty.as_ref().expect("result_ty populated").as_ref();
+                assert_eq!(ty, &Type::Bool);
+            }
+            _ => unreachable!(),
+        }
+    }
 }

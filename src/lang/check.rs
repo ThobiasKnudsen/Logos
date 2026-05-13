@@ -78,7 +78,21 @@ impl<'p> TypeEnv<'p> {
 
 /// Type-check an IR program. Returns the type of the program's value
 /// (typically the type of the last expression in the top-level block).
+///
+/// Today this clones and calls `check_mut` so existing read-only callers can
+/// keep their `&Ir` shape. `lower::annotate_types` shares the same engine
+/// via `check_mut` so every `Apply.result_ty` ends up populated as a side
+/// effect of inference.
 pub fn check(ir: &Ir) -> Result<Type, TypeError> {
+    let mut owned = ir.clone();
+    check_mut(&mut owned)
+}
+
+/// Mutating variant of `check`. Walks `ir` and writes `result_ty` on every
+/// `Apply` node as inference proceeds. `lower::annotate_types` is the
+/// production caller; `check` is a clone-and-discard wrapper kept for the
+/// `Result<Type, _>`-only callers (e.g. `lang::type_check`).
+pub(crate) fn check_mut(ir: &mut Ir) -> Result<Type, TypeError> {
     let mut env = TypeEnv::root();
     seed_axis_vars(&mut env);
     infer(ir, &mut env)
@@ -95,8 +109,10 @@ fn seed_axis_vars(env: &mut TypeEnv) {
 }
 
 /// Core inference. Walks the node, mutates `env` for bindings/functions, and
-/// returns the inferred type or a `TypeError`.
-fn infer(node: &Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
+/// returns the inferred type or a `TypeError`. Also writes the inferred type
+/// into each `Apply.result_ty` as a side effect — `lower::annotate_types`
+/// relies on this so backends can read types off the IR without a second walk.
+fn infer(node: &mut Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
     match node {
         Ir::Number { .. } => Ok(Type::Num),
         Ir::BoolLit { .. } => Ok(Type::Bool),
@@ -109,12 +125,22 @@ fn infer(node: &Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
             // Accept them as `Unknown` so type-checking still completes;
             // codegen separately rejects unrepresentable higher-order uses.
             .or_else(|| env.get_func(name).map(|_| Type::Unknown))
-            .ok_or_else(|| TypeError::new(*span, format!("undefined variable `{}`", name))),
+            .ok_or_else(|| TypeError::new(*span, format!("Undefined variable `{}`", name))),
 
-        Ir::Apply { callee, args, span, .. } => infer_apply(callee, args, *span, env),
+        Ir::Apply {
+            callee,
+            args,
+            span,
+            result_ty,
+        } => {
+            let ty = infer_apply(callee, args, *span, env)?;
+            *result_ty = Some(Box::new(ty.clone()));
+            Ok(ty)
+        }
 
         Ir::Tuple { items, .. } => {
-            let item_types: Result<Vec<_>, _> = items.iter().map(|i| infer(i, env)).collect();
+            let item_types: Result<Vec<_>, _> =
+                items.iter_mut().map(|i| infer(i, env)).collect();
             Ok(Type::Tuple(item_types?))
         }
 
@@ -154,8 +180,24 @@ fn infer(node: &Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
 
         Ir::Block { items, .. } => {
             let mut child = env.child();
+            // Pre-register FunctionDef signatures so forward references inside
+            // sibling function bodies resolve. After lowering, synthesized
+            // helper functions are *prepended* to the block and reference
+            // user-defined originals declared later in the same block; without
+            // this pre-pass, the synthesized body's type-check fails on the
+            // forward call. Each entry uses `Type::Unknown` as a placeholder
+            // return type, then gets overwritten when the FunctionDef itself
+            // is visited and its real return type is computed.
+            for stmt in items.iter() {
+                if let Ir::FunctionDef { name, params, .. } = stmt {
+                    let param_tys = params.iter().map(|_| Type::Num).collect();
+                    child
+                        .funcs
+                        .insert(name.clone(), (param_tys, Type::Unknown));
+                }
+            }
             let mut last = Type::Void;
-            for stmt in items {
+            for stmt in items.iter_mut() {
                 last = infer(stmt, &mut child)?;
             }
             Ok(last)
@@ -202,7 +244,7 @@ fn infer(node: &Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
             // value type — codegen lifts it to a synthetic function before
             // anything tries to use it — so we report `Unknown`.
             let mut child = env.child();
-            for p in params {
+            for p in params.iter() {
                 child.vars.insert(p.clone(), Type::Num);
             }
             let _body_ty = infer(body, &mut child)?;
@@ -217,7 +259,7 @@ fn infer(node: &Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
             // When polymorphic user functions matter, this is where to widen
             // (e.g., infer from call sites or accept explicit annotations).
             let mut child = env.child();
-            for p in params {
+            for p in params.iter() {
                 child.vars.insert(p.clone(), Type::Num);
             }
             let body_ty = infer(body, &mut child)?;
@@ -283,12 +325,14 @@ fn infer(node: &Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
                 // Empty array — element type is unknown until used.
                 return Ok(Type::Array(Box::new(Type::Unknown)));
             }
-            let first = infer(&items[0], env)?;
-            for item in &items[1..] {
+            let span = *span;
+            let (first_item, rest) = items.split_first_mut().unwrap();
+            let first = infer(first_item, env)?;
+            for item in rest.iter_mut() {
                 let ty = infer(item, env)?;
                 if ty != first {
                     return Err(TypeError::new(
-                        *span,
+                        span,
                         format!(
                             "array elements have mixed types: {} and {}",
                             first.display(),
@@ -314,7 +358,7 @@ fn infer(node: &Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
                 Type::Unknown => Ok(Type::Unknown),
                 other => Err(TypeError::new(
                     array.span(),
-                    format!("indexing requires an Array, got {}", other.display()),
+                    format!("cannot index a non-array value of type {}", other.display()),
                 )),
             }
         }
@@ -377,16 +421,19 @@ fn infer(node: &Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
         }
 
         Ir::PropertyAccess {
-            object, property, ..
+            object,
+            property,
+            span,
         } => {
             // Today only axis property access is meaningful (`x.min`, `y.res`,
             // etc.), and they all produce `Num`. Anything else is rejected so
             // typos don't slip through.
+            let prop_span = *span;
             let _ = infer(object, env)?;
             match property.as_str() {
                 "min" | "max" | "res" => Ok(Type::Num),
                 other => Err(TypeError::new(
-                    node.span(),
+                    prop_span,
                     format!("unknown property `.{}`", other),
                 )),
             }
@@ -398,11 +445,11 @@ fn infer(node: &Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
 /// overload resolution; user calls look up the function table.
 fn infer_apply(
     callee: &Callee,
-    args: &[Ir],
+    args: &mut [Ir],
     span: Span,
     env: &mut TypeEnv,
 ) -> Result<Type, TypeError> {
-    let arg_types: Result<Vec<_>, _> = args.iter().map(|a| infer(a, env)).collect();
+    let arg_types: Result<Vec<_>, _> = args.iter_mut().map(|a| infer(a, env)).collect();
     let arg_types = arg_types?;
 
     match callee {
@@ -473,7 +520,7 @@ fn infer_apply(
                 None => {
                     return Err(TypeError::new(
                         span,
-                        format!("undefined function `{}`", name),
+                        format!("Undefined function `{}`", name),
                     ));
                 }
             };
@@ -834,7 +881,7 @@ mod tests {
     #[test]
     fn undefined_var_errors() {
         let err = check_str("nope").unwrap_err();
-        assert!(err.message.contains("undefined variable `nope`"));
+        assert!(err.message.contains("Undefined variable `nope`"));
     }
 
     #[test]

@@ -1907,9 +1907,11 @@ fn substitute_params(body: &Ir, params: &[String], args: &[Ir]) -> Ir {
             callee,
             args: func_args,
             span,
-            result_ty: None,
+            result_ty,
         } => {
-            // Don't substitute the function name, only its arguments
+            // Don't substitute the function name, only its arguments.
+            // Re-using the parent's `result_ty` is safe because substitution
+            // only rewires leaves — the operator's result shape is unchanged.
             let new_args = func_args
                 .iter()
                 .map(|a| substitute_params(a, params, args))
@@ -1918,7 +1920,7 @@ fn substitute_params(body: &Ir, params: &[String], args: &[Ir]) -> Ir {
                 callee: callee.clone(),
                 args: new_args,
                 span: *span,
-                result_ty: None,
+                result_ty: result_ty.clone(),
             }
         }
         Ir::Block { items: stmts, span } => Ir::Block {
