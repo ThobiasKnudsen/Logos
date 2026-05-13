@@ -353,12 +353,21 @@ pub enum Ir {
     /// `lower::annotate_types` with the inferred type of `body`. Backends
     /// read it to choose the WGSL signature (`-> f32` / `-> bool` /
     /// `-> vec4<f32>`) without re-walking the body.
+    ///
+    /// `captured` is `None` at parse time and gets populated by
+    /// `lower::annotate_captures` with the names of outer-scope variables
+    /// (plus implicit axis vars `x`/`y`) referenced inside `body` and not
+    /// shadowed by a parameter. WGSL codegen forwards these as extra
+    /// arguments since WGSL has no closure capture. The `Vec<String>` is
+    /// boxed so the variant stays small enough that the parser's
+    /// pathological-depth test doesn't overflow the test stack.
     FunctionDef {
         name: String,
         params: Vec<String>,
         body: Box<Ir>,
         span: Span,
         return_ty: Option<Box<Type>>,
+        captured: Option<Box<Vec<String>>>,
     },
 
     /// Anonymous function: `x |-> body` or `(a, b) |-> body`.
@@ -653,12 +662,14 @@ fn replace_at_path_inner(node: Ir, path: &[usize], replacement: Ir) -> Option<Ir
             body,
             span,
             return_ty,
+            captured,
         } if head == 0 => Some(Ir::FunctionDef {
             name,
             params,
             body: Box::new(replace_at_path_inner(*body, tail, replacement)?),
             span,
             return_ty,
+            captured,
         }),
         Ir::ForLoop {
             var, range, body, span,
@@ -883,6 +894,7 @@ fn substitute_idents_inner(node: &Ir, bindings: &[(String, Ir)]) -> Ir {
             body: Box::new(substitute_idents_inner(body, bindings)),
             span: *span,
             return_ty: None,
+            captured: None,
         },
         Ir::Lambda { params, body, span } => Ir::Lambda {
             params: params.clone(),

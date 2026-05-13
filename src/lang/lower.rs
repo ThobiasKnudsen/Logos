@@ -35,7 +35,8 @@ use super::ir::{BindingId, Callee, FuncId, Ir, Resolution};
 pub fn lower(ir: Ir) -> Result<Ir, String> {
     let ir = pre_passes(ir);
     let ir = resolve_names(ir);
-    let ir = annotate_types(ir)?;
+    let mut ir = annotate_types(ir)?;
+    annotate_captures(&mut ir);
     Ok(ir)
 }
 
@@ -289,6 +290,7 @@ fn hoist_recurse(
             body: body.clone(),
             span: *span,
             return_ty: None,
+            captured: None,
         },
         Ir::ForLoop {
             var,
@@ -449,6 +451,7 @@ fn lift_lambdas_inner(node: &mut Ir, counter: &mut usize, new_defs: &mut Vec<Ir>
             body,
             span: binding_span,
             return_ty: None,
+            captured: None,
         });
         *node = Ir::Number {
             value: 0.0,
@@ -524,6 +527,7 @@ fn lift_lambdas_inner(node: &mut Ir, counter: &mut usize, new_defs: &mut Vec<Ir>
             body: saved_body,
             span: saved_span,
             return_ty: None,
+            captured: None,
         });
         *node = Ir::Identifier {
             name,
@@ -676,6 +680,7 @@ fn rewrite_hof_calls(
                                 body: Box::new(new_body),
                                 span: spec_span,
                                 return_ty: None,
+                                captured: None,
                             });
                             sn
                         };
@@ -1266,6 +1271,147 @@ impl<'a> ResolveCtx<'a> {
 fn annotate_types(mut ir: Ir) -> Result<Ir, String> {
     super::check::check_mut(&mut ir).map_err(|e| e.message)?;
     Ok(ir)
+}
+
+// ---------------------------------------------------------------------------
+// Pass 6: annotate captured variables on each FunctionDef
+// ---------------------------------------------------------------------------
+
+/// Populate `FunctionDef.captured` with the names of outer-scope variables
+/// (plus implicit axis vars `x`/`y`) that the body references and that
+/// aren't shadowed by a parameter. WGSL backends forward these as extra
+/// arguments since WGSL has no closure capture.
+///
+/// Runs after `annotate_types` so the IR shape is fully normalized (lambdas
+/// lifted, HOFs specialized, anonymous blocks hoisted). The traversal
+/// threads a `scope_bindings: Vec<String>` of names visible from the
+/// enclosing scope; entering a `FunctionDef` extends that with the
+/// function's params and the names introduced by its body's bindings, then
+/// recurses into nested functions only.
+pub(crate) fn annotate_captures(ir: &mut Ir) {
+    let mut scope: Vec<String> = Vec::new();
+    annotate_captures_inner(ir, &mut scope);
+}
+
+fn annotate_captures_inner(node: &mut Ir, scope: &mut Vec<String>) {
+    match node {
+        Ir::Block { items, .. } => {
+            for s in items.iter_mut() {
+                annotate_captures_inner(s, scope);
+            }
+        }
+        Ir::FunctionDef {
+            params,
+            body,
+            captured,
+            ..
+        } => {
+            // Determine which outer-scope bindings the body references.
+            let mut referenced: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            collect_referenced_names(body, &mut referenced);
+
+            let param_set: std::collections::HashSet<&str> =
+                params.iter().map(|s| s.as_str()).collect();
+            let mut caps: Vec<String> = Vec::new();
+            for var in scope.iter() {
+                if referenced.contains(var) && !param_set.contains(var.as_str()) {
+                    caps.push(var.clone());
+                }
+            }
+            // Axis vars are implicitly available in `fs_main` but not inside
+            // WGSL functions, so they need to be forwarded as extra params
+            // whenever the body references them.
+            for axis in ["x", "y"] {
+                if referenced.contains(axis)
+                    && !param_set.contains(axis)
+                    && !caps.iter().any(|c| c == axis)
+                {
+                    caps.push(axis.to_string());
+                }
+            }
+            *captured = Some(Box::new(caps));
+
+            // Build the body's inner scope: outer + params + body bindings,
+            // then recurse into nested function defs.
+            let mut inner = scope.clone();
+            inner.extend(params.iter().cloned());
+            if let Ir::Block { items, .. } = body.as_ref() {
+                for stmt in items {
+                    match stmt {
+                        Ir::Binding { name, .. } => inner.push(name.clone()),
+                        Ir::TupleBinding { names, .. } => inner.extend(names.iter().cloned()),
+                        _ => {}
+                    }
+                }
+            }
+            annotate_captures_inner(body, &mut inner);
+        }
+        // Non-FunctionDef nodes propagate the current scope unchanged.
+        _ => {
+            for child in node_children_mut(node) {
+                annotate_captures_inner(child, scope);
+            }
+        }
+    }
+}
+
+/// Mutable children for a non-FunctionDef node. `Ir::children()` only yields
+/// immutable references, but the capture pass needs to descend with `&mut`
+/// to write into nested `FunctionDef.captured`. Variants without children
+/// return an empty vector.
+fn node_children_mut(node: &mut Ir) -> Vec<&mut Ir> {
+    match node {
+        Ir::Number { .. } | Ir::BoolLit { .. } | Ir::Identifier { .. } => Vec::new(),
+        Ir::Apply { args, .. } => args.iter_mut().collect(),
+        Ir::Tuple { items, .. } | Ir::ArrayLiteral { items, .. } => items.iter_mut().collect(),
+        Ir::Block { items, .. } => items.iter_mut().collect(),
+        Ir::Binding { value, .. } | Ir::TupleBinding { value, .. } => vec![value.as_mut()],
+        Ir::IfExpr {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let mut v: Vec<&mut Ir> = vec![condition.as_mut(), then_branch.as_mut()];
+            if let Some(e) = else_branch {
+                v.push(e.as_mut());
+            }
+            v
+        }
+        Ir::FunctionDef { body, .. } | Ir::Lambda { body, .. } => vec![body.as_mut()],
+        Ir::ForLoop { range, body, .. } | Ir::ParallelFor { range, body, .. } => {
+            vec![range.as_mut(), body.as_mut()]
+        }
+        Ir::WhileLoop {
+            condition, body, ..
+        } => vec![condition.as_mut(), body.as_mut()],
+        Ir::PropertyAccess { object, .. } => vec![object.as_mut()],
+        Ir::IndexAccess { array, index, .. } => vec![array.as_mut(), index.as_mut()],
+        Ir::Range { start, end, .. } => vec![start.as_mut(), end.as_mut()],
+        Ir::IndexAssign {
+            array,
+            index,
+            value,
+            ..
+        } => vec![array.as_mut(), index.as_mut(), value.as_mut()],
+    }
+}
+
+/// Collect every identifier name referenced in `node`. Mirrors the
+/// `find_referenced_identifiers` helper that used to live in `wgsl_gen` —
+/// keeping it here makes the capture pass self-contained.
+fn collect_referenced_names(node: &Ir, out: &mut std::collections::HashSet<String>) {
+    match node {
+        Ir::Identifier { name, .. } => {
+            out.insert(name.clone());
+        }
+        _ => {
+            for child in node.children() {
+                collect_referenced_names(child, out);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

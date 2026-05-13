@@ -29,8 +29,11 @@ fn join(start: Span, end: Span) -> Span {
 /// Maximum recursion depth for nested expressions / parentheses. Guards
 /// against stack overflow on pathological input (e.g. `((((...))))`).
 /// Each level descends through ~10 mutually recursive parse fns, so this
-/// translates to roughly 10x the stack frames.
-const MAX_RECURSION_DEPTH: u32 = 64;
+/// translates to roughly 10x the stack frames. The bound is set
+/// conservatively so debug-build test runners (with their default
+/// thread stack and chunky `Ir` enum) still bail with the proper error
+/// instead of aborting.
+const MAX_RECURSION_DEPTH: u32 = 50;
 
 pub struct Parser {
     tokens: Vec<Token>,
@@ -177,6 +180,7 @@ impl Parser {
                 body: Box::new(body),
                 span,
                 return_ty: None,
+                captured: None,
             }));
         }
 

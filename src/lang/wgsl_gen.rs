@@ -300,8 +300,6 @@ struct GenContext<'a> {
     /// IR bodies of bool functions — used for inlining during corner-checking
     /// so that comparisons go through sign-change detection, not float ==.
     bool_function_defs: std::collections::HashMap<String, BoolFunctionDef>,
-    /// For hoisted nested functions: maps function name → extra captured variables to pass.
-    captured_vars: std::collections::HashMap<String, Vec<String>>,
     /// Lowered AST. Methods like `result_is_bool` and `emit_bool_with_corners`
     /// use it to resolve identifier references back to their binding's
     /// declared value, replacing what used to be a `bool_binding_defs` cache.
@@ -377,83 +375,44 @@ impl<'a> GenContext<'a> {
             functions: Vec::new(),
             bindings: Vec::new(),
             bool_function_defs: std::collections::HashMap::new(),
-            captured_vars: std::collections::HashMap::new(),
             ast,
         }
     }
 
     /// Walk the IR to collect function definitions and bindings.
     fn collect_functions(&mut self, ast: &Ir) {
-        self.collect_functions_with_scope(ast, &[]);
-    }
-
-    /// Collect functions with the enclosing scope's binding names.
-    /// `scope_bindings` are variable names available from the enclosing scope
-    /// (used to detect captured variables for nested function hoisting).
-    fn collect_functions_with_scope(&mut self, ast: &Ir, scope_bindings: &[String]) {
         match ast {
             Ir::Block { items: stmts, .. } => {
                 for stmt in stmts {
-                    self.collect_functions_with_scope(stmt, scope_bindings);
+                    self.collect_functions(stmt);
                 }
             }
             Ir::FunctionDef {
                 name, params, body, ..
             } => {
-                // Collect nested function defs from the body first
-                // Build the scope for nested functions: parent scope + this function's params + body bindings
-                let mut inner_scope: Vec<String> = scope_bindings.to_vec();
-                inner_scope.extend(params.iter().cloned());
+                // Recurse into nested function defs before emitting this one.
                 if let Ir::Block { items: stmts, .. } = body.as_ref() {
-                    // Add binding names from the body to the inner scope
-                    for stmt in stmts {
-                        match stmt {
-                            Ir::Binding { name, .. } => inner_scope.push(name.clone()),
-                            Ir::TupleBinding { names, .. } => {
-                                inner_scope.extend(names.iter().cloned())
-                            }
-                            _ => {}
-                        }
-                    }
-                    // Recurse to collect nested function definitions
                     for stmt in stmts {
                         if let Ir::FunctionDef { .. } = stmt {
-                            self.collect_functions_with_scope(stmt, &inner_scope);
+                            self.collect_functions(stmt);
                         }
                     }
                 }
 
-                // Determine captured variables (scope bindings or axis variables
-                // referenced in body, not shadowed by params). `x`/`y` are
-                // implicitly available in fs_main but not inside WGSL functions —
-                // pass them as extra params when the body references them, so e.g.
-                // `f(n) := (sum := x; for ... ; y = sum)` compiles correctly.
-                let mut captured = Vec::new();
-                let param_set: HashSet<&str> = params.iter().map(|s| s.as_str()).collect();
-                let referenced = find_referenced_identifiers(body);
-                for var in scope_bindings {
-                    if referenced.contains(var.as_str()) && !param_set.contains(var.as_str()) {
-                        captured.push(var.clone());
-                    }
-                }
-                for axis in ["x", "y"] {
-                    if referenced.contains(axis)
-                        && !param_set.contains(axis)
-                        && !captured.iter().any(|c| c == axis)
-                    {
-                        captured.push(axis.to_string());
-                    }
-                }
+                // Captured variables are populated on the FunctionDef itself
+                // by `lower::annotate_captures` — no separate analysis here.
+                let captured: Vec<String> = match ast {
+                    Ir::FunctionDef {
+                        captured: Some(c), ..
+                    } => (**c).clone(),
+                    _ => Vec::new(),
+                };
 
                 // Build parameter list including captured variables
                 let mut all_params: Vec<String> =
                     params.iter().map(|p| format!("{}: f32", p)).collect();
                 for cap in &captured {
                     all_params.push(format!("{}: f32", cap));
-                }
-
-                if !captured.is_empty() {
-                    self.captured_vars.insert(name.clone(), captured.clone());
                 }
 
                 // The function's return type comes off `FunctionDef.return_ty`
@@ -1278,15 +1237,13 @@ impl<'a> GenContext<'a> {
                 // evaluated at the pixel center for all four corners, killing the
                 // sign-change check and producing a dotted curve.
                 let mut all_args = emitted;
-                if let Some(captured) = self.captured_vars.get(name) {
-                    for cap in captured {
-                        let s = match (subst, cap.as_str()) {
-                            (Some((xv, _)), "x") => xv.to_string(),
-                            (Some((_, yv)), "y") => yv.to_string(),
-                            _ => cap.clone(),
-                        };
-                        all_args.push(s);
-                    }
+                for cap in function_captured(self.ast, name) {
+                    let s = match (subst, cap.as_str()) {
+                        (Some((xv, _)), "x") => xv.to_string(),
+                        (Some((_, yv)), "y") => yv.to_string(),
+                        _ => cap.clone(),
+                    };
+                    all_args.push(s);
                 }
                 return Ok(format!("{}({})", name, all_args.join(", ")));
             }
@@ -1441,11 +1398,7 @@ impl<'a> GenContext<'a> {
                 if let Callee::User(name) = callee {
                     if let Some(cmp_op) = lifted_function_diff_op(self.ast, name) {
                         let diff_fn_name = format!("_diff_{}", name);
-                        let captured = self
-                            .captured_vars
-                            .get(name)
-                            .cloned()
-                            .unwrap_or_default();
+                        let captured = function_captured(self.ast, name);
                         // Build the regular argument list (not yet corner-substituted).
                         let arg_strs: Result<Vec<String>, String> = args
                             .iter()
@@ -1455,7 +1408,7 @@ impl<'a> GenContext<'a> {
 
                         let corner_call = |xc: &str, yc: &str| {
                             let mut all = arg_strs.clone();
-                            for cap in &captured {
+                            for cap in captured {
                                 let s = match cap.as_str() {
                                     "x" => xc.to_string(),
                                     "y" => yc.to_string(),
@@ -1570,14 +1523,6 @@ impl<'a> GenContext<'a> {
         }
     }
 }
-
-/// Find all identifiers referenced in an IR node (for captured variable analysis).
-fn find_referenced_identifiers(node: &Ir) -> HashSet<String> {
-    let mut result = HashSet::new();
-    collect_identifiers(node, &mut result);
-    result
-}
-
 
 /// The set of user-defined function *names* with at least one function-typed
 /// parameter. Same fixpoint detection as `compute_hof_indices`, just exposed
@@ -1725,88 +1670,6 @@ fn collect_user_calls(
             }
         }
         _ => {}
-    }
-}
-
-fn collect_identifiers(node: &Ir, result: &mut HashSet<String>) {
-    match node {
-        Ir::Identifier { name, .. } => {
-            result.insert(name.clone());
-        }
-        Ir::Apply { args, .. } => {
-            for arg in args {
-                collect_identifiers(arg, result);
-            }
-        }
-        Ir::Block { items: stmts, .. } => {
-            for s in stmts {
-                collect_identifiers(s, result);
-            }
-        }
-        Ir::Binding { value, .. } => {
-            collect_identifiers(value, result);
-        }
-        Ir::TupleBinding { value, .. } => {
-            collect_identifiers(value, result);
-        }
-        Ir::Tuple { items, .. } => {
-            for item in items {
-                collect_identifiers(item, result);
-            }
-        }
-        Ir::IfExpr {
-            condition,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            collect_identifiers(condition, result);
-            collect_identifiers(then_branch, result);
-            if let Some(eb) = else_branch {
-                collect_identifiers(eb, result);
-            }
-        }
-        Ir::WhileLoop {
-            condition, body, ..
-        } => {
-            collect_identifiers(condition, result);
-            collect_identifiers(body, result);
-        }
-        Ir::FunctionDef { body, .. } => {
-            collect_identifiers(body, result);
-        }
-        Ir::PropertyAccess { object, .. } => {
-            collect_identifiers(object, result);
-        }
-        Ir::Number { .. } | Ir::BoolLit { .. } => {}
-        Ir::ArrayLiteral { items: elems, .. } => {
-            for e in elems {
-                collect_identifiers(e, result);
-            }
-        }
-        Ir::IndexAccess { array, index, .. } => {
-            collect_identifiers(array, result);
-            collect_identifiers(index, result);
-        }
-        Ir::Range { start, end, .. } => {
-            collect_identifiers(start, result);
-            collect_identifiers(end, result);
-        }
-        Ir::ForLoop { range, body, .. } | Ir::ParallelFor { range, body, .. } => {
-            collect_identifiers(range, result);
-            collect_identifiers(body, result);
-        }
-        Ir::IndexAssign {
-            array,
-            index,
-            value,
-            ..
-        } => {
-            collect_identifiers(array, result);
-            collect_identifiers(index, result);
-            collect_identifiers(value, result);
-        }
-        Ir::Lambda { body, .. } => collect_identifiers(body, result),
     }
 }
 
@@ -2027,6 +1890,22 @@ fn collect_lifted_block_names(ast: &Ir, out: &mut Vec<String>) {
         collect_lifted_block_names(child, out);
     }
 }
+
+/// Captured outer-scope variables (plus axis vars) for the user function
+/// named `name`. Returns an empty slice when the function captures nothing,
+/// or when the name doesn't resolve to any `FunctionDef`. Reads directly
+/// off `FunctionDef.captured`, which `lower::annotate_captures` populates.
+fn function_captured<'a>(ast: &'a Ir, name: &str) -> &'a [String] {
+    match find_function_def(ast, name) {
+        Some(Ir::FunctionDef { captured, .. }) => match captured {
+            Some(v) => v.as_slice(),
+            None => &[],
+        },
+        _ => &[],
+    }
+}
+
+
 
 /// If `name` is a user function with a `_diff_<name>` companion (bool return,
 /// imperative body, comparison-op result), return the comparison op. Mirrors
