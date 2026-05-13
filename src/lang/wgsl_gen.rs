@@ -197,22 +197,25 @@ pub fn generate(ast: &Ir) -> Result<String, String> {
         // Hoist each lifted block's per-corner evaluation into a single `let`,
         // so the corner-check expression below can reuse the values without
         // re-invoking the (potentially loop-heavy) function multiple times.
-        for (binding_name, def) in &ctx.lifted_block_defs {
+        let mut lifted_names = Vec::new();
+        collect_lifted_block_names(ast, &mut lifted_names);
+        for binding_name in &lifted_names {
+            let fn_name = format!("_lifted_{}", binding_name);
             shader.push_str(&format!(
                 "    let _corner_{0}_mm = {1}(x_m, y_m);\n",
-                binding_name, def.fn_name
+                binding_name, fn_name
             ));
             shader.push_str(&format!(
                 "    let _corner_{0}_mp = {1}(x_m, y_p);\n",
-                binding_name, def.fn_name
+                binding_name, fn_name
             ));
             shader.push_str(&format!(
                 "    let _corner_{0}_pm = {1}(x_p, y_m);\n",
-                binding_name, def.fn_name
+                binding_name, fn_name
             ));
             shader.push_str(&format!(
                 "    let _corner_{0}_pp = {1}(x_p, y_p);\n",
-                binding_name, def.fn_name
+                binding_name, fn_name
             ));
         }
 
@@ -297,40 +300,12 @@ struct GenContext<'a> {
     /// IR bodies of bool functions — used for inlining during corner-checking
     /// so that comparisons go through sign-change detection, not float ==.
     bool_function_defs: std::collections::HashMap<String, BoolFunctionDef>,
-    /// Block-valued bindings (e.g. `f := (sum := 0; for ... ; y = sum)`) lifted
-    /// into WGSL functions so corner-checking can re-evaluate the block at each
-    /// corner, not just the pixel center.
-    lifted_block_defs: std::collections::HashMap<String, LiftedBlockDef>,
-    /// User-defined bool functions whose bodies are imperative + comparison.
-    /// Tracks the matching `_diff_<name>` companion that returns lhs - rhs so
-    /// corner-checking can call the function at each corner without re-inlining
-    /// the imperative body (which doesn't survive emit_bool_with_corners).
-    lifted_function_defs: std::collections::HashMap<String, LiftedFunctionDef>,
     /// For hoisted nested functions: maps function name → extra captured variables to pass.
     captured_vars: std::collections::HashMap<String, Vec<String>>,
     /// Lowered AST. Methods like `result_is_bool` and `emit_bool_with_corners`
     /// use it to resolve identifier references back to their binding's
     /// declared value, replacing what used to be a `bool_binding_defs` cache.
     ast: &'a Ir,
-}
-
-/// Metadata for a block-valued binding lifted into a WGSL function.
-/// The function signature is `fn fn_name(x: f32, y: f32) -> f32`. When
-/// `comparison_op` is set, the function returns `lhs - rhs`; otherwise it
-/// returns the block's float result directly.
-#[derive(Debug, Clone)]
-struct LiftedBlockDef {
-    fn_name: String,
-    comparison_op: Option<BuiltinOp>,
-}
-
-/// Metadata for a user-defined function whose bool body has imperative content.
-/// `diff_fn_name(args..., x_corner, y_corner) -> f32` returns `lhs - rhs` of the
-/// body's comparison so corner-checking can sign-check at four corners.
-#[derive(Debug, Clone)]
-struct LiftedFunctionDef {
-    diff_fn_name: String,
-    comparison_op: BuiltinOp,
 }
 
 /// If `callee` is a 2-arg comparison operator, return it; otherwise `None`.
@@ -402,8 +377,6 @@ impl<'a> GenContext<'a> {
             functions: Vec::new(),
             bindings: Vec::new(),
             bool_function_defs: std::collections::HashMap::new(),
-            lifted_block_defs: std::collections::HashMap::new(),
-            lifted_function_defs: std::collections::HashMap::new(),
             captured_vars: std::collections::HashMap::new(),
             ast,
         }
@@ -561,13 +534,6 @@ impl<'a> GenContext<'a> {
                                             wgsl_code: diff_wgsl,
                                             user_name: Some(name.clone()),
                                         });
-                                        self.lifted_function_defs.insert(
-                                            name.clone(),
-                                            LiftedFunctionDef {
-                                                diff_fn_name: diff_name,
-                                                comparison_op: cmp_op,
-                                            },
-                                        );
                                     }
                                 }
                             }
@@ -618,22 +584,14 @@ impl<'a> GenContext<'a> {
                 };
 
                 if let Some(stmts) = imperative_block_stmts {
-                    if let Ok((fn_name, comparison_op, binding_expr)) =
+                    if let Ok((comparison_op, binding_expr)) =
                         self.lift_block_to_fn(name, &stmts)
                     {
-                        let is_comparison = comparison_op.is_some();
-                        self.lifted_block_defs.insert(
-                            name.clone(),
-                            LiftedBlockDef {
-                                fn_name,
-                                comparison_op,
-                            },
-                        );
                         // For lifted comparison results we render via corner-checking
                         // (which calls the function 4 times directly); the regular
                         // `let name = call(x, y) <op> 0.0` binding would only add a
                         // 5th unused call per pixel. Skip emitting it.
-                        if !is_comparison {
+                        if comparison_op.is_none() {
                             self.bindings.push(EmittedBinding {
                                 name: name.clone(),
                                 expr: binding_expr,
@@ -676,13 +634,16 @@ impl<'a> GenContext<'a> {
     /// Emit a function body that contains bindings and/or loops.
     /// Returns the WGSL body code including the final `return` statement.
     /// Lift a block-valued binding into a WGSL function so its body re-runs
-    /// at every corner during corner-checking. Returns
-    /// `(fn_name, comparison_op, binding_call_expr)`.
+    /// at every corner during corner-checking. Returns `(comparison_op,
+    /// binding_call_expr)`. The synthesized WGSL function is `_lifted_<name>`,
+    /// derived from `binding_name` rather than returned, so every caller
+    /// (corner emission, identifier substitution) computes the same string
+    /// without sharing state.
     fn lift_block_to_fn(
         &mut self,
         binding_name: &str,
         stmts: &[Ir],
-    ) -> Result<(String, Option<BuiltinOp>, String), String> {
+    ) -> Result<(Option<BuiltinOp>, String), String> {
         let result = block_result_expr_from_stmts(stmts)
             .ok_or_else(|| format!("block-valued binding `{}` has no result", binding_name))?;
 
@@ -714,7 +675,7 @@ impl<'a> GenContext<'a> {
             format!("{}(x, y)", fn_name)
         };
 
-        Ok((fn_name, comparison_op, binding_expr))
+        Ok((comparison_op, binding_expr))
     }
 
     /// Emit a lifted-block function body: imperative statements then a return
@@ -984,10 +945,7 @@ impl<'a> GenContext<'a> {
                         _ => None,
                     })
                     .is_some_and(|t| t == &Type::Bool)
-                    || self
-                        .lifted_block_defs
-                        .get(name)
-                        .is_some_and(|d| d.comparison_op.is_some())
+                    || lifted_block_comparison_op(self.ast, name).is_some()
             }
             Ir::Block { items: stmts, .. } => {
                 stmts.last().is_some_and(|s| self.result_is_bool(s))
@@ -1211,13 +1169,12 @@ impl<'a> GenContext<'a> {
                     // block actually re-evaluates per corner. Without this
                     // the binding would resolve to its pixel-center value
                     // and the curve would dot out on steep slopes.
-                    if self.lifted_block_defs.contains_key(name) {
+                    if is_lifted_block_binding(self.ast, name) {
                         if let Some(suffix) = corner_suffix(x_var, y_var) {
                             return Ok(format!("_corner_{}_{}", name, suffix));
                         }
                         // Non-standard corner — fall back to a direct call.
-                        let def = &self.lifted_block_defs[name];
-                        return Ok(format!("{}({}, {})", def.fn_name, x_var, y_var));
+                        return Ok(format!("_lifted_{}({}, {})", name, x_var, y_var));
                     }
                 }
                 // Map time/t → u.time (accessible in user functions too)
@@ -1415,8 +1372,7 @@ impl<'a> GenContext<'a> {
             // The four corner calls are hoisted into `__lifted_<name>_mm/mp/pm/pp`
             // by the caller so we only invoke the function 4 times per pixel,
             // not 6+ (the corner expression below references each corner twice).
-            Ir::Identifier { name, .. } if self.lifted_block_defs.contains_key(name) => {
-                let def = self.lifted_block_defs.get(name).unwrap();
+            Ir::Identifier { name, .. } if is_lifted_block_binding(self.ast, name) => {
                 let calls = [
                     format!("_corner_{}_mm", name),
                     format!("_corner_{}_mp", name),
@@ -1426,7 +1382,7 @@ impl<'a> GenContext<'a> {
 
                 // No comparison op → treat float result as implicit curve `f = 0`,
                 // which is the same pattern as `Eq` (sign-change detection).
-                let op = def.comparison_op.unwrap_or(BuiltinOp::Eq);
+                let op = lifted_block_comparison_op(self.ast, name).unwrap_or(BuiltinOp::Eq);
                 Ok(emit_corner_compare(op, &calls))
             }
 
@@ -1483,8 +1439,8 @@ impl<'a> GenContext<'a> {
                 // four pixel corners. Inlining doesn't work here because
                 // emit_bool_with_corners can't re-emit imperative stmts.
                 if let Callee::User(name) = callee {
-                    if self.lifted_function_defs.contains_key(name) {
-                        let def = self.lifted_function_defs.get(name).unwrap().clone();
+                    if let Some(cmp_op) = lifted_function_diff_op(self.ast, name) {
+                        let diff_fn_name = format!("_diff_{}", name);
                         let captured = self
                             .captured_vars
                             .get(name)
@@ -1507,7 +1463,7 @@ impl<'a> GenContext<'a> {
                                 };
                                 all.push(s);
                             }
-                            format!("{}({})", def.diff_fn_name, all.join(", "))
+                            format!("{}({})", diff_fn_name, all.join(", "))
                         };
 
                         let calls = [
@@ -1517,7 +1473,7 @@ impl<'a> GenContext<'a> {
                             corner_call("x_p", "y_p"),
                         ];
 
-                        return Ok(emit_corner_compare(def.comparison_op, &calls));
+                        return Ok(emit_corner_compare(cmp_op, &calls));
                     }
                     if self.bool_function_defs.contains_key(name) {
                         let func_def = self.bool_function_defs.get(name).unwrap();
@@ -2007,6 +1963,103 @@ fn find_binding<'a>(ast: &'a Ir, name: &str) -> Option<&'a Ir> {
         }
     }
     None
+}
+
+/// Find the `FunctionDef` with the given `name` in `ast`. Walks in pre-order;
+/// first match wins. Returns `None` if there's no such function.
+fn find_function_def<'a>(ast: &'a Ir, name: &str) -> Option<&'a Ir> {
+    if let Ir::FunctionDef { name: n, .. } = ast {
+        if n == name {
+            return Some(ast);
+        }
+    }
+    for child in ast.children() {
+        if let Some(found) = find_function_def(child, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Was the binding for `name` lifted to a `_lifted_<name>` WGSL function?
+/// Matches the structural condition in `collect_functions_with_scope` —
+/// block-valued binding with at least one imperative stmt and a result expr.
+fn is_lifted_block_binding(ast: &Ir, name: &str) -> bool {
+    let Some(Ir::Binding { value, .. }) = find_binding(ast, name) else {
+        return false;
+    };
+    let Ir::Block { items, .. } = value.as_ref() else {
+        return false;
+    };
+    super::lower::has_imperative_stmt(items) && block_result_expr_from_stmts(items).is_some()
+}
+
+/// If `name` is a lifted block-valued binding whose result expression is a
+/// comparison op, return that op. Returns `None` for plain float results
+/// (which corner-checking treats as implicit `f = 0` curves) and for names
+/// that aren't lifted bindings at all.
+fn lifted_block_comparison_op(ast: &Ir, name: &str) -> Option<BuiltinOp> {
+    let Ir::Binding { value, .. } = find_binding(ast, name)? else {
+        return None;
+    };
+    let Ir::Block { items, .. } = value.as_ref() else {
+        return None;
+    };
+    if !super::lower::has_imperative_stmt(items) {
+        return None;
+    }
+    match block_result_expr_from_stmts(items)? {
+        Ir::Apply { callee, args, .. } => as_comparison_op(callee, args),
+        _ => None,
+    }
+}
+
+/// Walks `ast` collecting the names of every binding the codegen lifted
+/// (per `is_lifted_block_binding`). Used by `generate()` to hoist
+/// `_corner_<name>_<suffix>` setups out of the per-corner expressions.
+fn collect_lifted_block_names(ast: &Ir, out: &mut Vec<String>) {
+    if let Ir::Binding { name, .. } = ast {
+        if is_lifted_block_binding(ast, name) {
+            out.push(name.clone());
+        }
+    }
+    for child in ast.children() {
+        collect_lifted_block_names(child, out);
+    }
+}
+
+/// If `name` is a user function with a `_diff_<name>` companion (bool return,
+/// imperative body, comparison-op result), return the comparison op. Mirrors
+/// the population condition in `collect_functions_with_scope`.
+fn lifted_function_diff_op(ast: &Ir, name: &str) -> Option<BuiltinOp> {
+    let Ir::FunctionDef {
+        body, return_ty, ..
+    } = find_function_def(ast, name)?
+    else {
+        return None;
+    };
+    if return_ty.as_deref() != Some(&Type::Bool) {
+        return None;
+    }
+    let Ir::Block { items, .. } = body.as_ref() else {
+        return None;
+    };
+    let has_imperative = items.iter().any(|s| {
+        matches!(
+            s,
+            Ir::Binding { .. }
+                | Ir::WhileLoop { .. }
+                | Ir::ForLoop { .. }
+                | Ir::TupleBinding { .. }
+        )
+    });
+    if !has_imperative {
+        return None;
+    }
+    match block_result_expr_from_stmts(items)? {
+        Ir::Apply { callee, args, .. } => as_comparison_op(callee, args),
+        _ => None,
+    }
 }
 
 /// If `node` is a Block, return its result expression (the last non-imperative
