@@ -35,7 +35,7 @@ use super::ir::{BindingId, Callee, FuncId, Ir, Resolution};
 pub fn lower(ir: Ir) -> Result<Ir, String> {
     let ir = pre_passes(ir);
     let ir = resolve_names(ir);
-    let mut ir = annotate_types(ir)?;
+    let mut ir = annotate_types(ir).map_err(|e| e.message)?;
     annotate_captures(&mut ir);
     Ok(ir)
 }
@@ -1261,15 +1261,19 @@ impl<'a> ResolveCtx<'a> {
 // Pass 5: annotate expression types
 // ---------------------------------------------------------------------------
 
-/// Populate `Ir::Apply.result_ty` (and per-expression type info on other
-/// variants in future) by running type inference on the lowered IR.
+/// Populate `Ir::Apply.result_ty`, `Ir::Binding.value_ty`, and
+/// `Ir::FunctionDef.return_ty` by running type inference on the lowered IR.
 ///
-/// Shares the inference engine with `check::check` via `check::check_mut`,
-/// so every `Apply` node sees its `result_ty` written as a side effect of
-/// the inference walk. Backends can then read types straight off the IR
-/// instead of re-running their own structural inference passes.
-fn annotate_types(mut ir: Ir) -> Result<Ir, String> {
-    super::check::check_mut(&mut ir).map_err(|e| e.message)?;
+/// The pass is implemented by the inference engine in `check.rs`; this
+/// function is just the entry point that the lowering pipeline calls and
+/// that `check::check` routes through for the read-only view. Errors
+/// propagate as structured `TypeError` so callers that want a span-aware
+/// diagnostic can keep them; `lower::lower` collapses to `String` for the
+/// broader pipeline.
+pub(crate) fn annotate_types(
+    mut ir: Ir,
+) -> Result<Ir, super::check::TypeError> {
+    super::check::check_mut(&mut ir)?;
     Ok(ir)
 }
 

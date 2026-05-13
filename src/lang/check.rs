@@ -79,19 +79,19 @@ impl<'p> TypeEnv<'p> {
 /// Type-check an IR program. Returns the type of the program's value
 /// (typically the type of the last expression in the top-level block).
 ///
-/// Today this clones and calls `check_mut` so existing read-only callers can
-/// keep their `&Ir` shape. `lower::annotate_types` shares the same engine
-/// via `check_mut` so every `Apply.result_ty` ends up populated as a side
-/// effect of inference.
+/// Thin wrapper that clones the IR and routes through the inference
+/// engine in `check_mut`. Callers that already need the annotated tree
+/// (every backend, via `lower::lower`) should go through
+/// `lower::annotate_types` instead so the clone is avoided.
 pub fn check(ir: &Ir) -> Result<Type, TypeError> {
     let mut owned = ir.clone();
     check_mut(&mut owned)
 }
 
-/// Mutating variant of `check`. Walks `ir` and writes `result_ty` on every
-/// `Apply` node as inference proceeds. `lower::annotate_types` is the
-/// production caller; `check` is a clone-and-discard wrapper kept for the
-/// `Result<Type, _>`-only callers (e.g. `lang::type_check`).
+/// Walk `ir` mutably, writing `Apply.result_ty` / `Binding.value_ty` /
+/// `FunctionDef.return_ty` as inference proceeds, and return the type of
+/// the program's value. `lower::annotate_types` is the production caller;
+/// `check::check` is the clone-and-discard wrapper for `&Ir`-only contexts.
 pub(crate) fn check_mut(ir: &mut Ir) -> Result<Type, TypeError> {
     let mut env = TypeEnv::root();
     seed_axis_vars(&mut env);

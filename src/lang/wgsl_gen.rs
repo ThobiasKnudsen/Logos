@@ -288,18 +288,9 @@ struct EmittedFunction {
     user_name: Option<String>,
 }
 
-/// Stored IR of a bool function for inlining in the plotting context.
-struct BoolFunctionDef {
-    params: Vec<String>,
-    body: Ir,
-}
-
 struct GenContext<'a> {
     functions: Vec<EmittedFunction>,
     bindings: Vec<EmittedBinding>,
-    /// IR bodies of bool functions — used for inlining during corner-checking
-    /// so that comparisons go through sign-change detection, not float ==.
-    bool_function_defs: std::collections::HashMap<String, BoolFunctionDef>,
     /// Lowered AST. Methods like `result_is_bool` and `emit_bool_with_corners`
     /// use it to resolve identifier references back to their binding's
     /// declared value, replacing what used to be a `bool_binding_defs` cache.
@@ -374,7 +365,6 @@ impl<'a> GenContext<'a> {
         Self {
             functions: Vec::new(),
             bindings: Vec::new(),
-            bool_function_defs: std::collections::HashMap::new(),
             ast,
         }
     }
@@ -449,16 +439,6 @@ impl<'a> GenContext<'a> {
                 } else {
                     "f32"
                 };
-                if returns_bool_val {
-                    self.bool_function_defs.insert(
-                        name.clone(),
-                        BoolFunctionDef {
-                            params: params.clone(),
-                            body: body.as_ref().clone(),
-                        },
-                    );
-                }
-
                 // For bool functions with imperative bodies whose result is a
                 // direct comparison, also emit a `_diff_<name>` companion that
                 // returns lhs - rhs. Corner-checking uses this so it can call
@@ -1428,10 +1408,17 @@ impl<'a> GenContext<'a> {
 
                         return Ok(emit_corner_compare(cmp_op, &calls));
                     }
-                    if self.bool_function_defs.contains_key(name) {
-                        let func_def = self.bool_function_defs.get(name).unwrap();
-                        let inlined = substitute_params(&func_def.body, &func_def.params, args);
-                        return self.emit_bool_with_corners(&inlined);
+                    if let Some(Ir::FunctionDef {
+                        params,
+                        body,
+                        return_ty,
+                        ..
+                    }) = find_function_def(self.ast, name)
+                    {
+                        if return_ty.as_deref() == Some(&Type::Bool) {
+                            let inlined = substitute_params(body, params, args);
+                            return self.emit_bool_with_corners(&inlined);
+                        }
                     }
                 }
                 // Anything else: fall back to normal emission
