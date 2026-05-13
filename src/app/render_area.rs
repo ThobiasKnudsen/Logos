@@ -7,6 +7,75 @@ pub(crate) enum MouseZone {
     YAxisEdge,
 }
 
+/// Which render-area visual element a toggle button controls. Used as
+/// the payload of `HoverTarget::RenderAreaToggle` and the entry point
+/// for click → state mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToggleKind {
+    /// Background major/minor gridlines.
+    Grid,
+    /// Mouse-tracking crosshair lines.
+    Cursor,
+    /// Tick labels along the axes.
+    AxisNumbers,
+    /// 2D vs 3D projection mode (3D camera is not yet wired; toggling
+    /// it stashes the user's preference so it picks up when 3D lands).
+    ViewMode,
+}
+
+impl ToggleKind {
+    /// Stable ordering for layout (left → right): grid, cursor, axis
+    /// numbers, then view mode. Used by the renderer to place the four
+    /// buttons in a deterministic row.
+    pub fn all() -> [Self; 4] {
+        [Self::Grid, Self::Cursor, Self::AxisNumbers, Self::ViewMode]
+    }
+}
+
+/// Persistent visibility toggles for the render area. Saved per-tab on
+/// `NotebookView` so each notebook keeps its own preferences when the
+/// user flips between tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewToggles {
+    pub show_grid: bool,
+    pub show_cursor: bool,
+    pub show_axis_numbers: bool,
+    /// `true` ⇒ 3D projection. The 2D/3D camera split is pending; the
+    /// toggle is stored so user intent survives the upcoming work.
+    pub is_3d: bool,
+}
+
+impl Default for ViewToggles {
+    fn default() -> Self {
+        Self {
+            show_grid: true,
+            show_cursor: true,
+            show_axis_numbers: true,
+            is_3d: false,
+        }
+    }
+}
+
+impl ViewToggles {
+    pub fn get(&self, kind: ToggleKind) -> bool {
+        match kind {
+            ToggleKind::Grid => self.show_grid,
+            ToggleKind::Cursor => self.show_cursor,
+            ToggleKind::AxisNumbers => self.show_axis_numbers,
+            ToggleKind::ViewMode => self.is_3d,
+        }
+    }
+
+    pub fn toggle(&mut self, kind: ToggleKind) {
+        match kind {
+            ToggleKind::Grid => self.show_grid = !self.show_grid,
+            ToggleKind::Cursor => self.show_cursor = !self.show_cursor,
+            ToggleKind::AxisNumbers => self.show_axis_numbers = !self.show_axis_numbers,
+            ToggleKind::ViewMode => self.is_3d = !self.is_3d,
+        }
+    }
+}
+
 pub(crate) struct RenderAreaState {
     pub axis_x_min: f32,
     pub axis_x_max: f32,
@@ -20,6 +89,9 @@ pub(crate) struct RenderAreaState {
     pub is_dragging: bool,
     pub last_drag_pos: (f32, f32),
     pub mouse_zone: MouseZone,
+    /// Visibility toggles. Mutated by clicks on the render-area chrome
+    /// buttons and persisted to the active `NotebookView` on tab switch.
+    pub toggles: ViewToggles,
 }
 
 impl Default for RenderAreaState {
@@ -36,6 +108,7 @@ impl Default for RenderAreaState {
             is_dragging: false,
             last_drag_pos: (0.0, 0.0),
             mouse_zone: MouseZone::Center,
+            toggles: ViewToggles::default(),
         }
     }
 }
@@ -132,5 +205,63 @@ impl RenderAreaState {
         let range = (self.axis_y_max - self.axis_y_min) * factor;
         self.axis_y_min = wy - t_y * range;
         self.axis_y_max = self.axis_y_min + range;
+    }
+}
+
+#[cfg(test)]
+mod toggle_tests {
+    use super::*;
+
+    /// Default toggle state: grid/cursor/axis-numbers on, 3D off.
+    /// Locks in the issue #27 "default-friendly" UX so a regression
+    /// silently hiding the grid would surface immediately in tests.
+    #[test]
+    fn default_view_toggles_show_everything_in_2d() {
+        let v = ViewToggles::default();
+        assert!(v.show_grid);
+        assert!(v.show_cursor);
+        assert!(v.show_axis_numbers);
+        assert!(!v.is_3d);
+    }
+
+    /// Each toggle flips independently — flipping one must not bleed
+    /// into another, which is the explicit acceptance criterion in
+    /// issue #27 ("Each toggle is independent").
+    #[test]
+    fn toggles_are_independent() {
+        for target in ToggleKind::all() {
+            let mut v = ViewToggles::default();
+            let originals = [
+                v.show_grid,
+                v.show_cursor,
+                v.show_axis_numbers,
+                v.is_3d,
+            ];
+            v.toggle(target);
+            let after = [v.show_grid, v.show_cursor, v.show_axis_numbers, v.is_3d];
+            for (i, kind) in ToggleKind::all().iter().enumerate() {
+                if *kind == target {
+                    assert_ne!(originals[i], after[i], "toggling {:?} did not flip it", target);
+                } else {
+                    assert_eq!(
+                        originals[i], after[i],
+                        "toggling {:?} unexpectedly flipped {:?}",
+                        target, kind
+                    );
+                }
+            }
+        }
+    }
+
+    /// Two toggles return to the original state — guards against a
+    /// future refactor that accidentally mutates extra state on toggle.
+    #[test]
+    fn double_toggle_is_identity() {
+        let mut v = ViewToggles::default();
+        for kind in ToggleKind::all() {
+            v.toggle(kind);
+            v.toggle(kind);
+        }
+        assert_eq!(v, ViewToggles::default());
     }
 }

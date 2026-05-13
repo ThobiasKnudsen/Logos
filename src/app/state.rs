@@ -365,6 +365,20 @@ impl AppState {
 
         let rp = self.cached_layout.right_pane;
         if point_in_rect(mx, my, &rp) {
+            // Toggle toolbar overlay (issue #27) sits on top of the
+            // render area in screen space. Test it before the area
+            // itself so the buttons aren't shadowed by the generic
+            // "pan / zoom the chart" hover target underneath them.
+            let toggle_rects = self.renderer.render_area_toggle_rects();
+            for (rect, kind) in toggle_rects
+                .iter()
+                .zip(crate::app::render_area::ToggleKind::all().iter())
+            {
+                if rect.w > 0.0 && rect.h > 0.0 && point_in_rect(mx, my, rect) {
+                    self.set_hover(HoverTarget::RenderAreaToggle(*kind));
+                    return;
+                }
+            }
             self.render_area.mouse_zone = detect_mouse_zone(mx, my, &rp);
             self.set_hover(HoverTarget::RenderArea);
             return;
@@ -390,7 +404,8 @@ impl AppState {
                 | HoverTarget::CellOutputToggle(_)
                 | HoverTarget::AutocompleteItem(_)
                 | HoverTarget::FeedbackButton
-                | HoverTarget::ColorPickerSlider(_) => CursorIcon::Pointer,
+                | HoverTarget::ColorPickerSlider(_)
+                | HoverTarget::RenderAreaToggle(_) => CursorIcon::Pointer,
                 HoverTarget::RenderArea => match self.render_area.mouse_zone {
                     MouseZone::Center => {
                         if self.render_area.is_dragging {
@@ -473,6 +488,7 @@ impl AppState {
                     self.render_area.axis_y_min = ymin;
                     self.render_area.axis_y_max = ymax;
                 }
+                self.render_area.toggles = tab.view_toggles;
             }
             self.invalidate_lang_cache();
         }
@@ -498,6 +514,7 @@ impl AppState {
                 self.render_area.axis_y_min,
                 self.render_area.axis_y_max,
             ]);
+            tab.view_toggles = self.render_area.toggles;
         }
         if let Some(tab) = self.session.tabs().get(new_tab) {
             if let Some([xmin, xmax, ymin, ymax]) = tab.axis_bounds {
@@ -512,6 +529,7 @@ impl AppState {
                 self.render_area.axis_y_min = default.axis_y_min;
                 self.render_area.axis_y_max = default.axis_y_max;
             }
+            self.render_area.toggles = tab.view_toggles;
         }
     }
 

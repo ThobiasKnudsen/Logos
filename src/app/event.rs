@@ -613,6 +613,14 @@ impl AppState {
                 self.close_menu();
                 self.dismiss_autocomplete();
             }
+            HoverTarget::RenderAreaToggle(_) => {
+                // Press just records the target; the actual toggle
+                // fires on release in `handle_mouse_released_left` so
+                // dragging off the button before releasing cancels
+                // the click (matching every other button in the UI).
+                self.close_menu();
+                self.dismiss_autocomplete();
+            }
             HoverTarget::CellOutputCopyButton(i) => {
                 self.close_menu();
                 self.dismiss_autocomplete();
@@ -788,7 +796,8 @@ impl AppState {
             | HoverTarget::CellOutputCopyButton(_)
             | HoverTarget::CellOutputToggle(_)
             | HoverTarget::CellDeleteButton(_)
-            | HoverTarget::AddCellButton => self.mouse_press_target,
+            | HoverTarget::AddCellButton
+            | HoverTarget::RenderAreaToggle(_) => self.mouse_press_target,
             _ => self.hover_target,
         };
         match click_target {
@@ -859,6 +868,18 @@ impl AppState {
                 self.session.active_tab_mut().add_cell();
                 self.invalidate_lang_cache();
                 self.sync_active_tab();
+            }
+            HoverTarget::RenderAreaToggle(kind) => {
+                // Flip the toggle and copy the result into the active
+                // tab so it survives a tab switch. Each toggle is
+                // independent (issue #27 acceptance #1); the renderer
+                // re-reads `RenderAreaParams.toggles` on the next
+                // frame and gates the corresponding visual.
+                self.render_area.toggles.toggle(kind);
+                if let Some(tab) = self.session.tab_mut(self.session.active_index()) {
+                    tab.view_toggles = self.render_area.toggles;
+                }
+                self.window.request_redraw();
             }
             _ => {}
         }
@@ -1082,6 +1103,7 @@ impl AppState {
             axis_y_min: self.render_area.axis_y_min,
             axis_y_max: self.render_area.axis_y_max,
             mouse_uv,
+            toggles: self.render_area.toggles,
         };
 
         let picker_color = self.open_color_picker.and_then(|i| {

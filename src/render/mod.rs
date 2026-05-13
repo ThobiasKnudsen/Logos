@@ -140,6 +140,11 @@ pub struct RenderAreaParams {
     pub axis_y_min: f32,
     pub axis_y_max: f32,
     pub mouse_uv: [f32; 2],
+    /// Per-element visibility toggles for the render area chrome.
+    /// The frame builder consults each flag before emitting the
+    /// corresponding visual; flipping a flag removes that element
+    /// without otherwise affecting layout or the plot itself.
+    pub toggles: crate::app::render_area::ViewToggles,
 }
 
 pub(crate) const MAX_AXIS_LABELS: usize = 12;
@@ -336,6 +341,19 @@ pub struct Renderer {
 
     pub(crate) feedback_label: TextBuffer,
     pub(crate) feedback_button_rect: Rect,
+
+    /// Layout rects for the four render-area toggle buttons (issue #27),
+    /// in the order `ToggleKind::all()`. Each rect is zero-sized when the
+    /// render area is too narrow to fit the toolbar, in which case
+    /// hit-testing treats them as miss.
+    pub(crate) render_area_toggle_rects: [Rect; 4],
+    /// Two labels per toggle: "off" (when the toggle's bool is `false`)
+    /// and "on" (when `true`). For most toggles the two are identical —
+    /// the visual difference is the filled background. The 2D/3D toggle
+    /// uses this slot to swap the displayed label so the button always
+    /// shows the *current* projection mode.
+    pub(crate) render_area_toggle_labels_off: [TextBuffer; 4],
+    pub(crate) render_area_toggle_labels_on: [TextBuffer; 4],
 
     /// Background rect of the open color-picker popup. Zero-sized when the
     /// picker is closed; the renderer skips drawing the picker in that case.

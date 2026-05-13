@@ -17,7 +17,7 @@ use crate::ui::theme::spacing;
 mod cas;
 mod event;
 mod menus;
-mod render_area;
+pub(crate) mod render_area;
 mod state;
 
 pub(crate) use menus::{
@@ -60,6 +60,11 @@ pub(crate) enum HoverTarget {
     CellEditorHScrollThumb(usize),
     CellEditorVScrollThumb(usize),
     RenderArea,
+    /// A render-area chrome toggle button (issue #27). Payload picks
+    /// which of the four buttons (grid / cursor / axis numbers /
+    /// 2D-3D) is under the cursor so both hover-styling and click
+    /// dispatch can identify it without re-running hit-tests.
+    RenderAreaToggle(render_area::ToggleKind),
     WindowEdge(ResizeDirection),
 }
 

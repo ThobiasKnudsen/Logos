@@ -259,6 +259,23 @@ impl Renderer {
         let cell_play_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25B6}");
         let cell_stop_label = Self::create_label(&mut font_system, fonts::ui_size(), "\u{25A0}");
         let cell_color_label = Self::create_label(&mut font_system, fonts::small_size(), "color");
+
+        // Render-area toggle button labels (issue #27). Single glyphs
+        // for grid/cursor/axis-numbers; the 2D/3D button shows the
+        // *current* mode rather than the action, matching how the
+        // play/stop pair works on each cell.
+        let toggle_off = [
+            Self::create_label(&mut font_system, fonts::small_size(), "#"),
+            Self::create_label(&mut font_system, fonts::small_size(), "+"),
+            Self::create_label(&mut font_system, fonts::small_size(), "N"),
+            Self::create_label(&mut font_system, fonts::small_size(), "2D"),
+        ];
+        let toggle_on = [
+            Self::create_label(&mut font_system, fonts::small_size(), "#"),
+            Self::create_label(&mut font_system, fonts::small_size(), "+"),
+            Self::create_label(&mut font_system, fonts::small_size(), "N"),
+            Self::create_label(&mut font_system, fonts::small_size(), "3D"),
+        ];
         let cell_chevron_right =
             Self::create_label(&mut font_system, fonts::small_size(), "\u{25B6}");
         let cell_chevron_down =
@@ -341,6 +358,9 @@ impl Renderer {
             win_close_label,
             feedback_label,
             feedback_button_rect: zero_rect,
+            render_area_toggle_rects: [zero_rect, zero_rect, zero_rect, zero_rect],
+            render_area_toggle_labels_off: toggle_off,
+            render_area_toggle_labels_on: toggle_on,
             color_picker_bg: zero_rect,
             color_picker_sliders: [zero_rect, zero_rect, zero_rect, zero_rect],
             color_picker_labels,

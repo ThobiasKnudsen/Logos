@@ -105,4 +105,12 @@ impl Renderer {
     pub fn add_cell_button_rect(&self) -> Rect {
         self.add_cell_rect
     }
+
+    /// Layout rects for the render-area toggle buttons (issue #27),
+    /// in `ToggleKind::all()` order. Zero-sized rects mean the
+    /// toolbar didn't fit and should be treated as miss by the
+    /// hover/click path.
+    pub fn render_area_toggle_rects(&self) -> [Rect; 4] {
+        self.render_area_toggle_rects
+    }
 }

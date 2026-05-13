@@ -1351,7 +1351,10 @@ impl Renderer {
         let grid_th = spacing::line_thickness().round().max(1.0);
         let zero_th = (grid_th * 2.0).round().max(2.0);
         let mut overlay_grid_rects: Vec<RectInstance> = Vec::new();
-        if x_range > f32::EPSILON {
+        // Grid lines are gated on the user's grid toggle (issue #27).
+        // The zero-axis line is rendered as a brighter grid line — same
+        // toggle applies; the user can hide it via the same button.
+        if render_area.toggles.show_grid && x_range > f32::EPSILON {
             for tick in &x_ticks {
                 let t_ = (tick - render_area.axis_x_min) / x_range;
                 let sx = rp.x + t_ * rp.w;
@@ -1370,7 +1373,7 @@ impl Renderer {
                 }
             }
         }
-        if y_range > f32::EPSILON {
+        if render_area.toggles.show_grid && y_range > f32::EPSILON {
             for tick in &y_ticks {
                 let t_ = (tick - render_area.axis_y_min) / y_range;
                 let sy = rp.y + rp.h - t_ * rp.h;
@@ -1400,7 +1403,8 @@ impl Renderer {
             bottom: (rp.y + rp.h) as i32,
         };
 
-        if x_range > f32::EPSILON {
+        // Axis tick labels gated on the axis-numbers toggle (issue #27).
+        if render_area.toggles.show_axis_numbers && x_range > f32::EPSILON {
             for (i, tick) in x_ticks.iter().enumerate() {
                 let t_ = (tick - render_area.axis_x_min) / x_range;
                 let sx = rp.x + t_ * rp.w;
@@ -1419,7 +1423,7 @@ impl Renderer {
             }
         }
 
-        if y_range > f32::EPSILON {
+        if render_area.toggles.show_axis_numbers && y_range > f32::EPSILON {
             for (i, tick) in y_ticks.iter().enumerate() {
                 let t_ = (tick - render_area.axis_y_min) / y_range;
                 let sy = rp.y + rp.h - t_ * rp.h;
@@ -1439,7 +1443,11 @@ impl Renderer {
 
         let mut cursor_bg_rects: Vec<RectInstance> = Vec::new();
         let mut cursor_text_areas: Vec<TextArea> = Vec::new();
-        if hover == HoverTarget::RenderArea {
+        // The cursor crosshair is gated on its own toggle (#27); the
+        // numeric readout under the cursor still tracks the toggle so
+        // hiding the lines also hides the coordinate display they'd
+        // otherwise label.
+        if render_area.toggles.show_cursor && hover == HoverTarget::RenderArea {
             let cursor_color = [1.0_f32, 1.0, 1.0, 0.8];
             let cursor_line_thickness = 2.0_f32;
             let [mu, mv] = render_area.mouse_uv;
@@ -1540,6 +1548,91 @@ impl Renderer {
                 default_color: cursor_text_color,
                 custom_glyphs: &[],
             });
+        }
+
+        // Render-area toggle toolbar (issue #27). Four small buttons in
+        // the top-right corner: grid / cursor / axis-numbers / 2D-3D.
+        // Filled background = toggle is on; hollow = off. The 2D/3D
+        // button swaps its label to reflect the *current* mode so the
+        // visible text always reads as a state, not an action.
+        //
+        // The rects are stashed on `self.render_area_toggle_rects` so
+        // hit-testing in `app/state.rs` can read them back without
+        // re-deriving the same layout math.
+        {
+            let toggle_button_size = (24.0_f32 * scale).round();
+            let toggle_button_gap = (4.0_f32 * scale).round();
+            let toggle_padding = (8.0_f32 * scale).round();
+            let toggle_kinds = crate::app::render_area::ToggleKind::all();
+            let toggle_count = toggle_kinds.len() as f32;
+            let toggle_total_w =
+                toggle_count * toggle_button_size + (toggle_count - 1.0) * toggle_button_gap;
+            let toggle_y = rp.y + toggle_padding;
+            let toggle_x_start = rp.x + rp.w - toggle_total_w - toggle_padding;
+            let fits = rp.w >= toggle_total_w + 2.0 * toggle_padding
+                && rp.h >= toggle_button_size + 2.0 * toggle_padding;
+            if fits {
+                let radius = 4.0 * scale;
+                let on_text = GlyphonColor::rgba(0, 0, 0, 255);
+                let off_text = GlyphonColor::rgba(255, 255, 255, 255);
+                let label_h = fonts::small_size() * 1.4;
+                for (i, kind) in toggle_kinds.iter().enumerate() {
+                    let bx = toggle_x_start + i as f32 * (toggle_button_size + toggle_button_gap);
+                    let rect = Rect {
+                        x: bx,
+                        y: toggle_y,
+                        w: toggle_button_size,
+                        h: toggle_button_size,
+                    };
+                    self.render_area_toggle_rects[i] = rect;
+
+                    let is_on = render_area.toggles.get(*kind);
+                    let is_hovered =
+                        matches!(hover, HoverTarget::RenderAreaToggle(k) if k == *kind);
+                    let bg_color = match (is_on, is_hovered) {
+                        (true, true) => [1.0_f32, 1.0, 1.0, 0.95],
+                        (true, false) => [1.0_f32, 1.0, 1.0, 0.80],
+                        (false, true) => [0.0_f32, 0.0, 0.0, 0.70],
+                        (false, false) => [0.0_f32, 0.0, 0.0, 0.45],
+                    };
+                    cursor_bg_rects.push(RectInstance {
+                        x: rect.x,
+                        y: rect.y,
+                        w: rect.w,
+                        h: rect.h,
+                        color: bg_color,
+                        corner_radius: radius,
+                        _padding: [0.0; 3],
+                    });
+
+                    let label = if is_on {
+                        &self.render_area_toggle_labels_on[i]
+                    } else {
+                        &self.render_area_toggle_labels_off[i]
+                    };
+                    let lw = Self::measure_label_width(label);
+                    let lx = rect.x + (rect.w - lw) / 2.0;
+                    let ly = rect.y + (rect.h - label_h) / 2.0;
+                    cursor_text_areas.push(TextArea {
+                        buffer: label,
+                        left: lx,
+                        top: ly,
+                        scale: 1.0,
+                        bounds: rp_bounds,
+                        default_color: if is_on { on_text } else { off_text },
+                        custom_glyphs: &[],
+                    });
+                }
+            } else {
+                for r in self.render_area_toggle_rects.iter_mut() {
+                    *r = Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 0.0,
+                        h: 0.0,
+                    };
+                }
+            }
         }
 
         // Color picker — pushed onto the late cursor-overlay collections so

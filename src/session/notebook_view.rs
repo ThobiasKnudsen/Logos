@@ -35,6 +35,10 @@ pub struct NotebookView {
     /// Math-space viewport bounds (xmin, ymin, xmax, ymax). Saved/restored
     /// on tab switch.
     pub axis_bounds: Option<[f32; 4]>,
+    /// Per-tab render-area visibility toggles (grid/cursor/axis numbers/
+    /// 2D-3D mode). Stashed on tab switch like `axis_bounds` so each
+    /// notebook keeps its own preferences without leaking across tabs.
+    pub view_toggles: crate::app::render_area::ViewToggles,
     pub notebook: Notebook,
 }
 
@@ -52,6 +56,7 @@ impl NotebookView {
             active_cell_index: 0,
             is_modified: false,
             axis_bounds: None,
+            view_toggles: crate::app::render_area::ViewToggles::default(),
             notebook,
         }
     }
@@ -89,6 +94,7 @@ impl NotebookView {
             active_cell_index: 0,
             is_modified: false,
             axis_bounds: None,
+            view_toggles: crate::app::render_area::ViewToggles::default(),
             notebook,
         })
     }
