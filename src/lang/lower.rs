@@ -211,6 +211,7 @@ fn hoist_recurse(
                         span: *span,
                     }),
                     span: *span,
+                    value_ty: None,
                 });
                 return Ir::Identifier {
                     name,
@@ -250,11 +251,12 @@ fn hoist_recurse(
                 .collect(),
             span: *span,
         },
-        Ir::Binding { name, value, span } => Ir::Binding {
+        Ir::Binding { name, value, span, .. } => Ir::Binding {
             name: name.clone(),
             // The binding's value position is handled by existing lifting.
             value: Box::new(hoist_recurse(value, false, counter, prepended)),
             span: *span,
+            value_ty: None,
         },
         Ir::TupleBinding { names, value, span } => Ir::TupleBinding {
             names: names.clone(),
@@ -427,6 +429,7 @@ fn lift_lambdas_inner(node: &mut Ir, counter: &mut usize, new_defs: &mut Vec<Ir>
             name,
             value,
             span: binding_span,
+            ..
         } = taken
         else {
             unreachable!()

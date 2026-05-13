@@ -144,9 +144,15 @@ fn infer(node: &mut Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
             Ok(Type::Tuple(item_types?))
         }
 
-        Ir::Binding { name, value, .. } => {
+        Ir::Binding {
+            name,
+            value,
+            value_ty,
+            ..
+        } => {
             let ty = infer(value, env)?;
-            env.vars.insert(name.clone(), ty.clone());
+            *value_ty = Some(Box::new(ty.clone()));
+            env.vars.insert(name.clone(), ty);
             // A binding statement contributes no value to its enclosing block.
             Ok(Type::Void)
         }

@@ -27,7 +27,7 @@ pub fn generate(ast: &Ir) -> Result<String, String> {
     let owned_ast = super::lower::lower(ast.clone())?;
     let ast: &Ir = &owned_ast;
 
-    let mut ctx = GenContext::new();
+    let mut ctx = GenContext::new(ast);
 
     // Collect top-level function definitions (and bindings if no top-level loops)
     ctx.collect_functions(ast);
@@ -291,7 +291,7 @@ struct BoolFunctionDef {
     body: Ir,
 }
 
-struct GenContext {
+struct GenContext<'a> {
     functions: Vec<EmittedFunction>,
     bindings: Vec<EmittedBinding>,
     /// Names of user-defined functions that return vec types (not f32).
@@ -301,9 +301,6 @@ struct GenContext {
     /// IR bodies of bool functions — used for inlining during corner-checking
     /// so that comparisons go through sign-change detection, not float ==.
     bool_function_defs: std::collections::HashMap<String, BoolFunctionDef>,
-    /// IR values of bool-typed bindings — used for inlining during
-    /// corner-checking so `f := x = y^2; plot(f)` renders the curve correctly.
-    bool_binding_defs: std::collections::HashMap<String, Ir>,
     /// Block-valued bindings (e.g. `f := (sum := 0; for ... ; y = sum)`) lifted
     /// into WGSL functions so corner-checking can re-evaluate the block at each
     /// corner, not just the pixel center.
@@ -315,6 +312,10 @@ struct GenContext {
     lifted_function_defs: std::collections::HashMap<String, LiftedFunctionDef>,
     /// For hoisted nested functions: maps function name → extra captured variables to pass.
     captured_vars: std::collections::HashMap<String, Vec<String>>,
+    /// Lowered AST. Methods like `result_is_bool` and `emit_bool_with_corners`
+    /// use it to resolve identifier references back to their binding's
+    /// declared value, replacing what used to be a `bool_binding_defs` cache.
+    ast: &'a Ir,
 }
 
 /// Metadata for a block-valued binding lifted into a WGSL function.
@@ -399,18 +400,18 @@ fn emit_corner_compare(op: BuiltinOp, calls: &[String; 4]) -> String {
 /// When `Some`, identifiers "x" and "y" are replaced with the given variable names.
 type CornerSubst<'a> = Option<(&'a str, &'a str)>;
 
-impl GenContext {
-    fn new() -> Self {
+impl<'a> GenContext<'a> {
+    fn new(ast: &'a Ir) -> Self {
         Self {
             functions: Vec::new(),
             bindings: Vec::new(),
             vec_functions: HashSet::new(),
             bool_functions: HashSet::new(),
             bool_function_defs: std::collections::HashMap::new(),
-            bool_binding_defs: std::collections::HashMap::new(),
             lifted_block_defs: std::collections::HashMap::new(),
             lifted_function_defs: std::collections::HashMap::new(),
             captured_vars: std::collections::HashMap::new(),
+            ast,
         }
     }
 
@@ -646,10 +647,6 @@ impl GenContext {
                     // Fall through if lifting failed.
                 }
 
-                if returns_bool(value) {
-                    let result_expr = block_result_expr(value).clone();
-                    self.bool_binding_defs.insert(name.clone(), result_expr);
-                }
                 if let Ok(expr_code) = self.emit_expr(value) {
                     self.bindings.push(EmittedBinding {
                         name: name.clone(),
@@ -986,7 +983,16 @@ impl GenContext {
                 returns_bool(node)
             }
             Ir::Identifier { name, .. } => {
-                self.bool_binding_defs.contains_key(name)
+                // A binding's `value_ty` (populated by `lower::annotate_types`)
+                // directly answers "is this name bound to a bool". The
+                // lifted-block branch is kept until Stage E folds those into
+                // the regular binding lookup.
+                find_binding(self.ast, name)
+                    .and_then(|b| match b {
+                        Ir::Binding { value_ty, .. } => value_ty.as_deref(),
+                        _ => None,
+                    })
+                    .is_some_and(|t| t == &Type::Bool)
                     || self
                         .lifted_block_defs
                         .get(name)
@@ -1435,9 +1441,23 @@ impl GenContext {
 
             // Identifier bound to a bool expression: inline so the comparison
             // goes through corner-checking instead of a direct float ==.
-            Ir::Identifier { name, .. } if self.bool_binding_defs.contains_key(name) => {
-                let bound = self.bool_binding_defs.get(name).unwrap().clone();
-                self.emit_bool_with_corners(&bound)
+            // The bool-ness check matches `result_is_bool` exactly; the inline
+            // path reads the binding's value (its result expression, in case
+            // the value was itself a block) and recurses for corner emission.
+            Ir::Identifier { name, .. }
+                if find_binding(self.ast, name)
+                    .and_then(|b| match b {
+                        Ir::Binding { value_ty, .. } => value_ty.as_deref(),
+                        _ => None,
+                    })
+                    .is_some_and(|t| t == &Type::Bool) =>
+            {
+                let value = find_binding(self.ast, name).and_then(|b| match b {
+                    Ir::Binding { value, .. } => Some(value.as_ref()),
+                    _ => None,
+                });
+                let bound = block_result_expr(value.expect("binding exists"));
+                self.emit_bool_with_corners(&bound.clone())
             }
 
             Ir::Apply { callee, args, .. } => {
@@ -1916,10 +1936,12 @@ fn substitute_params(body: &Ir, params: &[String], args: &[Ir]) -> Ir {
                 .collect(),
             span: *span,
         },
-        Ir::Binding { name, value, span } => Ir::Binding {
+        Ir::Binding { name, value, span, .. } => Ir::Binding {
             name: name.clone(),
             value: Box::new(substitute_params(value, params, args)),
             span: *span,
+            // Substituted body needs a fresh inference pass to repopulate.
+            value_ty: None,
         },
         Ir::IfExpr {
             condition,
@@ -1976,6 +1998,25 @@ fn corner_suffix(xv: &str, yv: &str) -> Option<&'static str> {
     }
 }
 
+
+/// Find the `Binding` with the given `name` in `ast`, returning the whole
+/// `Ir::Binding` node so the caller can read both its `value` and `value_ty`.
+/// Walks the tree in pre-order; first match wins. Returns `None` if there
+/// is no binding by that name (which includes both undeclared names and
+/// names that resolve to a function parameter or axis variable).
+fn find_binding<'a>(ast: &'a Ir, name: &str) -> Option<&'a Ir> {
+    if let Ir::Binding { name: n, .. } = ast {
+        if n == name {
+            return Some(ast);
+        }
+    }
+    for child in ast.children() {
+        if let Some(found) = find_binding(child, name) {
+            return Some(found);
+        }
+    }
+    None
+}
 
 /// If `node` is a Block, return its result expression (the last non-imperative
 /// statement). Otherwise return `node` itself.

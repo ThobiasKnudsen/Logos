@@ -203,6 +203,7 @@ impl Parser {
             name,
             value: Box::new(value),
             span,
+            value_ty: None,
         }))
     }
 
@@ -522,6 +523,7 @@ impl Parser {
                             name: synth_name.clone(),
                             value: Box::new(lambda),
                             span: lambda_span,
+                            value_ty: None,
                         };
                         let call = Ir::Apply {
                             callee: Callee::User(synth_name),

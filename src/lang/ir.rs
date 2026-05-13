@@ -322,11 +322,18 @@ pub enum Ir {
     /// Tuple literal: (a, b, c)
     Tuple { items: Vec<Ir>, span: Span },
 
-    /// Variable binding: `name := expr`
+    /// Variable binding: `name := expr`.
+    ///
+    /// `value_ty` is `None` at parse time and gets populated by
+    /// `lower::annotate_types` with the inferred type of `value`. Backends
+    /// read it to answer "is this a bool binding?" without walking the
+    /// value expression structurally. Boxed for the same reasons as
+    /// `Apply.result_ty`.
     Binding {
         name: String,
         value: Box<Ir>,
         span: Span,
+        value_ty: Option<Box<Type>>,
     },
 
     /// Block: sequence of statements; last is the return value
@@ -583,12 +590,18 @@ fn replace_at_path_inner(node: Ir, path: &[usize], replacement: Ir) -> Option<Ir
             items[head] = replace_at_path_inner(child, tail, replacement)?;
             Some(Ir::Block { items, span })
         }
-        Ir::Binding { name, value, span } if head == 0 => {
+        Ir::Binding {
+            name,
+            value,
+            span,
+            value_ty,
+        } if head == 0 => {
             let new_value = replace_at_path_inner(*value, tail, replacement)?;
             Some(Ir::Binding {
                 name,
                 value: Box::new(new_value),
                 span,
+                value_ty,
             })
         }
         Ir::TupleBinding { names, value, span } if head == 0 => {
@@ -823,10 +836,14 @@ fn substitute_idents_inner(node: &Ir, bindings: &[(String, Ir)]) -> Ir {
             items: items.iter().map(|a| substitute_idents_inner(a, bindings)).collect(),
             span: *span,
         },
-        Ir::Binding { name, value, span } => Ir::Binding {
+        Ir::Binding { name, value, span, .. } => Ir::Binding {
             name: name.clone(),
             value: Box::new(substitute_idents_inner(value, bindings)),
             span: *span,
+            // Substitution rebuilds the value subtree, so any pre-computed
+            // type annotation is stale; let a later annotate_types pass
+            // refill it.
+            value_ty: None,
         },
         Ir::TupleBinding { names, value, span } => Ir::TupleBinding {
             names: names.clone(),
@@ -1189,6 +1206,7 @@ mod to_source_tests {
                 name: name.clone(),
                 value: Box::new(strip_spans(value)),
                 span: (0, 0),
+                value_ty: None,
             },
             Ir::Block { items, .. } => Ir::Block {
                 items: items.iter().map(strip_spans).collect(),
