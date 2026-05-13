@@ -952,6 +952,30 @@ fn examples_render_through_notebook() {
     );
 }
 
+/// User-reported regression: `plot((x) |-> sin(x), (x) |-> …)` —
+/// value and color lambdas both name their param `x` — errors with
+/// "No result expression found" through the *full notebook flow*
+/// even though it passes the lower-level `lang::compile_plot` path.
+/// Exercises the actual `play()` route so we don't paper over a
+/// notebook-only regression.
+#[test]
+fn plot_with_explicit_color_lambda_through_notebook() {
+    let mut nb = null_notebook();
+    let i = add_and_play(
+        &mut nb,
+        "plot((x) |-> sin(x), (x) |-> (sin(x), cos(x), 0.5, 1))",
+    );
+    let outcome = &nb.cell(i).outcome;
+    if let Some(CellMessage::Error(e)) = &outcome.message {
+        panic!("plot+color through notebook failed:\n{}", e);
+    }
+    assert!(
+        !outcome.shaders.is_empty(),
+        "expected a shader; diagnostics: {:?}",
+        outcome.diagnostics
+    );
+}
+
 /// Issue #28: `plot(<array of 2-tuples>)` routes through the vertex-
 /// plot path and surfaces vertex data on the ShaderSpec. The
 /// fragment-only `wgsl` field carries the canonical vertex+fragment

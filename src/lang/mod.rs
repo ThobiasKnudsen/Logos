@@ -870,6 +870,21 @@ mod integration_tests {
         assert!(wgsl.contains("let _color = _plot_color_"));
     }
 
+    /// User-reported regression: both lambdas use `x` as their param
+    /// name. Earlier I assumed unique synthesized names via span
+    /// guarantee uniqueness, but a downstream walker must also keep
+    /// the cell's *result* expression alive — the `Apply(Eq, …)` —
+    /// or `find_result_expr` errors with "all statements are
+    /// bindings". This exercises that path.
+    #[test]
+    fn test_plot_color_same_param_name_in_value_and_color() {
+        let wgsl = compile_plot(
+            "plot((x) |-> sin(x), (x) |-> (sin(x), cos(x), 0.5, 1))",
+        );
+        assert!(wgsl.contains("fn _plot_color_"));
+        assert!(wgsl.contains("let _color = _plot_color_"));
+    }
+
     /// 2D surface plots take the color path through the numeric
     /// branch instead of the corner-check branch — the same color
     /// helper still gets called, and `u.primary_color` still drops

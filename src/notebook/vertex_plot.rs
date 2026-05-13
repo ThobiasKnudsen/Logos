@@ -120,6 +120,16 @@ fn eval_const_num(node: &Ir) -> Option<f32> {
 /// plots pan and zoom with the render area just like analytic shaders
 /// do. The fragment shader emits the cell's primary color, premulti-
 /// plied to match the rest of the pipeline's blend setup.
+///
+/// **Y convention**: `render::frame` passes `axis_bounds` to the shader
+/// pipeline as `[x_min, y_MAX, x_max, y_MIN]` — y is intentionally
+/// swapped (see `src/render/frame.rs` near `shader_pipeline.render`)
+/// so the analytic shader's already-y-flipped UV math ends up with
+/// world-y-up rendering. That means `u.axis_min.y` is the math y at
+/// the *top* of the screen and `u.axis_max.y` is the math y at the
+/// *bottom*. The vertex shader compensates by inverting the y leg of
+/// the NDC mapping; without that, a vertex at `(0, 1)` would render
+/// below a vertex at `(0, 0)`.
 pub const VERTEX_PLOT_WGSL: &str = r#"struct Uniforms {
     time: f32,
     max_loop_iter: u32,
@@ -142,8 +152,12 @@ pub const VERTEX_PLOT_WGSL: &str = r#"struct Uniforms {
 fn vs_main(@location(0) world_pos: vec2<f32>) -> @builtin(position) vec4<f32> {
     let range = u.axis_max - u.axis_min;
     let normalized = (world_pos - u.axis_min) / range;
-    // Map [0, 1] to NDC [-1, 1]; flip y so world y-up matches screen.
-    let ndc = vec2<f32>(normalized.x * 2.0 - 1.0, normalized.y * 2.0 - 1.0);
+    // X: standard [0, 1] -> [-1, 1] mapping.
+    // Y: inverted because `u.axis_min.y` is the math y at the *top* of
+    // the viewport (see the comment on `VERTEX_PLOT_WGSL` above); without
+    // this flip vertex plots render upside-down relative to the analytic
+    // plot path.
+    let ndc = vec2<f32>(normalized.x * 2.0 - 1.0, 1.0 - normalized.y * 2.0);
     return vec4<f32>(ndc, 0.0, 1.0);
 }
 
