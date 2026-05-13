@@ -138,6 +138,39 @@ pub fn generate(ast: &Ir) -> Result<String, String> {
     shader.push_str("    let x = world.x;\n");
     shader.push_str("    let y = world.y;\n");
 
+    // If the user supplied a per-pixel color expression (plot's second
+    // arg), build a synthetic call to the lifted helper and emit it
+    // here. From then on `color_var` names the resulting `vec4<f32>`
+    // and replaces every `u.primary_color` reference below — bool
+    // (curve) and numeric (field) branches both use it transparently.
+    // The vec-result branch already produces its own RGBA, so an
+    // explicit color is redundant there and we skip the call.
+    let plot_color_fn = if is_vec { None } else { find_plot_color_fn(ast) };
+    let color_var = if let Some((fn_name, arity)) = &plot_color_fn {
+        let axis_args: Vec<Ir> = (0..*arity)
+            .map(|i| Ir::Identifier {
+                name: match i {
+                    0 => "x".to_string(),
+                    1 => "y".to_string(),
+                    _ => unreachable!("plot color lambda arity is validated at canonicalization"),
+                },
+                span: (0, 0),
+                resolved: None,
+            })
+            .collect();
+        let call_ir = Ir::Apply {
+            callee: Callee::User(fn_name.clone()),
+            args: axis_args,
+            span: (0, 0),
+            result_ty: None,
+        };
+        let call_wgsl = ctx.emit_expr(&call_ir)?;
+        shader.push_str(&format!("    let _color = {};\n", call_wgsl));
+        "_color"
+    } else {
+        "u.primary_color"
+    };
+
     if top_has_loops {
         // Imperative emission for top-level code with loops
         let top_stmts = match ast {
@@ -225,9 +258,10 @@ pub fn generate(ast: &Ir) -> Result<String, String> {
         // Pipeline blends with premultiplied alpha, so the RGB output must
         // be pre-multiplied by both shade and the user-chosen alpha — else
         // RGB dominates regardless of alpha.
-        shader.push_str(
-            "    let _a = _shade * u.primary_color.a;\n    return vec4<f32>(u.primary_color.rgb * _a, _a);\n",
-        );
+        shader.push_str(&format!(
+            "    let _a = _shade * {0}.a;\n    return vec4<f32>({0}.rgb * _a, _a);\n",
+            color_var,
+        ));
     } else {
         // Numeric expressions: clamp to [0, 1] grayscale
         let expr_code = ctx.emit_expr(expr)?;
@@ -236,9 +270,10 @@ pub fn generate(ast: &Ir) -> Result<String, String> {
         // Pipeline blends with premultiplied alpha, so the RGB output must
         // be pre-multiplied by both shade and the user-chosen alpha — else
         // RGB dominates regardless of alpha.
-        shader.push_str(
-            "    let _a = _shade * u.primary_color.a;\n    return vec4<f32>(u.primary_color.rgb * _a, _a);\n",
-        );
+        shader.push_str(&format!(
+            "    let _a = _shade * {0}.a;\n    return vec4<f32>({0}.rgb * _a, _a);\n",
+            color_var,
+        ));
     }
     shader.push_str("}\n");
 
@@ -1890,6 +1925,33 @@ fn function_captured<'a>(ast: &'a Ir, name: &str) -> &'a [String] {
         },
         _ => &[],
     }
+}
+
+/// Find the synthesized per-pixel-color `FunctionDef` (named
+/// `_plot_color_<span>` by `lang::canonicalize_plot_color`) in `ast`,
+/// returning its `(name, arity)`. Returns `None` when no color arg
+/// was supplied. There is at most one per `wgsl_gen::generate` call
+/// because the notebook compiles one `plot(...)` per shader.
+///
+/// `arity` is the user-facing parameter count — 0 for implicit-tuple
+/// colors (axis vars enter via capture), 1 for `(x) ↦ …`, or 2 for
+/// `(x, y) ↦ …`. Captures are appended at the call site by the same
+/// path that handles ordinary user function calls.
+fn find_plot_color_fn(ast: &Ir) -> Option<(String, usize)> {
+    fn walk(node: &Ir) -> Option<(String, usize)> {
+        if let Ir::FunctionDef { name, params, .. } = node {
+            if name.starts_with(super::PLOT_COLOR_FN_PREFIX) {
+                return Some((name.clone(), params.len()));
+            }
+        }
+        for child in node.children() {
+            if let Some(found) = walk(child) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(ast)
 }
 
 

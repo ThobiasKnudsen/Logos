@@ -747,11 +747,17 @@ fn resolve_builtin(op: BuiltinOp, args: &[Type]) -> Result<Type, BuiltinResolveE
                 got: args.len(),
             }),
         },
-        Plot => match args {
-            [_] => Ok(Type::Void),
-            _ => Err(BuiltinResolveErr::WrongArity {
+        // `plot(value)` and `plot(value, color)` are both accepted; the
+        // optional 2nd arg supplies the per-pixel RGBA color.
+        Plot => match args.len() {
+            1 | 2 => Ok(Type::Void),
+            0 => Err(BuiltinResolveErr::WrongArity {
                 expected: 1,
-                got: args.len(),
+                got: 0,
+            }),
+            n => Err(BuiltinResolveErr::WrongArity {
+                expected: 2,
+                got: n,
             }),
         },
     }

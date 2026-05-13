@@ -204,6 +204,11 @@ pub fn build_print_ir(ir: &Ir, print_index: usize) -> Ir {
 /// comparisons (`y = sin(x)`, bare value expressions) all produce the same
 /// downstream shape: a binding to a synthesized helper function plus a
 /// call wired to the canonical axis variables.
+///
+/// If `plot()` carries a second positional arg, it's the per-pixel color
+/// (see issue #24). `canonicalize_plot_color` lifts it into a synthetic
+/// `_plot_color_<span>` binding so wgsl_gen can pick it up and use the
+/// result vec4 in place of `u.primary_color`.
 pub fn build_plot_ir(ir: &Ir, plot_index: usize) -> Result<Ir, String> {
     let stmts = match ir {
         Ir::Block { items: stmts, .. } => stmts,
@@ -215,7 +220,11 @@ pub fn build_plot_ir(ir: &Ir, plot_index: usize) -> Result<Ir, String> {
             } = other
             {
                 if !args.is_empty() {
-                    let canonical = canonicalize_plot_body(&args[0])?;
+                    let mut canonical = Vec::new();
+                    if let Some(color) = args.get(1) {
+                        canonical.push(canonicalize_plot_color(color));
+                    }
+                    canonical.extend(canonicalize_plot_body(&args[0])?);
                     return Ok(coalesce_block(canonical, other.span()));
                 }
             }
@@ -233,8 +242,10 @@ pub fn build_plot_ir(ir: &Ir, plot_index: usize) -> Result<Ir, String> {
             } = stmt
             {
                 if !args.is_empty() {
-                    let canonical = canonicalize_plot_body(&args[0])?;
-                    result.extend(canonical);
+                    if let Some(color) = args.get(1) {
+                        result.push(canonicalize_plot_color(color));
+                    }
+                    result.extend(canonicalize_plot_body(&args[0])?);
                 }
             }
             continue;
@@ -356,6 +367,52 @@ fn canonicalize_plot_body(arg: &Ir) -> Result<Vec<Ir>, String> {
         )),
     }
 }
+
+/// Lift `plot()`'s optional second argument into a synthetic
+/// `_plot_color_<span>` binding that `wgsl_gen` recognizes and uses
+/// as the per-pixel RGBA output in place of `u.primary_color`.
+///
+/// Two input shapes are accepted, both desugared into the same lambda
+/// shape so the downstream pipeline (lift_lambdas, capture analysis,
+/// codegen) handles them uniformly:
+///
+/// - Explicit lambda `(x) ↦ (r,g,b,a)` / `(x, y) ↦ (r,g,b,a)` — passed
+///   through; lift_lambdas turns the binding into a top-level
+///   `FunctionDef`.
+///
+/// - Implicit expression `(sin(x), cos(y), x*y, 1)` — wrapped in a
+///   0-parameter lambda. Capture analysis then promotes referenced
+///   axis vars to extra function arguments at the call site, so the
+///   user can mix `x`, `y` and any in-scope bindings freely.
+///
+/// The synthesized binding is uniquely named by source span so multi-
+/// plot cells stay free of name collisions, and any unexpected color
+/// value type surfaces through the normal type-checker once the
+/// surrounding expression is inferred.
+fn canonicalize_plot_color(arg: &Ir) -> Ir {
+    let span = arg.span();
+    let synth_name = format!("_plot_color_{}_{}", span.0, span.1);
+    let lambda_value = match arg {
+        Ir::Lambda { .. } => arg.clone(),
+        other => Ir::Lambda {
+            params: Vec::new(),
+            body: Box::new(other.clone()),
+            span,
+        },
+    };
+    Ir::Binding {
+        name: synth_name,
+        value: Box::new(lambda_value),
+        span,
+        value_ty: None,
+    }
+}
+
+/// Prefix used by `canonicalize_plot_color` for the synthesized
+/// color-function binding. Public so `wgsl_gen` can locate the
+/// matching `FunctionDef` after `lift_lambdas` runs without
+/// re-deriving the naming convention.
+pub(crate) const PLOT_COLOR_FN_PREFIX: &str = "_plot_color_";
 
 /// Lex and parse source code into Logos IR.
 pub fn parse(source: &str) -> Result<Ir, String> {
@@ -768,6 +825,85 @@ mod integration_tests {
     fn test_plot_lambda_param_can_be_any_name() {
         let wgsl = compile_plot("plot((u) |-> sin(u))");
         assert!(wgsl.contains("_plot_fn_"), "expected lifted helper fn");
+    }
+
+    /// Implicit color tuple in a 1D plot must lift to a `_plot_color_*`
+    /// helper, swap `u.primary_color` for `_color`, and route the
+    /// captured axis vars to the call site. Without all three, the
+    /// shader either references undeclared captures or keeps using the
+    /// uniform color the user explicitly overrode.
+    #[test]
+    fn test_plot_color_implicit_tuple_replaces_primary_color() {
+        let wgsl = compile_plot("plot(y = sin(x), (sin(x), cos(y), 0.5, 1))");
+        assert!(
+            wgsl.contains("fn _plot_color_"),
+            "expected lifted color fn; got:\n{}",
+            wgsl
+        );
+        assert!(
+            wgsl.contains("let _color = _plot_color_"),
+            "expected `let _color = _plot_color_…(…)`; got:\n{}",
+            wgsl
+        );
+        assert!(
+            !wgsl.contains("u.primary_color"),
+            "u.primary_color should not appear in the curve return; got:\n{}",
+            wgsl
+        );
+        assert!(
+            wgsl.contains("_color.rgb") && wgsl.contains("_color.a"),
+            "the return path must use _color, got:\n{}",
+            wgsl
+        );
+    }
+
+    /// Explicit 1-arg color lambda: param name irrelevant, axis vars
+    /// flow in through the lifted call. Validates that an explicit
+    /// lambda path goes through the same `_plot_color_*` machinery
+    /// as the implicit tuple form.
+    #[test]
+    fn test_plot_color_explicit_lambda_compiles() {
+        let wgsl = compile_plot(
+            "plot((x) |-> sin(x), (u) |-> (sin(u), cos(u), 0.5, 1))",
+        );
+        assert!(wgsl.contains("fn _plot_color_"), "expected lifted color fn");
+        assert!(wgsl.contains("let _color = _plot_color_"));
+    }
+
+    /// 2D surface plots take the color path through the numeric
+    /// branch instead of the corner-check branch — the same color
+    /// helper still gets called, and `u.primary_color` still drops
+    /// out of the return.
+    #[test]
+    fn test_plot_color_two_d_field_uses_color() {
+        let wgsl = compile_plot(
+            "plot((u, v) |-> u*v, (u, v) |-> (u, v, 0.5, 1))",
+        );
+        assert!(wgsl.contains("fn _plot_color_"), "got:\n{}", wgsl);
+        assert!(wgsl.contains("_color.rgb"), "got:\n{}", wgsl);
+        assert!(
+            !wgsl.contains("u.primary_color"),
+            "u.primary_color should be replaced; got:\n{}",
+            wgsl
+        );
+    }
+
+    /// Without a color arg, `u.primary_color` remains the source of
+    /// truth — guards the default path from regression as the color
+    /// branch lands.
+    #[test]
+    fn test_plot_without_color_keeps_primary_color() {
+        let wgsl = compile_plot("plot(y = sin(x))");
+        assert!(
+            wgsl.contains("u.primary_color"),
+            "expected default uniform color; got:\n{}",
+            wgsl
+        );
+        assert!(
+            !wgsl.contains("let _color ="),
+            "no color helper should be emitted; got:\n{}",
+            wgsl
+        );
     }
 }
 
