@@ -1,0 +1,35 @@
+logos_version := 0.1
+
+cells := [
+  (
+    plot_color := (0.3, 0.7, 0.9, 1.0),
+    content := (
+        # Riemann sum with an explicit step via `a..b..d`. The third operand
+        # of `..` is the iteration delta — default is 1, here we use 0.05.
+        Integral(f, x0, x1, d) := (
+            sum := 0
+            for i in x0..x1..d (
+                sum := sum + f(i) * d
+            )
+            sum
+        )
+
+        plot(y = Integral(s ↦ s*s, 0, x, 0.05))
+    ),
+  ),
+  (
+    plot_color := (0.9, 0.4, 0.6, 1.0),
+    content := (
+        # Halving the delta refines the approximation.
+        FineIntegral(f, x0, x1) := (
+            sum := 0
+            for i in x0..x1..0.01 (
+                sum := sum + f(i) * 0.01
+            )
+            sum
+        )
+
+        plot(y = FineIntegral(s ↦ cos(s), 0, x))
+    ),
+  ),
+]

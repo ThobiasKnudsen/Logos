@@ -24,7 +24,7 @@ fn token_color(ty: &TokenType) -> Rgba {
         | TokenType::And
         | TokenType::Or
         | TokenType::Not
-        | TokenType::Parallel
+        | TokenType::Gpu
         | TokenType::In => theme.keyword,
 
         // Literals

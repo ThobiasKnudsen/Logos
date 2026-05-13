@@ -14,6 +14,14 @@ pub enum Value {
     F64(f64),
     Bool(bool),
     Array(Vec<f64>),
+    /// First-class range value: `0..10` → `Range { start: 0, end: 10, delta: 1 }`.
+    /// `0..10..0.5` adds an explicit step. Stored 1-D; multi-dim ranges only
+    /// exist as transient `Ir::Range` nodes consumed by a `for` loop.
+    Range {
+        start: f64,
+        end: f64,
+        delta: f64,
+    },
     Void,
 }
 
@@ -60,6 +68,13 @@ impl std::fmt::Display for Value {
                     }
                 }
                 write!(f, "]")
+            }
+            Value::Range { start, end, delta } => {
+                write!(f, "{}..{}", start, end)?;
+                if *delta != 1.0 {
+                    write!(f, "..{}", delta)?;
+                }
+                Ok(())
             }
             Value::Void => write!(f, "()"),
         }
@@ -122,11 +137,40 @@ impl Env {
 // GPU callback: called when a parallel for is encountered
 // ---------------------------------------------------------------------------
 
-/// Information the interpreter passes to the GPU dispatch layer.
-pub struct ParallelForRequest {
+/// One iteration dimension of a (possibly multi-dim) parallel for.
+/// `count()` returns the number of iterations contributed by this axis.
+#[derive(Debug, Clone)]
+pub struct DimSpec {
     pub var_name: String,
-    pub range_start: usize,
-    pub range_end: usize,
+    pub start: f64,
+    pub end: f64,
+    pub delta: f64,
+}
+
+impl DimSpec {
+    /// Iteration count for this axis: `((end - start) / delta).ceil()`,
+    /// clamped to 0 for degenerate (empty or inverted) ranges.
+    pub fn count(&self) -> u32 {
+        let span = self.end - self.start;
+        if self.delta == 0.0 {
+            return 0;
+        }
+        let raw = span / self.delta;
+        if !raw.is_finite() || raw <= 0.0 {
+            0
+        } else {
+            raw.ceil() as u32
+        }
+    }
+}
+
+/// Information the interpreter passes to the GPU dispatch layer.
+///
+/// `dims` is the per-axis iteration specification (one entry for a 1-D
+/// loop, N entries for an N-D Cartesian iteration). The total thread
+/// count is `dims.iter().map(|d| d.count()).product()`.
+pub struct ParallelForRequest {
+    pub dims: Vec<DimSpec>,
     pub body: Ir,
     /// Arrays that are written to (read-write storage buffers).
     pub readwrite_arrays: Vec<(String, Vec<f64>)>,
@@ -134,6 +178,13 @@ pub struct ParallelForRequest {
     pub readonly_arrays: Vec<(String, Vec<f64>)>,
     /// Scalar constants referenced in the body.
     pub scalars: Vec<(String, f64)>,
+}
+
+impl ParallelForRequest {
+    /// Total number of GPU threads to dispatch (product of per-axis counts).
+    pub fn total_threads(&self) -> u32 {
+        self.dims.iter().map(|d| d.count()).product()
+    }
 }
 
 /// Trait for GPU dispatch — the interpreter calls this for parallel for.
@@ -159,12 +210,13 @@ impl GpuDispatch for CpuFallback {
             env.vars.insert(name.clone(), Value::F64(*val));
         }
 
-        // Execute body for each index (sequentially on CPU)
-        for i in request.range_start..request.range_end {
-            env.vars
-                .insert(request.var_name.clone(), Value::F64(i as f64));
-            eval_node(&request.body, &mut env, &CpuFallback)?;
-        }
+        // Execute body for each combination of indices (Cartesian product).
+        iterate_dims(&request.dims, &mut |coords| {
+            for (dim, value) in request.dims.iter().zip(coords.iter()) {
+                env.vars.insert(dim.var_name.clone(), Value::F64(*value));
+            }
+            eval_node(&request.body, &mut env, &CpuFallback).map(|_| ())
+        })?;
 
         // Collect updated read-write arrays
         let mut results = Vec::new();
@@ -175,6 +227,43 @@ impl GpuDispatch for CpuFallback {
         }
         Ok(results)
     }
+}
+
+/// Walk every Cartesian combination of `dims`, calling `body` with the
+/// current value of each axis. Iteration order is leftmost-axis-outermost.
+fn iterate_dims<F>(dims: &[DimSpec], body: &mut F) -> Result<(), String>
+where
+    F: FnMut(&[f64]) -> Result<(), String>,
+{
+    let mut coords = vec![0.0_f64; dims.len()];
+    iterate_dims_inner(dims, 0, &mut coords, body)
+}
+
+fn iterate_dims_inner<F>(
+    dims: &[DimSpec],
+    axis: usize,
+    coords: &mut Vec<f64>,
+    body: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(&[f64]) -> Result<(), String>,
+{
+    if axis == dims.len() {
+        return body(coords);
+    }
+    let d = &dims[axis];
+    let count = d.count();
+    if count as usize > MAX_LOOP_ITERATIONS {
+        return Err(format!(
+            "for loop axis '{}' has too many iterations ({}, max {})",
+            d.var_name, count, MAX_LOOP_ITERATIONS
+        ));
+    }
+    for i in 0..count {
+        coords[axis] = d.start + (i as f64) * d.delta;
+        iterate_dims_inner(dims, axis + 1, coords, body)?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -230,15 +319,26 @@ fn eval_node(node: &Ir, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Value, S
             }
         }
 
-        Ir::Range { start, end, .. } => {
-            // Ranges aren't values themselves — they're only valid inside parallel for.
-            // If we reach here, the user wrote a range outside that context.
-            let s = eval_node(start, env, gpu)?.as_f64()?;
-            let e = eval_node(end, env, gpu)?.as_f64()?;
-            // Return as array of indices for convenience
-            let len = (e - s) as usize;
-            let arr: Vec<f64> = (0..len).map(|i| s + i as f64).collect();
-            Ok(Value::Array(arr))
+        Ir::Range {
+            start, end, delta, ..
+        } => {
+            let s = eval_node(start, env, gpu)?;
+            let e = eval_node(end, env, gpu)?;
+            let d = match delta {
+                Some(d) => eval_node(d, env, gpu)?,
+                None => Value::F64(1.0),
+            };
+            match (&s, &e, &d) {
+                (Value::F64(sf), Value::F64(ef), Value::F64(df)) => Ok(Value::Range {
+                    start: *sf,
+                    end: *ef,
+                    delta: *df,
+                }),
+                _ => Err(
+                    "range with tuple endpoints can only appear as a for-loop range"
+                        .to_string(),
+                ),
+            }
         }
 
         Ir::Binding { name, value, .. } => {
@@ -317,37 +417,25 @@ fn eval_node(node: &Ir, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Value, S
         }
 
         Ir::ForLoop {
-            var, range, body, ..
+            vars, range, body, ..
         } => {
-            let (start, end) = match range.as_ref() {
-                Ir::Range { start, end, .. } => {
-                    let s_f = eval_node(start, env, gpu)?.as_f64()?;
-                    let e_f = eval_node(end, env, gpu)?.as_f64()?;
-                    if s_f < 0.0 || e_f < 0.0 {
-                        return Err(format!(
-                            "for loop range bounds must be non-negative ({}..{})",
-                            s_f, e_f
-                        ));
-                    }
-                    if e_f < s_f {
-                        return Err(format!("for loop range end < start ({}..{})", s_f, e_f));
-                    }
-                    (s_f as usize, e_f as usize)
-                }
-                _ => return Err("for loop range must be start..end".to_string()),
-            };
-            if end - start > MAX_LOOP_ITERATIONS {
+            let dims = resolve_for_dims(vars, range, env, gpu)?;
+            // Pre-flight: total iterations must not exceed the safety cap.
+            let total: u64 = dims.iter().map(|d| d.count() as u64).product();
+            if total > MAX_LOOP_ITERATIONS as u64 {
                 return Err(format!(
                     "for loop range too large ({} iterations, max {})",
-                    end - start,
-                    MAX_LOOP_ITERATIONS
+                    total, MAX_LOOP_ITERATIONS
                 ));
             }
             let mut last = Value::Void;
-            for i in start..end {
-                env.vars.insert(var.clone(), Value::F64(i as f64));
+            iterate_dims(&dims, &mut |coords| {
+                for (dim, value) in dims.iter().zip(coords.iter()) {
+                    env.vars.insert(dim.var_name.clone(), Value::F64(*value));
+                }
                 last = eval_node(body, env, gpu)?;
-            }
+                Ok(())
+            })?;
             Ok(last)
         }
 
@@ -407,8 +495,8 @@ fn eval_node(node: &Ir, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Value, S
         }
 
         Ir::ParallelFor {
-            var, range, body, ..
-        } => eval_parallel_for(var, range, body, env, gpu),
+            vars, range, body, ..
+        } => eval_parallel_for(vars, range, body, env, gpu),
     }
 }
 
@@ -533,36 +621,13 @@ fn eval_apply(
 // ---------------------------------------------------------------------------
 
 fn eval_parallel_for(
-    var: &str,
+    vars: &[String],
     range_node: &Ir,
     body: &Ir,
     env: &mut Env,
     gpu: &dyn GpuDispatch,
 ) -> Result<Value, String> {
-    // Evaluate range
-    let (start, end) = match range_node {
-        Ir::Range { start, end, .. } => {
-            let s_f = eval_node(start, env, gpu)?.as_f64()?;
-            let e_f = eval_node(end, env, gpu)?.as_f64()?;
-            if s_f < 0.0 || e_f < 0.0 {
-                return Err(format!(
-                    "parallel for range bounds must be non-negative ({}..{})",
-                    s_f, e_f
-                ));
-            }
-            if e_f < s_f {
-                return Err(format!("parallel for range end < start ({}..{})", s_f, e_f));
-            }
-            (s_f as usize, e_f as usize)
-        }
-        _ => {
-            let val = eval_node(range_node, env, gpu)?;
-            match val {
-                Value::Array(a) => (0, a.len()),
-                _ => return Err("parallel for range must be start..end".to_string()),
-            }
-        }
-    };
+    let dims = resolve_for_dims(vars, range_node, env, gpu)?;
 
     // Find which arrays are written to (IndexAssign targets). Vec preserves
     // insertion order (used below for `last_written`); HashSet does dedup
@@ -582,7 +647,7 @@ fn eval_parallel_for(
     let mut scalars = Vec::new();
 
     for name in &referenced {
-        if name == var {
+        if vars.iter().any(|v| v == name) {
             continue;
         }
         if let Some(val) = env.vars.get(name) {
@@ -596,7 +661,7 @@ fn eval_parallel_for(
                 }
                 Value::F64(n) => scalars.push((name.clone(), *n)),
                 Value::Bool(b) => scalars.push((name.clone(), if *b { 1.0 } else { 0.0 })),
-                Value::Void => {}
+                Value::Range { .. } | Value::Void => {}
             }
         }
     }
@@ -604,9 +669,7 @@ fn eval_parallel_for(
     let last_written = written_names.last().cloned();
 
     let request = ParallelForRequest {
-        var_name: var.to_string(),
-        range_start: start,
-        range_end: end,
+        dims,
         body: body.clone(),
         readwrite_arrays,
         readonly_arrays,
@@ -628,6 +691,156 @@ fn eval_parallel_for(
             .ok_or_else(|| format!("Array '{}' not found", name))
     } else {
         Ok(Value::Void)
+    }
+}
+
+/// Resolve a for-loop's range expression to a list of `DimSpec`s, one per
+/// loop variable. Verifies that the number of dimensions in the range
+/// matches the number of loop variables.
+fn resolve_for_dims(
+    vars: &[String],
+    range_node: &Ir,
+    env: &mut Env,
+    gpu: &dyn GpuDispatch,
+) -> Result<Vec<DimSpec>, String> {
+    let dims: Vec<DimSpec> = match range_node {
+        // Multi-dim from already-defined ranges: `for (x, y) (body)`
+        // parses to range = Tuple([Ident(x), Ident(y)]).
+        Ir::Tuple { items, .. } => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                let v = eval_node(item, env, gpu)?;
+                match v {
+                    Value::Range { start, end, delta } => out.push(DimSpec {
+                        var_name: String::new(),
+                        start,
+                        end,
+                        delta,
+                    }),
+                    other => {
+                        return Err(format!(
+                            "for loop range component must be a Range, got {}",
+                            other
+                        ));
+                    }
+                }
+            }
+            out
+        }
+        // Literal range expression. Endpoints may be scalar (1-D) or
+        // tuples of matching arity (multi-dim component-wise).
+        Ir::Range {
+            start, end, delta, ..
+        } => {
+            let s_val = eval_node(start, env, gpu)?;
+            let e_val = eval_node(end, env, gpu)?;
+            let d_val = match delta {
+                Some(d) => Some(eval_node(d, env, gpu)?),
+                None => None,
+            };
+            decompose_range_values(s_val, e_val, d_val)?
+        }
+        // Any other expression: evaluate and expect a Range value
+        // (e.g. an identifier bound to a Range, like `for i in x (body)`
+        // where `x := 0..10`).
+        other => {
+            let v = eval_node(other, env, gpu)?;
+            match v {
+                Value::Range { start, end, delta } => vec![DimSpec {
+                    var_name: String::new(),
+                    start,
+                    end,
+                    delta,
+                }],
+                other => {
+                    return Err(format!(
+                        "for loop range must be a Range, got {}",
+                        other
+                    ));
+                }
+            }
+        }
+    };
+    if dims.len() != vars.len() {
+        return Err(format!(
+            "for loop has {} variable{} but range has {} dimension{}",
+            vars.len(),
+            if vars.len() == 1 { "" } else { "s" },
+            dims.len(),
+            if dims.len() == 1 { "" } else { "s" },
+        ));
+    }
+    let mut named = Vec::with_capacity(dims.len());
+    for (var, dim) in vars.iter().zip(dims.into_iter()) {
+        if dim.delta == 0.0 {
+            return Err(format!(
+                "for loop delta for '{}' is zero (would never terminate)",
+                var
+            ));
+        }
+        named.push(DimSpec {
+            var_name: var.clone(),
+            ..dim
+        });
+    }
+    Ok(named)
+}
+
+/// Build per-axis `DimSpec`s from evaluated range endpoints. Endpoints
+/// may be scalar (`F64`) or tuples (`Array`); a scalar `delta` broadcasts
+/// across a tuple range.
+fn decompose_range_values(
+    s: Value,
+    e: Value,
+    d: Option<Value>,
+) -> Result<Vec<DimSpec>, String> {
+    let starts = value_to_components(s, "range start")?;
+    let ends = value_to_components(e, "range end")?;
+    if starts.len() != ends.len() {
+        return Err(format!(
+            "range start has {} component{}, end has {}",
+            starts.len(),
+            if starts.len() == 1 { "" } else { "s" },
+            ends.len()
+        ));
+    }
+    let deltas: Vec<f64> = match d {
+        Some(d_v) => {
+            let parsed = value_to_components(d_v, "range delta")?;
+            if parsed.len() == 1 && starts.len() > 1 {
+                vec![parsed[0]; starts.len()]
+            } else if parsed.len() != starts.len() {
+                return Err(format!(
+                    "range delta has {} component{}, expected {}",
+                    parsed.len(),
+                    if parsed.len() == 1 { "" } else { "s" },
+                    starts.len()
+                ));
+            } else {
+                parsed
+            }
+        }
+        None => vec![1.0; starts.len()],
+    };
+    Ok(starts
+        .into_iter()
+        .zip(ends)
+        .zip(deltas)
+        .map(|((start, end), delta)| DimSpec {
+            var_name: String::new(),
+            start,
+            end,
+            delta,
+        })
+        .collect())
+}
+
+fn value_to_components(v: Value, label: &str) -> Result<Vec<f64>, String> {
+    match v {
+        Value::F64(n) => Ok(vec![n]),
+        Value::Bool(b) => Ok(vec![if b { 1.0 } else { 0.0 }]),
+        Value::Array(items) => Ok(items),
+        other => Err(format!("{} must be Num or tuple of Num, got {}", label, other)),
     }
 }
 
@@ -798,7 +1011,7 @@ mod tests {
     #[test]
     fn test_parallel_for_inplace() {
         let val = run("data := [1, 2, 3, 4]\n\
-             parallel for i in 0..4 ( data[i] := data[i] * 2 )\n\
+             for i in 0..4 gpu ( data[i] := data[i] * 2 )\n\
              data");
         match val {
             Value::Array(a) => assert_eq!(a, vec![2.0, 4.0, 6.0, 8.0]),
@@ -809,7 +1022,7 @@ mod tests {
     #[test]
     fn test_parallel_for_with_len() {
         let val = run("data := [10, 20, 30]\n\
-             parallel for i in 0..len(data) ( data[i] := data[i] + 1 )\n\
+             for i in 0..len(data) gpu ( data[i] := data[i] + 1 )\n\
              data");
         match val {
             Value::Array(a) => assert_eq!(a, vec![11.0, 21.0, 31.0]),
@@ -820,7 +1033,7 @@ mod tests {
     #[test]
     fn test_parallel_for_with_scalar() {
         let val = run("data := [1, 2, 3]\nscale := 10\n\
-             parallel for i in 0..3 ( data[i] := data[i] * scale )\n\
+             for i in 0..3 gpu ( data[i] := data[i] * scale )\n\
              data");
         match val {
             Value::Array(a) => assert_eq!(a, vec![10.0, 20.0, 30.0]),
@@ -832,7 +1045,7 @@ mod tests {
     fn test_parallel_for_returns_last_written() {
         // parallel for returns the last written array
         let val = run("data := [1, 2, 3]\n\
-             doubled := parallel for i in 0..3 ( data[i] := data[i] * 2 )\n\
+             doubled := for i in 0..3 gpu ( data[i] := data[i] * 2 )\n\
              doubled");
         match val {
             Value::Array(a) => assert_eq!(a, vec![2.0, 4.0, 6.0]),
@@ -844,7 +1057,7 @@ mod tests {
     fn test_parallel_for_write_different_array() {
         let val = run("a := [1, 2, 3]\n\
              b := [0, 0, 0]\n\
-             parallel for i in 0..3 ( b[i] := a[i] + 10 )\n\
+             for i in 0..3 gpu ( b[i] := a[i] + 10 )\n\
              b");
         match val {
             Value::Array(a) => assert_eq!(a, vec![11.0, 12.0, 13.0]),
@@ -855,8 +1068,8 @@ mod tests {
     #[test]
     fn test_chained_parallel_for() {
         let val = run("data := [1, 2, 3]\n\
-             parallel for i in 0..3 ( data[i] := data[i] * 2 )\n\
-             parallel for i in 0..3 ( data[i] := data[i] + 1 )\n\
+             for i in 0..3 gpu ( data[i] := data[i] * 2 )\n\
+             for i in 0..3 gpu ( data[i] := data[i] + 1 )\n\
              data");
         match val {
             Value::Array(a) => assert_eq!(a, vec![3.0, 5.0, 7.0]),
@@ -867,7 +1080,7 @@ mod tests {
     #[test]
     fn test_parallel_for_multi_statement() {
         let val = run("data := [1, 2, 3, 4]\n\
-             parallel for i in 0..4 (\n\
+             for i in 0..4 gpu (\n\
                  temp := data[i] * 2\n\
                  data[i] := temp + 1\n\
              )\n\
@@ -901,7 +1114,7 @@ mod tests {
     fn test_for_then_parallel_for() {
         let val = run("data := [0, 0, 0]\n\
              for i in 0..3 ( data[i] := (i + 1) * 100 )\n\
-             parallel for i in 0..3 ( data[i] := data[i] * 2 )\n\
+             for i in 0..3 gpu ( data[i] := data[i] * 2 )\n\
              data");
         match val {
             Value::Array(a) => assert_eq!(a, vec![200.0, 400.0, 600.0]),
@@ -964,19 +1177,20 @@ mod tests {
     }
 
     #[test]
-    fn err_for_loop_negative_range() {
-        let err = try_run("for i in 0..(-3) ( i )").unwrap_err();
-        assert!(
-            err.contains("non-negative") || err.contains("end < start"),
-            "got: {}",
-            err
-        );
+    fn for_loop_negative_range_is_empty() {
+        // `0..(-3)` with the default positive delta has no valid iterations.
+        // Matches Rust's empty-range semantics: the loop simply doesn't run
+        // instead of raising an error (rangewise: count = (end - start) / delta
+        // is non-positive, so the loop body is skipped).
+        let val = try_run("acc := 0\nfor i in 0..(-3) ( acc := acc + 1 )\nacc").unwrap();
+        assert!(matches!(val, Value::F64(n) if n == 0.0), "got: {:?}", val);
     }
 
     #[test]
-    fn err_for_loop_inverted_range() {
-        let err = try_run("for i in 5..2 ( i )").unwrap_err();
-        assert!(err.contains("end < start"), "got: {}", err);
+    fn for_loop_inverted_range_is_empty() {
+        // `5..2` is also empty under the default positive delta.
+        let val = try_run("acc := 0\nfor i in 5..2 ( acc := acc + 1 )\nacc").unwrap();
+        assert!(matches!(val, Value::F64(n) if n == 0.0), "got: {:?}", val);
     }
 
     #[test]
@@ -1014,5 +1228,104 @@ mod tests {
             "got: {}",
             err
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Range with delta + multi-var for loops (issues #22, #23)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn range_with_delta_is_first_class_value() {
+        // `r := 0..10..0.5` binds r to a Range value.
+        let val = try_run("r := 0..10..0.5\nr").unwrap();
+        match val {
+            Value::Range { start, end, delta } => {
+                assert_eq!(start, 0.0);
+                assert_eq!(end, 10.0);
+                assert_eq!(delta, 0.5);
+            }
+            _ => panic!("expected Range, got {:?}", val),
+        }
+    }
+
+    #[test]
+    fn range_default_delta_is_one() {
+        let val = try_run("r := 0..10\nr").unwrap();
+        match val {
+            Value::Range { delta, .. } => assert_eq!(delta, 1.0),
+            _ => panic!("expected Range, got {:?}", val),
+        }
+    }
+
+    #[test]
+    fn for_loop_with_fractional_delta_runs_100_iterations() {
+        // Per #23 acceptance: `for i in 0..1..0.01 (body)` runs 100 iterations.
+        let val = try_run("acc := 0\nfor i in 0..1..0.01 ( acc := acc + 1 )\nacc").unwrap();
+        match val {
+            Value::F64(n) => assert_eq!(n, 100.0),
+            _ => panic!("expected number, got {:?}", val),
+        }
+    }
+
+    #[test]
+    fn for_loop_iterates_over_range_binding() {
+        // Per #23: `r := 0..10..2; for i in r (body)` uses the range's delta.
+        let val = try_run("r := 0..10..2\nacc := 0\nfor i in r ( acc := acc + i )\nacc").unwrap();
+        // i ∈ {0, 2, 4, 6, 8}, sum = 20.
+        match val {
+            Value::F64(n) => assert_eq!(n, 20.0),
+            _ => panic!("expected number, got {:?}", val),
+        }
+    }
+
+    #[test]
+    fn for_loop_tuple_range_cartesian_product() {
+        // Per #22: `for (a, b) in (0, 10)..(3, 13) (body)` iterates 9 combos.
+        let val = try_run(
+            "acc := 0\nfor (a, b) in (0, 10)..(3, 13) ( acc := acc + 1 )\nacc",
+        )
+        .unwrap();
+        match val {
+            Value::F64(n) => assert_eq!(n, 9.0),
+            _ => panic!("expected number, got {:?}", val),
+        }
+    }
+
+    #[test]
+    fn for_loop_with_predefined_ranges_no_in_clause() {
+        // Per #22: predefined ranges plus `for (rx, ry) (body)` iterates the
+        // Cartesian product of their values. The loop var names must match
+        // the names of pre-bound Range values in the outer scope.
+        let val = try_run(
+            "rx := 0..3\nry := 0..2\nacc := 0\nfor (rx, ry) (acc := acc + 1)\nacc",
+        )
+        .unwrap();
+        match val {
+            Value::F64(n) => assert_eq!(n, 6.0),
+            _ => panic!("expected number, got {:?}", val),
+        }
+    }
+
+    #[test]
+    fn gpu_for_dispatches_like_old_parallel_for() {
+        // Per #21: `for i in 0..n gpu (body)` runs through the same dispatch
+        // path as the old `parallel for`. Tested here via the CPU fallback.
+        let val = try_run(
+            "data := [1, 2, 3, 4]\nfor i in 0..4 gpu ( data[i] := data[i] * 3 )\ndata",
+        )
+        .unwrap();
+        match val {
+            Value::Array(a) => assert_eq!(a, vec![3.0, 6.0, 9.0, 12.0]),
+            _ => panic!("expected array, got {:?}", val),
+        }
+    }
+
+    #[test]
+    fn parallel_keyword_is_no_longer_accepted() {
+        // The old `parallel` keyword is gone. It now lexes as an ordinary
+        // identifier, which makes `parallel for ...` fail to parse because
+        // the parser sees an unexpected `for` token after the identifier.
+        let err = try_run("parallel for i in 0..3 ( i )").unwrap_err();
+        assert!(!err.is_empty(), "should fail to parse, but ran fine");
     }
 }

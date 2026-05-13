@@ -29,12 +29,12 @@ pub fn dispatch(
         ));
     }
 
-    let len = request.range_end - request.range_start;
-    if len == 0 {
+    let total_threads = request.total_threads() as usize;
+    if total_threads == 0 {
         return Ok(request
             .readwrite_arrays
             .iter()
-            .map(|(name, _)| (name.clone(), Vec::new()))
+            .map(|(name, data)| (name.clone(), data.clone()))
             .collect());
     }
 
@@ -54,12 +54,9 @@ pub fn dispatch(
         ));
     }
 
-    // 3. Create buffers
-    let buf_size = (len * std::mem::size_of::<f32>()) as u64;
-
     // Params uniform
     let mut params = ParamsBuffer::zeroed();
-    params.len = len as u32;
+    params.len = total_threads as u32;
     for (i, (_, val)) in request.scalars.iter().enumerate() {
         params.scalars[i] = *val as f32;
     }
@@ -71,13 +68,14 @@ pub fn dispatch(
     });
     queue.write_buffer(&params_buffer, 0, bytemuck::bytes_of(&params));
 
-    // Read-only storage buffers
+    // Read-only storage buffers — sized by each array's own length.
     let mut readonly_buffers = Vec::new();
     for (_, data) in &request.readonly_arrays {
         let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+        let size = (data.len() * std::mem::size_of::<f32>()).max(4) as u64;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("compute_readonly"),
-            size: buf_size,
+            size,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -85,13 +83,15 @@ pub fn dispatch(
         readonly_buffers.push(buffer);
     }
 
-    // Read-write storage buffers (need COPY_SRC for readback)
+    // Read-write storage buffers (need COPY_SRC for readback).
     let mut readwrite_buffers = Vec::new();
+    let mut readwrite_sizes = Vec::new();
     for (_, data) in &request.readwrite_arrays {
         let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+        let size = (data.len() * std::mem::size_of::<f32>()).max(4) as u64;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("compute_readwrite"),
-            size: buf_size,
+            size,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -99,14 +99,15 @@ pub fn dispatch(
         });
         queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&f32_data));
         readwrite_buffers.push(buffer);
+        readwrite_sizes.push(size);
     }
 
-    // Staging buffers for readback (one per read-write array)
+    // Staging buffers for readback (one per read-write array).
     let mut staging_buffers = Vec::new();
-    for _ in &request.readwrite_arrays {
+    for &size in &readwrite_sizes {
         staging_buffers.push(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("compute_staging"),
-            size: buf_size,
+            size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
@@ -208,7 +209,7 @@ pub fn dispatch(
 
     // 6. Dispatch compute
     let wg = compute_gen::WORKGROUP_SIZE;
-    let workgroups = (len as u32).div_ceil(wg);
+    let workgroups = (total_threads as u32).div_ceil(wg);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("compute_encoder"),
     });
@@ -224,7 +225,7 @@ pub fn dispatch(
 
     // 7. Copy read-write buffers → staging
     for (i, rw_buf) in readwrite_buffers.iter().enumerate() {
-        encoder.copy_buffer_to_buffer(rw_buf, 0, &staging_buffers[i], 0, buf_size);
+        encoder.copy_buffer_to_buffer(rw_buf, 0, &staging_buffers[i], 0, readwrite_sizes[i]);
     }
     queue.submit(Some(encoder.finish()));
 

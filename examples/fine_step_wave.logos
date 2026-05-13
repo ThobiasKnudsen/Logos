@@ -1,0 +1,20 @@
+logos_version := 0.1
+
+cells := [
+  (
+    plot_color := (0.6, 0.4, 0.9, 1.0),
+    content := (
+        # Sum a family of sine waves whose frequencies step by a fractional
+        # delta — only reachable with the new `a..b..d` range syntax.
+        Comb(n_max, dk) := (
+            sum := 0
+            for k in 1..n_max..dk (
+                sum := sum + sin(k * x + t) / k
+            )
+            sum
+        )
+
+        plot(y = Comb(8, 0.5))
+    ),
+  ),
+]
