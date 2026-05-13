@@ -1148,6 +1148,95 @@ fn nested_cas_fixpoint_iterates_until_fully_resolved() {
 }
 
 #[test]
+fn gpu_for_loop_through_notebook_pipeline_returns_array() {
+    // The `gpu` modifier on a `for` loop lowers to `Ir::ParallelFor`,
+    // which makes `needs_interpreter` true. After the CAS-fixpoint
+    // refactor, the notebook's `dispatch` routes those cells through
+    // `interpreter::eval` (CpuFallback in tests; real wgpu in the live
+    // app). Pin the routing: a basic `gpu` for-loop on an array must
+    // produce the right value without parking on Pending or erroring.
+    let mut nb = null_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        data := [1, 2, 3, 4]
+        for i in 0..4 gpu ( data[i] := data[i] * 2 )
+        data
+        "#,
+    );
+    match &nb.cell(i).outcome.message {
+        Some(CellMessage::Computed(s)) => {
+            // The interpreter formats arrays as `[2, 4, 6, 8]` (commas + spaces).
+            // Don't pin the exact format; check the values are present in order.
+            let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(
+                cleaned.contains("2") && cleaned.contains("4")
+                    && cleaned.contains("6") && cleaned.contains("8"),
+                "expected [2, 4, 6, 8] from doubling; got {:?}",
+                s,
+            );
+        }
+        other => panic!(
+            "expected Computed after gpu-for dispatch; got {:?}\n\
+             diagnostics: {:?}",
+            other,
+            nb.cell(i).outcome.diagnostics,
+        ),
+    }
+    assert!(matches!(nb.cell(i).state, CellState::Playing));
+}
+
+#[test]
+fn gpu_for_loop_with_cas_in_dependency_routes_through_fixpoint() {
+    // Cross-feature regression: a `gpu` for-loop whose body references
+    // a function with a CAS body must (a) trigger the eager fixpoint
+    // (`needs_interpreter` → eager_cas), (b) park on Pending while the
+    // simplifier resolves the integral, and (c) finally compute the
+    // array. This is the only test exercising the intersection between
+    // the new `gpu` keyword and the CAS-fixpoint refactor.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        F(x) := ∫(x, x)
+        data := [F(1.0), F(2.0), F(3.0), F(4.0)]
+        for i in 0..4 gpu ( data[i] := data[i] * 2 )
+        data
+        "#,
+    );
+    let cell_id = nb.cell(i).id;
+    assert!(
+        matches!(nb.cell(i).outcome.message, Some(CellMessage::Pending)),
+        "CAS in F's body must trigger eager fixpoint; got {:?}",
+        nb.cell(i).outcome.message,
+    );
+
+    mock.respond_to(cell_id, Ok("x**2/2".to_string()));
+    nb.tick();
+
+    match &nb.cell(i).outcome.message {
+        Some(CellMessage::Computed(s)) => {
+            // After CAS resolution: F(n) = n²/2, doubled = n². Expect
+            // [1, 4, 9, 16].
+            let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+            for expected in ["1", "4", "9", "16"] {
+                assert!(
+                    cleaned.contains(expected),
+                    "expected {} in {:?} after CAS+gpu pipeline",
+                    expected, s,
+                );
+            }
+        }
+        other => panic!(
+            "expected Computed after CAS + gpu-for; got {:?}\n\
+             diagnostics: {:?}",
+            other,
+            nb.cell(i).outcome.diagnostics,
+        ),
+    }
+}
+
+#[test]
 fn timed_out_cell_can_be_replayed_cleanly() {
     // After `tick_with_now` converts a pending submission into an error
     // diagnostic, the user should be able to play the cell again and have
