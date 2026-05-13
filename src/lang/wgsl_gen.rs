@@ -294,10 +294,6 @@ struct BoolFunctionDef {
 struct GenContext<'a> {
     functions: Vec<EmittedFunction>,
     bindings: Vec<EmittedBinding>,
-    /// Names of user-defined functions that return vec types (not f32).
-    vec_functions: HashSet<String>,
-    /// Names of user-defined functions that return bool.
-    bool_functions: HashSet<String>,
     /// IR bodies of bool functions — used for inlining during corner-checking
     /// so that comparisons go through sign-change detection, not float ==.
     bool_function_defs: std::collections::HashMap<String, BoolFunctionDef>,
@@ -405,8 +401,6 @@ impl<'a> GenContext<'a> {
         Self {
             functions: Vec::new(),
             bindings: Vec::new(),
-            vec_functions: HashSet::new(),
-            bool_functions: HashSet::new(),
             bool_function_defs: std::collections::HashMap::new(),
             lifted_block_defs: std::collections::HashMap::new(),
             lifted_function_defs: std::collections::HashMap::new(),
@@ -489,9 +483,18 @@ impl<'a> GenContext<'a> {
                     self.captured_vars.insert(name.clone(), captured.clone());
                 }
 
-                // Check if function body returns a tuple/vec (for vec4 color output)
-                // Use result_is_vec which also checks calls to known vec-returning functions
-                let returns_vec = self.result_is_vec(body);
+                // The function's return type comes off `FunctionDef.return_ty`
+                // (populated by `lower::annotate_types`). Tuple-of-Num bodies
+                // lower to `vec4<f32>` like explicit Vec constructors do.
+                let return_ty = match ast {
+                    Ir::FunctionDef { return_ty, .. } => return_ty.as_deref(),
+                    _ => None,
+                };
+                let returns_vec = matches!(
+                    return_ty,
+                    Some(Type::Vec2 | Type::Vec3 | Type::Vec4)
+                ) || matches!(return_ty, Some(Type::Tuple(items)) if items.len() >= 2);
+                let returns_bool_val = return_ty == Some(&Type::Bool);
 
                 // Check if the body is a block with bindings or loops
                 let needs_imperative = match body.as_ref() {
@@ -507,7 +510,6 @@ impl<'a> GenContext<'a> {
                     _ => false,
                 };
 
-                let returns_bool_val = returns_bool(body);
                 let ret_type = if returns_vec {
                     "vec4<f32>"
                 } else if returns_bool_val {
@@ -515,11 +517,7 @@ impl<'a> GenContext<'a> {
                 } else {
                     "f32"
                 };
-                if returns_vec {
-                    self.vec_functions.insert(name.clone());
-                }
                 if returns_bool_val {
-                    self.bool_functions.insert(name.clone());
                     self.bool_function_defs.insert(
                         name.clone(),
                         BoolFunctionDef {
@@ -974,14 +972,7 @@ impl<'a> GenContext<'a> {
     /// and identifiers bound to bool expressions.
     fn result_is_bool(&self, node: &Ir) -> bool {
         match node {
-            Ir::Apply { callee, .. } => {
-                if let Callee::User(name) = callee {
-                    if self.bool_functions.contains(name) {
-                        return true;
-                    }
-                }
-                returns_bool(node)
-            }
+            Ir::Apply { .. } => returns_bool(node),
             Ir::Identifier { name, .. } => {
                 // A binding's `value_ty` (populated by `lower::annotate_types`)
                 // directly answers "is this name bound to a bool". The

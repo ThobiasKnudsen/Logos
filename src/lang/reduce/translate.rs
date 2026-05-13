@@ -713,6 +713,7 @@ mod tests {
             params: vec!["x".to_string()],
             body: Box::new(parse_ir("x*e^(x^2)")),
             span: (0, 0),
+            return_ty: None,
         };
         let bindings = vec![
             (

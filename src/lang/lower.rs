@@ -281,12 +281,14 @@ fn hoist_recurse(
             params,
             body,
             span,
+            ..
         } => Ir::FunctionDef {
             name: name.clone(),
             params: params.clone(),
             // Function bodies are their own scope — don't hoist *out* of them.
             body: body.clone(),
             span: *span,
+            return_ty: None,
         },
         Ir::ForLoop {
             var,
@@ -446,6 +448,7 @@ fn lift_lambdas_inner(node: &mut Ir, counter: &mut usize, new_defs: &mut Vec<Ir>
             params,
             body,
             span: binding_span,
+            return_ty: None,
         });
         *node = Ir::Number {
             value: 0.0,
@@ -520,6 +523,7 @@ fn lift_lambdas_inner(node: &mut Ir, counter: &mut usize, new_defs: &mut Vec<Ir>
             params: saved_params,
             body: saved_body,
             span: saved_span,
+            return_ty: None,
         });
         *node = Ir::Identifier {
             name,
@@ -671,6 +675,7 @@ fn rewrite_hof_calls(
                                 params: new_params,
                                 body: Box::new(new_body),
                                 span: spec_span,
+                                return_ty: None,
                             });
                             sn
                         };

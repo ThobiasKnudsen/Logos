@@ -176,6 +176,7 @@ impl Parser {
                 params,
                 body: Box::new(body),
                 span,
+                return_ty: None,
             }));
         }
 

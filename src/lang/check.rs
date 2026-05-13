@@ -258,7 +258,11 @@ fn infer(node: &mut Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
         }
 
         Ir::FunctionDef {
-            name, params, body, ..
+            name,
+            params,
+            body,
+            return_ty,
+            ..
         } => {
             // We don't yet have parameter type annotations, so each parameter
             // is treated as `Num` for now — the dominant case for math cells.
@@ -269,6 +273,7 @@ fn infer(node: &mut Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
                 child.vars.insert(p.clone(), Type::Num);
             }
             let body_ty = infer(body, &mut child)?;
+            *return_ty = Some(Box::new(body_ty.clone()));
             let param_tys: Vec<Type> = params.iter().map(|_| Type::Num).collect();
             env.funcs
                 .insert(name.clone(), (param_tys, body_ty.clone()));

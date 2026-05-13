@@ -347,12 +347,18 @@ pub enum Ir {
         span: Span,
     },
 
-    /// Function definition: `f(x, y) = body`
+    /// Function definition: `f(x, y) = body`.
+    ///
+    /// `return_ty` is `None` at parse time and gets populated by
+    /// `lower::annotate_types` with the inferred type of `body`. Backends
+    /// read it to choose the WGSL signature (`-> f32` / `-> bool` /
+    /// `-> vec4<f32>`) without re-walking the body.
     FunctionDef {
         name: String,
         params: Vec<String>,
         body: Box<Ir>,
         span: Span,
+        return_ty: Option<Box<Type>>,
     },
 
     /// Anonymous function: `x |-> body` or `(a, b) |-> body`.
@@ -646,11 +652,13 @@ fn replace_at_path_inner(node: Ir, path: &[usize], replacement: Ir) -> Option<Ir
             params,
             body,
             span,
+            return_ty,
         } if head == 0 => Some(Ir::FunctionDef {
             name,
             params,
             body: Box::new(replace_at_path_inner(*body, tail, replacement)?),
             span,
+            return_ty,
         }),
         Ir::ForLoop {
             var, range, body, span,
@@ -868,11 +876,13 @@ fn substitute_idents_inner(node: &Ir, bindings: &[(String, Ir)]) -> Ir {
             params,
             body,
             span,
+            ..
         } => Ir::FunctionDef {
             name: name.clone(),
             params: params.clone(),
             body: Box::new(substitute_idents_inner(body, bindings)),
             span: *span,
+            return_ty: None,
         },
         Ir::Lambda { params, body, span } => Ir::Lambda {
             params: params.clone(),
