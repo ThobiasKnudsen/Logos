@@ -383,9 +383,15 @@ pub enum Ir {
         span: Span,
     },
 
-    /// For loop: `for i in 0..n ( body )` — sequential CPU execution
+    /// For loop: `for i in 0..n ( body )` — sequential CPU execution.
+    ///
+    /// `vars` is one name for a 1-D range and N names for an N-D Cartesian
+    /// iteration. When the source omits the `in` clause (`for (x, y) (body)`),
+    /// the parser synthesizes `range` from the var names so downstream consumers
+    /// see a uniform shape: each var must resolve to a `Range` value in the
+    /// enclosing scope.
     ForLoop {
-        var: String,
+        vars: Vec<String>,
         range: Box<Ir>,
         body: Box<Ir>,
         span: Span,
@@ -422,10 +428,17 @@ pub enum Ir {
         span: Span,
     },
 
-    /// Range: `0..n`
+    /// Range: `0..n` or `0..n..d` (with explicit delta).
+    ///
+    /// `delta` is `None` for the default step of 1. Both `start` and `end`
+    /// are scalar `Num` for a 1-D range; they may also be tuples of the same
+    /// arity, in which case the range is interpreted component-wise (each
+    /// dimension iterates independently and the loop performs a Cartesian
+    /// product).
     Range {
         start: Box<Ir>,
         end: Box<Ir>,
+        delta: Option<Box<Ir>>,
         span: Span,
     },
 
@@ -437,10 +450,15 @@ pub enum Ir {
         span: Span,
     },
 
-    /// Parallel for: `parallel for i in 0..n ( body )`
-    /// Mutates arrays in-place. Body contains IndexAssign statements.
+    /// Parallel for: `for i in 0..n gpu ( body )`.
+    ///
+    /// Surface syntax is the `gpu` modifier on a `for` loop. Each iteration
+    /// (or each multi-index combination, for tuple `vars`) runs on a separate
+    /// GPU thread. Body typically contains `IndexAssign` statements; the
+    /// dispatcher reads arrays from the enclosing scope and writes back after
+    /// the kernel completes.
     ParallelFor {
-        var: String,
+        vars: Vec<String>,
         range: Box<Ir>,
         body: Box<Ir>,
         span: Span,
@@ -528,7 +546,13 @@ impl Ir {
             Ir::WhileLoop { condition, body, .. } => vec![condition, body],
             Ir::PropertyAccess { object, .. } => vec![object],
             Ir::IndexAccess { array, index, .. } => vec![array, index],
-            Ir::Range { start, end, .. } => vec![start, end],
+            Ir::Range { start, end, delta, .. } => {
+                let mut v = vec![start.as_ref(), end.as_ref()];
+                if let Some(d) = delta {
+                    v.push(d.as_ref());
+                }
+                v
+            }
             Ir::IndexAssign {
                 array, index, value, ..
             } => vec![array, index, value],
@@ -672,16 +696,16 @@ fn replace_at_path_inner(node: Ir, path: &[usize], replacement: Ir) -> Option<Ir
             captured,
         }),
         Ir::ForLoop {
-            var, range, body, span,
+            vars, range, body, span,
         } => match head {
             0 => Some(Ir::ForLoop {
-                var,
+                vars,
                 range: Box::new(replace_at_path_inner(*range, tail, replacement)?),
                 body,
                 span,
             }),
             1 => Some(Ir::ForLoop {
-                var,
+                vars,
                 range,
                 body: Box::new(replace_at_path_inner(*body, tail, replacement)?),
                 span,
@@ -723,17 +747,28 @@ fn replace_at_path_inner(node: Ir, path: &[usize], replacement: Ir) -> Option<Ir
             }),
             _ => None,
         },
-        Ir::Range { start, end, span } => match head {
+        Ir::Range { start, end, delta, span } => match head {
             0 => Some(Ir::Range {
                 start: Box::new(replace_at_path_inner(*start, tail, replacement)?),
                 end,
+                delta,
                 span,
             }),
             1 => Some(Ir::Range {
                 start,
                 end: Box::new(replace_at_path_inner(*end, tail, replacement)?),
+                delta,
                 span,
             }),
+            2 => {
+                let d = delta?;
+                Some(Ir::Range {
+                    start,
+                    end,
+                    delta: Some(Box::new(replace_at_path_inner(*d, tail, replacement)?)),
+                    span,
+                })
+            }
             _ => None,
         },
         Ir::IndexAssign {
@@ -760,16 +795,16 @@ fn replace_at_path_inner(node: Ir, path: &[usize], replacement: Ir) -> Option<Ir
             _ => None,
         },
         Ir::ParallelFor {
-            var, range, body, span,
+            vars, range, body, span,
         } => match head {
             0 => Some(Ir::ParallelFor {
-                var,
+                vars,
                 range: Box::new(replace_at_path_inner(*range, tail, replacement)?),
                 body,
                 span,
             }),
             1 => Some(Ir::ParallelFor {
-                var,
+                vars,
                 range,
                 body: Box::new(replace_at_path_inner(*body, tail, replacement)?),
                 span,
@@ -902,9 +937,9 @@ fn substitute_idents_inner(node: &Ir, bindings: &[(String, Ir)]) -> Ir {
             span: *span,
         },
         Ir::ForLoop {
-            var, range, body, span,
+            vars, range, body, span,
         } => Ir::ForLoop {
-            var: var.clone(),
+            vars: vars.clone(),
             range: Box::new(substitute_idents_inner(range, bindings)),
             body: Box::new(substitute_idents_inner(body, bindings)),
             span: *span,
@@ -928,9 +963,10 @@ fn substitute_idents_inner(node: &Ir, bindings: &[(String, Ir)]) -> Ir {
             index: Box::new(substitute_idents_inner(index, bindings)),
             span: *span,
         },
-        Ir::Range { start, end, span } => Ir::Range {
+        Ir::Range { start, end, delta, span } => Ir::Range {
             start: Box::new(substitute_idents_inner(start, bindings)),
             end: Box::new(substitute_idents_inner(end, bindings)),
+            delta: delta.as_ref().map(|d| Box::new(substitute_idents_inner(d, bindings))),
             span: *span,
         },
         Ir::IndexAssign {
@@ -942,9 +978,9 @@ fn substitute_idents_inner(node: &Ir, bindings: &[(String, Ir)]) -> Ir {
             span: *span,
         },
         Ir::ParallelFor {
-            var, range, body, span,
+            vars, range, body, span,
         } => Ir::ParallelFor {
-            var: var.clone(),
+            vars: vars.clone(),
             range: Box::new(substitute_idents_inner(range, bindings)),
             body: Box::new(substitute_idents_inner(body, bindings)),
             span: *span,
@@ -1046,10 +1082,10 @@ fn write_ir(out: &mut String, ir: &Ir, wrap_binary: bool) {
             write_ir(out, body, false);
         }
         Ir::ForLoop {
-            var, range, body, ..
+            vars, range, body, ..
         } => {
             out.push_str("for ");
-            out.push_str(var);
+            write_for_vars(out, vars);
             out.push_str(" in ");
             write_ir(out, range, true);
             out.push(' ');
@@ -1084,10 +1120,14 @@ fn write_ir(out: &mut String, ir: &Ir, wrap_binary: bool) {
             write_ir(out, index, false);
             out.push(']');
         }
-        Ir::Range { start, end, .. } => {
+        Ir::Range { start, end, delta, .. } => {
             write_ir(out, start, true);
             out.push_str("..");
             write_ir(out, end, true);
+            if let Some(d) = delta {
+                out.push_str("..");
+                write_ir(out, d, true);
+            }
         }
         Ir::IndexAssign {
             array, index, value, ..
@@ -1099,15 +1139,30 @@ fn write_ir(out: &mut String, ir: &Ir, wrap_binary: bool) {
             write_ir(out, value, false);
         }
         Ir::ParallelFor {
-            var, range, body, ..
+            vars, range, body, ..
         } => {
-            out.push_str("parallel for ");
-            out.push_str(var);
+            out.push_str("for ");
+            write_for_vars(out, vars);
             out.push_str(" in ");
             write_ir(out, range, true);
-            out.push(' ');
+            out.push_str(" gpu ");
             write_ir(out, body, true);
         }
+    }
+}
+
+fn write_for_vars(out: &mut String, vars: &[String]) {
+    if vars.len() == 1 {
+        out.push_str(&vars[0]);
+    } else {
+        out.push('(');
+        for (i, v) in vars.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(v);
+        }
+        out.push(')');
     }
 }
 

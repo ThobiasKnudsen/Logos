@@ -10,14 +10,22 @@ pub const WORKGROUP_SIZE: u32 = 64;
 /// Generate a WGSL compute shader from a parallel for request.
 ///
 /// The generated shader has:
-/// - A uniform buffer with `len` and scalar constants
+/// - A uniform buffer with `len` (total thread count) and scalar constants
 /// - Read-only storage buffers for arrays that are only read
 /// - Read-write storage buffers for arrays that are written to
 /// - A @compute @workgroup_size(WORKGROUP_SIZE) entry point
+///
+/// For multi-dim iteration, the global invocation id is decomposed into a
+/// multi-index using per-axis counts, then each loop variable is bound to
+/// `start + index * delta` (as `f32`).
 pub fn generate(request: &ParallelForRequest) -> Result<String, String> {
+    if request.dims.is_empty() {
+        return Err("parallel for has no iteration dimensions".to_string());
+    }
+
     let mut shader = String::new();
 
-    // Params uniform: length + scalar constants
+    // Params uniform: total length + scalar constants
     shader.push_str("struct Params {\n");
     shader.push_str("    len: u32,\n");
     for (name, _) in &request.scalars {
@@ -51,21 +59,58 @@ pub fn generate(request: &ParallelForRequest) -> Result<String, String> {
     // Compute entry point
     shader.push_str(&format!("@compute @workgroup_size({})\n", WORKGROUP_SIZE));
     shader.push_str("fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n");
-    shader.push_str(&format!("    let {} = gid.x;\n", request.var_name));
-    shader.push_str(&format!(
-        "    if ({} >= params.len) {{ return; }}\n",
-        request.var_name
-    ));
+    shader.push_str("    if (gid.x >= params.len) { return; }\n");
+
+    // Decompose gid.x → per-axis index. Innermost axis varies fastest,
+    // matching the CPU fallback's iteration order via `iterate_dims_inner`.
+    let counts: Vec<u32> = request.dims.iter().map(|d| d.count()).collect();
+    if request.dims.len() == 1 {
+        // 1-D fast path: the per-axis index *is* gid.x. For a unit-stride
+        // zero-start range we can name it directly with the loop variable
+        // (u32, cast to f32 on use in math expressions); array indexing
+        // then uses the raw name with no cast. For non-unit-stride or
+        // non-zero-start ranges, the variable holds the float value.
+        let dim = &request.dims[0];
+        if is_simple_dim(dim) {
+            shader.push_str(&format!("    let {} = gid.x;\n", dim.var_name));
+        } else {
+            shader.push_str(&format!(
+                "    let {} = {:.6} + f32(gid.x) * {:.6};\n",
+                dim.var_name, dim.start, dim.delta
+            ));
+        }
+    } else {
+        // Multi-dim: peel innermost-first, then bind each loop variable.
+        shader.push_str("    var _tid: u32 = gid.x;\n");
+        let mut idx_decls: Vec<(String, String)> = Vec::new();
+        for (i, dim) in request.dims.iter().enumerate().rev() {
+            let idx_name = format!("_idx_{}", dim.var_name);
+            if i == 0 {
+                shader.push_str(&format!("    let {} = _tid;\n", idx_name));
+            } else {
+                let c = counts[i];
+                shader.push_str(&format!("    let {} = _tid % {}u;\n", idx_name, c));
+                shader.push_str(&format!("    _tid = _tid / {}u;\n", c));
+            }
+            idx_decls.push((dim.var_name.clone(), idx_name));
+        }
+        // Bind each loop variable.
+        for (var_name, idx_name) in idx_decls.iter().rev() {
+            let dim = request.dims.iter().find(|d| &d.var_name == var_name).unwrap();
+            if is_simple_dim(dim) {
+                shader.push_str(&format!("    let {} = {};\n", var_name, idx_name));
+            } else {
+                shader.push_str(&format!(
+                    "    let {} = {:.6} + f32({}) * {:.6};\n",
+                    var_name, dim.start, idx_name, dim.delta
+                ));
+            }
+        }
+    }
 
     // Emit body statements
     let mut declared: HashSet<String> = HashSet::new();
-    emit_body_statements(
-        &request.body,
-        &request.var_name,
-        request,
-        &mut shader,
-        &mut declared,
-    )?;
+    emit_body_statements(&request.body, request, &mut shader, &mut declared)?;
 
     shader.push_str("}\n");
 
@@ -83,7 +128,6 @@ pub fn binding_count(request: &ParallelForRequest) -> u32 {
 
 fn emit_body_statements(
     node: &Ir,
-    loop_var: &str,
     request: &ParallelForRequest,
     shader: &mut String,
     declared: &mut HashSet<String>,
@@ -91,7 +135,7 @@ fn emit_body_statements(
     match node {
         Ir::Block { items: stmts, .. } => {
             for stmt in stmts {
-                emit_body_statements(stmt, loop_var, request, shader, declared)?;
+                emit_body_statements(stmt, request, shader, declared)?;
             }
         }
         Ir::IndexAssign {
@@ -100,8 +144,8 @@ fn emit_body_statements(
             value,
             ..
         } => {
-            let idx = emit_compute_index(index, loop_var, request)?;
-            let val = emit_compute_expr(value, loop_var, request, declared)?;
+            let idx = emit_compute_index(index, request)?;
+            let val = emit_compute_expr(value, request, declared)?;
             if let Ir::Identifier { name, .. } = array.as_ref() {
                 shader.push_str(&format!("    arr_{}[{}] = {};\n", name, idx, val));
             } else {
@@ -109,7 +153,7 @@ fn emit_body_statements(
             }
         }
         Ir::Binding { name, value, .. } => {
-            let val = emit_compute_expr(value, loop_var, request, declared)?;
+            let val = emit_compute_expr(value, request, declared)?;
             if declared.contains(name) {
                 shader.push_str(&format!("    {} = {};\n", name, val));
             } else {
@@ -119,7 +163,7 @@ fn emit_body_statements(
         }
         _ => {
             // Expression statement — emit as-is (rare)
-            let val = emit_compute_expr(node, loop_var, request, declared)?;
+            let val = emit_compute_expr(node, request, declared)?;
             shader.push_str(&format!("    _ = {};\n", val));
         }
     }
@@ -135,9 +179,22 @@ fn is_array(name: &str, request: &ParallelForRequest) -> bool {
         || request.readwrite_arrays.iter().any(|(n, _)| n == name)
 }
 
+/// A "simple" iteration axis is `0..n` with unit stride — the loop
+/// variable is bound directly to the integer multi-index and needs a
+/// `f32(...)` cast in math expressions.
+fn is_simple_dim(dim: &super::interpreter::DimSpec) -> bool {
+    dim.delta == 1.0 && dim.start == 0.0
+}
+
+fn loop_var_dim<'a>(
+    name: &str,
+    request: &'a ParallelForRequest,
+) -> Option<&'a super::interpreter::DimSpec> {
+    request.dims.iter().find(|d| d.var_name == name)
+}
+
 fn emit_compute_expr(
     node: &Ir,
-    loop_var: &str,
     request: &ParallelForRequest,
     declared: &HashSet<String>,
 ) -> Result<String, String> {
@@ -153,8 +210,14 @@ fn emit_compute_expr(
         Ir::BoolLit { value: b, .. } => Ok(format!("{}", b)),
 
         Ir::Identifier { name, .. } => {
-            if name == loop_var {
-                Ok(format!("f32({})", name))
+            if let Some(dim) = loop_var_dim(name, request) {
+                // Simple dim → u32, cast to f32 here for use in math
+                // expressions. Non-simple dim → already an f32, use directly.
+                if is_simple_dim(dim) {
+                    Ok(format!("f32({})", name))
+                } else {
+                    Ok(name.clone())
+                }
             } else if declared.contains(name) {
                 Ok(name.clone())
             } else if request.scalars.iter().any(|(n, _)| n == name) {
@@ -170,7 +233,7 @@ fn emit_compute_expr(
         }
 
         Ir::IndexAccess { array, index, .. } => {
-            let idx = emit_compute_index(index, loop_var, request)?;
+            let idx = emit_compute_index(index, request)?;
             if let Ir::Identifier { name, .. } = array.as_ref() {
                 if is_array(name, request) {
                     return Ok(format!("arr_{}[{}]", name, idx));
@@ -182,7 +245,7 @@ fn emit_compute_expr(
         Ir::Apply { callee, args, .. } => {
             let arg_strs: Vec<String> = args
                 .iter()
-                .map(|a| emit_compute_expr(a, loop_var, request, declared))
+                .map(|a| emit_compute_expr(a, request, declared))
                 .collect::<Result<_, _>>()?;
 
             let op = match callee {
@@ -273,10 +336,10 @@ fn emit_compute_expr(
             else_branch,
             ..
         } => {
-            let cond = emit_compute_expr(condition, loop_var, request, declared)?;
-            let then_val = emit_compute_expr(then_branch, loop_var, request, declared)?;
+            let cond = emit_compute_expr(condition, request, declared)?;
+            let then_val = emit_compute_expr(then_branch, request, declared)?;
             let else_val = if let Some(eb) = else_branch {
-                emit_compute_expr(eb, loop_var, request, declared)?
+                emit_compute_expr(eb, request, declared)?
             } else {
                 "0.0".to_string()
             };
@@ -294,19 +357,20 @@ fn emit_compute_expr(
 }
 
 /// Emit an index expression — must produce a u32 for array indexing.
-fn emit_compute_index(
-    node: &Ir,
-    loop_var: &str,
-    request: &ParallelForRequest,
-) -> Result<String, String> {
-    match node {
-        Ir::Identifier { name, .. } if name == loop_var => Ok(name.clone()),
-        _ => {
-            let declared = HashSet::new();
-            let expr = emit_compute_expr(node, loop_var, request, &declared)?;
-            Ok(format!("u32({})", expr))
+/// When the index is exactly a "simple" loop variable (unit stride,
+/// start 0), the variable is already u32 so we can use it directly. Any
+/// other expression gets wrapped in `u32(...)`.
+fn emit_compute_index(node: &Ir, request: &ParallelForRequest) -> Result<String, String> {
+    if let Ir::Identifier { name, .. } = node {
+        if let Some(dim) = loop_var_dim(name, request) {
+            if is_simple_dim(dim) {
+                return Ok(name.clone());
+            }
         }
     }
+    let declared = HashSet::new();
+    let expr = emit_compute_expr(node, request, &declared)?;
+    Ok(format!("u32({})", expr))
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +381,8 @@ fn emit_compute_index(
 mod tests {
     use super::*;
 
+    use crate::lang::interpreter::DimSpec;
+
     fn make_request(
         body: Ir,
         readwrite: Vec<(&str, Vec<f64>)>,
@@ -324,9 +390,12 @@ mod tests {
         scalars: Vec<(&str, f64)>,
     ) -> ParallelForRequest {
         ParallelForRequest {
-            var_name: "i".to_string(),
-            range_start: 0,
-            range_end: 4,
+            dims: vec![DimSpec {
+                var_name: "i".to_string(),
+                start: 0.0,
+                end: 4.0,
+                delta: 1.0,
+            }],
             body,
             readwrite_arrays: readwrite
                 .into_iter()

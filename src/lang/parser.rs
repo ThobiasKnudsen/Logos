@@ -40,7 +40,7 @@ pub struct Parser {
     pos: usize,
     source: String,
     /// When false, bare identifiers followed by `(` are NOT parsed as function
-    /// calls in parse_postfix. Used to prevent the `(body)` of `parallel for`
+    /// calls in parse_postfix. Used to prevent the `(body)` of `for ... (...)`
     /// from being consumed as a call on the last range token.
     allow_ident_call: bool,
     /// Current recursion depth (incremented on each call to parse_primary/expr).
@@ -377,18 +377,26 @@ impl Parser {
 
     fn parse_range(&mut self) -> Result<Ir, String> {
         let left = self.parse_addition()?;
-        if self.peek().ty == TokenType::DotDot {
-            self.advance();
-            let right = self.parse_addition()?;
-            let span = join(left.span(), right.span());
-            Ok(Ir::Range {
-                start: Box::new(left),
-                end: Box::new(right),
-                span,
-            })
-        } else {
-            Ok(left)
+        if self.peek().ty != TokenType::DotDot {
+            return Ok(left);
         }
+        self.advance();
+        let right = self.parse_addition()?;
+        let (delta, end_span) = if self.peek().ty == TokenType::DotDot {
+            self.advance();
+            let d = self.parse_addition()?;
+            let d_span = d.span();
+            (Some(Box::new(d)), d_span)
+        } else {
+            (None, right.span())
+        };
+        let span = join(left.span(), end_span);
+        Ok(Ir::Range {
+            start: Box::new(left),
+            end: Box::new(right),
+            delta,
+            span,
+        })
     }
 
     fn parse_addition(&mut self) -> Result<Ir, String> {
@@ -713,6 +721,7 @@ impl Parser {
                         Some(Ir::Binding { .. })
                             | Some(Ir::FunctionDef { .. })
                             | Some(Ir::ForLoop { .. })
+                            | Some(Ir::ParallelFor { .. })
                             | Some(Ir::WhileLoop { .. })
                             | Some(Ir::IndexAssign { .. })
                             | Some(Ir::TupleBinding { .. })
@@ -813,31 +822,35 @@ impl Parser {
                     span,
                 })
             }
-            // For loop: for var in range (body) — sequential CPU
+            // For loop: `for VARS [in RANGE] [gpu] (body)`.
+            //
+            // VARS = single ident | `(ident, ident, ...)`. With `in`, the
+            // range is any expression; without, the parser synthesizes a
+            // tuple of identifier references so the var names themselves
+            // supply the ranges (each must resolve to a Range value in
+            // scope). `gpu` toggles `Ir::ParallelFor`.
             TokenType::For => {
                 let for_span = tok_span;
                 self.advance(); // consume 'for'
-                let var = match &self.peek().ty {
-                    TokenType::Identifier(name) | TokenType::AxisVar(name) => {
-                        let name = name.clone();
-                        self.advance();
-                        name
-                    }
-                    _ => {
-                        return Err(super::format_error_at(
-                            &self.source,
-                            self.peek().span.0,
-                            &format!(
-                                "Expected loop variable after 'for', found {}",
-                                self.peek().ty
-                            ),
-                        ))
-                    }
+                let vars = self.parse_for_vars()?;
+                let range = if self.peek().ty == TokenType::In {
+                    self.advance(); // consume 'in'
+                    self.allow_ident_call = false;
+                    let r = self.parse_expr()?;
+                    self.allow_ident_call = true;
+                    r
+                } else {
+                    // No `in` clause: synthesize range from var names. Each
+                    // var resolves to a Range value in the outer scope; the
+                    // loop body shadows them as scalars.
+                    self.synth_range_from_vars(&vars, for_span)
                 };
-                self.expect(TokenType::In)?;
-                self.allow_ident_call = false;
-                let range = self.parse_expr()?;
-                self.allow_ident_call = true;
+                let is_gpu = if self.peek().ty == TokenType::Gpu {
+                    self.advance();
+                    true
+                } else {
+                    false
+                };
                 self.skip_newlines();
                 let body_lparen_span = self.peek().span;
                 self.expect(TokenType::LParen)?;
@@ -862,12 +875,21 @@ impl Parser {
                     }
                 };
                 let span = join(for_span, body_rparen_span);
-                Ok(Ir::ForLoop {
-                    var,
-                    range: Box::new(range),
-                    body: Box::new(body),
-                    span,
-                })
+                if is_gpu {
+                    Ok(Ir::ParallelFor {
+                        vars,
+                        range: Box::new(range),
+                        body: Box::new(body),
+                        span,
+                    })
+                } else {
+                    Ok(Ir::ForLoop {
+                        vars,
+                        range: Box::new(range),
+                        body: Box::new(body),
+                        span,
+                    })
+                }
             }
             // Array literal: [expr, expr, ...]
             TokenType::LBracket => {
@@ -891,66 +913,6 @@ impl Parser {
                 Ok(Ir::ArrayLiteral {
                     items: elements,
                     span: join(lbracket_span, rbracket_span),
-                })
-            }
-            // Parallel for: parallel for var in range (body)
-            TokenType::Parallel => {
-                let parallel_span = tok_span;
-                self.advance(); // consume 'parallel'
-                self.expect(TokenType::For)?;
-                let var = match &self.peek().ty {
-                    TokenType::Identifier(name) | TokenType::AxisVar(name) => {
-                        let name = name.clone();
-                        self.advance();
-                        name
-                    }
-                    _ => {
-                        return Err(super::format_error_at(
-                            &self.source,
-                            self.peek().span.0,
-                            &format!(
-                                "Expected loop variable after 'parallel for', found {}",
-                                self.peek().ty
-                            ),
-                        ))
-                    }
-                };
-                self.expect(TokenType::In)?;
-                // Disable identifier function calls so the body `(` isn't
-                // consumed as a call on the last range token.
-                self.allow_ident_call = false;
-                let range = self.parse_expr()?;
-                self.allow_ident_call = true;
-                self.skip_newlines();
-                // Body is a parenthesized block of statements
-                let body_lparen_span = self.peek().span;
-                self.expect(TokenType::LParen)?;
-                self.skip_newlines();
-                let mut stmts = Vec::new();
-                while self.peek().ty != TokenType::RParen && !self.at_end() {
-                    stmts.push(self.parse_block_item()?);
-                    self.skip_newlines();
-                    if self.peek().ty == TokenType::Comma {
-                        self.advance();
-                    }
-                    self.skip_newlines();
-                }
-                let body_rparen_span = self.peek().span;
-                self.expect(TokenType::RParen)?;
-                let body = if stmts.len() == 1 {
-                    stmts.pop().unwrap()
-                } else {
-                    Ir::Block {
-                        items: stmts,
-                        span: join(body_lparen_span, body_rparen_span),
-                    }
-                };
-                let span = join(parallel_span, body_rparen_span);
-                Ok(Ir::ParallelFor {
-                    var,
-                    range: Box::new(range),
-                    body: Box::new(body),
-                    span,
                 })
             }
             // Type names as cast functions: f32(expr), vec2(a, b), etc.
@@ -997,6 +959,97 @@ impl Parser {
                 self.peek().span.0,
                 &format!("Unexpected token {}", self.peek().ty),
             )),
+        }
+    }
+
+    /// Parse the loop-variable binding after `for`. Accepts a single
+    /// identifier (`i`) or a parenthesized tuple of identifiers
+    /// (`(x, y, z)`) for Cartesian iteration.
+    fn parse_for_vars(&mut self) -> Result<Vec<String>, String> {
+        match &self.peek().ty {
+            TokenType::Identifier(name) | TokenType::AxisVar(name) => {
+                let name = name.clone();
+                self.advance();
+                Ok(vec![name])
+            }
+            TokenType::LParen => {
+                self.advance(); // consume '('
+                let mut vars = Vec::new();
+                self.skip_newlines();
+                match &self.peek().ty {
+                    TokenType::Identifier(n) | TokenType::AxisVar(n) => {
+                        vars.push(n.clone());
+                        self.advance();
+                    }
+                    _ => {
+                        return Err(super::format_error_at(
+                            &self.source,
+                            self.peek().span.0,
+                            &format!(
+                                "Expected loop variable name, found {}",
+                                self.peek().ty
+                            ),
+                        ));
+                    }
+                }
+                while self.peek().ty == TokenType::Comma {
+                    self.advance();
+                    self.skip_newlines();
+                    match &self.peek().ty {
+                        TokenType::Identifier(n) | TokenType::AxisVar(n) => {
+                            vars.push(n.clone());
+                            self.advance();
+                        }
+                        _ => {
+                            return Err(super::format_error_at(
+                                &self.source,
+                                self.peek().span.0,
+                                &format!(
+                                    "Expected loop variable name, found {}",
+                                    self.peek().ty
+                                ),
+                            ));
+                        }
+                    }
+                }
+                self.expect(TokenType::RParen)?;
+                Ok(vars)
+            }
+            _ => Err(super::format_error_at(
+                &self.source,
+                self.peek().span.0,
+                &format!(
+                    "Expected loop variable after 'for', found {}",
+                    self.peek().ty
+                ),
+            )),
+        }
+    }
+
+    /// Build a synthetic range expression for `for VARS (body)` (no `in`).
+    /// Each var name resolves to a Range value in the outer scope; we wrap
+    /// them in a Tuple for the multi-dim case so the runtime can iterate
+    /// over each component independently. Single-var collapses to the bare
+    /// identifier.
+    fn synth_range_from_vars(&self, vars: &[String], span: Span) -> Ir {
+        if vars.len() == 1 {
+            Ir::Identifier {
+                name: vars[0].clone(),
+                span,
+                resolved: None,
+            }
+        } else {
+            Ir::Tuple {
+                items: vars
+                    .iter()
+                    .map(|v| Ir::Identifier {
+                        name: v.clone(),
+                        span,
+                        resolved: None,
+                    })
+                    .collect(),
+                span,
+            }
         }
     }
 

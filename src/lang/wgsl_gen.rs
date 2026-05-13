@@ -667,9 +667,9 @@ impl<'a> GenContext<'a> {
                     )?;
                 }
                 Ir::ForLoop {
-                    var, range, body, ..
+                    vars, range, body, ..
                 } => {
-                    self.emit_for_loop(&mut code, var, range, body, "    ", &mut declared)?;
+                    self.emit_for_loop(&mut code, vars, range, body, "    ", &mut declared)?;
                 }
                 Ir::WhileLoop {
                     condition, body, ..
@@ -745,9 +745,9 @@ impl<'a> GenContext<'a> {
                     )?;
                 }
                 Ir::ForLoop {
-                    var, range, body, ..
+                    vars, range, body, ..
                 } => {
-                    self.emit_for_loop(&mut code, var, range, body, "    ", &mut declared)?;
+                    self.emit_for_loop(&mut code, vars, range, body, "    ", &mut declared)?;
                 }
                 Ir::WhileLoop {
                     condition, body, ..
@@ -788,18 +788,38 @@ impl<'a> GenContext<'a> {
     }
 
     /// Emit statements inside a loop body.
-    /// Emit a `for var in start..end (body)` as a WGSL for-loop with iteration guard.
+    /// Emit a `for var in start..end[..delta] (body)` as a WGSL for-loop
+    /// with iteration guard.
+    ///
+    /// Multi-dim (tuple-var) loops are not supported in fragment-shader
+    /// contexts — they belong to the GPU compute path. We reject them
+    /// here with a typed error rather than silently emitting nonsense.
     fn emit_for_loop(
         &self,
         code: &mut String,
-        var: &str,
+        vars: &[String],
         range: &Ir,
         body: &Ir,
         indent: &str,
         declared: &mut HashSet<String>,
     ) -> Result<(), String> {
-        let (start_expr, end_expr) = match range {
-            Ir::Range { start, end, .. } => (self.emit_expr(start)?, self.emit_expr(end)?),
+        if vars.len() != 1 {
+            return Err(
+                "multi-variable for loops are only supported in `gpu` blocks, not in plot bodies"
+                    .to_string(),
+            );
+        }
+        let var = &vars[0];
+        let (start_expr, end_expr, delta_expr) = match range {
+            Ir::Range { start, end, delta, .. } => {
+                let s = self.emit_expr(start)?;
+                let e = self.emit_expr(end)?;
+                let d = match delta {
+                    Some(d) => self.emit_expr(d)?,
+                    None => "1.0".to_string(),
+                };
+                (s, e, d)
+            }
             _ => return Err("for loop range must be start..end".to_string()),
         };
         // Declare or reassign the loop variable
@@ -807,7 +827,7 @@ impl<'a> GenContext<'a> {
             code.push_str(&format!("{}{} = {};\n", indent, var, start_expr));
         } else {
             code.push_str(&format!("{}var {} = {};\n", indent, var, start_expr));
-            declared.insert(var.to_string());
+            declared.insert(var.clone());
         }
         // Iteration-guarded loop
         code.push_str(&format!(
@@ -820,8 +840,11 @@ impl<'a> GenContext<'a> {
         ));
         // Body
         self.emit_loop_body_stmts(code, body, declared)?;
-        // Update: var = var + 1.0
-        code.push_str(&format!("{}    {} = {} + 1.0;\n", indent, var, var));
+        // Update: var = var + delta
+        code.push_str(&format!(
+            "{}    {} = {} + {};\n",
+            indent, var, var, delta_expr
+        ));
         code.push_str(&format!("{}}}\n", indent));
         Ok(())
     }
@@ -1041,9 +1064,9 @@ impl<'a> GenContext<'a> {
                     self.emit_tuple_binding(&mut code, names, value, indent, "var", declared)?;
                 }
                 Ir::ForLoop {
-                    var, range, body, ..
+                    vars, range, body, ..
                 } => {
-                    self.emit_for_loop(&mut code, var, range, body, indent, declared)?;
+                    self.emit_for_loop(&mut code, vars, range, body, indent, declared)?;
                 }
                 Ir::WhileLoop {
                     condition, body, ..

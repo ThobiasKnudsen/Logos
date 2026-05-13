@@ -15,7 +15,7 @@ pub enum TokenType {
     And,
     Or,
     Not,
-    Parallel,
+    Gpu,
     In,
 
     // Types
@@ -80,7 +80,7 @@ impl fmt::Display for TokenType {
             TokenType::And => write!(f, "'and'"),
             TokenType::Or => write!(f, "'or'"),
             TokenType::Not => write!(f, "'not'"),
-            TokenType::Parallel => write!(f, "'parallel'"),
+            TokenType::Gpu => write!(f, "'gpu'"),
             TokenType::In => write!(f, "'in'"),
             TokenType::TypeF32 => write!(f, "'f32'"),
             TokenType::TypeF64 => write!(f, "'f64'"),
