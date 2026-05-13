@@ -964,6 +964,214 @@ fn remove_cell_drops_pending_reduce() {
     // the in-flight handle, but Notebook would ignore any stale response).
 }
 
+// ─── CAS-fixpoint architecture ─────────────────────────────────────────────
+//
+// The run_cell refactor makes CAS resolution a precondition for plot,
+// interpreter, and bare-expression dispatch. Print is the only branch with
+// its own symbolic fallback, so the fixpoint skips print-only cells to
+// avoid a redundant second round-trip after the splice. Tests below pin
+// each part of that contract.
+
+#[test]
+fn print_only_with_cas_subtree_does_one_round_trip_not_two() {
+    // `print(∫(sin(x), x))` resolves through the print branch's symbolic
+    // fallback in a single REDUCE submission. The eager fixpoint must NOT
+    // strip the integral first and re-submit the spliced `-cos(x)` — that
+    // would double the REDUCE round-trips for every symbolic print.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "print(∫(sin(x), x))");
+    let cell_id = nb.cell(i).id;
+    mock.respond_to(cell_id, Ok("-cos(x)".to_string()));
+    nb.tick();
+    assert_eq!(computed(&nb, i), "-cos(x)");
+    let subs = mock.submissions_for(cell_id);
+    assert_eq!(
+        subs.len(),
+        1,
+        "print(CAS) must use exactly one REDUCE round-trip; got submissions:\n  {:?}",
+        subs,
+    );
+    assert!(
+        subs[0].expression.contains("int(sin(x)"),
+        "the single submission must carry the CAS call intact; got {:?}",
+        subs[0].expression,
+    );
+}
+
+#[test]
+fn plot_with_cas_in_body_dispatches_through_fixpoint_then_handle_plots() {
+    // Same scenario as plot_routes_through_cas_when_function_body_contains_integral,
+    // but written against the fixpoint contract: the first submission carries
+    // the CAS subtree (fixpoint), and after the splice no further submission
+    // is needed because handle_plots is synchronous.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        F(x) := ∫(x², x)
+        plot(y = F(x))
+        "#,
+    );
+    let cell_id = nb.cell(i).id;
+    let subs_before = mock.submissions_for(cell_id);
+    assert_eq!(subs_before.len(), 1, "fixpoint submits once up front");
+    assert!(
+        subs_before[0].expression.contains("int("),
+        "first submission must be the CAS subtree, got {:?}",
+        subs_before[0].expression,
+    );
+    mock.respond_to(cell_id, Ok("x**3/3".to_string()));
+    nb.tick();
+    let subs_after = mock.submissions_for(cell_id);
+    assert_eq!(
+        subs_after.len(),
+        1,
+        "handle_plots is synchronous — no extra REDUCE call after splice; got {:?}",
+        subs_after,
+    );
+    assert!(
+        !nb.cell(i).outcome.shaders.is_empty(),
+        "shader should emit after fixpoint splice; diagnostics: {:?}",
+        nb.cell(i).outcome.diagnostics,
+    );
+}
+
+#[test]
+fn timeout_diagnostic_surfaces_after_pending_period() {
+    use std::time::{Duration, Instant};
+    // A symbolic round-trip that the backend never answers must not park
+    // the cell on `…` forever. `tick_with_now` walks pending submissions
+    // and converts any older than `PENDING_TIMEOUT` into a user-visible
+    // error diagnostic. Drive the clock past the timeout instead of
+    // sleeping for 30 real seconds.
+    let (mut nb, _mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "f := x + 2*x\nprint(f)");
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Pending)
+    ));
+
+    let before_timeout = Instant::now() + Duration::from_secs(1);
+    nb.tick_with_now(before_timeout);
+    assert!(
+        matches!(nb.cell(i).outcome.message, Some(CellMessage::Pending)),
+        "still pending before timeout window",
+    );
+
+    let after_timeout = Instant::now() + Notebook::PENDING_TIMEOUT + Duration::from_secs(1);
+    let updated = nb.tick_with_now(after_timeout);
+    assert_eq!(updated, vec![i], "timed-out cell must be reported updated");
+
+    let diags = &nb.cell(i).outcome.diagnostics;
+    assert_eq!(diags.len(), 1, "exactly one timeout diagnostic");
+    let msg = &diags[0].message;
+    assert!(
+        msg.contains("did not respond") && msg.contains("30s"),
+        "timeout diagnostic should name the wait window; got {:?}",
+        msg,
+    );
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Error(_)),
+    ));
+    // A late response would be silently dropped — the notebook's
+    // pending_simplify map no longer references the timed-out cell_id.
+    // (`nb.has_pending()` may still report true because the mock backend
+    // doesn't know we gave up on its request, but that's a backend-only
+    // bookkeeping detail; the cell-level state is what matters.)
+}
+
+#[test]
+fn fast_path_print_makes_no_reduce_submission() {
+    // The refactor must preserve print's interpreter fast-path: a fully
+    // numeric `print(3+4)` should never touch REDUCE. This guards against
+    // a future change that always pre-walks the IR for CAS.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "print(3 + 4)");
+    let cell_id = nb.cell(i).id;
+    assert_eq!(computed(&nb, i), "7");
+    assert!(
+        mock.submissions_for(cell_id).is_empty(),
+        "no REDUCE submission for purely numeric prints",
+    );
+}
+
+#[test]
+fn nested_cas_fixpoint_iterates_until_fully_resolved() {
+    // Two CAS subtrees in the same cell — the fixpoint must keep
+    // resubmitting until find_cas_path returns None, then dispatch. With
+    // only one round-trip the second integral would leak into WGSL.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        F(x) := ∫(x, x)
+        G(x) := ∫(x², x)
+        plot(y = F(x) + G(x))
+        "#,
+    );
+    let cell_id = nb.cell(i).id;
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Pending),
+    ));
+
+    mock.respond_to(cell_id, Ok("x**2/2".to_string()));
+    nb.tick();
+    // Still pending — second CAS subtree should be in flight now.
+    assert!(
+        matches!(nb.cell(i).outcome.message, Some(CellMessage::Pending)),
+        "fixpoint should re-submit the remaining ∫; got {:?}",
+        nb.cell(i).outcome.message,
+    );
+    assert!(
+        nb.cell(i).outcome.shaders.is_empty(),
+        "no shader before the fixpoint completes",
+    );
+
+    mock.respond_to(cell_id, Ok("x**3/3".to_string()));
+    nb.tick();
+    assert!(
+        !nb.cell(i).outcome.shaders.is_empty(),
+        "shader should emit after both CAS subtrees resolve; diagnostics: {:?}",
+        nb.cell(i).outcome.diagnostics,
+    );
+    let s = &nb.cell(i).outcome.shaders[0];
+    assert!(
+        !s.wgsl.contains("integral(") && !s.wgsl.contains("int("),
+        "no unresolved CAS may leak into WGSL; got:\n{}",
+        s.wgsl,
+    );
+    validate_wgsl(&s.wgsl).expect("wgsl validates");
+    let subs = mock.submissions_for(cell_id);
+    assert_eq!(subs.len(), 2, "fixpoint must submit each CAS subtree once");
+}
+
+#[test]
+fn dead_simplifier_under_real_service_eventually_surfaces_diagnostic() {
+    // A `MockReduce` that never responds is the simplest stand-in for the
+    // "REDUCE worker is dead" scenario described in #19. Combined with the
+    // `tick_with_now` timeout path, this is the regression test for the
+    // failure mode where a crashed CSL session leaves cells on `…` forever.
+    use std::time::{Duration, Instant};
+    let (mut nb, _mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "print(∫(sin(x), x))");
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Pending),
+    ));
+
+    let later = Instant::now() + Notebook::PENDING_TIMEOUT + Duration::from_millis(100);
+    nb.tick_with_now(later);
+
+    match nb.cell(i).outcome.message.as_ref().unwrap() {
+        CellMessage::Error(msg) => {
+            assert!(msg.contains("Symbolic engine did not respond"));
+        }
+        other => panic!("expected Error after timeout, got {:?}", other),
+    }
+}
+
 // ─── LaTeX-symbol substitutions ────────────────────────────────────────────
 //
 // Verify every Unicode codepoint the autocomplete LATEX_SYMBOLS table inserts
