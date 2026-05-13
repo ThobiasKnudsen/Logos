@@ -952,6 +952,90 @@ fn examples_render_through_notebook() {
     );
 }
 
+/// Issue #28: `plot(<array of 2-tuples>)` routes through the vertex-
+/// plot path and surfaces vertex data on the ShaderSpec. The
+/// fragment-only `wgsl` field carries the canonical vertex+fragment
+/// pair, and the renderer-facing `vertices` field carries the
+/// uploaded positions.
+#[test]
+fn plot_with_literal_vertex_array_emits_vertex_shader() {
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "plot([(0, 0), (1, 1), (2, 0)])");
+    let spec = shader(&nb.cell(i).outcome);
+    let verts = spec
+        .vertices
+        .as_ref()
+        .expect("vertex plot must populate `vertices`");
+    assert_eq!(
+        verts.positions,
+        vec![[0.0, 0.0], [1.0, 1.0], [2.0, 0.0]],
+        "exact positions from the literal array",
+    );
+    assert!(
+        spec.wgsl.contains("@vertex"),
+        "ShaderSpec.wgsl should be the vertex+fragment pair, got:\n{}",
+        spec.wgsl,
+    );
+}
+
+/// Issue #28: re-running a cell whose vertex data hasn't changed must
+/// produce a ShaderSpec with the same hash, so the renderer's
+/// content-keyed pipeline cache skips the GPU re-upload.
+#[test]
+fn replayed_unchanged_vertex_plot_keeps_same_hash() {
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "plot([(0, 0), (1, 1)])");
+    let first = shader(&nb.cell(i).outcome)
+        .vertices
+        .as_ref()
+        .unwrap()
+        .hash;
+    nb.play(i);
+    let second = shader(&nb.cell(i).outcome)
+        .vertices
+        .as_ref()
+        .unwrap()
+        .hash;
+    assert_eq!(first, second, "identical replays must produce equal hashes");
+}
+
+/// Issue #28: editing the vertex data flips the hash so the cache
+/// in `ShaderPipelineManager::set_cell_shaders` rebuilds the
+/// pipeline + buffer.
+#[test]
+fn editing_vertex_data_changes_hash() {
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "plot([(0, 0), (1, 1)])");
+    let before = shader(&nb.cell(i).outcome)
+        .vertices
+        .as_ref()
+        .unwrap()
+        .hash;
+    nb.set_text(i, "plot([(0, 0), (1, 2)])");
+    nb.play(i);
+    let after = shader(&nb.cell(i).outcome)
+        .vertices
+        .as_ref()
+        .unwrap()
+        .hash;
+    assert_ne!(before, after, "different positions must hash differently");
+}
+
+/// Issue #28: analytic plots (curve, surface, lambda) continue to
+/// route through the fragment-only path — `vertices` stays `None`
+/// so the renderer doesn't accidentally try to bind a non-existent
+/// buffer.
+#[test]
+fn analytic_plot_does_not_attach_vertices() {
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "plot(y = sin(x))");
+    let spec = shader(&nb.cell(i).outcome);
+    assert!(
+        spec.vertices.is_none(),
+        "analytic plot must leave `vertices` None"
+    );
+}
+
 #[test]
 fn remove_cell_drops_pending_reduce() {
     let (mut nb, _mock) = mock_reduce_notebook();

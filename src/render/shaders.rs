@@ -1,19 +1,22 @@
 use std::sync::Arc;
 
+use super::shader_pipeline::CellShaderInput;
 use super::Renderer;
 
 impl Renderer {
-    /// Compile and install one pipeline per `(primary_color, wgsl)` pair for
-    /// `cell_id`. Replaces any pipelines previously installed for this cell.
-    /// Used by the multi-plot path: each `plot(...)` in a cell becomes its
-    /// own pipeline.
+    /// Compile and install one pipeline per input for `cell_id`,
+    /// replacing any pipelines previously installed for this cell.
+    /// Each `plot(...)` in a cell becomes its own pipeline; analytic
+    /// plots route through the fullscreen-fragment path while vertex
+    /// plots (issue #28) take an uploaded vertex buffer and a
+    /// custom vertex+fragment WGSL.
     pub fn set_cell_shaders(
         &mut self,
         cell_id: usize,
-        sources: &[([f32; 4], &str)],
+        inputs: &[CellShaderInput<'_>],
     ) -> Result<(), String> {
         self.shader_pipeline
-            .set_cell_shaders(&self.device, cell_id, sources)
+            .set_cell_shaders(&self.device, cell_id, inputs)
     }
 
     /// Update the plot color used by every pipeline for `cell_id`. Cheap —

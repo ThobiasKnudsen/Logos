@@ -18,12 +18,13 @@ mod diagnostic;
 mod reduce_backend;
 mod reduce_simplifier;
 mod shader;
+mod vertex_plot;
 
 pub use cell::{CellMessage, CellOutcome, CellState, NotebookCell};
 pub use diagnostic::{Diagnostic, Severity, Span};
 pub use reduce_backend::{ReduceBackend, SharedReduce};
 pub use reduce_simplifier::ReduceSimplifier;
-pub use shader::ShaderSpec;
+pub use shader::{ShaderSpec, VertexData};
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -812,6 +813,23 @@ impl Notebook {
         let mut shaders = Vec::with_capacity(plot_indices.len());
         let mut last_ir: Option<Ir> = None;
         for &plot_idx in plot_indices {
+            // Vertex-plot dispatch (issue #28): peek at the first arg
+            // *before* `build_plot_ir` runs. If it materializes as a
+            // CPU-side array of 2D points, we build a vertex+fragment
+            // ShaderSpec and bypass the analytic codegen entirely.
+            // Anything `try_evaluate` doesn't recognize falls through
+            // to the existing curve/surface path below.
+            if let Some(arg) = action_arg(combined, plot_idx, BuiltinOp::Plot) {
+                if let Some(vertices) = vertex_plot::try_evaluate(combined, arg) {
+                    shaders.push(ShaderSpec {
+                        wgsl: vertex_plot::VERTEX_PLOT_WGSL.to_string(),
+                        vertices: Some(vertices),
+                    });
+                    last_ir = Some(arg.clone());
+                    continue;
+                }
+            }
+
             let plot_ir = match lang::build_plot_ir(combined, plot_idx) {
                 Ok(ir) => ir,
                 Err(e) => {
@@ -825,7 +843,10 @@ impl Notebook {
             }
             match crate::lang::wgsl_gen::generate(&plot_ir) {
                 Ok(wgsl) => {
-                    shaders.push(ShaderSpec { wgsl });
+                    shaders.push(ShaderSpec {
+                        wgsl,
+                        vertices: None,
+                    });
                     last_ir = Some(plot_ir);
                 }
                 Err(e) => {
@@ -1001,7 +1022,10 @@ impl Notebook {
         }
         match crate::lang::wgsl_gen::generate(&combined) {
             Ok(wgsl) => {
-                self.cells[idx].outcome.shaders = vec![ShaderSpec { wgsl }];
+                self.cells[idx].outcome.shaders = vec![ShaderSpec {
+                    wgsl,
+                    vertices: None,
+                }];
                 self.cells[idx].outcome.program_ir = Some(combined);
                 self.cells[idx].state = CellState::Playing;
                 self.cells[idx].last_played_text = Some(self.cells[idx].buffer.text().to_string());

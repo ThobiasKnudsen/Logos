@@ -1008,14 +1008,19 @@ impl AppState {
         }
         let cell_id = cell.id;
         let primary_color = cell.plot_color.to_f32_array();
-        let sources: Vec<([f32; 4], &str)> = cell
+        let inputs: Vec<crate::render::shader_pipeline::CellShaderInput> = cell
             .outcome
             .shaders
             .iter()
-            .map(|s| (primary_color, s.wgsl.as_str()))
+            .map(|s| crate::render::shader_pipeline::CellShaderInput {
+                primary_color,
+                wgsl: s.wgsl.as_str(),
+                vertices: s.vertices.as_ref().map(|v| v.positions.as_slice()),
+                vertex_hash: s.vertices.as_ref().map(|v| v.hash).unwrap_or(0),
+            })
             .collect();
 
-        if let Err(e) = self.renderer.set_cell_shaders(cell_id, &sources) {
+        if let Err(e) = self.renderer.set_cell_shaders(cell_id, &inputs) {
             log::error!("Shader compilation failed: {}", e);
             let source = self
                 .session
