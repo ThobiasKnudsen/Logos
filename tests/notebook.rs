@@ -769,14 +769,16 @@ fn interpreter_path_routes_through_cas_when_function_body_contains_integral() {
     // `compile_after_simplify` resumes the interpreter branch.
     let (mut nb, mock) = mock_reduce_notebook();
     // Array-literal cell that triggers `needs_interpreter` and references
-    // a function whose body contains a CAS call. The trailing expression
-    // (`g`) makes the cell's final value the array itself, not Void.
+    // a function whose body contains a CAS call. `print(g)` is what
+    // surfaces the array to the output panel — a bare trailing `g` would
+    // run the interpreter for side effects but leave `outcome.message`
+    // unset (Q2: output panel is reserved for print + errors).
     let i = add_and_play(
         &mut nb,
         r#"
         F(x) := ∫(x, x)
         g := [F(1.0), F(2.0)]
-        g
+        print(g)
         "#,
     );
     let cell_id = nb.cell(i).id;
@@ -1148,13 +1150,59 @@ fn nested_cas_fixpoint_iterates_until_fully_resolved() {
 }
 
 #[test]
-fn gpu_for_loop_through_notebook_pipeline_returns_array() {
-    // The `gpu` modifier on a `for` loop lowers to `Ir::ParallelFor`,
-    // which makes `needs_interpreter` true. After the CAS-fixpoint
-    // refactor, the notebook's `dispatch` routes those cells through
-    // `interpreter::eval` (CpuFallback in tests; real wgpu in the live
-    // app). Pin the routing: a basic `gpu` for-loop on an array must
-    // produce the right value without parking on Pending or erroring.
+fn user_typed_int_does_not_trigger_eager_cas_fixpoint() {
+    // After dropping `int`/`df` from CAS_CALLEES, a plot/interpreter
+    // cell with `int(x, x)` in a function body must NOT trigger the
+    // eager fixpoint — `int` is no longer a recognized CAS spelling
+    // (only `∫` / `integral` is). The cell should fail downstream
+    // (WGSL/interpreter doesn't know `int`) rather than silently
+    // shipping the expression to REDUCE under the user's nose.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        F(x) := int(x, x)
+        plot(y = F(x))
+        "#,
+    );
+    let cell_id = nb.cell(i).id;
+    assert!(
+        mock.submissions_for(cell_id).is_empty(),
+        "`int(...)` in a plot/interpreter context must NOT trigger the \
+         eager CAS fixpoint; got submissions {:?}",
+        mock.submissions_for(cell_id),
+    );
+    assert!(
+        !matches!(nb.cell(i).outcome.message, Some(CellMessage::Pending)),
+        "cell should not park on Pending — REDUCE was never called",
+    );
+}
+
+#[test]
+fn unicode_integral_still_routes_to_cas() {
+    // Sanity check the other half: the canonical `∫(...)` (lexed as
+    // `User("integral")`) must still be submitted to REDUCE.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "print(∫(x, x))");
+    let cell_id = nb.cell(i).id;
+    let subs = mock.submissions_for(cell_id);
+    assert_eq!(subs.len(), 1, "∫ must submit to REDUCE; got {:?}", subs);
+    assert!(
+        subs[0].expression.contains("int("),
+        "ir_to_reduce should still translate `integral` → `int` for \
+         REDUCE's text-level API; got {:?}",
+        subs[0].expression,
+    );
+}
+
+#[test]
+fn bare_trailing_expression_runs_side_effects_but_does_not_print() {
+    // Q2 contract: the output panel is reserved for `print(...)` and
+    // errors. A cell whose last statement is a bare value-producing
+    // expression (here, `data`) runs the interpreter for its side
+    // effects — the `gpu` for-loop mutates `data` — but the trailing
+    // value is NOT pushed to `outcome.message`. The user must wrap
+    // `data` in `print(data)` to see it.
     let mut nb = null_notebook();
     let i = add_and_play(
         &mut nb,
@@ -1162,6 +1210,71 @@ fn gpu_for_loop_through_notebook_pipeline_returns_array() {
         data := [1, 2, 3, 4]
         for i in 0..4 gpu ( data[i] := data[i] * 2 )
         data
+        "#,
+    );
+
+    // No output message — no print() in the cell.
+    assert!(
+        nb.cell(i).outcome.message.is_none(),
+        "bare trailing expression must not appear in the output panel; \
+         got {:?}",
+        nb.cell(i).outcome.message,
+    );
+    // No error either — the cell ran successfully.
+    assert!(
+        nb.cell(i).outcome.diagnostics.is_empty(),
+        "diagnostics should be empty on a successful bare-trailing cell; \
+         got {:?}",
+        nb.cell(i).outcome.diagnostics,
+    );
+    // The interpreter did run (side effects + value computation): the
+    // cell stored its program_ir.
+    let program_ir = nb
+        .cell(i)
+        .outcome
+        .program_ir
+        .as_ref()
+        .expect("program_ir should be populated after the interpreter runs");
+
+    // Q3 contract: a Rust caller can re-evaluate the program_ir via the
+    // public interpreter API to recover the cell's value. This is the
+    // "call Logos from Rust, get a Value back" path — separate from the
+    // UI display layer.
+    use logos::lang::interpreter::{self, CpuFallback};
+    let value = interpreter::eval(program_ir, &CpuFallback)
+        .expect("re-eval of program_ir should succeed");
+    // Value's display formatting includes the doubled array.
+    let displayed = format!("{}", value);
+    let cleaned: String = displayed.chars().filter(|c| !c.is_whitespace()).collect();
+    for expected in ["2", "4", "6", "8"] {
+        assert!(
+            cleaned.contains(expected),
+            "programmatic re-eval should yield the doubled array [2,4,6,8]; \
+             got {:?}",
+            displayed,
+        );
+    }
+}
+
+#[test]
+fn gpu_for_loop_through_notebook_pipeline_returns_array() {
+    // The `gpu` modifier on a `for` loop lowers to `Ir::ParallelFor`,
+    // which makes `needs_interpreter` true. After the CAS-fixpoint
+    // refactor, the notebook's `dispatch` routes those cells through
+    // `interpreter::eval` (CpuFallback in tests; real wgpu in the live
+    // app). Pin the routing: a basic `gpu` for-loop on an array must
+    // produce the right value without parking on Pending or erroring.
+    //
+    // The trailing `print(data)` is required by Q2: the output panel
+    // only shows print/error messages. A bare trailing `data` would run
+    // the for-loop but leave `outcome.message` unset.
+    let mut nb = null_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        data := [1, 2, 3, 4]
+        for i in 0..4 gpu ( data[i] := data[i] * 2 )
+        print(data)
         "#,
     );
     match &nb.cell(i).outcome.message {
@@ -1183,7 +1296,9 @@ fn gpu_for_loop_through_notebook_pipeline_returns_array() {
             nb.cell(i).outcome.diagnostics,
         ),
     }
-    assert!(matches!(nb.cell(i).state, CellState::Playing));
+    // (state stays Idle for print-only cells — that's the existing
+    // contract; only plot / interpreter / wgsl-gen branches transition
+    // to Playing. Test focus is on the dispatch path, not state.)
 }
 
 #[test]
@@ -1201,7 +1316,7 @@ fn gpu_for_loop_with_cas_in_dependency_routes_through_fixpoint() {
         F(x) := ∫(x, x)
         data := [F(1.0), F(2.0), F(3.0), F(4.0)]
         for i in 0..4 gpu ( data[i] := data[i] * 2 )
-        data
+        print(data)
         "#,
     );
     let cell_id = nb.cell(i).id;

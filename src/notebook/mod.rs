@@ -755,12 +755,16 @@ impl Notebook {
             return;
         }
 
-        // No print/plot — array/parallel cells need the interpreter.
+        // No print/plot — array/parallel cells still need the interpreter
+        // to run for their side effects (mutating arrays, dispatching gpu
+        // for-loops), but the trailing expression's value is NOT pushed
+        // to the output panel. The output panel is reserved for explicit
+        // `print(...)` results and errors. Programmatic callers can
+        // re-evaluate `outcome.program_ir` via `lang::interpreter::eval`
+        // to recover the value.
         if lang::needs_interpreter(&combined) {
             match interpreter::eval(&combined, self.gpu.as_ref()) {
-                Ok(val) => {
-                    self.cells[idx].outcome.message =
-                        Some(CellMessage::Computed(format!("{}", val)));
+                Ok(_val) => {
                     self.cells[idx].outcome.program_ir = Some(combined);
                     self.cells[idx].state = CellState::Playing;
                     self.cells[idx].last_played_text = Some(snapshot.to_string());
