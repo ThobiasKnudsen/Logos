@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -107,7 +108,7 @@ struct FuncDef {
 // Environment
 // ---------------------------------------------------------------------------
 
-/// Environment — variable + function bindings.
+/// Environment — variable + function bindings, plus a shared stdout buffer.
 ///
 /// Functions are stored behind `Rc<HashMap>` so that creating a child scope
 /// doesn't deep-clone the function table. `Rc::make_mut` is used on insertion
@@ -115,10 +116,17 @@ struct FuncDef {
 /// function bodies only read a handful of parent vars and inserting params
 /// would otherwise mutate the parent. (For deeply nested or hot-path calls
 /// this could be improved further with a parent-pointer scope chain.)
+///
+/// `stdout` is the print buffer — a single shared `Rc<RefCell<Vec<String>>>`
+/// across all child scopes so a `print()` inside a `for`/`while`/lambda body
+/// pushes to the same buffer that the top-level caller reads after eval.
+/// Without this shared buffer, nested prints disappeared because the caller
+/// never saw them — they were only "value returns" through the recursion.
 #[derive(Debug, Clone)]
 pub struct Env {
     vars: HashMap<String, Value>,
     funcs: Rc<HashMap<String, FuncDef>>,
+    stdout: Rc<RefCell<Vec<String>>>,
 }
 
 impl Env {
@@ -126,6 +134,7 @@ impl Env {
         Self {
             vars: HashMap::new(),
             funcs: Rc::new(HashMap::new()),
+            stdout: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
@@ -133,6 +142,7 @@ impl Env {
         Self {
             vars: self.vars.clone(),
             funcs: Rc::clone(&self.funcs),
+            stdout: Rc::clone(&self.stdout),
         }
     }
 
@@ -142,6 +152,13 @@ impl Env {
 
     fn get_func(&self, name: &str) -> Option<&FuncDef> {
         self.funcs.get(name)
+    }
+
+    /// Push a printed line onto the shared stdout buffer. Used by
+    /// `BuiltinOp::Print` so a print inside any nested scope reaches the
+    /// top-level caller's collected output.
+    fn push_stdout(&self, line: String) {
+        self.stdout.borrow_mut().push(line);
     }
 }
 
@@ -289,10 +306,29 @@ where
 /// same normalized IR as wgsl_gen. After lowering: no `Ir::Lambda` nodes
 /// (they're lifted into synthetic FunctionDefs); HOF calls are monomorphized;
 /// every `Ir::Identifier` has its `resolved` field populated.
+///
+/// `print()` output is collected internally but discarded. Use
+/// `eval_with_stdout` if you need to surface it (e.g. the notebook's print
+/// output panel).
 pub fn eval(ast: &Ir, gpu: &dyn GpuDispatch) -> Result<Value, String> {
+    let (val, _stdout) = eval_with_stdout(ast, gpu)?;
+    Ok(val)
+}
+
+/// Same as `eval`, but also returns the in-order stdout the program
+/// produced via `print(...)`. Each line corresponds to one `print` call,
+/// including those nested inside `for`/`while`/`if`/lambda bodies. The
+/// notebook's nested-print routing uses this to populate the output
+/// panel without per-print extraction.
+pub fn eval_with_stdout(
+    ast: &Ir,
+    gpu: &dyn GpuDispatch,
+) -> Result<(Value, Vec<String>), String> {
     let lowered = super::lower::lower(ast.clone())?;
     let mut env = Env::new();
-    eval_node(&lowered, &mut env, gpu)
+    let value = eval_node(&lowered, &mut env, gpu)?;
+    let stdout = env.stdout.borrow().clone();
+    Ok((value, stdout))
 }
 
 // ---------------------------------------------------------------------------
@@ -632,7 +668,14 @@ fn eval_apply(
 
         BuiltinOp::Print => {
             if vals.len() == 1 {
-                Ok(vals.into_iter().next().unwrap())
+                let v = vals.into_iter().next().unwrap();
+                // Push the formatted value onto the shared stdout buffer
+                // so nested calls (inside for/while/if/lambda bodies)
+                // surface to the notebook's output panel — not just the
+                // top-level `print(...)` calls picked up by
+                // `detect_cell_actions`.
+                env.push_stdout(format!("{}", v));
+                Ok(v)
             } else {
                 Err("print() expects 1 argument".to_string())
             }
@@ -1384,6 +1427,49 @@ mod tests {
              add3(7)",
         );
         assert_eq!(v.as_f64().unwrap(), 10.0);
+    }
+
+    #[test]
+    fn stdout_captures_print_inside_for_loop() {
+        // The whole point of issue #63: `print(i)` inside a for-loop
+        // must surface every iteration's output via the stdout buffer,
+        // not be dropped because `detect_cell_actions` only sees top-
+        // level statements.
+        let source = "for i in 0..5 ( print(i) )";
+        let mut lex = Lexer::new(source);
+        let tokens = lex.tokenize().unwrap();
+        let mut parser = Parser::new(tokens, source.to_string());
+        let ast = parser.parse().unwrap();
+        let (_val, stdout) = eval_with_stdout(&ast, &CpuFallback).unwrap();
+        assert_eq!(stdout, vec!["0", "1", "2", "3", "4"]);
+    }
+
+    #[test]
+    fn stdout_captures_print_inside_nested_for_loops() {
+        let source = "for i in 0..2 (
+            for j in 0..2 (
+                print(i*10 + j)
+            )
+        )";
+        let mut lex = Lexer::new(source);
+        let tokens = lex.tokenize().unwrap();
+        let mut parser = Parser::new(tokens, source.to_string());
+        let ast = parser.parse().unwrap();
+        let (_val, stdout) = eval_with_stdout(&ast, &CpuFallback).unwrap();
+        assert_eq!(stdout, vec!["0", "1", "10", "11"]);
+    }
+
+    #[test]
+    fn stdout_captures_top_level_and_nested_prints_in_order() {
+        let source = "print(100)
+        for i in 0..3 ( print(i) )
+        print(200)";
+        let mut lex = Lexer::new(source);
+        let tokens = lex.tokenize().unwrap();
+        let mut parser = Parser::new(tokens, source.to_string());
+        let ast = parser.parse().unwrap();
+        let (_val, stdout) = eval_with_stdout(&ast, &CpuFallback).unwrap();
+        assert_eq!(stdout, vec!["100", "0", "1", "2", "200"]);
     }
 
     #[test]

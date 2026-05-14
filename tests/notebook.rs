@@ -1889,6 +1889,49 @@ fn latex_infinity_lexes_as_identifier() {
 //       semantic mapping exists, e.g. `≤` → Lte).
 
 #[test]
+fn print_inside_for_loop_surfaces_each_iteration() {
+    // Issue #63: nested `print()` calls are routed through the
+    // `eval_with_stdout` path. Every iteration's print should land in
+    // the cell's output panel in source order.
+    let mut nb = null_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        for i in 0..5 (
+            print(i)
+        )
+        "#,
+    );
+    match &nb.cell(i).outcome.message {
+        Some(CellMessage::Computed(msg)) => {
+            assert_eq!(msg, "0\n1\n2\n3\n4", "got: {:?}", msg);
+        }
+        other => panic!("expected Computed output, got {:?}", other),
+    }
+}
+
+#[test]
+fn print_inside_nested_for_loops_surfaces_all_iterations() {
+    let mut nb = null_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        for i in 0..2 (
+            for j in 0..2 (
+                print(i*10 + j)
+            )
+        )
+        "#,
+    );
+    match &nb.cell(i).outcome.message {
+        Some(CellMessage::Computed(msg)) => {
+            assert_eq!(msg, "0\n1\n10\n11", "got: {:?}", msg);
+        }
+        other => panic!("expected Computed output, got {:?}", other),
+    }
+}
+
+#[test]
 fn gpu_subset_error_fires_on_print_route() {
     // A cell whose top-level is a `print(...)` would route through
     // handle_prints → interpreter → REDUCE without ever hitting wgsl_gen,

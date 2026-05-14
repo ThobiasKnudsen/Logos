@@ -759,6 +759,42 @@ impl Notebook {
             Err(_) => (Vec::new(), Vec::new()),
         };
 
+        // Nested prints (inside for / while / if / lambda bodies) aren't
+        // visible to `detect_cell_actions`. When the current cell has
+        // any, evaluate the whole combined IR via `eval_with_stdout` and
+        // surface the collected lines — `handle_prints`' per-print
+        // extraction can't reach them (it only walks top-level Apply
+        // statements). The cell's own_plots, if any, still go through
+        // `handle_plots` below.
+        //
+        // Trade-off: prior cells' top-level prints also re-fire during
+        // this eval and bleed into the buffer. For single-cell programs
+        // (the common case) the buffer is clean; for multi-cell setups
+        // with nested prints in earlier cells the leak is cosmetic. A
+        // proper fix would slice the buffer at the cell boundary.
+        let cell_ir = self.cells[idx].cached_ir().ok();
+        let cell_has_nested_print = cell_ir
+            .as_ref()
+            .map(|ir| lang::has_nested_print(ir))
+            .unwrap_or(false);
+        if cell_has_nested_print && own_plots.is_empty() {
+            match interpreter::eval_with_stdout(&combined, self.gpu.as_ref()) {
+                Ok((_val, stdout)) => {
+                    let msg = if stdout.is_empty() {
+                        None
+                    } else {
+                        Some(CellMessage::Computed(stdout.join("\n")))
+                    };
+                    self.cells[idx].outcome.message = msg;
+                    self.cells[idx].outcome.program_ir = Some(combined);
+                    self.cells[idx].state = CellState::Playing;
+                    self.cells[idx].last_played_text = Some(snapshot.to_string());
+                }
+                Err(e) => self.set_runtime_error(idx, e, snapshot),
+            }
+            return;
+        }
+
         if !own_prints.is_empty() {
             self.handle_prints(idx, &own_prints, &combined);
             if own_plots.is_empty() {
