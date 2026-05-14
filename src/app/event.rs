@@ -153,8 +153,19 @@ impl ApplicationHandler for App {
                 ..
             } => state.handle_mouse_released_left(event_loop),
 
+            // `is_synthetic` events are fired by winit when the window
+            // gains or loses focus, to inform the app which keys were
+            // already held down at that moment. The user didn't actually
+            // press them during the focused session, so treating them as
+            // real input would insert characters into whatever cell has
+            // focus — the canonical symptom being Alt+Tab into the app
+            // dropping a real Tab character into the editor. Modifier
+            // state still updates correctly through `ModifiersChanged`,
+            // so dropping synthetic key events here is safe.
             WindowEvent::KeyboardInput {
-                event: key_event, ..
+                event: key_event,
+                is_synthetic: false,
+                ..
             } => state.handle_keyboard_input(key_event, event_loop),
 
             WindowEvent::RedrawRequested => state.handle_redraw_requested(),
