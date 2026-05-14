@@ -225,6 +225,30 @@ fn action_arg<'a>(combined: &'a Ir, stmt_idx: usize, op: BuiltinOp) -> Option<&'
     None
 }
 
+/// Whether `ty` is an acceptable result type for `plot(...)` once
+/// canonicalization has run and the vertex-plot path has been ruled
+/// out. Two shapes are valid:
+///
+/// - `Bool` — a predicate corner-checked across pixels.
+/// - `Vec2/3/4`, or a homogeneous-Num tuple of size 2/3/4 — taken as
+///   the per-pixel RGBA output (wgsl_gen's "value is color" branch
+///   expands shorter widths to vec4).
+///
+/// `Unknown` is permitted because inference inside synthesized
+/// helpers may leave a function-pointer arg as `Unknown` — rejecting
+/// that path would block the higher-order user-function flow.
+fn plot_result_type_ok(ty: &crate::lang::ir::Type) -> bool {
+    use crate::lang::ir::Type::*;
+    match ty {
+        Bool | Unknown => true,
+        Vec2 | Vec3 | Vec4 => true,
+        Tuple(items) if matches!(items.len(), 2..=4) => {
+            items.iter().all(|t| matches!(t, Num | Unknown))
+        }
+        _ => false,
+    }
+}
+
 /// Like `action_arg`, but for `plot(...)` specifically and returns the
 /// full argument list. Used by the vertex-plot dispatcher to peek at
 /// both the first arg (the vertex array) and the optional second arg
@@ -1059,9 +1083,44 @@ impl Notebook {
                     return;
                 }
             };
-            if let Err(e) = crate::lang::type_check(&plot_ir, snapshot) {
-                self.set_runtime_error(idx, e, snapshot);
-                return;
+            // `plot()` accepts exactly two result shapes:
+            //   - Bool predicate — corner-checked, draws where true.
+            //   - Vec/4-tuple — taken verbatim as the per-pixel RGBA
+            //     output (the "value is color" path in wgsl_gen).
+            // A bare numeric expression has no defined `where to draw`
+            // meaning, so reject it instead of silently rendering as
+            // grayscale. The lambda check in `canonicalize_plot_body`
+            // catches `plot((x) |-> sin(x))`; this catches the implicit
+            // forms — `plot(x*x + y*y)`, `plot(∫(x², x))`, anything
+            // that CAS-resolves to a Num. The vertex-plot branch above
+            // already returned `continue`, so this only runs for
+            // analytic plots.
+            match crate::lang::check::check(&plot_ir) {
+                Ok(ty) if plot_result_type_ok(&ty) => {}
+                Ok(other) => {
+                    self.set_runtime_error(
+                        idx,
+                        format!(
+                            "plot expects a Bool predicate (e.g. `y = sin(x)`, \
+                             `x*x + y*y < 1`) or an RGBA 4-tuple for an \
+                             explicit per-pixel color; got {}. A bare numeric \
+                             expression has no `where to draw` meaning — wrap \
+                             it in a comparison, inequality, or a `(r,g,b,a)` \
+                             tuple.",
+                            other.display()
+                        ),
+                        snapshot,
+                    );
+                    return;
+                }
+                Err(e) => {
+                    self.set_runtime_error(
+                        idx,
+                        crate::lang::format_error_at(snapshot, e.span.0, &e.message),
+                        snapshot,
+                    );
+                    return;
+                }
             }
             match crate::lang::wgsl_gen::generate(&plot_ir) {
                 Ok(wgsl) => {

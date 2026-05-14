@@ -954,6 +954,58 @@ fn examples_render_through_notebook() {
     );
 }
 
+/// User-reported regression (2026-05-14): `plot((x) |-> sin(x))`
+/// should error because the lambda body is `Num`, not `Bool`. The
+/// `canonicalize_plot_body` check rejects it at the lang level; pin
+/// the same outcome through the full notebook `play()` path so a
+/// future dispatch refactor can't silently bypass the check.
+#[test]
+fn plot_with_numeric_lambda_errors_through_notebook() {
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "plot((x) |-> sin(x))");
+    let outcome = &nb.cell(i).outcome;
+    let msg = outcome.message.as_ref().unwrap_or_else(|| {
+        panic!(
+            "expected CellMessage::Error; got None. diagnostics={:?}",
+            outcome.diagnostics
+        )
+    });
+    match msg {
+        CellMessage::Error(s) => {
+            assert!(
+                s.contains("must be a Bool predicate"),
+                "expected Bool-predicate rejection; got:\n{}",
+                s
+            );
+        }
+        other => panic!("expected CellMessage::Error; got {:?}", other),
+    }
+}
+
+/// User-reported regression (2026-05-14): `plot(<bare Num expr>)`
+/// should error too, not just lambda forms. Previously the lambda
+/// check fired at canonicalization time but bare expressions slipped
+/// straight through to wgsl_gen and rendered as grayscale.
+/// `plot(x*y)` is the simplest reproducer; `plot(∫(x², x))` is the
+/// one the user reported (CAS simplifies the integral to `x³/3`,
+/// which is Num).
+#[test]
+fn plot_with_bare_numeric_expression_errors() {
+    let mut nb = null_notebook();
+    let i = add_and_play(&mut nb, "plot(x*y)");
+    let msg = nb.cell(i).outcome.message.as_ref().unwrap_or_else(|| {
+        panic!("expected an error on plot(x*y); got None")
+    });
+    match msg {
+        CellMessage::Error(s) => assert!(
+            s.contains("plot expects a Bool predicate"),
+            "expected Bool-predicate rejection; got:\n{}",
+            s
+        ),
+        other => panic!("expected CellMessage::Error; got {:?}", other),
+    }
+}
+
 /// User-reported regression: `plot((x) |-> sin(x), (x) |-> …)` —
 /// value and color lambdas both name their param `x` — errors with
 /// "No result expression found" through the *full notebook flow*
