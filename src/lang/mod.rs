@@ -206,6 +206,52 @@ impl CellActions {
     }
 }
 
+/// True if `ir` contains a `print(...)` call inside any nested scope —
+/// a for/while body, an if branch, a function body, etc. — that
+/// `detect_cell_actions` wouldn't see because it only walks top-level
+/// items. The notebook uses this to decide between the per-print
+/// extraction path (top-level only, with REDUCE fallback per print) and
+/// the whole-cell `eval_with_stdout` path (every print, regardless of
+/// nesting).
+pub fn has_nested_print(ir: &Ir) -> bool {
+    let stmts: &[Ir] = match ir {
+        Ir::Block { items, .. } => items,
+        other => std::slice::from_ref(other),
+    };
+    // Skip top-level Apply(Print) statements — they're already handled
+    // by `detect_cell_actions`. Recurse into everything else.
+    for stmt in stmts {
+        match stmt {
+            Ir::Apply { callee: ir::Callee::Builtin(ir::BuiltinOp::Print), .. } => {
+                // Top-level print — don't count, but still scan its args
+                // in case someone wrote `print(for i in 0..n ( print(i) ))`.
+                if let Ir::Apply { args, .. } = stmt {
+                    if args.iter().any(contains_print) {
+                        return true;
+                    }
+                }
+            }
+            other => {
+                if contains_print(other) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn contains_print(node: &Ir) -> bool {
+    if let Ir::Apply {
+        callee: ir::Callee::Builtin(ir::BuiltinOp::Print),
+        ..
+    } = node
+    {
+        return true;
+    }
+    node.children().iter().any(|c| contains_print(c))
+}
+
 /// Walk the IR to find all print() and plot() action statements.
 pub fn detect_cell_actions(ir: &Ir) -> CellActions {
     let stmts: &[Ir] = match ir {
