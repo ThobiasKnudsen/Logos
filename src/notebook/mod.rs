@@ -744,6 +744,26 @@ impl Notebook {
             }
         };
 
+        // GPU subset enforcement: walk every `plot(...)` / `... gpu (...)`
+        // scope's transitive call graph before routing. Without this the
+        // print/interpreter/REDUCE path would silently swallow GPU-scope
+        // violations (since `wgsl_gen::generate` — the only other site that
+        // runs the check — is bypassed for cells whose top-level is a
+        // print). Lowering once here so HOF specialization has run; on
+        // failure surface the structured `Diagnostic` with caret + chain.
+        match crate::lang::lower::lower(combined.clone()) {
+            Ok(lowered) => {
+                if let Err(diag) = crate::lang::check::check_gpu_subset(&lowered) {
+                    self.set_runtime_error(idx, diag.format(snapshot), snapshot);
+                    return;
+                }
+            }
+            Err(_) => {
+                // Lowering errors surface later via the type-check or
+                // interpreter path with their normal diagnostics.
+            }
+        }
+
         let actions = lang::detect_cell_actions(&combined);
 
         // Restrict plots/prints to those originating in *this* cell —
@@ -817,12 +837,12 @@ impl Notebook {
                 self.cells[idx].last_played_text = Some(snapshot.to_string());
             }
             Err(e) => {
-                if e.contains("No result expression") {
+                if e.message.contains("No result expression") {
                     self.cells[idx].outcome.program_ir = Some(combined);
                     self.cells[idx].state = CellState::Playing;
                     self.cells[idx].last_played_text = Some(snapshot.to_string());
                 } else {
-                    self.set_runtime_error(idx, e, snapshot);
+                    self.set_runtime_error(idx, e.format(snapshot), snapshot);
                 }
             }
         }
@@ -1016,7 +1036,7 @@ impl Notebook {
                     last_ir = Some(plot_ir);
                 }
                 Err(e) => {
-                    self.set_runtime_error(idx, e, snapshot);
+                    self.set_runtime_error(idx, e.format(snapshot), snapshot);
                     return;
                 }
             }

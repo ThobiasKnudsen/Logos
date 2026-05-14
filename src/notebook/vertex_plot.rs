@@ -205,7 +205,12 @@ pub fn shader_with_color(color_arg: &Ir) -> Result<String, String> {
         span: (0, 0),
     };
 
-    let analytic_wgsl = crate::lang::wgsl_gen::generate(&synth_ir)?;
+    // `wgsl_gen::generate` returns a `Diagnostic`; render it as a bare
+    // string for this internal codegen path so the rest of the function
+    // can keep its `Result<String, String>` shape. The synth IR has
+    // no real source, so spans wouldn't add useful context here.
+    let analytic_wgsl =
+        crate::lang::wgsl_gen::generate(&synth_ir).map_err(|d| d.message)?;
 
     // Keep everything up to (but not including) the analytic fs_main:
     // uniform struct, bind-group declaration, helper functions, and the

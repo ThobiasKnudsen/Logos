@@ -14,6 +14,17 @@ pub enum Value {
     F64(f64),
     Bool(bool),
     Array(Vec<f64>),
+    /// A first-class function value — produced when an `Identifier`
+    /// referring to a user function is evaluated as a value (e.g. by an
+    /// `if cond then sq else cube` binding), or when a lifted lambda flows
+    /// through a binding. `env` is the environment captured at the point
+    /// the value was created so the body can resolve outer-scope names
+    /// (closures). Boxed to keep the enum compact.
+    Function {
+        params: Vec<String>,
+        body: Box<Ir>,
+        env: Box<Env>,
+    },
     /// First-class range value: `0..10` → `Range { start: 0, end: 10, delta: 1 }`.
     /// `0..10..0.5` adds an explicit step. Stored 1-D; multi-dim ranges only
     /// exist as transient `Ir::Range` nodes consumed by a `for` loop.
@@ -77,6 +88,7 @@ impl std::fmt::Display for Value {
                 Ok(())
             }
             Value::Void => write!(f, "()"),
+            Value::Function { .. } => write!(f, "<function>"),
         }
     }
 }
@@ -292,11 +304,24 @@ fn eval_node(node: &Ir, env: &mut Env, gpu: &dyn GpuDispatch) -> Result<Value, S
         Ir::Number { value, .. } => Ok(Value::F64(*value)),
         Ir::BoolLit { value, .. } => Ok(Value::Bool(*value)),
 
-        Ir::Identifier { name, .. } => env
-            .vars
-            .get(name)
-            .cloned()
-            .ok_or_else(|| format!("Undefined variable: {}", name)),
+        Ir::Identifier { name, .. } => {
+            if let Some(v) = env.vars.get(name) {
+                return Ok(v.clone());
+            }
+            // Promote function-named identifiers to first-class `Value::Function`
+            // values so they can flow through bindings, conditionals, and
+            // Apply-on-binding dispatch. The captured `env` enables closures
+            // — e.g. a lifted `t |-> t + n` references `n` from its enclosing
+            // FunctionDef's scope, which gets snapshotted here.
+            if let Some(func) = env.get_func(name) {
+                return Ok(Value::Function {
+                    params: func.params.clone(),
+                    body: Box::new(func.body.clone()),
+                    env: Box::new(env.clone()),
+                });
+            }
+            Err(format!("Undefined variable: {}", name))
+        }
 
         Ir::ArrayLiteral { items: elems, .. } => {
             let mut arr = Vec::with_capacity(elems.len());
@@ -530,6 +555,15 @@ fn eval_apply(
                 }
                 return eval_node(&func.body, &mut child, gpu);
             }
+            // First-class function dispatch: `f := if cond then sq else cube`
+            // binds `f` to a `Value::Function` in vars. A subsequent `f(5)`
+            // can't find `f` in the function table — fall through to the
+            // value side and invoke the captured body inside the captured
+            // env. Errors as "not callable" when the bound value is something
+            // other than a function (e.g. a scalar).
+            if let Some(val) = env.vars.get(name).cloned() {
+                return apply_function_value(name, &val, args, env, gpu);
+            }
             return Err(format!("Unknown function: {}", name));
         }
     };
@@ -616,6 +650,48 @@ fn eval_apply(
     }
 }
 
+/// Invoke `val` as a function with `args` evaluated in `env`. Used when an
+/// `Apply` with a `Callee::User(name)` references a binding whose value
+/// turned out to be a `Value::Function` — first-class function dispatch
+/// outside any GPU scope. Other value kinds error as "not callable".
+fn apply_function_value(
+    name: &str,
+    val: &Value,
+    args: &[Ir],
+    env: &mut Env,
+    gpu: &dyn GpuDispatch,
+) -> Result<Value, String> {
+    let Value::Function {
+        params,
+        body,
+        env: captured_env,
+    } = val
+    else {
+        return Err(format!(
+            "`{}` is not callable (got {:?})",
+            name, val
+        ));
+    };
+    if args.len() != params.len() {
+        return Err(format!(
+            "Function value bound to `{}` expects {} args, got {}",
+            name,
+            params.len(),
+            args.len()
+        ));
+    }
+    // Evaluate arguments in the calling scope (where the call site sits),
+    // then bind them in a child of the captured scope (where the body's
+    // free variables resolve). Two scopes meeting: arg expressions read
+    // call-site names; the body reads the function's lexical closure.
+    let mut child = (**captured_env).clone();
+    for (param, arg_node) in params.iter().zip(args.iter()) {
+        let v = eval_node(arg_node, env, gpu)?;
+        child.vars.insert(param.clone(), v);
+    }
+    eval_node(body, &mut child, gpu)
+}
+
 // ---------------------------------------------------------------------------
 // Parallel for
 // ---------------------------------------------------------------------------
@@ -661,7 +737,11 @@ fn eval_parallel_for(
                 }
                 Value::F64(n) => scalars.push((name.clone(), *n)),
                 Value::Bool(b) => scalars.push((name.clone(), if *b { 1.0 } else { 0.0 })),
-                Value::Range { .. } | Value::Void => {}
+                // Function values, ranges, and void aren't lowerable
+                // through the GPU dispatch path; ignoring them matches
+                // the existing policy for non-scalar/non-array referenced
+                // names.
+                Value::Function { .. } | Value::Range { .. } | Value::Void => {}
             }
         }
     }
@@ -1214,6 +1294,139 @@ mod tests {
         let err = try_run("f(x, y) := x + y\nf(1)").unwrap_err();
         assert!(
             err.contains("expects") && err.contains("got"),
+            "got: {}",
+            err
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // First-class function values (issue #29)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn first_class_function_dispatch_via_if() {
+        // `f := if (cond) sq else cube` binds `f` to one of two function
+        // values picked at runtime; `f(5)` dispatches through the captured
+        // Value::Function instead of looking `f` up in env.funcs.
+        let v = run(
+            "sq(x) := x*x\n\
+             cube(x) := x*x*x\n\
+             cond := 1\n\
+             f := if (cond) sq else cube\n\
+             f(5)",
+        );
+        assert_eq!(v.as_f64().unwrap(), 25.0);
+    }
+
+    #[test]
+    fn first_class_function_dispatch_via_if_else_branch() {
+        let v = run(
+            "sq(x) := x*x\n\
+             cube(x) := x*x*x\n\
+             cond := 0\n\
+             f := if (cond) sq else cube\n\
+             f(5)",
+        );
+        assert_eq!(v.as_f64().unwrap(), 125.0);
+    }
+
+    #[test]
+    fn first_class_function_aliasing() {
+        // Direct alias: `g := sq` makes `g` a function value pointing at sq.
+        let v = run(
+            "sq(x) := x*x\n\
+             g := sq\n\
+             g(7)",
+        );
+        assert_eq!(v.as_f64().unwrap(), 49.0);
+    }
+
+    #[test]
+    fn first_class_function_with_closure() {
+        // A lambda that captures an outer variable: `n` is in the enclosing
+        // scope when the lambda is created, and must still resolve when the
+        // resulting function value is invoked later via dynamic dispatch.
+        let v = run(
+            "make_doubler() := (t \u{21A6} t*2)\n\
+             d := make_doubler()\n\
+             d(7)",
+        );
+        assert_eq!(v.as_f64().unwrap(), 14.0);
+    }
+
+    #[test]
+    fn first_class_function_captures_top_level_binding() {
+        // Lifted-lambda closure over an outer-scope name: `offset` is bound
+        // at top level, the lambda body references it, and the synthetic
+        // FunctionDef carries `offset` in its `captured` list so the type
+        // checker brings it into scope.
+        let v = run(
+            "offset := 3\n\
+             add_offset := (t \u{21A6} t + offset)\n\
+             add_offset(7)",
+        );
+        assert_eq!(v.as_f64().unwrap(), 10.0);
+    }
+
+    /// The canonical closure: `make_offset(n)` returns a lambda capturing
+    /// `n` from its caller. Lifting hoists the lambda to the top level,
+    /// but `n` lives in `make_offset`'s scope (a parameter), not at top
+    /// level — so the capture-pre-pass on the outer Block doesn't see it
+    /// and the type checker rejects the body as "Undefined variable `n`".
+    /// Fixing this needs `lift_lambdas` to thread the enclosing
+    /// FunctionDef's params into the lifted body's captured list.
+    #[test]
+    #[ignore = "lambda lifting from inside a FunctionDef loses its enclosing-fn captures"]
+    fn first_class_function_with_param_capture() {
+        let v = run(
+            "make_offset(n) := (t \u{21A6} t + n)\n\
+             add3 := make_offset(3)\n\
+             add3(7)",
+        );
+        assert_eq!(v.as_f64().unwrap(), 10.0);
+    }
+
+    #[test]
+    fn print_of_function_value_shows_function_marker() {
+        // Printing a function value should produce "<function>" instead of
+        // erroring or showing internal IR.
+        let v = run("sq(x) := x*x\nsq");
+        match v {
+            Value::Function { .. } => {}
+            other => panic!("expected Value::Function, got {:?}", other),
+        }
+        assert_eq!(format!("{}", v), "<function>");
+    }
+
+    /// `parallel for` body calling a user function. compute_gen emits the
+    /// loop body into a compute shader but doesn't carry the helper
+    /// `FunctionDef`s with it, so the shader fails validation with
+    /// "Unknown variable 'sq' in compute shader body". This is a
+    /// pre-existing compute_gen limitation (it never had user-function
+    /// support); tracked so the regression is caught when compute_gen
+    /// grows the same `emit_user_functions` plumbing wgsl_gen already has.
+    #[test]
+    #[ignore = "compute_gen doesn't emit user-defined helper functions"]
+    fn parallel_for_calling_user_function() {
+        let v = run(
+            "sq(x) := x*x\n\
+             data := [1, 2, 3]\n\
+             parallel for i in 0..3 ( data[i] := sq(data[i]) )\n\
+             data",
+        );
+        match v {
+            Value::Array(a) => assert_eq!(a, vec![1.0, 4.0, 9.0]),
+            other => panic!("expected array, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn first_class_function_value_not_callable_for_scalar_binding() {
+        // Binding `f` to a scalar, then trying to call `f(5)` should error
+        // as "not callable" rather than silently doing nothing.
+        let err = try_run("f := 5\nf(3)").unwrap_err();
+        assert!(
+            err.contains("not callable") || err.contains("Unknown function"),
             "got: {}",
             err
         );

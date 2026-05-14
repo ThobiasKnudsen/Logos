@@ -113,8 +113,13 @@ fn compile_stages(source: &str) -> String {
     eprintln!("  parse: ok (IR: {:?})", std::mem::discriminant(&ir));
 
     // Stage 3: WGSL codegen
-    let wgsl = crate::lang::wgsl_gen::generate(&ir)
-        .unwrap_or_else(|e| panic!("WGSL GEN FAILED\n  source: {:?}\n  error: {}", source, e));
+    let wgsl = crate::lang::wgsl_gen::generate(&ir).unwrap_or_else(|e| {
+        panic!(
+            "WGSL GEN FAILED\n  source: {:?}\n  error: {}",
+            source,
+            e.format(source)
+        )
+    });
     eprintln!("  wgsl gen: {} bytes", wgsl.len());
 
     // Stage 4: naga WGSL validation

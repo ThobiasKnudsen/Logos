@@ -2034,6 +2034,47 @@ fn latex_infinity_lexes_as_identifier() {
 //       semantic mapping exists, e.g. `≤` → Lte).
 
 #[test]
+fn gpu_subset_error_fires_on_print_route() {
+    // A cell whose top-level is a `print(...)` would route through
+    // handle_prints → interpreter → REDUCE without ever hitting wgsl_gen,
+    // which used to be the only site that ran `check_gpu_subset`. The
+    // user observed the GPU-scope diagnostic being silently swallowed
+    // and replaced by a REDUCE syntax error. The dispatch-level check
+    // now fires before routing — confirm it lands as a structured
+    // `CellMessage::Error` mentioning the chain.
+    let mut nb = null_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        N_integral(f, x0, x1, d) := (
+            sum := 0
+            for i in 0..10 (sum := sum + f(i*d) * d)
+            sum
+        )
+        val := 5
+        data := [0, 0, 0]
+        for i in 0..3 gpu (
+            data[i] := N_integral(val, 0, 1, 0.1)
+        )
+        print(data)
+        "#,
+    );
+    match &nb.cell(i).outcome.message {
+        Some(CellMessage::Error(msg)) => {
+            assert!(
+                msg.contains("N_integral") && msg.contains("runtime function dispatch"),
+                "expected chain-aware GPU subset diagnostic, got: {}",
+                msg
+            );
+        }
+        other => panic!(
+            "expected GPU subset Error, got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
 fn every_latex_symbol_substitution_lexes() {
     use logos::editor::autocomplete::LATEX_SYMBOLS;
     use logos::lang::lexer::Lexer;

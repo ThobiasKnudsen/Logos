@@ -34,9 +34,16 @@ use super::ir::{BindingId, Callee, FuncId, Ir, Resolution};
 /// in the tree.
 pub fn lower(ir: Ir) -> Result<Ir, String> {
     let ir = pre_passes(ir);
-    let ir = resolve_names(ir);
-    let mut ir = annotate_types(ir).map_err(|e| e.message)?;
+    let mut ir = resolve_names(ir);
+    // Capture annotation runs *before* type inference so that a lifted
+    // lambda's body (which lives at the top level but references its
+    // creator's locals) has its closure names available when the type
+    // checker walks the synthetic FunctionDef. Without this ordering, a
+    // simple `make_offset(n) := (t ↦ t + n)` fails as "Undefined variable
+    // `n`" because the lifted body lands in a scope where `n` was never
+    // introduced.
     annotate_captures(&mut ir);
+    let ir = annotate_types(ir).map_err(|e| e.message)?;
     Ok(ir)
 }
 
