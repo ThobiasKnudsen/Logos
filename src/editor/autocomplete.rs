@@ -348,7 +348,7 @@ pub fn static_candidates() -> Vec<Candidate> {
 
     // Keywords
     for &kw in &[
-        "if", "else", "for", "while", "and", "or", "not", "true", "false",
+        "if", "else", "for", "while", "and", "or", "not", "true", "false", "gpu", "in",
     ] {
         result.push(Candidate {
             label: kw.to_string(),
@@ -448,7 +448,9 @@ fn walk_ir(node: &Ir, result: &mut Vec<Candidate>, seen: &mut HashSet<String>) {
                 walk_ir(eb, result, seen);
             }
         }
-        Ir::WhileLoop { body, .. } | Ir::ForLoop { body, .. } => {
+        Ir::WhileLoop { body, .. }
+        | Ir::ForLoop { body, .. }
+        | Ir::ParallelFor { body, .. } => {
             walk_ir(body, result, seen);
         }
         _ => {}

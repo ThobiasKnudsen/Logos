@@ -95,46 +95,89 @@ impl CslSession {
         // assgnpri that dumps raw S-expressions. We define our own infix
         // printer using prepsq (SQ → prefix) and a recursive formatter.
         let init_stmts = [
-            // Define recursive infix printer for prepsq prefix forms
+            // Define recursive infix printer for prepsq prefix forms.
+            //
+            // `logos_infix` walks REDUCE's internal s-expression tree and
+            // emits standard infix. It takes a context-precedence argument
+            // and parenthesizes operands whose top-level operator has lower
+            // precedence than the context — otherwise REDUCE's compact
+            // textual form is ambiguous. Specifically, REDUCE represents
+            // a result like `(num)/(3·log(2))` as `(quotient (plus …)
+            // (times 3 log(2)))`; the previous printer dropped both sets
+            // of parens and emitted `num/3*log(2)`, which standard
+            // left-to-right precedence re-parses as `(num/3)*log(2)` —
+            // silently producing the wrong value. The precedence-aware
+            // version below preserves the operator tree exactly.
+            //
+            // Precedence levels (higher binds tighter):
+            //   1 plus, difference
+            //   2 times, quotient
+            //   3 unary minus
+            //   4 expt
+            //   ∞ (99) atoms / numbers / function calls
+            //
+            // Operand contexts are chosen so that:
+            //   • binary `-`'s right operand gets ctx=2 (so `a - (b - c)`
+            //     keeps its parens),
+            //   • `/`'s right operand gets ctx=3 (so `a/(b*c)` keeps its
+            //     parens — the bug above),
+            //   • `^`'s right operand gets ctx=4 (right-associative: the
+            //     Logos parser reads `a^b^c` as `a^(b^c)`, so a same-prec
+            //     right operand still needs no parens; only lower-prec
+            //     subexpressions do).
             concat!(
                 "symbolic procedure logos_print_sq(u); ",
-                "if eqcar(u, '!*sq) then logos_infix prepsq cadr u ",
+                "if eqcar(u, '!*sq) then logos_infix(prepsq cadr u, 0) ",
                 "else if atom u then prin2 u ",
-                "else logos_infix u;",
+                "else logos_infix(u, 0);",
             ),
             concat!(
-                "symbolic procedure logos_infix(u); ",
-                "if numberp u then prin2 u ",
-                "else if atom u then prin2 u ",
-                "else begin scalar op; ",
+                "symbolic procedure logos_op_prec(op); ",
+                "if op eq 'plus then 1 ",
+                "else if op eq 'difference then 1 ",
+                "else if op eq 'times then 2 ",
+                "else if op eq 'quotient then 2 ",
+                "else if op eq 'minus then 3 ",
+                "else if op eq 'expt then 4 ",
+                "else 99;",
+            ),
+            concat!(
+                "symbolic procedure logos_infix(u, ctx); ",
+                "begin scalar op, prec, parens; ",
+                "if numberp u then << prin2 u; return nil >>; ",
+                "if atom u then << prin2 u; return nil >>; ",
                 "op := car u; ",
+                "prec := logos_op_prec op; ",
+                "parens := prec < ctx; ",
+                "if parens then prin2 \"(\"; ",
                 "if op eq 'equal then ",
-                "<< logos_infix cadr u; prin2 \" = \"; logos_infix caddr u >> ",
+                "<< logos_infix(cadr u, 0); prin2 \" = \"; logos_infix(caddr u, 0) >> ",
                 "else if op eq 'plus then ",
-                "<< logos_infix cadr u; ",
-                "for each x in cddr u do << prin2 \" + \"; logos_infix x >> >> ",
-                "else if op eq 'minus then ",
-                "<< prin2 \" - \"; logos_infix cadr u >> ",
+                "<< logos_infix(cadr u, 1); ",
+                "for each x in cddr u do << prin2 \" + \"; logos_infix(x, 1) >> >> ",
                 "else if op eq 'difference then ",
-                "<< logos_infix cadr u; prin2 \" - \"; logos_infix caddr u >> ",
+                "<< logos_infix(cadr u, 1); prin2 \" - \"; logos_infix(caddr u, 2) >> ",
+                "else if op eq 'minus then ",
+                "<< prin2 \"-\"; logos_infix(cadr u, 3) >> ",
                 "else if op eq 'times then ",
-                "<< logos_infix cadr u; ",
-                "for each x in cddr u do << prin2 \"*\"; logos_infix x >> >> ",
+                "<< logos_infix(cadr u, 2); ",
+                "for each x in cddr u do << prin2 \"*\"; logos_infix(x, 2) >> >> ",
                 "else if op eq 'quotient then ",
-                "<< logos_infix cadr u; prin2 \"/\"; logos_infix caddr u >> ",
+                "<< logos_infix(cadr u, 2); prin2 \"/\"; logos_infix(caddr u, 3) >> ",
                 "else if op eq 'expt then ",
-                "<< logos_infix cadr u; prin2 \"^\"; logos_infix caddr u >> ",
+                "<< logos_infix(cadr u, 5); prin2 \"^\"; logos_infix(caddr u, 4) >> ",
                 "else << ",
                 "prin2 op; prin2 \"(\"; ",
-                "logos_infix cadr u; ",
-                "for each x in cddr u do << prin2 \",\"; logos_infix x >>; ",
+                "logos_infix(cadr u, 0); ",
+                "for each x in cddr u do << prin2 \",\"; logos_infix(x, 0) >>; ",
                 "prin2 \")\" >> ",
+                "; if parens then prin2 \")\" ",
                 "end;",
             ),
             concat!(
                 "symbolic procedure logos_assgnpri(u, v, w); ",
                 "if atom u then << prin2 u; terpri() >> ",
-                "else if eqcar(u, '!*sq) then << logos_infix prepsq cadr u; terpri() >> ",
+                "else if eqcar(u, '!*sq) then << logos_infix(prepsq cadr u, 0); terpri() >> ",
                 "else if eqcar(u, 'equal) then << ",
                 "logos_print_sq(cadr u); prin2 \" = \"; logos_print_sq(caddr u); terpri() >> ",
                 "else if eqcar(u, 'list) then << ",
@@ -481,7 +524,7 @@ mod tests {
 
         // ── Trig derivatives ────────────────────────────────────
         assert_simplify_eq(&session, "df(sin(x), x)", "cos(x)");
-        assert_simplify_eq(&session, "df(cos(x), x)", "- sin(x)");
+        assert_simplify_eq(&session, "df(cos(x), x)", "-sin(x)");
 
         // ── Log derivative ──────────────────────────────────────
         assert_simplify_eq(&session, "df(log(x), x)", "1/x");
@@ -600,7 +643,10 @@ mod tests {
         assert_simplify_eq(&session, "x**n", "x^n");
 
         // ── Unary minus ─────────────────────────────────────────
-        assert_simplify_eq(&session, "-x", "- x");
+        // Emitted as `-x` (no space after the prefix), to match standard
+        // math convention; the leading-space form `" - x"` produced by
+        // the previous printer is now reserved for binary subtraction.
+        assert_simplify_eq(&session, "-x", "-x");
 
         // ── Generic function calls (unevaluated trig/log) ──────
         assert_simplify_eq(&session, "sin(x)", "sin(x)");
@@ -937,6 +983,60 @@ mod tests {
                 r.contains("x"),
                 "result should still reference x: {}",
                 r,
+            );
+        }
+
+        // ── Fraction printing: parenthesize numerator and denominator ──
+        //
+        // Regression for the user-reported bug where `print(∫(x²+2^x, x))`
+        // surfaced as `(3*(2^x)) + (((log(2)*(x^3))/3)*log(2))` — REDUCE's
+        // internal expression tree was correct (one big fraction), but the
+        // custom `logos_infix` printer dropped parentheses around the
+        // numerator and the denominator. Standard left-to-right precedence
+        // then re-parsed the flat text as `(num/3)*log(2)`, silently
+        // multiplying by `log(2)` instead of dividing.
+        //
+        // The integral `∫(x² + 2^x) dx = x³/3 + 2^x/log(2)` evaluates to
+        // the single fraction `(3*2^x + log(2)*x^3)/(3*log(2))`. The
+        // assertion below pins the parenthesization: the result must
+        // contain `/(...)` (i.e. the denominator is grouped) — without
+        // this, the textual roundtrip silently corrupts the math.
+        {
+            let r = session
+                .simplify("int(x**2 + 2**x, x)")
+                .expect("int(x²+2^x, x) failed");
+            // Re-parse via Logos's own parser and re-simplify back through
+            // REDUCE. If the printer was emitting an ambiguous form, the
+            // re-simplification would produce a structurally different
+            // expression — the round-trip check catches that.
+            let roundtrip = session
+                .simplify(&format!("({}) - ((x^3)/3 + (2^x)/log(2))", r))
+                .expect("round-trip subtraction failed");
+            assert_eq!(
+                roundtrip, "0",
+                "printed integral does not round-trip to the closed form. \
+                 REDUCE returned {:?} which subtracted from x^3/3 + 2^x/log(2) \
+                 should be 0 — got {:?} instead. This was the user-reported \
+                 `print(∫(x²+2^x, x))` bug.",
+                r, roundtrip,
+            );
+        }
+
+        // Same shape on a simpler division: 1/(x*y) — REDUCE may emit this
+        // as `log(x)/y` after integration. Confirms `quotient`'s right
+        // operand keeps its denominator parenthesized when it's a product.
+        {
+            let r = session
+                .simplify("(a + b)/(c * d)")
+                .expect("(a+b)/(c*d) failed");
+            let roundtrip = session
+                .simplify(&format!("({}) - (a/(c*d) + b/(c*d))", r))
+                .expect("round-trip subtraction failed");
+            assert_eq!(
+                roundtrip, "0",
+                "(a+b)/(c*d) printed form does not round-trip: REDUCE returned \
+                 {:?}, subtraction yielded {:?}",
+                r, roundtrip,
             );
         }
 

@@ -309,17 +309,13 @@ fn infer(node: &mut Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
         }
 
         Ir::ForLoop {
-            var, range, body, ..
+            vars, range, body, ..
         } => {
-            let range_ty = infer(range, env)?;
-            if !matches!(range_ty, Type::Range | Type::Unknown) {
-                return Err(TypeError::new(
-                    range.span(),
-                    format!("for loop expects a Range, got {}", range_ty.display()),
-                ));
-            }
+            check_for_range(range, vars.len(), env, "for loop")?;
             let mut child = env.child();
-            child.vars.insert(var.clone(), Type::Num);
+            for v in vars {
+                child.vars.insert(v.clone(), Type::Num);
+            }
             infer(body, &mut child)?;
             Ok(Type::Void)
         }
@@ -341,20 +337,30 @@ fn infer(node: &mut Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
             Ok(Type::Void)
         }
 
-        Ir::Range { start, end, .. } => {
+        Ir::Range { start, end, delta, .. } => {
             let s = infer(start, env)?;
             let e = infer(end, env)?;
-            if !matches!(s, Type::Num | Type::Unknown) {
-                return Err(TypeError::new(
-                    start.span(),
-                    format!("range start must be Num, got {}", s.display()),
-                ));
+            // Tuple endpoints are allowed for multi-dim ranges; the runtime
+            // pairs them component-wise. Mixed shapes (one tuple, one scalar)
+            // are rejected so the iteration arity is unambiguous.
+            check_range_endpoint(start.span(), &s, "range start")?;
+            check_range_endpoint(end.span(), &e, "range end")?;
+            match (&s, &e) {
+                (Type::Tuple(a), Type::Tuple(b)) if a.len() != b.len() => {
+                    return Err(TypeError::new(
+                        end.span(),
+                        format!(
+                            "range endpoints have different arities: start is a {}-tuple, end is a {}-tuple",
+                            a.len(),
+                            b.len()
+                        ),
+                    ));
+                }
+                _ => {}
             }
-            if !matches!(e, Type::Num | Type::Unknown) {
-                return Err(TypeError::new(
-                    end.span(),
-                    format!("range end must be Num, got {}", e.display()),
-                ));
+            if let Some(d) = delta {
+                let dt = infer(d, env)?;
+                check_range_endpoint(d.span(), &dt, "range delta")?;
             }
             Ok(Type::Range)
         }
@@ -441,20 +447,13 @@ fn infer(node: &mut Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
         }
 
         Ir::ParallelFor {
-            var, range, body, ..
+            vars, range, body, ..
         } => {
-            let range_ty = infer(range, env)?;
-            if !matches!(range_ty, Type::Range | Type::Unknown) {
-                return Err(TypeError::new(
-                    range.span(),
-                    format!(
-                        "parallel for expects a Range, got {}",
-                        range_ty.display()
-                    ),
-                ));
-            }
+            check_for_range(range, vars.len(), env, "gpu for loop")?;
             let mut child = env.child();
-            child.vars.insert(var.clone(), Type::Num);
+            for v in vars {
+                child.vars.insert(v.clone(), Type::Num);
+            }
             infer(body, &mut child)?;
             Ok(Type::Void)
         }
@@ -477,6 +476,89 @@ fn infer(node: &mut Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
                 )),
             }
         }
+    }
+}
+
+/// Check that a Range endpoint (`start`/`end`/`delta`) has an acceptable
+/// type — a scalar `Num` or a homogeneous tuple of `Num`. `Unknown` is
+/// accepted to defer; anything else is a typed error.
+fn check_range_endpoint(span: Span, ty: &Type, label: &str) -> Result<(), TypeError> {
+    match ty {
+        Type::Num | Type::Unknown => Ok(()),
+        Type::Tuple(items) => {
+            for item in items {
+                if !matches!(item, Type::Num | Type::Unknown) {
+                    return Err(TypeError::new(
+                        span,
+                        format!(
+                            "{} must be Num or a tuple of Num, got tuple containing {}",
+                            label,
+                            item.display()
+                        ),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        other => Err(TypeError::new(
+            span,
+            format!("{} must be Num or a tuple of Num, got {}", label, other.display()),
+        )),
+    }
+}
+
+/// Type-check a for-loop's range expression and confirm its arity matches
+/// the loop's number of binding variables. Accepts:
+///   - `Type::Range` or `Type::Unknown` (lone Range, only valid when N == 1)
+///   - `Type::Tuple` of `Type::Range`s when N matches the tuple length
+///     (e.g. `for (x, y) (body)` where `x` and `y` are bound to Ranges)
+fn check_for_range(
+    range: &mut Ir,
+    var_count: usize,
+    env: &mut TypeEnv,
+    label: &str,
+) -> Result<(), TypeError> {
+    let range_ty = infer(range, env)?;
+    match &range_ty {
+        Type::Range | Type::Unknown => {
+            // 1-D loops accept a single Range. Multi-var loops may still
+            // pair with a single Range if the parser produced a tuple-
+            // shaped Range (both endpoints are tuples of the same arity);
+            // we can't tell from the Type alone, so accept and let the
+            // runtime enforce arity.
+            Ok(())
+        }
+        Type::Tuple(items) => {
+            if items.len() != var_count {
+                return Err(TypeError::new(
+                    range.span(),
+                    format!(
+                        "{} expects {} range{}, got tuple of {}",
+                        label,
+                        var_count,
+                        if var_count == 1 { "" } else { "s" },
+                        items.len()
+                    ),
+                ));
+            }
+            for item in items {
+                if !matches!(item, Type::Range | Type::Unknown) {
+                    return Err(TypeError::new(
+                        range.span(),
+                        format!(
+                            "{} expects a tuple of Ranges, got tuple containing {}",
+                            label,
+                            item.display()
+                        ),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        other => Err(TypeError::new(
+            range.span(),
+            format!("{} expects a Range, got {}", label, other.display()),
+        )),
     }
 }
 

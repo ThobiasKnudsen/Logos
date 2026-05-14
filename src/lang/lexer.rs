@@ -576,7 +576,7 @@ impl<'a> Lexer<'a> {
             "and" => TokenType::And,
             "or" => TokenType::Or,
             "not" => TokenType::Not,
-            "parallel" => TokenType::Parallel,
+            "gpu" => TokenType::Gpu,
             "in" => TokenType::In,
             "true" => TokenType::BoolLit(true),
             "false" => TokenType::BoolLit(false),

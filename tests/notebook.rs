@@ -769,14 +769,16 @@ fn interpreter_path_routes_through_cas_when_function_body_contains_integral() {
     // `compile_after_simplify` resumes the interpreter branch.
     let (mut nb, mock) = mock_reduce_notebook();
     // Array-literal cell that triggers `needs_interpreter` and references
-    // a function whose body contains a CAS call. The trailing expression
-    // (`g`) makes the cell's final value the array itself, not Void.
+    // a function whose body contains a CAS call. `print(g)` is what
+    // surfaces the array to the output panel — a bare trailing `g` would
+    // run the interpreter for side effects but leave `outcome.message`
+    // unset (Q2: output panel is reserved for print + errors).
     let i = add_and_play(
         &mut nb,
         r#"
         F(x) := ∫(x, x)
         g := [F(1.0), F(2.0)]
-        g
+        print(g)
         "#,
     );
     let cell_id = nb.cell(i).id;
@@ -962,6 +964,654 @@ fn remove_cell_drops_pending_reduce() {
     assert_eq!(nb.len(), 0);
     // Notebook-side pending entry is cleared (mock backend may still hold
     // the in-flight handle, but Notebook would ignore any stale response).
+}
+
+// ─── CAS-fixpoint architecture ─────────────────────────────────────────────
+//
+// The run_cell refactor makes CAS resolution a precondition for plot,
+// interpreter, and bare-expression dispatch. Print is the only branch with
+// its own symbolic fallback, so the fixpoint skips print-only cells to
+// avoid a redundant second round-trip after the splice. Tests below pin
+// each part of that contract.
+
+#[test]
+fn print_only_with_cas_subtree_does_one_round_trip_not_two() {
+    // `print(∫(sin(x), x))` resolves through the print branch's symbolic
+    // fallback in a single REDUCE submission. The eager fixpoint must NOT
+    // strip the integral first and re-submit the spliced `-cos(x)` — that
+    // would double the REDUCE round-trips for every symbolic print.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "print(∫(sin(x), x))");
+    let cell_id = nb.cell(i).id;
+    mock.respond_to(cell_id, Ok("-cos(x)".to_string()));
+    nb.tick();
+    assert_eq!(computed(&nb, i), "-cos(x)");
+    let subs = mock.submissions_for(cell_id);
+    assert_eq!(
+        subs.len(),
+        1,
+        "print(CAS) must use exactly one REDUCE round-trip; got submissions:\n  {:?}",
+        subs,
+    );
+    assert!(
+        subs[0].expression.contains("int(sin(x)"),
+        "the single submission must carry the CAS call intact; got {:?}",
+        subs[0].expression,
+    );
+}
+
+#[test]
+fn plot_with_cas_in_body_dispatches_through_fixpoint_then_handle_plots() {
+    // Same scenario as plot_routes_through_cas_when_function_body_contains_integral,
+    // but written against the fixpoint contract: the first submission carries
+    // the CAS subtree (fixpoint), and after the splice no further submission
+    // is needed because handle_plots is synchronous.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        F(x) := ∫(x², x)
+        plot(y = F(x))
+        "#,
+    );
+    let cell_id = nb.cell(i).id;
+    let subs_before = mock.submissions_for(cell_id);
+    assert_eq!(subs_before.len(), 1, "fixpoint submits once up front");
+    assert!(
+        subs_before[0].expression.contains("int("),
+        "first submission must be the CAS subtree, got {:?}",
+        subs_before[0].expression,
+    );
+    mock.respond_to(cell_id, Ok("x**3/3".to_string()));
+    nb.tick();
+    let subs_after = mock.submissions_for(cell_id);
+    assert_eq!(
+        subs_after.len(),
+        1,
+        "handle_plots is synchronous — no extra REDUCE call after splice; got {:?}",
+        subs_after,
+    );
+    assert!(
+        !nb.cell(i).outcome.shaders.is_empty(),
+        "shader should emit after fixpoint splice; diagnostics: {:?}",
+        nb.cell(i).outcome.diagnostics,
+    );
+}
+
+#[test]
+fn timeout_diagnostic_surfaces_after_pending_period() {
+    use std::time::{Duration, Instant};
+    // A symbolic round-trip that the backend never answers must not park
+    // the cell on `…` forever. `tick_with_now` walks pending submissions
+    // and converts any older than `PENDING_TIMEOUT` into a user-visible
+    // error diagnostic. Drive the clock past the timeout instead of
+    // sleeping for 30 real seconds.
+    let (mut nb, _mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "f := x + 2*x\nprint(f)");
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Pending)
+    ));
+
+    let before_timeout = Instant::now() + Duration::from_secs(1);
+    nb.tick_with_now(before_timeout);
+    assert!(
+        matches!(nb.cell(i).outcome.message, Some(CellMessage::Pending)),
+        "still pending before timeout window",
+    );
+
+    let after_timeout = Instant::now() + Notebook::PENDING_TIMEOUT + Duration::from_secs(1);
+    let updated = nb.tick_with_now(after_timeout);
+    assert_eq!(updated, vec![i], "timed-out cell must be reported updated");
+
+    let diags = &nb.cell(i).outcome.diagnostics;
+    assert_eq!(diags.len(), 1, "exactly one timeout diagnostic");
+    let msg = &diags[0].message;
+    assert!(
+        msg.contains("did not respond") && msg.contains("30s"),
+        "timeout diagnostic should name the wait window; got {:?}",
+        msg,
+    );
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Error(_)),
+    ));
+    // A late response would be silently dropped — the notebook's
+    // pending_simplify map no longer references the timed-out cell_id.
+    // (`nb.has_pending()` may still report true because the mock backend
+    // doesn't know we gave up on its request, but that's a backend-only
+    // bookkeeping detail; the cell-level state is what matters.)
+}
+
+#[test]
+fn fast_path_print_makes_no_reduce_submission() {
+    // The refactor must preserve print's interpreter fast-path: a fully
+    // numeric `print(3+4)` should never touch REDUCE. This guards against
+    // a future change that always pre-walks the IR for CAS.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "print(3 + 4)");
+    let cell_id = nb.cell(i).id;
+    assert_eq!(computed(&nb, i), "7");
+    assert!(
+        mock.submissions_for(cell_id).is_empty(),
+        "no REDUCE submission for purely numeric prints",
+    );
+}
+
+#[test]
+fn nested_cas_fixpoint_iterates_until_fully_resolved() {
+    // Two CAS subtrees in the same cell — the fixpoint must keep
+    // resubmitting until find_cas_path returns None, then dispatch. With
+    // only one round-trip the second integral would leak into WGSL.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        F(x) := ∫(x, x)
+        G(x) := ∫(x², x)
+        plot(y = F(x) + G(x))
+        "#,
+    );
+    let cell_id = nb.cell(i).id;
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Pending),
+    ));
+
+    mock.respond_to(cell_id, Ok("x**2/2".to_string()));
+    nb.tick();
+    // Still pending — second CAS subtree should be in flight now.
+    assert!(
+        matches!(nb.cell(i).outcome.message, Some(CellMessage::Pending)),
+        "fixpoint should re-submit the remaining ∫; got {:?}",
+        nb.cell(i).outcome.message,
+    );
+    assert!(
+        nb.cell(i).outcome.shaders.is_empty(),
+        "no shader before the fixpoint completes",
+    );
+
+    mock.respond_to(cell_id, Ok("x**3/3".to_string()));
+    nb.tick();
+    assert!(
+        !nb.cell(i).outcome.shaders.is_empty(),
+        "shader should emit after both CAS subtrees resolve; diagnostics: {:?}",
+        nb.cell(i).outcome.diagnostics,
+    );
+    let s = &nb.cell(i).outcome.shaders[0];
+    assert!(
+        !s.wgsl.contains("integral(") && !s.wgsl.contains("int("),
+        "no unresolved CAS may leak into WGSL; got:\n{}",
+        s.wgsl,
+    );
+    validate_wgsl(&s.wgsl).expect("wgsl validates");
+    let subs = mock.submissions_for(cell_id);
+    assert_eq!(subs.len(), 2, "fixpoint must submit each CAS subtree once");
+}
+
+#[test]
+fn user_typed_int_does_not_trigger_eager_cas_fixpoint() {
+    // After dropping `int`/`df` from CAS_CALLEES, a plot/interpreter
+    // cell with `int(x, x)` in a function body must NOT trigger the
+    // eager fixpoint — `int` is no longer a recognized CAS spelling
+    // (only `∫` / `integral` is). The cell should fail downstream
+    // (WGSL/interpreter doesn't know `int`) rather than silently
+    // shipping the expression to REDUCE under the user's nose.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        F(x) := int(x, x)
+        plot(y = F(x))
+        "#,
+    );
+    let cell_id = nb.cell(i).id;
+    assert!(
+        mock.submissions_for(cell_id).is_empty(),
+        "`int(...)` in a plot/interpreter context must NOT trigger the \
+         eager CAS fixpoint; got submissions {:?}",
+        mock.submissions_for(cell_id),
+    );
+    assert!(
+        !matches!(nb.cell(i).outcome.message, Some(CellMessage::Pending)),
+        "cell should not park on Pending — REDUCE was never called",
+    );
+}
+
+#[test]
+fn unicode_integral_still_routes_to_cas() {
+    // Sanity check the other half: the canonical `∫(...)` (lexed as
+    // `User("integral")`) must still be submitted to REDUCE.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "print(∫(x, x))");
+    let cell_id = nb.cell(i).id;
+    let subs = mock.submissions_for(cell_id);
+    assert_eq!(subs.len(), 1, "∫ must submit to REDUCE; got {:?}", subs);
+    assert!(
+        subs[0].expression.contains("int("),
+        "ir_to_reduce should still translate `integral` → `int` for \
+         REDUCE's text-level API; got {:?}",
+        subs[0].expression,
+    );
+}
+
+#[test]
+fn bare_trailing_expression_runs_side_effects_but_does_not_print() {
+    // Q2 contract: the output panel is reserved for `print(...)` and
+    // errors. A cell whose last statement is a bare value-producing
+    // expression (here, `data`) runs the interpreter for its side
+    // effects — the `gpu` for-loop mutates `data` — but the trailing
+    // value is NOT pushed to `outcome.message`. The user must wrap
+    // `data` in `print(data)` to see it.
+    let mut nb = null_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        data := [1, 2, 3, 4]
+        for i in 0..4 gpu ( data[i] := data[i] * 2 )
+        data
+        "#,
+    );
+
+    // No output message — no print() in the cell.
+    assert!(
+        nb.cell(i).outcome.message.is_none(),
+        "bare trailing expression must not appear in the output panel; \
+         got {:?}",
+        nb.cell(i).outcome.message,
+    );
+    // No error either — the cell ran successfully.
+    assert!(
+        nb.cell(i).outcome.diagnostics.is_empty(),
+        "diagnostics should be empty on a successful bare-trailing cell; \
+         got {:?}",
+        nb.cell(i).outcome.diagnostics,
+    );
+    // The interpreter did run (side effects + value computation): the
+    // cell stored its program_ir.
+    let program_ir = nb
+        .cell(i)
+        .outcome
+        .program_ir
+        .as_ref()
+        .expect("program_ir should be populated after the interpreter runs");
+
+    // Q3 contract: a Rust caller can re-evaluate the program_ir via the
+    // public interpreter API to recover the cell's value. This is the
+    // "call Logos from Rust, get a Value back" path — separate from the
+    // UI display layer.
+    use logos::lang::interpreter::{self, CpuFallback};
+    let value = interpreter::eval(program_ir, &CpuFallback)
+        .expect("re-eval of program_ir should succeed");
+    // Value's display formatting includes the doubled array.
+    let displayed = format!("{}", value);
+    let cleaned: String = displayed.chars().filter(|c| !c.is_whitespace()).collect();
+    for expected in ["2", "4", "6", "8"] {
+        assert!(
+            cleaned.contains(expected),
+            "programmatic re-eval should yield the doubled array [2,4,6,8]; \
+             got {:?}",
+            displayed,
+        );
+    }
+}
+
+#[test]
+fn gpu_for_loop_through_notebook_pipeline_returns_array() {
+    // The `gpu` modifier on a `for` loop lowers to `Ir::ParallelFor`,
+    // which makes `needs_interpreter` true. After the CAS-fixpoint
+    // refactor, the notebook's `dispatch` routes those cells through
+    // `interpreter::eval` (CpuFallback in tests; real wgpu in the live
+    // app). Pin the routing: a basic `gpu` for-loop on an array must
+    // produce the right value without parking on Pending or erroring.
+    //
+    // The trailing `print(data)` is required by Q2: the output panel
+    // only shows print/error messages. A bare trailing `data` would run
+    // the for-loop but leave `outcome.message` unset.
+    let mut nb = null_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        data := [1, 2, 3, 4]
+        for i in 0..4 gpu ( data[i] := data[i] * 2 )
+        print(data)
+        "#,
+    );
+    match &nb.cell(i).outcome.message {
+        Some(CellMessage::Computed(s)) => {
+            // The interpreter formats arrays as `[2, 4, 6, 8]` (commas + spaces).
+            // Don't pin the exact format; check the values are present in order.
+            let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(
+                cleaned.contains("2") && cleaned.contains("4")
+                    && cleaned.contains("6") && cleaned.contains("8"),
+                "expected [2, 4, 6, 8] from doubling; got {:?}",
+                s,
+            );
+        }
+        other => panic!(
+            "expected Computed after gpu-for dispatch; got {:?}\n\
+             diagnostics: {:?}",
+            other,
+            nb.cell(i).outcome.diagnostics,
+        ),
+    }
+    // (state stays Idle for print-only cells — that's the existing
+    // contract; only plot / interpreter / wgsl-gen branches transition
+    // to Playing. Test focus is on the dispatch path, not state.)
+}
+
+#[test]
+fn gpu_for_loop_with_cas_in_dependency_routes_through_fixpoint() {
+    // Cross-feature regression: a `gpu` for-loop whose body references
+    // a function with a CAS body must (a) trigger the eager fixpoint
+    // (`needs_interpreter` → eager_cas), (b) park on Pending while the
+    // simplifier resolves the integral, and (c) finally compute the
+    // array. This is the only test exercising the intersection between
+    // the new `gpu` keyword and the CAS-fixpoint refactor.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        F(x) := ∫(x, x)
+        data := [F(1.0), F(2.0), F(3.0), F(4.0)]
+        for i in 0..4 gpu ( data[i] := data[i] * 2 )
+        print(data)
+        "#,
+    );
+    let cell_id = nb.cell(i).id;
+    assert!(
+        matches!(nb.cell(i).outcome.message, Some(CellMessage::Pending)),
+        "CAS in F's body must trigger eager fixpoint; got {:?}",
+        nb.cell(i).outcome.message,
+    );
+
+    mock.respond_to(cell_id, Ok("x**2/2".to_string()));
+    nb.tick();
+
+    match &nb.cell(i).outcome.message {
+        Some(CellMessage::Computed(s)) => {
+            // After CAS resolution: F(n) = n²/2, doubled = n². Expect
+            // [1, 4, 9, 16].
+            let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+            for expected in ["1", "4", "9", "16"] {
+                assert!(
+                    cleaned.contains(expected),
+                    "expected {} in {:?} after CAS+gpu pipeline",
+                    expected, s,
+                );
+            }
+        }
+        other => panic!(
+            "expected Computed after CAS + gpu-for; got {:?}\n\
+             diagnostics: {:?}",
+            other,
+            nb.cell(i).outcome.diagnostics,
+        ),
+    }
+}
+
+#[test]
+fn timed_out_cell_can_be_replayed_cleanly() {
+    // After `tick_with_now` converts a pending submission into an error
+    // diagnostic, the user should be able to play the cell again and have
+    // it start fresh — not inherit the prior Error state, and not refuse
+    // to submit a new request because of stale bookkeeping.
+    use std::time::{Duration, Instant};
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "f := x + 2*x\nprint(f)");
+    let after_timeout = Instant::now() + Notebook::PENDING_TIMEOUT + Duration::from_secs(1);
+    nb.tick_with_now(after_timeout);
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Error(_)),
+    ));
+
+    // Replay — outcome must reset, and a fresh REDUCE submission must
+    // appear on the mock (we count submissions before/after).
+    let subs_before_replay = mock.submissions_for(nb.cell(i).id).len();
+    nb.play(i);
+    assert!(
+        matches!(nb.cell(i).outcome.message, Some(CellMessage::Pending)),
+        "after replay the cell must be Pending on a *new* request, not \
+         stuck on the previous error; got {:?}",
+        nb.cell(i).outcome.message,
+    );
+    let subs_after_replay = mock.submissions_for(nb.cell(i).id).len();
+    assert!(
+        subs_after_replay > subs_before_replay,
+        "replay must produce a fresh REDUCE submission",
+    );
+}
+
+#[test]
+fn editing_pending_cell_drops_stale_response() {
+    // While a cell is parked on Pending, the user types more characters.
+    // The pending entry must be cleared so a late response from the
+    // pre-edit submission can't land on the (now different) cell IR and
+    // either error out or splice unrelated bits into the new text.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "f := x + 2*x\nprint(f)");
+    let cell_id = nb.cell(i).id;
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Pending),
+    ));
+
+    // User edits the cell (no replay yet — the auto-rerun's 200ms quiet
+    // window hasn't fired).
+    nb.set_text(i, "print(3 + 4)");
+
+    // The pre-edit response arrives. Without the fix, this would try to
+    // splice the simplified IR into the new text and either error out or
+    // produce a corrupt state. With the fix, the late response is
+    // silently dropped.
+    mock.respond_to(cell_id, Ok("3*x".to_string()));
+    nb.tick();
+
+    // The cell's outcome should reflect the new text, not the stale
+    // response. (Auto-rerun would normally play; we exercise the
+    // explicit replay path here to keep the test deterministic.)
+    nb.play(i);
+    assert_eq!(
+        match &nb.cell(i).outcome.message {
+            Some(CellMessage::Computed(s)) => s.as_str(),
+            other => panic!("expected Computed after replay, got {:?}", other),
+        },
+        "7",
+    );
+    assert!(
+        nb.cell(i).outcome.diagnostics.is_empty(),
+        "stale-response handling must not raise a diagnostic; got {:?}",
+        nb.cell(i).outcome.diagnostics,
+    );
+}
+
+#[test]
+fn live_keystroke_during_pending_drops_stale_response() {
+    // The live editor doesn't call `set_text`; it mutates `buffer`
+    // directly and notifies the notebook via `mark_edited`. Verify the
+    // same late-response invariant holds on that path: a response that
+    // arrives after the user has resumed typing must be silently
+    // dropped, not spliced into the now-different text.
+    use std::time::Instant;
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "f := x + 2*x\nprint(f)");
+    let cell_id = nb.cell(i).id;
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Pending),
+    ));
+
+    // Simulate the user typing — buffer mutation + mark_edited, *without*
+    // an explicit play.
+    nb.cell_mut(i).buffer.set_text("print(3 + 4)");
+    nb.mark_edited(i, Instant::now());
+
+    // Late response from before the edit.
+    mock.respond_to(cell_id, Ok("3*x".to_string()));
+    nb.tick();
+
+    // Visible state must reflect that the user is now editing, not a
+    // ghost result from the prior submission.
+    assert!(
+        !matches!(
+            nb.cell(i).outcome.message,
+            Some(CellMessage::Computed(_)) | Some(CellMessage::Simplified(_)),
+        ),
+        "late response must not publish a Computed/Simplified message \
+         after the user has begun typing again; got {:?}",
+        nb.cell(i).outcome.message,
+    );
+}
+
+#[test]
+fn stopping_pending_cell_drops_pending_state() {
+    // User hits the red ■ button on a cell that's still waiting on
+    // REDUCE. The cell must transition to Stopped, and a *late* response
+    // must not resurrect the cell to Playing — that would be the worst
+    // kind of UX surprise: "I pressed stop, but the cell came back alive
+    // 30 seconds later."
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "f := x + 2*x\nprint(f)");
+    let cell_id = nb.cell(i).id;
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Pending),
+    ));
+
+    nb.stop(i);
+    assert!(matches!(nb.cell(i).state, CellState::Stopped));
+    let message_at_stop = format!("{:?}", nb.cell(i).outcome.message);
+
+    // Late response from before the stop.
+    mock.respond_to(cell_id, Ok("3*x".to_string()));
+    nb.tick();
+
+    assert!(
+        matches!(nb.cell(i).state, CellState::Stopped),
+        "stop() must remain authoritative against late REDUCE responses; \
+         got state={:?}, message={:?}",
+        nb.cell(i).state,
+        nb.cell(i).outcome.message,
+    );
+    let message_after_response = format!("{:?}", nb.cell(i).outcome.message);
+    assert_eq!(
+        message_at_stop, message_after_response,
+        "outcome.message must NOT change after stop — otherwise a user who \
+         hit ■ would see the result appear anyway when REDUCE finally \
+         answered. Before response: {} / After response: {}",
+        message_at_stop, message_after_response,
+    );
+}
+
+#[test]
+fn reduce_err_response_surfaces_as_diagnostic_not_hang() {
+    // REDUCE can legitimately fail (parser error, unknown operator,
+    // package not loaded). The notebook must convert `Err(msg)` from the
+    // simplifier into a cell-level error diagnostic — not leave the cell
+    // on `…` and not panic.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "F(x) := ∫(x, x)\nplot(y = F(x))");
+    let cell_id = nb.cell(i).id;
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Pending),
+    ));
+
+    mock.respond_to(
+        cell_id,
+        Err("***** Declare wat operator? (Y or N)".to_string()),
+    );
+    let updated = nb.tick();
+    assert_eq!(updated, vec![i]);
+
+    match &nb.cell(i).outcome.message {
+        Some(CellMessage::Error(msg)) => {
+            assert!(
+                msg.contains("operator"),
+                "error diagnostic should surface REDUCE's text; got {:?}",
+                msg,
+            );
+        }
+        other => panic!(
+            "expected Error after REDUCE Err response, got {:?}",
+            other,
+        ),
+    }
+    assert!(
+        nb.cell(i).outcome.shaders.is_empty(),
+        "no shader should emit when CAS resolution fails",
+    );
+}
+
+#[test]
+fn numeric_print_and_print_of_direct_cas_combine_in_order() {
+    // `print(3+4); print(∫(x², x))` — the first print stays on the
+    // interpreter fast path (no REDUCE) and the second submits the CAS
+    // call intact through the print branch's symbolic fallback. The
+    // final joined output must preserve source order.
+    let (mut nb, mock) = mock_reduce_notebook();
+    let i = add_and_play(
+        &mut nb,
+        r#"
+        print(3 + 4)
+        print(∫(x², x))
+        "#,
+    );
+    let cell_id = nb.cell(i).id;
+    let subs = mock.submissions_for(cell_id);
+    assert_eq!(
+        subs.len(),
+        1,
+        "exactly one REDUCE submission — for the CAS print; got {:?}",
+        subs,
+    );
+    assert!(
+        subs[0].expression.contains("int(") && subs[0].expression.contains("x"),
+        "submission carries the int(...) form; got {:?}",
+        subs[0].expression,
+    );
+
+    mock.respond_to(cell_id, Ok("x^3/3".to_string()));
+    nb.tick();
+    // `to_source` parenthesizes `x^3` because `^` binds tighter than `/`
+    // in Logos but the source pretty-printer wraps every subexpression for
+    // round-trip safety. Assert on structure rather than exact text.
+    let out = computed(&nb, i);
+    let lines: Vec<&str> = out.split('\n').collect();
+    assert_eq!(lines.len(), 2, "expected two output lines; got {:?}", out);
+    assert_eq!(lines[0], "7", "first print is the numeric fast path");
+    assert!(
+        lines[1].contains("x^3") && lines[1].contains("/3"),
+        "second print should be the integral closed form; got {:?}",
+        lines[1],
+    );
+}
+
+#[test]
+fn dead_simplifier_under_real_service_eventually_surfaces_diagnostic() {
+    // A `MockReduce` that never responds is the simplest stand-in for the
+    // "REDUCE worker is dead" scenario described in #19. Combined with the
+    // `tick_with_now` timeout path, this is the regression test for the
+    // failure mode where a crashed CSL session leaves cells on `…` forever.
+    use std::time::{Duration, Instant};
+    let (mut nb, _mock) = mock_reduce_notebook();
+    let i = add_and_play(&mut nb, "print(∫(sin(x), x))");
+    assert!(matches!(
+        nb.cell(i).outcome.message,
+        Some(CellMessage::Pending),
+    ));
+
+    let later = Instant::now() + Notebook::PENDING_TIMEOUT + Duration::from_millis(100);
+    nb.tick_with_now(later);
+
+    match nb.cell(i).outcome.message.as_ref().unwrap() {
+        CellMessage::Error(msg) => {
+            assert!(msg.contains("Symbolic engine did not respond"));
+        }
+        other => panic!("expected Error after timeout, got {:?}", other),
+    }
 }
 
 // ─── LaTeX-symbol substitutions ────────────────────────────────────────────
