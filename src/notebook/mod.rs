@@ -218,6 +218,27 @@ fn action_arg<'a>(combined: &'a Ir, stmt_idx: usize, op: BuiltinOp) -> Option<&'
     None
 }
 
+/// Like `action_arg`, but for `plot(...)` specifically and returns the
+/// full argument list. Used by the vertex-plot dispatcher to peek at
+/// both the first arg (the vertex array) and the optional second arg
+/// (the color expression — issue #46) before `build_plot_ir` runs.
+fn plot_args<'a>(combined: &'a Ir, stmt_idx: usize) -> Option<&'a [Ir]> {
+    let stmts: &[Ir] = match combined {
+        Ir::Block { items, .. } => items.as_slice(),
+        single => std::slice::from_ref(single),
+    };
+    let stmt = stmts.get(stmt_idx)?;
+    if let Ir::Apply {
+        callee: Callee::Builtin(BuiltinOp::Plot),
+        args,
+        ..
+    } = stmt
+    {
+        return Some(args.as_slice());
+    }
+    None
+}
+
 /// Rewrite an equation `lhs = rhs` as `lhs - rhs` so the simplifier
 /// reduces the residual to a single value. Returns `(rewritten_ir,
 /// is_equation)` where the flag tells the response handler whether to
@@ -813,19 +834,35 @@ impl Notebook {
         let mut shaders = Vec::with_capacity(plot_indices.len());
         let mut last_ir: Option<Ir> = None;
         for &plot_idx in plot_indices {
-            // Vertex-plot dispatch (issue #28): peek at the first arg
-            // *before* `build_plot_ir` runs. If it materializes as a
-            // CPU-side array of 2D points, we build a vertex+fragment
-            // ShaderSpec and bypass the analytic codegen entirely.
-            // Anything `try_evaluate` doesn't recognize falls through
-            // to the existing curve/surface path below.
-            if let Some(arg) = action_arg(combined, plot_idx, BuiltinOp::Plot) {
-                if let Some(vertices) = vertex_plot::try_evaluate(combined, arg) {
+            // Vertex-plot dispatch (issue #28): peek at the args
+            // *before* `build_plot_ir` runs. If the first arg
+            // materializes as a CPU-side array of 2D points, build a
+            // vertex+fragment ShaderSpec and bypass the analytic
+            // codegen. An optional second arg flows through the same
+            // canonicalization as analytic color (issue #46) so vertex
+            // plots get the same per-pixel color expressions as curves
+            // and surfaces.
+            if let Some(args) = plot_args(combined, plot_idx) {
+                if let Some(vertices) = args
+                    .first()
+                    .and_then(|a| vertex_plot::try_evaluate(combined, a))
+                {
+                    let wgsl_result = match args.get(1) {
+                        Some(color) => vertex_plot::shader_with_color(color),
+                        None => Ok(vertex_plot::VERTEX_PLOT_WGSL.to_string()),
+                    };
+                    let wgsl = match wgsl_result {
+                        Ok(w) => w,
+                        Err(e) => {
+                            self.set_runtime_error(idx, e, snapshot);
+                            return;
+                        }
+                    };
                     shaders.push(ShaderSpec {
-                        wgsl: vertex_plot::VERTEX_PLOT_WGSL.to_string(),
+                        wgsl,
                         vertices: Some(vertices),
                     });
-                    last_ir = Some(arg.clone());
+                    last_ir = Some(args[0].clone());
                     continue;
                 }
             }

@@ -168,6 +168,98 @@ fn fs_main() -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Vertex+fragment WGSL for a vertex plot with a user-supplied color
+/// expression (issue #46). The pipeline is the same as
+/// `VERTEX_PLOT_WGSL` except that:
+///
+/// - The vertex shader passes `world_pos` to the fragment as a
+///   varying, so each fragment knows the world-space coordinate of
+///   the line segment it is rasterizing.
+/// - The fragment shader calls a synthesized `_plot_color_<span>`
+///   function (lifted from the user's color expression by
+///   `canonicalize_plot_color` + `wgsl_gen`) and uses its `vec4<f32>`
+///   result in place of `u.primary_color`.
+///
+/// The function definition itself is shared between vertex plots and
+/// analytic plots — we synthesize a trivial analytic IR carrying just
+/// the color and let `wgsl_gen::generate` lift, type-check, and emit
+/// it; then we strip its `@fragment fn fs_main` and append our own.
+/// Going through `wgsl_gen` instead of re-implementing the emit logic
+/// here means feature parity (captures, time uniform, cell bindings)
+/// comes for free as those evolve in the analytic path.
+pub fn shader_with_color(color_arg: &Ir) -> Result<String, String> {
+    // Build a synthetic analytic IR: the color expression bound to a
+    // synthesized name, followed by a trivial numeric result. The
+    // numeric result keeps `is_vec` false in `wgsl_gen::generate`, which
+    // is the only path that emits `let _color = _plot_color_<…>(…);` —
+    // exactly the call expression we want to lift back out.
+    let color_binding = crate::lang::canonicalize_plot_color(color_arg);
+    let synth_ir = Ir::Block {
+        items: vec![
+            color_binding,
+            Ir::Number {
+                value: 0.0,
+                span: (0, 0),
+            },
+        ],
+        span: (0, 0),
+    };
+
+    let analytic_wgsl = crate::lang::wgsl_gen::generate(&synth_ir)?;
+
+    // Keep everything up to (but not including) the analytic fs_main:
+    // uniform struct, bind-group declaration, helper functions, and the
+    // synthesized `fn _plot_color_<span>` definition.
+    let fs_split = analytic_wgsl
+        .find("@fragment")
+        .ok_or_else(|| "internal: synthesized shader missing @fragment".to_string())?;
+    let preamble = &analytic_wgsl[..fs_split];
+
+    // Pull the color-call expression off the analytic fs_main's
+    // `let _color = …;` line so the call signature (params + appended
+    // captures) is exactly what `wgsl_gen` produces. Re-deriving this
+    // by walking the AST would duplicate `emit_apply` and quickly drift.
+    let let_marker = "let _color = ";
+    let lc_start = analytic_wgsl
+        .find(let_marker)
+        .ok_or_else(|| "internal: synthesized shader missing `_color` binding".to_string())?;
+    let value_start = lc_start + let_marker.len();
+    let value_end = analytic_wgsl[value_start..]
+        .find(';')
+        .ok_or_else(|| "internal: malformed `_color` binding".to_string())?
+        + value_start;
+    let call_expr = &analytic_wgsl[value_start..value_end];
+
+    Ok(format!(
+        "{preamble}\n\
+         struct VsOut {{\n\
+         \x20   @builtin(position) position: vec4<f32>,\n\
+         \x20   @location(0) world: vec2<f32>,\n\
+         }};\n\
+         \n\
+         @vertex\n\
+         fn vs_main(@location(0) world_pos: vec2<f32>) -> VsOut {{\n\
+         \x20   let range = u.axis_max - u.axis_min;\n\
+         \x20   let normalized = (world_pos - u.axis_min) / range;\n\
+         \x20   let ndc = vec2<f32>(normalized.x * 2.0 - 1.0, 1.0 - normalized.y * 2.0);\n\
+         \x20   var out: VsOut;\n\
+         \x20   out.position = vec4<f32>(ndc, 0.0, 1.0);\n\
+         \x20   out.world = world_pos;\n\
+         \x20   return out;\n\
+         }}\n\
+         \n\
+         @fragment\n\
+         fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{\n\
+         \x20   let x = in.world.x;\n\
+         \x20   let y = in.world.y;\n\
+         \x20   let _color = {call_expr};\n\
+         \x20   let a = _color.a;\n\
+         \x20   return vec4<f32>(_color.rgb * a, a);\n\
+         }}\n"
+    ))
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,5 +372,71 @@ mod tests {
         validator
             .validate(&module)
             .unwrap_or_else(|e| panic!("vertex plot WGSL validation error:\n{}", e));
+    }
+
+    /// Validate the dynamically composed vertex+color WGSL the same
+    /// way wgpu would at pipeline build time. Covers three shapes the
+    /// user can write:
+    ///
+    /// - Implicit color tuple `(r, g, b, a)` — wrapped as a 0-param
+    ///   lambda, captures axis vars (issue #46).
+    /// - Explicit 1-arg color lambda `(x) ↦ (…)` — single param,
+    ///   captures resolved against the param + outer axis vars.
+    /// - Constants and arithmetic in the color tuple.
+    ///
+    /// Each must produce a self-contained shader naga accepts; a
+    /// failure here would otherwise crash the renderer at pipeline
+    /// creation with an opaque WGSL error.
+    #[test]
+    fn shader_with_color_validates_for_common_shapes() {
+        let cases = [
+            "plot([(0, 0), (1, 1)], (1, 0, 0, 1))",
+            "plot([(0, 0), (1, 1)], (sin(x), cos(y), 0.5, 1))",
+            "plot([(0, 0), (1, 1)], (x) |-> (sin(x), cos(x), 0.5, 1))",
+        ];
+        for src in cases {
+            let ir = parse(src).unwrap();
+            let stmts: &[Ir] = match &ir {
+                Ir::Block { items, .. } => items.as_slice(),
+                single => std::slice::from_ref(single),
+            };
+            let args = match &stmts[0] {
+                Ir::Apply { args, .. } => args,
+                _ => panic!("expected plot Apply"),
+            };
+            let wgsl = shader_with_color(&args[1])
+                .unwrap_or_else(|e| panic!("shader_with_color({:?}) failed: {}", src, e));
+            let module = naga::front::wgsl::parse_str(&wgsl).unwrap_or_else(|e| {
+                panic!("naga parse error for {:?}:\n{}\nWGSL:\n{}", src, e, wgsl)
+            });
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "naga validation error for {:?}:\n{}\nWGSL:\n{}",
+                    src, e, wgsl
+                )
+            });
+            assert!(
+                wgsl.contains("fn _plot_color_"),
+                "expected lifted color fn in {:?}; got:\n{}",
+                src,
+                wgsl
+            );
+            assert!(
+                wgsl.contains("let _color = _plot_color_"),
+                "expected fragment shader to call the color fn for {:?}; got:\n{}",
+                src,
+                wgsl
+            );
+            assert!(
+                wgsl.contains("@vertex"),
+                "expected vertex stage for {:?}",
+                src
+            );
+        }
     }
 }

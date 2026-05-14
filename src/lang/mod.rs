@@ -372,6 +372,10 @@ fn canonicalize_plot_body(arg: &Ir) -> Result<Vec<Ir>, String> {
 /// `_plot_color_<span>` binding that `wgsl_gen` recognizes and uses
 /// as the per-pixel RGBA output in place of `u.primary_color`.
 ///
+/// Exposed `pub(crate)` so `notebook::vertex_plot` can share the same
+/// canonicalization for vertex plots with a color arg (issue #46) —
+/// any future tweak to the lift shape applies to both paths.
+///
 /// Two input shapes are accepted, both desugared into the same lambda
 /// shape so the downstream pipeline (lift_lambdas, capture analysis,
 /// codegen) handles them uniformly:
@@ -389,7 +393,7 @@ fn canonicalize_plot_body(arg: &Ir) -> Result<Vec<Ir>, String> {
 /// plot cells stay free of name collisions, and any unexpected color
 /// value type surfaces through the normal type-checker once the
 /// surrounding expression is inferred.
-fn canonicalize_plot_color(arg: &Ir) -> Ir {
+pub(crate) fn canonicalize_plot_color(arg: &Ir) -> Ir {
     let span = arg.span();
     let synth_name = format!("_plot_color_{}_{}", span.0, span.1);
     let lambda_value = match arg {

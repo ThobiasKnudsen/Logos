@@ -1060,6 +1060,39 @@ fn analytic_plot_does_not_attach_vertices() {
     );
 }
 
+/// Issue #46: `plot(verts, color)` runs through the vertex path,
+/// materializes positions, AND emits a shader that calls the
+/// synthesized color helper. Earlier the second arg was silently
+/// dropped and vertex plots rendered in the cell's default color.
+#[test]
+fn plot_with_vertices_and_color_emits_vertex_shader_using_color() {
+    let mut nb = null_notebook();
+    let i = add_and_play(
+        &mut nb,
+        "plot([(0, 0), (1, 1), (2, 0)], (1, 0, 0, 1))",
+    );
+    let outcome = &nb.cell(i).outcome;
+    if let Some(CellMessage::Error(e)) = &outcome.message {
+        panic!("plot+vertex+color failed:\n{}", e);
+    }
+    let spec = shader(outcome);
+    assert!(
+        spec.vertices.is_some(),
+        "expected vertex data on the ShaderSpec; diagnostics: {:?}",
+        outcome.diagnostics
+    );
+    assert!(
+        spec.wgsl.contains("fn _plot_color_"),
+        "expected lifted color fn; got:\n{}",
+        spec.wgsl
+    );
+    assert!(
+        spec.wgsl.contains("let _color = _plot_color_"),
+        "fragment shader must call the color fn; got:\n{}",
+        spec.wgsl
+    );
+}
+
 #[test]
 fn remove_cell_drops_pending_reduce() {
     let (mut nb, _mock) = mock_reduce_notebook();
