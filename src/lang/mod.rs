@@ -13,7 +13,62 @@ pub mod symbolic;
 pub mod token;
 pub mod wgsl_gen;
 
-use ir::Ir;
+use ir::{Ir, Span};
+
+/// A diagnostic with optional source-span info for richer formatting.
+///
+/// `span == (0, 0)` is the "no span" sentinel — callers fall back to plain
+/// message display. Otherwise the offset addresses byte `span.0` in the
+/// source and `Diagnostic::format` produces a `Line N, Col M:` message with
+/// the source line and a caret.
+///
+/// `comptime_level` is the compile-time-evaluation level the diagnostic was
+/// produced at. Today every diagnostic is level 0 (user source); the field
+/// is present so future multi-level metaprogramming can attribute errors to
+/// the right level without a wire-format change.
+#[derive(Debug, Clone)]
+pub struct Diagnostic {
+    pub message: String,
+    pub span: Span,
+    pub comptime_level: usize,
+}
+
+impl Diagnostic {
+    /// Build a diagnostic with a real source span and level 0.
+    pub fn at(span: Span, message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            span,
+            comptime_level: 0,
+        }
+    }
+
+    /// Build a diagnostic without source-span info — formats as bare message.
+    pub fn without_span(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            span: (0, 0),
+            comptime_level: 0,
+        }
+    }
+
+    /// Render this diagnostic against the original source. When the
+    /// diagnostic carries a real span (not the `(0, 0)` sentinel) the
+    /// message gets a `Line N, Col M:` prefix, the offending source line,
+    /// and a caret. Otherwise the bare message is returned.
+    pub fn format(&self, source: &str) -> String {
+        if self.span == (0, 0) {
+            return self.message.clone();
+        }
+        format_error_at(source, self.span.0, &self.message)
+    }
+}
+
+impl From<String> for Diagnostic {
+    fn from(message: String) -> Self {
+        Self::without_span(message)
+    }
+}
 
 /// Convert a byte offset in source to (line, col) — both 1-based.
 pub(crate) fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
@@ -52,33 +107,86 @@ pub fn format_error_at(source: &str, offset: usize, message: &str) -> String {
 }
 
 /// Check whether the IR contains nodes that require the interpreter
-/// (arrays, parallel for) rather than the fragment shader path.
+/// (arrays, parallel for, first-class function values) rather than the
+/// fragment shader path.
 pub fn needs_interpreter(ir: &Ir) -> bool {
+    if uses_first_class_functions(ir) {
+        return true;
+    }
+    needs_interpreter_struct(ir)
+}
+
+fn needs_interpreter_struct(ir: &Ir) -> bool {
     match ir {
         Ir::ArrayLiteral { .. }
         | Ir::IndexAccess { .. }
         | Ir::ParallelFor { .. }
         | Ir::IndexAssign { .. } => true,
-        Ir::Block { items: stmts, .. } => stmts.iter().any(needs_interpreter),
-        Ir::Binding { value, .. } => needs_interpreter(value),
-        Ir::TupleBinding { value, .. } => needs_interpreter(value),
-        Ir::FunctionDef { body, .. } => needs_interpreter(body),
+        Ir::Block { items: stmts, .. } => stmts.iter().any(needs_interpreter_struct),
+        Ir::Binding { value, .. } => needs_interpreter_struct(value),
+        Ir::TupleBinding { value, .. } => needs_interpreter_struct(value),
+        Ir::FunctionDef { body, .. } => needs_interpreter_struct(body),
         Ir::IfExpr {
             condition,
             then_branch,
             else_branch,
             ..
         } => {
-            needs_interpreter(condition)
-                || needs_interpreter(then_branch)
-                || else_branch.as_ref().is_some_and(|e| needs_interpreter(e))
+            needs_interpreter_struct(condition)
+                || needs_interpreter_struct(then_branch)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|e| needs_interpreter_struct(e))
         }
-        Ir::Apply { args, .. } => args.iter().any(needs_interpreter),
+        Ir::Apply { args, .. } => args.iter().any(needs_interpreter_struct),
         Ir::WhileLoop {
             condition, body, ..
-        } => needs_interpreter(condition) || needs_interpreter(body),
+        } => needs_interpreter_struct(condition) || needs_interpreter_struct(body),
         _ => false,
     }
+}
+
+/// True when `ir` references one of its own user functions as a value
+/// (rather than calling it directly). E.g. `f := if cond then sq else cube`
+/// reads `sq` and `cube` in value position. wgsl_gen can't lower these —
+/// the cell routes to the CPU interpreter, which handles `Value::Function`
+/// via captured environments (issue #29).
+fn uses_first_class_functions(ir: &Ir) -> bool {
+    let mut func_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    collect_function_names(ir, &mut func_names);
+    if func_names.is_empty() {
+        return false;
+    }
+    has_function_value_reference(ir, &func_names)
+}
+
+fn collect_function_names(ir: &Ir, out: &mut std::collections::HashSet<String>) {
+    if let Ir::FunctionDef { name, .. } = ir {
+        out.insert(name.clone());
+    }
+    for child in ir.children() {
+        collect_function_names(child, out);
+    }
+}
+
+fn has_function_value_reference(
+    ir: &Ir,
+    func_names: &std::collections::HashSet<String>,
+) -> bool {
+    if let Ir::Identifier { name, .. } = ir {
+        return func_names.contains(name);
+    }
+    // For `Apply`, the callee position is *invocation*, not value-position;
+    // we only need to scan the args. Everything else recurses through all
+    // children — that's still correct because the only structural place a
+    // function name in identifier form means "value, not callee" is inside
+    // an `Apply.args` (or some other non-Apply node).
+    if let Ir::Apply { args, .. } = ir {
+        return args.iter().any(|a| has_function_value_reference(a, func_names));
+    }
+    ir.children()
+        .iter()
+        .any(|c| has_function_value_reference(c, func_names))
 }
 
 /// Detected print/plot actions in a cell's IR.
@@ -290,7 +398,7 @@ pub fn compile(source: &str) -> Result<String, String> {
     let mut parser = parser::Parser::new(tokens, source.to_string());
     let ir = parser.parse()?;
     type_check(&ir, source)?;
-    wgsl_gen::generate(&ir)
+    wgsl_gen::generate(&ir).map_err(|d| d.format(source))
 }
 
 #[cfg(test)]
@@ -698,5 +806,46 @@ mod action_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod needs_interpreter_tests {
+    use super::*;
+
+    #[test]
+    fn detects_first_class_function_via_if_branch() {
+        // Routing trigger (issue #29): a cell that binds a function value
+        // via `if` must route to the CPU interpreter, since wgsl_gen can't
+        // lower dynamic dispatch.
+        let ir = parse(
+            "sq(x) := x*x\n\
+             cube(x) := x*x*x\n\
+             c := 1\n\
+             f := if (c) sq else cube\n\
+             f(5)",
+        )
+        .unwrap();
+        assert!(needs_interpreter(&ir));
+    }
+
+    #[test]
+    fn detects_function_alias_binding() {
+        // `g := sq` is the simplest first-class function use.
+        let ir = parse("sq(x) := x*x\ng := sq\ng(7)").unwrap();
+        assert!(needs_interpreter(&ir));
+    }
+
+    #[test]
+    fn plain_arithmetic_does_not_need_interpreter() {
+        let ir = parse("x + 1").unwrap();
+        assert!(!needs_interpreter(&ir));
+    }
+
+    #[test]
+    fn ordinary_function_call_does_not_need_interpreter() {
+        // `sq(x)` invokes sq — that's a Callee, not a first-class value.
+        let ir = parse("sq(x) := x*x\nsq(3)").unwrap();
+        assert!(!needs_interpreter(&ir));
     }
 }

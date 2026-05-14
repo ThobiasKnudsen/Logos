@@ -15,9 +15,10 @@
 //! paths via `lang::type_check`, which formats the resulting `TypeError`
 //! into a `Line N, Col M:` message using `format_error_at`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::ir::{BuiltinOp, Callee, Ir, Span, Type};
+use super::Diagnostic;
 
 /// A type-checking failure with the source span of the offending node.
 #[derive(Debug, Clone)]
@@ -186,20 +187,32 @@ fn infer(node: &mut Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
 
         Ir::Block { items, .. } => {
             let mut child = env.child();
-            // Pre-register FunctionDef signatures so forward references inside
-            // sibling function bodies resolve. After lowering, synthesized
-            // helper functions are *prepended* to the block and reference
-            // user-defined originals declared later in the same block; without
-            // this pre-pass, the synthesized body's type-check fails on the
-            // forward call. Each entry uses `Type::Unknown` as a placeholder
-            // return type, then gets overwritten when the FunctionDef itself
-            // is visited and its real return type is computed.
+            // Pre-register FunctionDef signatures AND Binding names so
+            // forward references inside sibling functions resolve. After
+            // lowering, lambdas-lifted-from-bindings are *prepended* to the
+            // block: a `g := (t ↦ t + offset)` becomes a `FunctionDef("g",
+            // [t], t+offset)` ahead of an `offset := 3` binding declared
+            // later. Without forward registration the synthetic body
+            // type-checks against an empty scope and fails on `offset`.
+            // Bindings register as `Type::Unknown`; the real type lands
+            // when the binding is actually visited.
             for stmt in items.iter() {
-                if let Ir::FunctionDef { name, params, .. } = stmt {
-                    let param_tys = params.iter().map(|_| Type::Num).collect();
-                    child
-                        .funcs
-                        .insert(name.clone(), (param_tys, Type::Unknown));
+                match stmt {
+                    Ir::FunctionDef { name, params, .. } => {
+                        let param_tys = params.iter().map(|_| Type::Num).collect();
+                        child
+                            .funcs
+                            .insert(name.clone(), (param_tys, Type::Unknown));
+                    }
+                    Ir::Binding { name, .. } => {
+                        child.vars.insert(name.clone(), Type::Unknown);
+                    }
+                    Ir::TupleBinding { names, .. } => {
+                        for n in names {
+                            child.vars.insert(n.clone(), Type::Unknown);
+                        }
+                    }
+                    _ => {}
                 }
             }
             let mut last = Type::Void;
@@ -262,6 +275,7 @@ fn infer(node: &mut Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
             params,
             body,
             return_ty,
+            captured,
             ..
         } => {
             // We don't yet have parameter type annotations, so each parameter
@@ -271,6 +285,20 @@ fn infer(node: &mut Ir, env: &mut TypeEnv) -> Result<Type, TypeError> {
             let mut child = env.child();
             for p in params.iter() {
                 child.vars.insert(p.clone(), Type::Num);
+            }
+            // Captures (populated by `annotate_captures` before this pass)
+            // bring outer-scope names into the body's scope. Required for
+            // lifted lambdas (`t ↦ t + n` becomes a top-level synthetic
+            // function whose body references `n` from the original
+            // enclosing function's params). Each capture is typed as `Num`
+            // — same default as parameters; matches the dominant case and
+            // doesn't fight overload resolution.
+            if let Some(caps) = captured.as_deref() {
+                for c in caps.iter() {
+                    if !params.contains(c) {
+                        child.vars.insert(c.clone(), Type::Num);
+                    }
+                }
             }
             let body_ty = infer(body, &mut child)?;
             *return_ty = Some(Box::new(body_ty.clone()));
@@ -462,6 +490,25 @@ fn infer_apply(
 ) -> Result<Type, TypeError> {
     let arg_types: Result<Vec<_>, _> = args.iter_mut().map(|a| infer(a, env)).collect();
     let arg_types = arg_types?;
+
+    // Functions ending in `plot(...)` or `print(...)` as a statement return
+    // `Void`. Using such a result as an operand silently produced nothing
+    // before — reject it here with an explicit message so the user sees the
+    // mismatch instead of an empty render or a generic overload-resolution
+    // failure downstream.
+    for (i, ty) in arg_types.iter().enumerate() {
+        if matches!(ty, Type::Void) {
+            let src = args[i].to_source();
+            let src = src.split('\n').next().unwrap_or(&src);
+            return Err(TypeError::new(
+                args[i].span(),
+                format!(
+                    "expected a value here, but `{}` returns void (functions ending in plot/print produce no value)",
+                    src
+                ),
+            ));
+        }
+    }
 
     match callee {
         Callee::Builtin(op) => match resolve_builtin(*op, &arg_types) {
@@ -789,6 +836,179 @@ fn unify_branches(then_ty: &Type, else_ty: &Type) -> Option<Type> {
 }
 
 // ---------------------------------------------------------------------------
+// GPU-subset enforcement
+// ---------------------------------------------------------------------------
+
+/// Validate that every GPU scope in `ir` uses only features the GPU backend
+/// can lower. A "GPU scope" is the argument expression of a `plot(…)` call
+/// or the body of a `parallel for` loop; outside those, the CPU interpreter
+/// path picks up whatever the GPU couldn't handle.
+///
+/// Today's check focuses on first-class function values at runtime: any user
+/// function with a function-typed parameter (an unrepresentable higher-order
+/// function) reachable from a GPU scope is rejected. The diagnostic points
+/// at the GPU scope itself and includes the call chain `helper → … → bad`
+/// so the user can see which path leads to the unrepresentable feature
+/// instead of getting an opaque codegen error.
+///
+/// Returns `Ok(())` when every GPU scope's transitive call graph stays
+/// inside the GPU subset, otherwise the first violation as a `Diagnostic`.
+pub fn check_gpu_subset(ir: &Ir) -> Result<(), Diagnostic> {
+    let mut defs: HashMap<String, (Vec<String>, Ir)> = HashMap::new();
+    super::lower::collect_owned_function_defs(ir, &mut defs);
+    let hof_set: HashSet<String> = super::lower::compute_hof_indices(&defs)
+        .keys()
+        .cloned()
+        .collect();
+    if hof_set.is_empty() {
+        return Ok(());
+    }
+
+    let body_map: HashMap<String, Ir> = defs
+        .iter()
+        .map(|(k, (_, body))| (k.clone(), body.clone()))
+        .collect();
+
+    let mut scopes: Vec<(Span, String, Ir)> = Vec::new();
+    collect_gpu_scopes(ir, &mut scopes);
+
+    if scopes.is_empty() {
+        // No explicit scope marker in this subtree. The entire tree is
+        // an implicit GPU scope (e.g., a notebook plot whose `plot(...)`
+        // wrapper was extracted by `build_plot_ir`). Treat the whole
+        // root as the scope so we still catch violations.
+        scopes.push((ir.span(), "this expression".to_string(), ir.clone()));
+    }
+
+    for (scope_span, scope_kind, scope_body) in &scopes {
+        let mut visited: HashSet<String> = HashSet::new();
+        if let Some((chain, inner_span)) = scan_for_hof(scope_body, &body_map, &hof_set, &mut visited) {
+            // Explicit scopes (plot / parallel for) carry their own
+            // user-visible source position; report there per the spec. For
+            // the implicit-whole-IR fallback the scope span is just the
+            // root, so we redirect to the offending call's span instead.
+            let report_span = if scope_kind == "this expression" {
+                inner_span
+            } else {
+                *scope_span
+            };
+            return Err(Diagnostic::at(report_span, format_chain_msg(scope_kind, &chain)));
+        }
+    }
+
+    Ok(())
+}
+
+/// Collect every GPU-scope marker in pre-order — `plot(...)` calls (the
+/// argument is the scope body) and `parallel for` loops (the loop body is
+/// the scope body). Nested scopes are recorded individually so each can be
+/// checked against its own reachable call graph.
+fn collect_gpu_scopes(node: &Ir, out: &mut Vec<(Span, String, Ir)>) {
+    if let Ir::Apply {
+        callee: Callee::Builtin(BuiltinOp::Plot),
+        args,
+        span,
+        ..
+    } = node
+    {
+        if let Some(arg) = args.first() {
+            out.push((*span, "plot(...)".to_string(), arg.clone()));
+        }
+    }
+    if let Ir::ParallelFor { body, span, .. } = node {
+        out.push((*span, "parallel for".to_string(), (**body).clone()));
+    }
+    for child in node.children() {
+        collect_gpu_scopes(child, out);
+    }
+}
+
+/// Walk `node` searching for any call that transitively reaches a user
+/// function listed in `hof_set`. Returns the chain of function names from
+/// the outermost call inside the scope down to the offending HOF, or `None`
+/// if the scope stays inside the GPU subset.
+///
+/// `visited` avoids infinite recursion on mutual or self-recursion;
+/// `body_map` provides each function's body so the walk descends through
+/// callees rather than stopping at the surface call.
+///
+/// `FunctionDef` siblings in the scope body are skipped — their bodies are
+/// reached only via `Apply`, not as part of the surrounding scope's
+/// expression. Without this, the implicit-whole-IR-as-scope case (a cell
+/// without a `plot(...)` wrapper) would descend into every sibling helper
+/// definition and falsely report HOFs that no caller actually reaches.
+fn scan_for_hof(
+    node: &Ir,
+    body_map: &HashMap<String, Ir>,
+    hof_set: &HashSet<String>,
+    visited: &mut HashSet<String>,
+) -> Option<(Vec<String>, Span)> {
+    if let Ir::Apply {
+        callee: Callee::User(name),
+        args,
+        span,
+        ..
+    } = node
+    {
+        if hof_set.contains(name) {
+            return Some((vec![name.clone()], *span));
+        }
+        for a in args {
+            if let Some(found) = scan_for_hof(a, body_map, hof_set, visited) {
+                return Some(found);
+            }
+        }
+        if visited.insert(name.clone()) {
+            if let Some(body) = body_map.get(name) {
+                if let Some((mut chain, _)) = scan_for_hof(body, body_map, hof_set, visited) {
+                    chain.insert(0, name.clone());
+                    return Some((chain, *span));
+                }
+            }
+        }
+        return None;
+    }
+    for child in node.children() {
+        if matches!(child, Ir::FunctionDef { .. }) {
+            continue;
+        }
+        if let Some(found) = scan_for_hof(child, body_map, hof_set, visited) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Build the user-visible message describing why a GPU scope can't compile,
+/// quoting the call chain from `helper` down to the offending HOF.
+fn format_chain_msg(scope_kind: &str, chain: &[String]) -> String {
+    debug_assert!(!chain.is_empty());
+    if chain.len() == 1 {
+        return format!(
+            "{0} cannot be compiled for the GPU because it calls `{1}`, which uses runtime function dispatch. Either inline the dispatch or move this code out of {2}.",
+            scope_kind,
+            chain[0],
+            scope_kind
+        );
+    }
+    let head = &chain[0];
+    let bad = chain.last().unwrap();
+    let middle: Vec<String> = chain[1..chain.len() - 1]
+        .iter()
+        .map(|n| format!("`{}`", n))
+        .collect();
+    let via = if middle.is_empty() {
+        String::new()
+    } else {
+        format!(" (via {})", middle.join(" → "))
+    };
+    format!(
+        "{0} cannot be compiled for the GPU because it calls `{1}`{2}, which calls `{3}` — a function that uses runtime function dispatch. Either inline the dispatch or move this code out of {0}.",
+        scope_kind, head, via, bad
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -978,6 +1198,27 @@ mod tests {
     }
 
     #[test]
+    fn void_in_expression_position_rejected() {
+        // `f(x) := plot(x)` makes f return Void. Using f(x) as an operand
+        // (here on the RHS of `y = …`) should error with a clear message
+        // pointing at the inner call.
+        let err = check_str("f(x) := plot(x)\nplot(y = f(x))").unwrap_err();
+        assert!(
+            err.message.contains("returns void"),
+            "got: {}",
+            err.message
+        );
+        assert!(err.message.contains("plot/print"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn plot_call_directly_in_operand_rejected() {
+        // Direct use of `plot(x)` as an operand also errors.
+        let err = check_str("1 + plot(x)").unwrap_err();
+        assert!(err.message.contains("returns void"), "got: {}", err.message);
+    }
+
+    #[test]
     fn property_access_returns_num() {
         assert_eq!(check_str("x.min").unwrap(), Type::Num);
         assert_eq!(check_str("y.max").unwrap(), Type::Num);
@@ -987,5 +1228,103 @@ mod tests {
     fn unknown_property_errors() {
         let err = check_str("x.bogus").unwrap_err();
         assert!(err.message.contains("unknown property"));
+    }
+
+    // -----------------------------------------------------------------------
+    // GPU subset enforcement
+    // -----------------------------------------------------------------------
+
+    fn gpu_check_str(source: &str) -> Result<(), Diagnostic> {
+        let ir = parse(source).expect("parse failed");
+        let lowered = super::super::lower::lower(ir).expect("lower failed");
+        check_gpu_subset(&lowered)
+    }
+
+    #[test]
+    fn gpu_subset_passes_for_specialized_hof_chain() {
+        // wrapper(f) → N_integral(f) → f(x) — all HOFs, but the call
+        // `y = wrapper(sq)` is fully specializable; nothing reaches the
+        // unrepresentable form at runtime.
+        let source = "\
+            sq(x) := x*x\n\
+            N_integral(f, x0, x1, d) := (sum := 0\nfor i in 0..10 (sum := sum + f(i*d)*d)\nsum)\n\
+            wrapper(f) := N_integral(f, 0, 1, 0.1)\n\
+            y = wrapper(sq)\n";
+        gpu_check_str(source).expect("specialized HOFs should pass");
+    }
+
+    #[test]
+    fn gpu_subset_rejects_unspecializable_hof_in_implicit_scope() {
+        // No explicit `plot(...)`: the whole IR is treated as a GPU scope
+        // (matches notebook plot_ir flow after `build_plot_ir` extraction).
+        // `val` isn't a function, so N_integral's HOF call can't be
+        // specialized; the check fires and points at the call site.
+        let source = "\
+            N_integral(f, x0, x1, d) := (sum := 0\nfor i in 0..10 (sum := sum + f(i*d)*d)\nsum)\n\
+            val := 5\n\
+            y = N_integral(val, 0, 1, 0.1)\n";
+        let diag = gpu_check_str(source).expect_err("should reject");
+        assert!(
+            diag.message.contains("N_integral"),
+            "chain message should name the HOF, got: {}",
+            diag.message
+        );
+        assert!(
+            diag.message.contains("runtime function dispatch"),
+            "message should explain why, got: {}",
+            diag.message
+        );
+    }
+
+    #[test]
+    fn gpu_subset_points_at_plot_call_for_explicit_scope() {
+        // Explicit `plot(...)` scope: the diagnostic span should land on the
+        // plot apply itself rather than on a helper or the offending HOF
+        // call inside the plot body — matches the spec's "errors at the
+        // plot" requirement.
+        let source = "\
+            N_integral(f, x0, x1, d) := (sum := 0\nfor i in 0..10 (sum := sum + f(i*d)*d)\nsum)\n\
+            val := 5\n\
+            plot(y = N_integral(val, 0, 1, 0.1))\n";
+        let diag = gpu_check_str(source).expect_err("should reject");
+        // The plot apply starts at the `p` of `plot(` on line 5 (the
+        // multi-line N_integral def spans lines 1-3, then val on line 4).
+        let (start, _) = diag.span;
+        let line_of_start = source[..start].matches('\n').count() + 1;
+        assert_eq!(
+            line_of_start, 5,
+            "diagnostic should point at the plot call line, got line {} (source:\n{})",
+            line_of_start, source
+        );
+        assert!(
+            diag.message.contains("plot(...)"),
+            "message should mention the plot scope, got: {}",
+            diag.message
+        );
+    }
+
+    /// Binding-LHS that's an axis-var name (`x`, `y`, `z`, `t`). The
+    /// lexer tokenizes these as `AxisVar`, but `try_parse_binding` only
+    /// matches `Identifier`, so `y := 1` produces "Unexpected token ':='"
+    /// rather than a binding. Either the parser should accept AxisVar as
+    /// a binding LHS (the axis var is just shadowed locally) or it should
+    /// reject with a clearer "axis variables can't be rebound" message.
+    #[test]
+    #[ignore = "parser doesn't accept axis-var names as binding LHS"]
+    fn binding_to_axis_var_name() {
+        let result = parse("y := 1\ny + 1");
+        assert!(result.is_ok(), "got: {:?}", result.err());
+    }
+
+    #[test]
+    fn gpu_subset_allows_hof_outside_gpu_scope() {
+        // A HOF used outside any GPU scope (no plot, no parallel for, AND
+        // the HOF isn't reachable from the cell's value path) should pass.
+        // Here `unused_caller` is defined but never called from the result.
+        let source = "\
+            N_integral(f, x0, x1, d) := (sum := 0\nfor i in 0..10 (sum := sum + f(i*d)*d)\nsum)\n\
+            unused_caller(val) := N_integral(val, 0, 1, 0.1)\n\
+            y = 42\n";
+        gpu_check_str(source).expect("unreachable HOF should not trip the GPU check");
     }
 }

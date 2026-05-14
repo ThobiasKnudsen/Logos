@@ -1,4 +1,5 @@
 use super::ir::{BuiltinOp, Callee, Ir, Type, WgslLowering};
+use super::Diagnostic;
 use std::collections::{HashMap, HashSet};
 
 // The for-loop guard's upper bound is loaded from the `max_loop_iter` uniform
@@ -17,15 +18,24 @@ use std::collections::{HashMap, HashSet};
 /// - For boolean expressions: uses corner-checking for pixel-perfect rendering
 ///   (equality → curve straddling, inequalities → all-corners-agree)
 /// - For numeric expressions: clamps to [0, 1] grayscale
-pub fn generate(ast: &Ir) -> Result<String, String> {
+pub fn generate(ast: &Ir) -> Result<String, Diagnostic> {
     // Run the shared lowering pipeline: hoist anonymous imperative
     // blocks, lift lambdas into synthetic FunctionDefs, specialize
     // higher-order function calls, and resolve identifier references.
     // After this, the AST contains no Lambda nodes and no calls to
     // user functions with first-class function arguments — both
     // invariants WGSL codegen relies on.
-    let owned_ast = super::lower::lower(ast.clone())?;
+    let owned_ast = super::lower::lower(ast.clone()).map_err(Diagnostic::without_span)?;
     let ast: &Ir = &owned_ast;
+
+    // Scope-rooted GPU subset check: walks each `plot(...)` / `parallel for`
+    // scope's call graph and rejects any reachable HOF that survived
+    // specialization. Run after lowering so specialized calls have been
+    // rewritten and only genuinely unspecializable HOFs remain. This
+    // supersedes the previous unconditional `unrepresentable_higher_order
+    // _functions` rejection — the new diagnostic includes the GPU scope's
+    // location and the call chain instead of a bare function name.
+    super::check::check_gpu_subset(ast)?;
 
     let mut ctx = GenContext::new(ast);
 
@@ -95,30 +105,11 @@ pub fn generate(ast: &Ir) -> Result<String, String> {
     // Emit user-defined helper functions. Skip any whose body uses a
     // function-typed parameter (e.g. `N_integral(f, ...)` calling `f(i*d)`),
     // since WGSL has no first-class functions and the emitted code would
-    // fail GPU validation. If such a function is actually called from the
-    // cell's result path we surface an explicit error here; if it's defined
-    // but unused (the user's `statistikk.logos` shape) we silently drop it
-    // so the rest of the cell still renders.
+    // fail GPU validation. The `check_gpu_subset` pass above has already
+    // rejected the case where such a function is *reachable* from a GPU
+    // scope; here we just silently drop unreachable definitions so the rest
+    // of the cell still renders.
     let hof_fns = unrepresentable_higher_order_functions(ast);
-    let reachable_user_fns = reachable_user_functions(ast);
-    for hof in &hof_fns {
-        if reachable_user_fns.contains(hof) {
-            // The HOF survived the specialization pass — meaning some call
-            // site passed a function value that wasn't a known function name
-            // or an inline `|->` lambda. WGSL has no first-class functions,
-            // so we can't generate code for it; reject with a clear message
-            // pointing at the limitation and the two supported shapes.
-            return Err(format!(
-                "Cannot compile call to higher-order function `{0}`: its \
-                 function-typed parameter must be statically known at compile \
-                 time. Pass either a defined function name (e.g. `{0}(my_fn, …)`) \
-                 or an inline lambda (e.g. `{0}(t |-> t*t, …)`). \
-                 Runtime-dispatched function values aren't supported on the GPU \
-                 backend yet.",
-                hof
-            ));
-        }
-    }
     for func in &ctx.functions {
         if let Some(name) = &func.user_name {
             if hof_fns.contains(name) {
@@ -1520,146 +1511,6 @@ fn unrepresentable_higher_order_functions(ast: &Ir) -> HashSet<String> {
     super::lower::compute_hof_indices(&defs).keys().cloned().collect()
 }
 
-
-/// Compute the set of user-defined function names actually reachable from the
-/// cell's result expression. Walks the AST collecting `Callee::User` calls
-/// from non-`FunctionDef` positions (the "roots"), then expands transitively
-/// through the bodies of each reachable function until fixpoint.
-fn reachable_user_functions(ast: &Ir) -> HashSet<String> {
-    let mut bodies: HashMap<String, &Ir> = HashMap::new();
-    collect_function_bodies(ast, &mut bodies);
-
-    let mut reachable: HashSet<String> = HashSet::new();
-    let mut worklist: Vec<String> = Vec::new();
-    collect_user_calls(ast, /*inside_fn_body=*/ false, &mut reachable, &mut worklist);
-
-    while let Some(name) = worklist.pop() {
-        if let Some(body) = bodies.get(&name).copied() {
-            collect_user_calls(body, /*inside_fn_body=*/ true, &mut reachable, &mut worklist);
-        }
-    }
-    reachable
-}
-
-fn collect_function_bodies<'a>(node: &'a Ir, out: &mut HashMap<String, &'a Ir>) {
-    match node {
-        Ir::FunctionDef { name, body, .. } => {
-            out.insert(name.clone(), body.as_ref());
-            collect_function_bodies(body, out);
-        }
-        Ir::Block { items, .. } => {
-            for s in items {
-                collect_function_bodies(s, out);
-            }
-        }
-        Ir::Binding { value, .. } | Ir::TupleBinding { value, .. } => {
-            collect_function_bodies(value, out);
-        }
-        Ir::Apply { args, .. } => {
-            for a in args {
-                collect_function_bodies(a, out);
-            }
-        }
-        Ir::Tuple { items, .. } | Ir::ArrayLiteral { items, .. } => {
-            for i in items {
-                collect_function_bodies(i, out);
-            }
-        }
-        Ir::IfExpr {
-            condition,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            collect_function_bodies(condition, out);
-            collect_function_bodies(then_branch, out);
-            if let Some(e) = else_branch {
-                collect_function_bodies(e, out);
-            }
-        }
-        Ir::WhileLoop {
-            condition, body, ..
-        } => {
-            collect_function_bodies(condition, out);
-            collect_function_bodies(body, out);
-        }
-        Ir::ForLoop { range, body, .. } => {
-            collect_function_bodies(range, out);
-            collect_function_bodies(body, out);
-        }
-        _ => {}
-    }
-}
-
-/// Walk `node` collecting every `Callee::User(name)` into `reachable`,
-/// pushing newly-seen names onto `worklist`. When `inside_fn_body` is false,
-/// any nested `FunctionDef` is skipped (we only care about calls from the
-/// "outside" — the actual result path — and from already-known-reachable
-/// function bodies).
-fn collect_user_calls(
-    node: &Ir,
-    inside_fn_body: bool,
-    reachable: &mut HashSet<String>,
-    worklist: &mut Vec<String>,
-) {
-    match node {
-        Ir::Apply { callee, args, .. } => {
-            if let Callee::User(name) = callee {
-                if reachable.insert(name.clone()) {
-                    worklist.push(name.clone());
-                }
-            }
-            for a in args {
-                collect_user_calls(a, inside_fn_body, reachable, worklist);
-            }
-        }
-        Ir::Block { items, .. } => {
-            for s in items {
-                collect_user_calls(s, inside_fn_body, reachable, worklist);
-            }
-        }
-        Ir::Binding { value, .. } | Ir::TupleBinding { value, .. } => {
-            collect_user_calls(value, inside_fn_body, reachable, worklist);
-        }
-        Ir::Tuple { items, .. } | Ir::ArrayLiteral { items, .. } => {
-            for i in items {
-                collect_user_calls(i, inside_fn_body, reachable, worklist);
-            }
-        }
-        Ir::IfExpr {
-            condition,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            collect_user_calls(condition, inside_fn_body, reachable, worklist);
-            collect_user_calls(then_branch, inside_fn_body, reachable, worklist);
-            if let Some(e) = else_branch {
-                collect_user_calls(e, inside_fn_body, reachable, worklist);
-            }
-        }
-        Ir::WhileLoop {
-            condition, body, ..
-        } => {
-            collect_user_calls(condition, inside_fn_body, reachable, worklist);
-            collect_user_calls(body, inside_fn_body, reachable, worklist);
-        }
-        Ir::ForLoop { range, body, .. } => {
-            collect_user_calls(range, inside_fn_body, reachable, worklist);
-            collect_user_calls(body, inside_fn_body, reachable, worklist);
-        }
-        Ir::FunctionDef { body, .. } => {
-            // Only descend into a function-def body when we're already
-            // expanding a known-reachable function — top-level traversal
-            // shouldn't pull in calls from unreachable defs.
-            if inside_fn_body {
-                collect_user_calls(body, inside_fn_body, reachable, worklist);
-            }
-        }
-        _ => {}
-    }
-}
-
 /// Check if an IR node is a constant expression (no x, y, z, t references).
 /// `const_names` tracks bindings already known to be constant.
 fn is_const_expr(node: &Ir, const_names: &HashSet<String>) -> bool {
@@ -2712,19 +2563,63 @@ step(lower, ny) * step(ny, upper)"#;
         );
     }
 
+    /// Function-alias binding inside a plot scope. `g := sq` makes `g` a
+    /// first-class function value; `plot(y = g(x))` calls through it. WGSL
+    /// has no first-class functions, so wgsl_gen emits `g(x)` literally and
+    /// the shader fails validation with "expected variable access, found
+    /// 'sq'" (or similar). The clean fix is an alias-resolution pass that
+    /// replaces `g` with `sq` before codegen, or `check_gpu_subset`
+    /// learning to reject first-class function bindings inside GPU scopes
+    /// with a chain-aware diagnostic. Tracked here so the user-visible
+    /// shader error is replaced by a structured one when the fix lands.
+    #[test]
+    #[ignore = "function-alias binding in plot scope produces opaque shader error"]
+    fn function_alias_inside_plot_should_resolve_or_diagnose() {
+        let source = "sq(x) := x*x\ng := sq\nplot(y = g(x))\n";
+        let result = crate::lang::compile(source);
+        match result {
+            Ok(_) => {} // ideal: resolves `g` to `sq` and compiles
+            Err(e) => {
+                assert!(
+                    e.contains("cannot be compiled for the GPU"),
+                    "should be a structured GPU-subset error, got:\n{}",
+                    e
+                );
+            }
+        }
+    }
+
     #[test]
     fn implicit_function_through_value_binding_is_rejected() {
         // Passing a non-function value (here a numeric binding) into a HOF's
-        // function-typed parameter slot. Can't be specialized; codegen rejects
-        // with the "must be statically known" error.
+        // function-typed parameter slot. Can't be specialized; the scope-
+        // rooted GPU subset check rejects with a chain-aware message and a
+        // line/col caret pointing at the offending call.
         let source = "\
             N_integral(f, x0, x1, d) := (sum := 0\nfor i in 0..10 (sum := sum + f(i*d)*d)\nsum)\n\
             val := 5\n\
             y = N_integral(val, 0, 1, 0.1)\n";
         let err = crate::lang::compile(source).expect_err("should reject implicit fn");
         assert!(
-            err.contains("function-typed parameter") && err.contains("N_integral"),
-            "error should explain the statically-known requirement, got:\n{}",
+            err.contains("runtime function dispatch") && err.contains("N_integral"),
+            "error should explain why the HOF can't be lowered, got:\n{}",
+            err
+        );
+        // Span-aware: format_error_at adds a `Line N, Col M:` prefix and a
+        // caret pointing at the call. Catches regressions on the diagnostic.
+        assert!(
+            err.starts_with("Line "),
+            "error should include line/col prefix, got:\n{}",
+            err
+        );
+        assert!(
+            err.contains("^"),
+            "error should include caret marker, got:\n{}",
+            err
+        );
+        assert!(
+            err.contains("N_integral(val"),
+            "error should display the source line, got:\n{}",
             err
         );
     }

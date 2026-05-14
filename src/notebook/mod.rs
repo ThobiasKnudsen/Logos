@@ -823,7 +823,7 @@ impl Notebook {
                     last_ir = Some(plot_ir);
                 }
                 Err(e) => {
-                    self.set_runtime_error(idx, e, snapshot);
+                    self.set_runtime_error(idx, e.format(snapshot), snapshot);
                     return;
                 }
             }
@@ -1001,8 +1001,9 @@ impl Notebook {
                 self.cells[idx].last_played_text = Some(self.cells[idx].buffer.text().to_string());
             }
             Err(e) => {
-                if !e.contains("No result expression") {
-                    self.set_runtime_error(idx, e, &self.cells[idx].buffer.text().to_string());
+                if !e.message.contains("No result expression") {
+                    let source = self.cells[idx].buffer.text().to_string();
+                    self.set_runtime_error(idx, e.format(&source), &source);
                 }
             }
         }
