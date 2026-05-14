@@ -140,9 +140,12 @@ fn scan_for_anon_blocks(node: &Ir, in_value_position: bool, found: &mut bool) {
             scan_for_anon_blocks(array, true, found);
             scan_for_anon_blocks(index, true, found);
         }
-        Ir::Range { start, end, .. } => {
+        Ir::Range { start, end, delta, .. } => {
             scan_for_anon_blocks(start, true, found);
             scan_for_anon_blocks(end, true, found);
+            if let Some(d) = delta {
+                scan_for_anon_blocks(d, true, found);
+            }
         }
         Ir::IndexAssign {
             array,
@@ -293,12 +296,12 @@ fn hoist_recurse(
             captured: None,
         },
         Ir::ForLoop {
-            var,
+            vars,
             range,
             body,
             span,
         } => Ir::ForLoop {
-            var: var.clone(),
+            vars: vars.clone(),
             range: Box::new(hoist_recurse(range, true, counter, prepended)),
             body: body.clone(),
             span: *span,
@@ -313,12 +316,12 @@ fn hoist_recurse(
             span: *span,
         },
         Ir::ParallelFor {
-            var,
+            vars,
             range,
             body,
             span,
         } => Ir::ParallelFor {
-            var: var.clone(),
+            vars: vars.clone(),
             range: Box::new(hoist_recurse(range, true, counter, prepended)),
             body: body.clone(),
             span: *span,
@@ -337,9 +340,10 @@ fn hoist_recurse(
             index: Box::new(hoist_recurse(index, true, counter, prepended)),
             span: *span,
         },
-        Ir::Range { start, end, span } => Ir::Range {
+        Ir::Range { start, end, delta, span } => Ir::Range {
             start: Box::new(hoist_recurse(start, true, counter, prepended)),
             end: Box::new(hoist_recurse(end, true, counter, prepended)),
+            delta: delta.as_ref().map(|d| Box::new(hoist_recurse(d, true, counter, prepended))),
             span: *span,
         },
         Ir::IndexAssign {
@@ -387,6 +391,7 @@ pub(crate) fn has_imperative_stmt(stmts: &[Ir]) -> bool {
                 | Ir::TupleBinding { .. }
                 | Ir::WhileLoop { .. }
                 | Ir::ForLoop { .. }
+                | Ir::ParallelFor { .. }
         )
     })
 }
@@ -499,7 +504,7 @@ fn lift_lambdas_inner(node: &mut Ir, counter: &mut usize, new_defs: &mut Vec<Ir>
             changed |= lift_lambdas_inner(condition, counter, new_defs);
             changed |= lift_lambdas_inner(body, counter, new_defs);
         }
-        Ir::ForLoop { range, body, .. } => {
+        Ir::ForLoop { range, body, .. } | Ir::ParallelFor { range, body, .. } => {
             changed |= lift_lambdas_inner(range, counter, new_defs);
             changed |= lift_lambdas_inner(body, counter, new_defs);
         }
@@ -733,7 +738,7 @@ fn rewrite_hof_calls(
             changed |= rewrite_hof_calls(condition, defs, hof_indices, cache, new_defs);
             changed |= rewrite_hof_calls(body, defs, hof_indices, cache, new_defs);
         }
-        Ir::ForLoop { range, body, .. } => {
+        Ir::ForLoop { range, body, .. } | Ir::ParallelFor { range, body, .. } => {
             changed |= rewrite_hof_calls(range, defs, hof_indices, cache, new_defs);
             changed |= rewrite_hof_calls(body, defs, hof_indices, cache, new_defs);
         }
@@ -797,7 +802,7 @@ fn substitute_user_callees(node: &mut Ir, subs: &HashMap<String, String>) {
             substitute_user_callees(condition, subs);
             substitute_user_callees(body, subs);
         }
-        Ir::ForLoop { range, body, .. } => {
+        Ir::ForLoop { range, body, .. } | Ir::ParallelFor { range, body, .. } => {
             substitute_user_callees(range, subs);
             substitute_user_callees(body, subs);
         }
@@ -934,7 +939,7 @@ fn body_passes_to_hof_slot(
             body_passes_to_hof_slot(condition, param, hof_indices)
                 || body_passes_to_hof_slot(body, param, hof_indices)
         }
-        Ir::ForLoop { range, body, .. } => {
+        Ir::ForLoop { range, body, .. } | Ir::ParallelFor { range, body, .. } => {
             body_passes_to_hof_slot(range, param, hof_indices)
                 || body_passes_to_hof_slot(body, param, hof_indices)
         }
@@ -975,7 +980,7 @@ fn body_calls_any_of(node: &Ir, names: &HashSet<&str>) -> bool {
         Ir::WhileLoop {
             condition, body, ..
         } => body_calls_any_of(condition, names) || body_calls_any_of(body, names),
-        Ir::ForLoop { range, body, .. } => {
+        Ir::ForLoop { range, body, .. } | Ir::ParallelFor { range, body, .. } => {
             body_calls_any_of(range, names) || body_calls_any_of(body, names)
         }
         Ir::FunctionDef { body, .. } => body_calls_any_of(body, names),
@@ -1070,9 +1075,12 @@ fn collect_func_ids(node: &Ir, funcs: &mut HashMap<String, FuncId>, next: &mut u
             collect_func_ids(range, funcs, next);
             collect_func_ids(body, funcs, next);
         }
-        Ir::Range { start, end, .. } => {
+        Ir::Range { start, end, delta, .. } => {
             collect_func_ids(start, funcs, next);
             collect_func_ids(end, funcs, next);
+            if let Some(d) = delta {
+                collect_func_ids(d, funcs, next);
+            }
         }
         Ir::PropertyAccess { object, .. } => collect_func_ids(object, funcs, next),
         Ir::IndexAccess { array, index, .. } => {
@@ -1196,19 +1204,21 @@ impl<'a> ResolveCtx<'a> {
                 self.visit(body);
             }
             Ir::ForLoop {
-                var, range, body, ..
+                vars, range, body, ..
             }
             | Ir::ParallelFor {
-                var, range, body, ..
+                vars, range, body, ..
             } => {
                 self.visit(range);
                 self.scopes.push(Scope::default());
-                let bid = self.fresh_bid();
-                self.scopes
-                    .last_mut()
-                    .unwrap()
-                    .bindings
-                    .insert(var.clone(), bid);
+                for v in vars.iter() {
+                    let bid = self.fresh_bid();
+                    self.scopes
+                        .last_mut()
+                        .unwrap()
+                        .bindings
+                        .insert(v.clone(), bid);
+                }
                 self.visit(body);
                 self.scopes.pop();
             }
@@ -1238,9 +1248,12 @@ impl<'a> ResolveCtx<'a> {
                 self.visit(array);
                 self.visit(index);
             }
-            Ir::Range { start, end, .. } => {
+            Ir::Range { start, end, delta, .. } => {
                 self.visit(start);
                 self.visit(end);
+                if let Some(d) = delta {
+                    self.visit(d);
+                }
             }
             Ir::IndexAssign {
                 array,
@@ -1392,7 +1405,13 @@ fn node_children_mut(node: &mut Ir) -> Vec<&mut Ir> {
         } => vec![condition.as_mut(), body.as_mut()],
         Ir::PropertyAccess { object, .. } => vec![object.as_mut()],
         Ir::IndexAccess { array, index, .. } => vec![array.as_mut(), index.as_mut()],
-        Ir::Range { start, end, .. } => vec![start.as_mut(), end.as_mut()],
+        Ir::Range { start, end, delta, .. } => {
+            let mut v: Vec<&mut Ir> = vec![start.as_mut(), end.as_mut()];
+            if let Some(d) = delta {
+                v.push(d.as_mut());
+            }
+            v
+        }
         Ir::IndexAssign {
             array,
             index,

@@ -232,16 +232,13 @@ const SPECIAL_FUNCTIONS: &[(&str, &str)] = &[
     ("whittakerw", "Whittaker W"),
 ];
 
-/// Unevaluated CAS operations that REDUCE returns when it cannot solve
-/// a problem. Each entry is (REDUCE keyword, human-readable operation).
-const UNEVALUATED_OPS: &[(&str, &str)] = &[("int", "integral"), ("df", "derivative")];
-
-/// CAS function names users can write in Logos source. Mirrors the prior
-/// text-level CAS-call list so the IR-walking detector finds the same set
-/// of subtrees `find_cas_call` (text) used to locate.
+/// CAS function names users can write in Logos source. Only the canonical
+/// Logos spellings are user-facing — the bare REDUCE names `int`/`df` are
+/// no longer recognized here, since they were a redundant ASCII alias for
+/// `integral`/`derivative` (the names the lexer normalizes `∫`/`∂`/`ⅆ` to).
+/// REDUCE-side communication still uses `int`/`df` internally; `to_reduce`
+/// / `from_reduce` translate between the two namespaces.
 const CAS_CALLEES: &[&str] = &[
-    "int",
-    "df",
     "integral",
     "derivative",
     "limit",
@@ -261,7 +258,7 @@ pub fn is_cas_callee(callee: &crate::lang::ir::Callee) -> bool {
 }
 
 /// Find the path to the first CAS-call subtree in `ir`, or `None` if none.
-/// CAS calls are `Apply { callee: User("int"|"df"|"integral"|"derivative"), … }`.
+/// CAS calls are `Apply { callee: User("integral"|"derivative"|…), … }`.
 pub fn find_cas_path(ir: &Ir) -> Option<Vec<usize>> {
     ir.find_path(&mut |node| {
         matches!(node, Ir::Apply { callee, .. } if is_cas_callee(callee))
@@ -271,22 +268,30 @@ pub fn find_cas_path(ir: &Ir) -> Option<Vec<usize>> {
 /// IR-level analogue of `detect_unevaluated_cas`: returns the human-readable
 /// name of the first residual CAS subtree (`int(...)` or `df(...)`) in the
 /// simplifier's response IR, indicating REDUCE couldn't solve it.
+///
+/// The check uses REDUCE's textual names (`int`, `df`) rather than the
+/// canonical Logos names (`integral`, `derivative`). That namespace split
+/// is deliberate: `from_reduce` does NOT rewrite `int`/`df` back, so a
+/// REDUCE residual `int(weird, x)` parses as `User("int")` and is
+/// distinguishable from the user's own `User("integral")` calls awaiting
+/// CAS. Without that distinction, a cell with multiple `∫(...)` calls
+/// would surface a false "cannot be computed" error as soon as one
+/// resolved while another was still pending.
 pub fn detect_unevaluated_cas_ir(ir: &Ir) -> Option<&'static str> {
     let path = ir.find_path(&mut |node| {
-        if let Ir::Apply { callee, .. } = node {
-            if let crate::lang::ir::Callee::User(name) = callee {
-                return matches!(name.as_str(), "int" | "df");
-            }
+        if let Ir::Apply { callee: crate::lang::ir::Callee::User(name), .. } = node {
+            matches!(name.as_str(), "int" | "df")
+        } else {
+            false
         }
-        false
     })?;
     let node = ir.get_at_path(&path)?;
     if let Ir::Apply { callee: crate::lang::ir::Callee::User(name), .. } = node {
-        for &(keyword, description) in UNEVALUATED_OPS {
-            if name == keyword {
-                return Some(description);
-            }
-        }
+        return match name.as_str() {
+            "int" => Some("integral"),
+            "df" => Some("derivative"),
+            _ => None,
+        };
     }
     None
 }
@@ -338,6 +343,19 @@ pub fn from_reduce(input: &str) -> String {
     output = replace_word(&output, "tau", "\u{03C4}");
     output = replace_word(&output, "pi", "\u{03C0}");
     output = replace_word(&output, "e", "\u{212F}");
+    //
+    // No translation of REDUCE's `int`/`df` back to `integral`/`derivative`
+    // here — the namespace split is deliberate and load-bearing:
+    //
+    //   User-typed `integral(...)`  → User("integral") → goes to REDUCE.
+    //   REDUCE's textual residual   → User("int")      → flagged by
+    //                                                    detect_unevaluated_cas_ir
+    //                                                    as "couldn't solve".
+    //
+    // If we collapsed both to `User("integral")`, a cell with one resolved
+    // and one unresolved integral would false-positive on the unresolved
+    // one's `User("integral")` (user-owned) and surface a spurious
+    // "cannot be computed symbolically" error.
 
     // ** → ^ (REDUCE exponentiation → Logos caret)
     output = output.replace("**", "^");
@@ -654,6 +672,8 @@ mod tests {
 
     #[test]
     fn test_detect_unevaluated_int() {
+        // The detector checks REDUCE's textual residual spelling (`int`)
+        // — the namespace split from user-typed `integral` is deliberate.
         let ir = parse_ir("int(sin(cos(x)),x)");
         assert_eq!(detect_unevaluated_cas_ir(&ir), Some("integral"));
     }
@@ -662,6 +682,19 @@ mod tests {
     fn test_detect_unevaluated_df() {
         let ir = parse_ir("df(foo(x),x)");
         assert_eq!(detect_unevaluated_cas_ir(&ir), Some("derivative"));
+    }
+
+    #[test]
+    fn test_detect_unevaluated_ignores_canonical_logos_names() {
+        // `integral(...)` / `derivative(...)` in IR are the user's own
+        // CAS calls (still awaiting REDUCE). The detector must NOT flag
+        // these — that would false-positive when a cell has one resolved
+        // and one in-flight integral, and surface a spurious "cannot be
+        // computed" error mid-fixpoint.
+        let ir = parse_ir("integral(x, x)");
+        assert_eq!(detect_unevaluated_cas_ir(&ir), None);
+        let ir = parse_ir("derivative(x, x)");
+        assert_eq!(detect_unevaluated_cas_ir(&ir), None);
     }
 
     #[test]

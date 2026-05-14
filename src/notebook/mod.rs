@@ -28,6 +28,7 @@ pub use shader::{ShaderSpec, VertexData};
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 /// Process-global cell ID counter. Multiple notebooks may share a single
 /// REDUCE service, so cell IDs must be unique across all notebooks for
@@ -161,6 +162,12 @@ struct PrintBatch {
 
 struct PendingSimplify {
     purpose: SimplifyPurpose,
+    /// Wall-clock instant when the request was handed to the simplifier.
+    /// `tick_with_now` compares against this to surface a timeout diagnostic
+    /// when the symbolic engine never responds (worker crash, runaway
+    /// REDUCE problem, etc.) — otherwise the cell would sit on `Pending`
+    /// forever with no way for the user to tell `…` apart from a hung app.
+    submitted_at: Instant,
 }
 
 /// Pull every top-level `Binding` statement out of `ir`, stopping at
@@ -369,6 +376,13 @@ impl Notebook {
         }
         self.cells[idx].buffer.set_text(text);
         self.cells[idx].invalidate_ir();
+        // Drop any pending simplifier round-trip — the path that the
+        // response was going to splice into refers to the old IR, which
+        // no longer matches the buffer text. Without this, a late
+        // response can either splice unrelated bits into the new text or
+        // raise a spurious "splice path no longer valid" diagnostic.
+        let cell_id = self.cells[idx].id;
+        self.pending_simplify.remove(&cell_id);
     }
 
     /// Replace the GPU dispatcher used by the interpreter for
@@ -416,12 +430,26 @@ impl Notebook {
             return;
         }
         self.cells[idx].state = CellState::Stopped;
+        // Forget any in-flight simplifier round-trip for this cell —
+        // otherwise a late REDUCE response would land on a stopped cell
+        // and re-publish a Computed/Simplified message, contradicting
+        // the user's "stop" action.
+        let cell_id = self.cells[idx].id;
+        self.pending_simplify.remove(&cell_id);
     }
 
     /// Drain ready REDUCE responses. Call once per frame (or until
     /// `has_pending() == false` for sync test loops). Returns the cell
     /// indices whose outcome changed.
     pub fn tick(&mut self) -> Vec<usize> {
+        self.tick_with_now(Instant::now())
+    }
+
+    /// `tick` with an injectable clock. Production calls `tick`; tests use
+    /// this entry point so they can advance simulated time past
+    /// `PENDING_TIMEOUT` and assert the resulting timeout diagnostic
+    /// without sleeping for 30 real seconds.
+    pub fn tick_with_now(&mut self, now: Instant) -> Vec<usize> {
         let mut updated = Vec::new();
         while let Some(resp) = self.simplifier.try_recv() {
             if let Some(idx) = self.handle_simplify_response(resp) {
@@ -430,15 +458,59 @@ impl Notebook {
                 }
             }
         }
+
+        // Surface any pending simplifier round-trip that the symbolic engine
+        // hasn't answered within `PENDING_TIMEOUT` as an error diagnostic on
+        // the cell. Without this safety net, a crashed REDUCE worker or a
+        // runaway symbolic problem leaves the cell on `…` indefinitely —
+        // indistinguishable to the user from "the app froze".
+        let timed_out: Vec<usize> = self
+            .pending_simplify
+            .iter()
+            .filter(|(_, p)| now.saturating_duration_since(p.submitted_at) >= Self::PENDING_TIMEOUT)
+            .map(|(&cell_id, _)| cell_id)
+            .collect();
+        for cell_id in timed_out {
+            self.pending_simplify.remove(&cell_id);
+            if let Some(idx) = self.cells.iter().position(|c| c.id == cell_id) {
+                let snapshot = self.cells[idx].buffer.text().to_string();
+                let msg = format!(
+                    "Symbolic engine did not respond within {}s. The service may have \
+                     crashed, or the symbolic problem is too hard to solve in reasonable \
+                     time.",
+                    Self::PENDING_TIMEOUT.as_secs()
+                );
+                self.set_runtime_error(idx, msg, &snapshot);
+                if !updated.contains(&idx) {
+                    updated.push(idx);
+                }
+            }
+        }
+
         updated
     }
+
+    /// Maximum time a pending symbolic-simplifier round-trip is allowed to
+    /// take before `tick_with_now` surfaces it as a user-visible error.
+    pub const PENDING_TIMEOUT: Duration = Duration::from_secs(30);
 
     /// Mark a cell as just-edited. Sets `last_edit_at = now`, which the
     /// auto-rerun pass watches to decide when 200ms of quiet has elapsed.
     /// Called by the app's keystroke handler after each text-changing input.
+    ///
+    /// Also clears any pending-simplifier round-trip on the cell — the
+    /// user's keystroke has invalidated whatever the prior submission's
+    /// splice path was pointing at, so a late response from REDUCE must
+    /// not be allowed to land. `set_text` (the programmatic equivalent)
+    /// does the same; we mirror it here for the live-typing path.
     pub fn mark_edited(&mut self, idx: usize, now: std::time::Instant) {
         if let Some(cell) = self.cells.get_mut(idx) {
             cell.last_edit_at = Some(now);
+            cell.effective_ir = None;
+        }
+        if let Some(cell) = self.cells.get(idx) {
+            let cell_id = cell.id;
+            self.pending_simplify.remove(&cell_id);
         }
     }
 
@@ -594,10 +666,80 @@ impl Notebook {
         let cell_id = self.cells[idx].id;
         self.pending_simplify.remove(&cell_id);
 
+        // Surface parse failures (this cell and any earlier cell whose
+        // bindings we'd need to splice in) up front — every downstream step
+        // needs a well-formed IR.
         let combined = match self.combined_ir_up_to(idx) {
-            Ok(a) => a,
+            Ok(ir) => ir,
             Err(msg) => {
                 self.set_parse_error(idx, msg, &snapshot);
+                return;
+            }
+        };
+        let cell_ir = match self.cells[idx].cached_ir() {
+            Ok(ir) => ir,
+            Err(msg) => {
+                self.set_parse_error(idx, msg, &snapshot);
+                return;
+            }
+        };
+
+        // CAS-fixpoint precondition: any unresolved `int(...)`/`df(...)`
+        // subtree in this cell's IR — including those buried in user
+        // function bodies — gets shipped to the symbolic simplifier *before*
+        // we dispatch to an action handler. The response handler splices
+        // the result back, then re-enters `dispatch` (or this same loop if
+        // more CAS subtrees remain). Making CAS resolution a precondition
+        // means new action types (parallel/array/etc.) can't accidentally
+        // leak unresolved CAS calls downstream — they're guaranteed gone
+        // before dispatch.
+        //
+        // One carve-out: cells whose only action is `print(...)` skip the
+        // fixpoint. `handle_prints` already routes interpreter-failing
+        // expressions through the symbolic simplifier per-print — for
+        // `print(∫(sin(x), x))` that's one round-trip with the CAS subtree
+        // intact, vs. two for "fixpoint, then re-submit the spliced text".
+        // Plot/interpreter/bare-expression branches have no such fallback,
+        // so for them the fixpoint is mandatory.
+        if self.cell_needs_eager_cas(idx, &combined) {
+            if let Some(cas_path) = translate::find_cas_path(&cell_ir) {
+                self.submit_cas_at(idx, &cell_ir, cas_path);
+                return;
+            }
+        }
+
+        self.dispatch(idx, &snapshot);
+    }
+
+    /// True iff the cell at `idx` has a downstream consumer that can't
+    /// handle unresolved CAS subtrees on its own — i.e. a plot, an
+    /// interpreter-requiring expression, or a pure-expression cell.
+    fn cell_needs_eager_cas(&self, idx: usize, combined: &Ir) -> bool {
+        let actions = lang::detect_cell_actions(combined);
+        let own_plots: Vec<usize> = match self.cell_stmt_range(idx) {
+            Ok((start, end)) => actions
+                .plots
+                .iter()
+                .copied()
+                .filter(|i| (start..end).contains(i))
+                .collect(),
+            Err(_) => actions.plots.clone(),
+        };
+        !own_plots.is_empty() || lang::needs_interpreter(combined) || !actions.has_action()
+    }
+
+    /// Action-routing for a cell whose CAS subtrees (if any) are already
+    /// resolved. Entered from `run_cell` when the cell has no CAS subtree,
+    /// and re-entered from `handle_simplify_response` once the iterative
+    /// CAS fixpoint has fully expanded the cell's IR. Never submits to the
+    /// symbolic simplifier itself — the only path back to `Pending` is
+    /// `handle_prints` (interpreter fails on a bare-axis print and falls
+    /// back to symbolic per-print).
+    fn dispatch(&mut self, idx: usize, snapshot: &str) {
+        let combined = match self.combined_ir_up_to(idx) {
+            Ok(ir) => ir,
+            Err(msg) => {
+                self.set_parse_error(idx, msg, snapshot);
                 return;
             }
         };
@@ -627,19 +769,7 @@ impl Notebook {
         }
 
         if !own_plots.is_empty() {
-            // If the cell contains a CAS subtree (e.g. `F(x) := ∫(...)` whose
-            // body is referenced by `plot(y = F(x))`), run the iterative-CAS
-            // path before WGSL gen. Otherwise the unresolved `integral(...)` /
-            // `df(...)` leaks into the shader and naga rejects it. When all
-            // CAS resolves, `compile_after_simplify` re-routes through
-            // `handle_plots`.
-            if let Ok(cell_ir) = self.cells[idx].cached_ir() {
-                if let Some(cas_path) = translate::find_cas_path(&cell_ir) {
-                    self.submit_cas_at(idx, &cell_ir, cas_path);
-                    return;
-                }
-            }
-            self.handle_plots(idx, &own_plots, &combined, &snapshot);
+            self.handle_plots(idx, &own_plots, &combined, snapshot);
             return;
         }
 
@@ -647,58 +777,55 @@ impl Notebook {
             return;
         }
 
-        // No print/plot. Try the interpreter for parallel/array cells.
+        // No print/plot — array/parallel cells still need the interpreter
+        // to run for their side effects (mutating arrays, dispatching gpu
+        // for-loops), but the trailing expression's value is NOT pushed
+        // to the output panel. The output panel is reserved for explicit
+        // `print(...)` results and errors. Programmatic callers can
+        // re-evaluate `outcome.program_ir` via `lang::interpreter::eval`
+        // to recover the value.
         if lang::needs_interpreter(&combined) {
-            // Same shape as the plot branch: if there's a CAS subtree the
-            // interpreter can't lower (e.g. `F(x) := ∫(...)` referenced by an
-            // array/parallel cell), run the iterative-CAS path first. Once
-            // it resolves, `compile_after_simplify` re-enters this branch
-            // through its own dispatch.
-            if let Ok(cell_ir) = self.cells[idx].cached_ir() {
-                if let Some(cas_path) = translate::find_cas_path(&cell_ir) {
-                    self.submit_cas_at(idx, &cell_ir, cas_path);
-                    return;
-                }
-            }
             match interpreter::eval(&combined, self.gpu.as_ref()) {
-                Ok(val) => {
-                    self.cells[idx].outcome.message =
-                        Some(CellMessage::Computed(format!("{}", val)));
+                Ok(_val) => {
                     self.cells[idx].outcome.program_ir = Some(combined);
                     self.cells[idx].state = CellState::Playing;
-                    self.cells[idx].last_played_text = Some(snapshot);
+                    self.cells[idx].last_played_text = Some(snapshot.to_string());
                 }
-                Err(e) => {
-                    self.set_runtime_error(idx, e, &snapshot);
-                }
+                Err(e) => self.set_runtime_error(idx, e, snapshot),
             }
             return;
         }
 
-        // CAS-only cell with no print/plot (e.g. raw `int(x²,x)` pasted as
-        // a cell). Find the CAS subtree in the cell's own IR, expand
-        // bindings referenced inside it, and submit to the simplifier.
-        let cell_ir = match self.cells[idx].cached_ir() {
-            Ok(ir) => ir,
-            Err(_) => {
-                // Combined parse already succeeded above; the per-cell
-                // parse should too. Fall through to the pure-expr branch.
+        // Pure expression / bare-CAS-resolved cell. Try WGSL gen so cells
+        // like `int(x²,x)` (which simplifies to a raw expression) render as
+        // a grayscale fragment shader. Pure-binding cells like `f := x²`
+        // have no result expression — `wgsl_gen` flags that with a known
+        // sentinel error and we mark them Playing with no shader so
+        // downstream cells can still reference the binding.
+        if let Err(e) = crate::lang::type_check(&combined, snapshot) {
+            self.set_runtime_error(idx, e, snapshot);
+            return;
+        }
+        match crate::lang::wgsl_gen::generate(&combined) {
+            Ok(wgsl) => {
+                self.cells[idx].outcome.shaders = vec![ShaderSpec {
+                    wgsl,
+                    vertices: None,
+                }];
                 self.cells[idx].outcome.program_ir = Some(combined);
                 self.cells[idx].state = CellState::Playing;
-                self.cells[idx].last_played_text = Some(snapshot);
-                return;
+                self.cells[idx].last_played_text = Some(snapshot.to_string());
             }
-        };
-        if let Some(cas_path) = translate::find_cas_path(&cell_ir) {
-            self.submit_cas_at(idx, &cell_ir, cas_path);
-            return;
+            Err(e) => {
+                if e.contains("No result expression") {
+                    self.cells[idx].outcome.program_ir = Some(combined);
+                    self.cells[idx].state = CellState::Playing;
+                    self.cells[idx].last_played_text = Some(snapshot.to_string());
+                } else {
+                    self.set_runtime_error(idx, e, snapshot);
+                }
+            }
         }
-
-        // Pure expression cell with no action — treat as Playing (its bindings
-        // are still in scope for later cells via combined_ir_up_to).
-        self.cells[idx].outcome.program_ir = Some(combined);
-        self.cells[idx].state = CellState::Playing;
-        self.cells[idx].last_played_text = Some(snapshot);
     }
 
     /// Gather the in-scope bindings for a CAS-or-print expression at
@@ -751,6 +878,7 @@ impl Notebook {
             cell_id,
             PendingSimplify {
                 purpose: SimplifyPurpose::InlineCas { path: cas_path },
+                submitted_at: Instant::now(),
             },
         );
         self.cells[idx].outcome.message = Some(CellMessage::Pending);
@@ -811,6 +939,7 @@ impl Notebook {
                         cell_id,
                         PendingSimplify {
                             purpose: SimplifyPurpose::Print(batch),
+                            submitted_at: Instant::now(),
                         },
                     );
                     self.cells[idx].outcome.message = Some(CellMessage::Pending);
@@ -993,86 +1122,14 @@ impl Notebook {
                     return Some(idx);
                 }
 
-                // All CAS resolved — generate WGSL from the combined IR
-                // (which now reads `effective_ir` for this cell).
-                self.compile_after_simplify(idx);
+                // All CAS resolved — re-enter the same dispatcher `run_cell`
+                // uses so prints, plots, and the interpreter path all share
+                // one resume point.
+                let snapshot = self.cells[idx].buffer.text().to_string();
+                self.dispatch(idx, &snapshot);
             }
         }
         Some(idx)
-    }
-
-    fn compile_after_simplify(&mut self, idx: usize) {
-        let combined = match self.combined_ir_up_to(idx) {
-            Ok(ir) => ir,
-            Err(e) => {
-                self.set_runtime_error(idx, e, &self.cells[idx].buffer.text().to_string());
-                return;
-            }
-        };
-
-        // If the cell contains plots, route them through `handle_plots` so
-        // each gets its own shader (one per `plot(...)` call, in source
-        // order). Plots from prior cells were already compiled when those
-        // cells ran — restrict to the current cell's statement range.
-        let actions = lang::detect_cell_actions(&combined);
-        let own_plots: Vec<usize> = match self.cell_stmt_range(idx) {
-            Ok((start, end)) => actions
-                .plots
-                .iter()
-                .copied()
-                .filter(|i| (start..end).contains(i))
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-        if !own_plots.is_empty() {
-            let snapshot = self.cells[idx].buffer.text().to_string();
-            self.handle_plots(idx, &own_plots, &combined, &snapshot);
-            return;
-        }
-
-        // If the original cell wanted the interpreter (parallel/array/index),
-        // resume there now that CAS is resolved. Without this, an array cell
-        // referencing a function with a CAS body would route through WGSL gen
-        // after simplification instead of evaluating.
-        if lang::needs_interpreter(&combined) {
-            let snapshot = self.cells[idx].buffer.text().to_string();
-            match interpreter::eval(&combined, self.gpu.as_ref()) {
-                Ok(val) => {
-                    self.cells[idx].outcome.message =
-                        Some(CellMessage::Computed(format!("{}", val)));
-                    self.cells[idx].outcome.program_ir = Some(combined);
-                    self.cells[idx].state = CellState::Playing;
-                    self.cells[idx].last_played_text = Some(snapshot);
-                }
-                Err(e) => self.set_runtime_error(idx, e, &snapshot),
-            }
-            return;
-        }
-
-        // No plot calls — fall back to whole-cell compile so cells like
-        // `int(x²,x)` that simplify to a raw expression still render as a
-        // grayscale fragment shader.
-        let cell_source = self.cells[idx].buffer.text().to_string();
-        if let Err(e) = crate::lang::type_check(&combined, &cell_source) {
-            self.set_runtime_error(idx, e, &cell_source);
-            return;
-        }
-        match crate::lang::wgsl_gen::generate(&combined) {
-            Ok(wgsl) => {
-                self.cells[idx].outcome.shaders = vec![ShaderSpec {
-                    wgsl,
-                    vertices: None,
-                }];
-                self.cells[idx].outcome.program_ir = Some(combined);
-                self.cells[idx].state = CellState::Playing;
-                self.cells[idx].last_played_text = Some(self.cells[idx].buffer.text().to_string());
-            }
-            Err(e) => {
-                if !e.contains("No result expression") {
-                    self.set_runtime_error(idx, e, &self.cells[idx].buffer.text().to_string());
-                }
-            }
-        }
     }
 
     // ─── error helpers ─────────────────────────────────────────────────────
