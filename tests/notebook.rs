@@ -963,7 +963,11 @@ fn plot_with_explicit_color_lambda_through_notebook() {
     let mut nb = null_notebook();
     let i = add_and_play(
         &mut nb,
-        "plot((x) |-> sin(x), (x) |-> (sin(x), cos(x), 0.5, 1))",
+        // Value lambda must be a Bool predicate (issue #25's
+        // unified philosophy); the color lambda has its own
+        // contract (returns vec4) and is unaffected by the Bool
+        // restriction.
+        "plot((x, y) |-> y = sin(x), (x) |-> (sin(x), cos(x), 0.5, 1))",
     );
     let outcome = &nb.cell(i).outcome;
     if let Some(CellMessage::Error(e)) = &outcome.message {

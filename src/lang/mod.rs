@@ -286,37 +286,87 @@ fn coalesce_block(mut items: Vec<Ir>, fallback_span: ir::Span) -> Ir {
 /// Canonicalize `plot()`'s first argument into a sequence of IR
 /// statements ending in the plottable result expression.
 ///
-/// Accepts three input shapes:
+/// A plot lambda's body must produce a Bool — plot draws the set of
+/// world points where the predicate holds, using corner-checking to
+/// detect sign changes across pixel boundaries. Numeric-returning
+/// lambdas are rejected with a clear message; the user is expected to
+/// turn them into a predicate (`(x) ↦ y = sin(x)`, `(x) ↦ sin(x) = 0`,
+/// `(x, y) ↦ x*x + y*y < 1`, …).
 ///
-/// - Explicit 1-arg lambda `(p) ↦ body` — synthesizes a binding
-///   `_plot_fn_<span> := (p) ↦ body` (which `lower::lift_lambdas`
-///   converts to a top-level `FunctionDef`) and emits the result
-///   `y = _plot_fn_<span>(x)` so the implicit-curve corner-checking
-///   path renders it.
+/// The accepted shapes are:
 ///
-/// - Explicit 2-arg lambda `(p, q) ↦ body` — emits a binding plus a
-///   call `_plot_fn_<span>(x, y)` whose numeric output drives the
-///   2D-surface grayscale path.
+/// - Explicit lambda `(p) ↦ predicate` or `(p, q) ↦ predicate` —
+///   synthesizes a binding `_plot_fn_<span> := lambda` (which
+///   `lower::lift_lambdas` converts to a Bool-returning `FunctionDef`)
+///   and emits the call `_plot_fn_<span>(x)` / `_plot_fn_<span>(x, y)`
+///   as the result. `wgsl_gen::emit_bool_with_corners` inlines the
+///   body at the call site and corner-checks it.
 ///
 /// - Anything else (implicit comparison `y = sin(x)`, bare expression
-///   like `x*x + y*y`, etc.) — returned as a single-element list with
-///   the expression unchanged. Existing implicit forms keep their
-///   current behaviour.
+///   `x*x + y*y`, vertex arrays, …) — returned unchanged. The
+///   downstream pipeline picks the path: corner-checking for booleans,
+///   grayscale clamp for numbers, vertex pipeline for arrays.
 ///
-/// Errors on lambdas with arity 0 or ≥ 3. ND plots with extras as
-/// tunable parameters are tracked separately (see issue #27).
+/// Errors on lambdas with arity 0 or ≥ 3, and on lambdas whose body
+/// isn't Bool. ND plots with extras as tunable parameters are tracked
+/// separately (see issue #27).
 ///
-/// Wraps the lambda in a binding (instead of substituting axis-var
-/// names into the body) so capture analysis stays correct in the
-/// presence of nested bindings that shadow the lambda's parameter.
+/// Wraps the lambda in a binding rather than substituting axis-var
+/// names into the body so capture analysis stays correct when the
+/// body shadows the lambda's parameter with a nested binding.
 fn canonicalize_plot_body(arg: &Ir) -> Result<Vec<Ir>, String> {
-    let Ir::Lambda { params, span, .. } = arg else {
+    let Ir::Lambda { params, span, body, .. } = arg else {
         return Ok(vec![arg.clone()]);
     };
 
     match params.len() {
         0 => Err("plot lambda must have at least one parameter".to_string()),
         n @ (1 | 2) => {
+            // Type-check the body with the lambda's params bound to
+            // canonical axis vars so the resulting predicate sees `x`
+            // / `y` exactly the way the corner-check will. Probing on
+            // a substituted body — rather than walking with a custom
+            // env — reuses the standard inference path and keeps the
+            // Bool-or-error decision in one place.
+            let probe_subs: Vec<(String, Ir)> = params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let axis = match i {
+                        0 => "x",
+                        1 => "y",
+                        _ => unreachable!(),
+                    };
+                    (
+                        p.clone(),
+                        Ir::Identifier {
+                            name: axis.to_string(),
+                            span: *span,
+                            resolved: None,
+                        },
+                    )
+                })
+                .collect();
+            let probe = body.substitute_idents(&probe_subs);
+            let body_ty = check::check(&probe).map_err(|e| {
+                format!("plot lambda body failed to type-check: {}", e.message)
+            })?;
+            if !matches!(body_ty, ir::Type::Bool | ir::Type::Unknown) {
+                return Err(format!(
+                    "plot lambda body must be a Bool predicate \
+                     (e.g. `y = sin(x)`, `sin(x) = 0`, `x*x + y*y < 1`); \
+                     got {}. Plot draws the set of points where the \
+                     predicate is true via corner-checking; a bare \
+                     numeric expression has no `where to draw` meaning.",
+                    body_ty.display()
+                ));
+            }
+
+            // Synthesize a binding so `lift_lambdas` turns the lambda
+            // into a top-level Bool-returning `FunctionDef`, then call
+            // it with the canonical axis vars. `emit_bool_with_corners`
+            // inlines the body at the call site and corner-checks the
+            // resulting comparison.
             let synth_name = format!("_plot_fn_{}_{}", span.0, span.1);
             let binding = Ir::Binding {
                 name: synth_name.clone(),
@@ -341,24 +391,7 @@ fn canonicalize_plot_body(arg: &Ir) -> Result<Vec<Ir>, String> {
                 span: *span,
                 result_ty: None,
             };
-            let result = if n == 1 {
-                // 1D: render `y = f(x)` as a curve via corner-checking.
-                let y_axis = Ir::Identifier {
-                    name: "y".to_string(),
-                    span: *span,
-                    resolved: None,
-                };
-                Ir::Apply {
-                    callee: ir::Callee::Builtin(ir::BuiltinOp::Eq),
-                    args: vec![y_axis, call],
-                    span: *span,
-                    result_ty: None,
-                }
-            } else {
-                // 2D: render `f(x, y)` as a numeric grayscale field.
-                call
-            };
-            Ok(vec![binding, result])
+            Ok(vec![binding, call])
         }
         n => Err(format!(
             "plot lambda with {} parameters is not yet supported; \
@@ -792,7 +825,7 @@ mod integration_tests {
     /// emit the same body expression.
     #[test]
     fn test_plot_explicit_lambda_matches_implicit_curve() {
-        let lambda_wgsl = compile_plot("plot((x) |-> sin(x))");
+        let lambda_wgsl = compile_plot("plot((x, y) |-> y = sin(x))");
         let implicit_wgsl = compile_plot("plot(y = sin(x))");
         for wgsl in [&lambda_wgsl, &implicit_wgsl] {
             assert!(
@@ -804,30 +837,55 @@ mod integration_tests {
         }
     }
 
-    /// 2-arg lambda gives a numeric surface — grayscale path, no
-    /// corner-checking (which would draw an isoline, not a heatmap).
+    /// 2-arg lambda whose body is a Bool predicate routes through the
+    /// corner-check path, same as the 1-arg variant. The user writes
+    /// the equation directly inside the lambda; the body is *not*
+    /// auto-wrapped in a `y = …` form.
     #[test]
-    fn test_plot_two_arg_lambda_compiles_as_field() {
-        let wgsl = compile_plot("plot((u, v) |-> u*v)");
+    fn test_plot_two_arg_lambda_compiles_as_predicate() {
+        let wgsl = compile_plot("plot((x, y) |-> x*x + y*y < 1)");
         assert!(
-            !wgsl.contains("x_m"),
-            "2-arg lambda should NOT trigger corner-checking; got:\n{}",
-            wgsl
-        );
-        assert!(
-            wgsl.contains("clamp(") || wgsl.contains("_shade"),
-            "expected numeric grayscale path; got:\n{}",
+            wgsl.contains("x_m") && wgsl.contains("y_m"),
+            "expected corner-checking path on a 2-arg Bool lambda; got:\n{}",
             wgsl
         );
     }
 
+    /// Non-Bool lambda bodies are rejected — plot draws the set of
+    /// points where a predicate is true, and a bare numeric expression
+    /// has no `where to draw` meaning. The user must wrap it in a
+    /// comparison or inequality.
+    #[test]
+    fn test_plot_one_arg_numeric_lambda_errors() {
+        let ir = parse("plot((x) |-> sin(x))").unwrap();
+        let actions = detect_cell_actions(&ir);
+        let err = build_plot_ir(&ir, actions.plots[0]).unwrap_err();
+        assert!(
+            err.contains("must be a Bool predicate"),
+            "expected `must be a Bool predicate` rejection; got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_plot_two_arg_numeric_lambda_errors() {
+        let ir = parse("plot((u, v) |-> u*v)").unwrap();
+        let actions = detect_cell_actions(&ir);
+        let err = build_plot_ir(&ir, actions.plots[0]).unwrap_err();
+        assert!(
+            err.contains("must be a Bool predicate"),
+            "expected `must be a Bool predicate` rejection; got: {}",
+            err
+        );
+    }
+
     /// Lambdas using non-axis parameter names still wire up to the
-    /// canonical axes. `(u) ↦ sin(u)` is the same function as
-    /// `(x) ↦ sin(x)`; capture analysis on the lifted helper takes
-    /// care of the rename via parameter passing.
+    /// canonical axes — `(u) ↦ sin(u) = 0` is the same predicate as
+    /// `(x) ↦ sin(x) = 0`; capture analysis on the lifted helper
+    /// takes care of the rename via parameter passing.
     #[test]
     fn test_plot_lambda_param_can_be_any_name() {
-        let wgsl = compile_plot("plot((u) |-> sin(u))");
+        let wgsl = compile_plot("plot((u) |-> sin(u) = 0)");
         assert!(wgsl.contains("_plot_fn_"), "expected lifted helper fn");
     }
 
@@ -861,42 +919,43 @@ mod integration_tests {
         );
     }
 
-    /// Explicit 1-arg color lambda: param name irrelevant, axis vars
-    /// flow in through the lifted call. Validates that an explicit
-    /// lambda path goes through the same `_plot_color_*` machinery
-    /// as the implicit tuple form.
+    /// Explicit 1-arg color lambda: the value arg is a Bool predicate;
+    /// the color arg has its own contract (`vec4<f32>` per pixel) and
+    /// goes through the `_plot_color_*` machinery. Validates that
+    /// explicit color lambdas compile end-to-end.
     #[test]
     fn test_plot_color_explicit_lambda_compiles() {
         let wgsl = compile_plot(
-            "plot((x) |-> sin(x), (u) |-> (sin(u), cos(u), 0.5, 1))",
+            "plot(y = sin(x), (u) |-> (sin(u), cos(u), 0.5, 1))",
         );
         assert!(wgsl.contains("fn _plot_color_"), "expected lifted color fn");
         assert!(wgsl.contains("let _color = _plot_color_"));
     }
 
-    /// User-reported regression: both lambdas use `x` as their param
-    /// name. Earlier I assumed unique synthesized names via span
-    /// guarantee uniqueness, but a downstream walker must also keep
-    /// the cell's *result* expression alive — the `Apply(Eq, …)` —
-    /// or `find_result_expr` errors with "all statements are
-    /// bindings". This exercises that path.
+    /// User-reported regression: the value and color lambdas both
+    /// name their param `x`. Earlier I assumed unique synthesized
+    /// names via span guarantee uniqueness, but a downstream walker
+    /// must also keep the cell's *result* expression alive — the
+    /// final call — or `find_result_expr` errors with "all statements
+    /// are bindings". The value lambda is a Bool predicate so
+    /// canonicalization keeps it.
     #[test]
     fn test_plot_color_same_param_name_in_value_and_color() {
         let wgsl = compile_plot(
-            "plot((x) |-> sin(x), (x) |-> (sin(x), cos(x), 0.5, 1))",
+            "plot((x, y) |-> y = sin(x), (x) |-> (sin(x), cos(x), 0.5, 1))",
         );
         assert!(wgsl.contains("fn _plot_color_"));
         assert!(wgsl.contains("let _color = _plot_color_"));
     }
 
-    /// 2D surface plots take the color path through the numeric
-    /// branch instead of the corner-check branch — the same color
-    /// helper still gets called, and `u.primary_color` still drops
-    /// out of the return.
+    /// 2-arg Bool predicates compose with the color path: the
+    /// predicate corner-checks where to draw, and the color helper
+    /// supplies the per-pixel RGBA. `u.primary_color` should drop
+    /// out of the return entirely when a color arg is present.
     #[test]
-    fn test_plot_color_two_d_field_uses_color() {
+    fn test_plot_color_two_arg_predicate_uses_color() {
         let wgsl = compile_plot(
-            "plot((u, v) |-> u*v, (u, v) |-> (u, v, 0.5, 1))",
+            "plot((u, v) |-> u*u + v*v = 1, (u, v) |-> (u, v, 0.5, 1))",
         );
         assert!(wgsl.contains("fn _plot_color_"), "got:\n{}", wgsl);
         assert!(wgsl.contains("_color.rgb"), "got:\n{}", wgsl);
@@ -1020,19 +1079,20 @@ mod action_tests {
         }
     }
 
-    /// Plot of an explicit 1-arg lambda must desugar into a synthetic
-    /// `_plot_fn_…` binding plus a `y = _plot_fn_…(x)` curve expression.
-    /// Without this shape lift_lambdas would emit a `FunctionDef` but
-    /// nothing in the result position would call it.
+    /// Plot of an explicit 1-arg Bool-predicate lambda desugars into
+    /// a synthetic `_plot_fn_…` binding plus a direct call —
+    /// `_plot_fn_…(x)`. No `y = …` wrapper: the lambda's body *is*
+    /// the predicate, the call returns Bool, and corner-checking
+    /// inlines the body to find sign changes.
     #[test]
-    fn test_build_plot_ir_one_arg_lambda_desugars_to_curve() {
-        let ir = parse("plot((u) |-> sin(u))").unwrap();
+    fn test_build_plot_ir_one_arg_lambda_desugars_to_call() {
+        let ir = parse("plot((u) |-> sin(u) = 0)").unwrap();
         let actions = detect_cell_actions(&ir);
         let plot_ir = build_plot_ir(&ir, actions.plots[0]).unwrap();
         let Ir::Block { items, .. } = &plot_ir else {
             panic!("expected Block, got {:?}", plot_ir);
         };
-        assert_eq!(items.len(), 2, "expected binding + curve, got {:?}", items);
+        assert_eq!(items.len(), 2, "expected binding + call, got {:?}", items);
         let Ir::Binding { name, value, .. } = &items[0] else {
             panic!("expected Binding first, got {:?}", items[0]);
         };
@@ -1041,27 +1101,20 @@ mod action_tests {
             matches!(value.as_ref(), Ir::Lambda { params, .. } if params.len() == 1),
             "binding value should still be the 1-arg lambda"
         );
-        let Ir::Apply {
-            callee, args, ..
-        } = &items[1] else {
-            panic!("expected Apply (y = …), got {:?}", items[1]);
+        let Ir::Apply { callee, args, .. } = &items[1] else {
+            panic!("expected direct call, got {:?}", items[1]);
         };
-        assert_eq!(callee.name(), "eq");
-        assert!(matches!(&args[0], Ir::Identifier { name, .. } if name == "y"));
-        let Ir::Apply { callee: inner, args: inner_args, .. } = &args[1] else {
-            panic!("expected inner Apply call, got {:?}", args[1]);
-        };
-        assert_eq!(inner.name(), name);
-        assert_eq!(inner_args.len(), 1);
-        assert!(matches!(&inner_args[0], Ir::Identifier { name, .. } if name == "x"));
+        assert_eq!(callee.name(), name);
+        assert_eq!(args.len(), 1);
+        assert!(matches!(&args[0], Ir::Identifier { name, .. } if name == "x"));
     }
 
-    /// 2-arg lambdas desugar into a numeric field expression — no
-    /// outer `y = …` wrapper, since the result is a scalar at every
-    /// `(x, y)` instead of a curve.
+    /// 2-arg Bool-predicate lambdas desugar into `_plot_fn_…(x, y)`,
+    /// passing both canonical axis vars; corner-checking then inlines
+    /// the body and detects sign changes across each pixel.
     #[test]
-    fn test_build_plot_ir_two_arg_lambda_desugars_to_field() {
-        let ir = parse("plot((p, q) |-> p*q)").unwrap();
+    fn test_build_plot_ir_two_arg_lambda_desugars_to_call() {
+        let ir = parse("plot((p, q) |-> p*p + q*q = 1)").unwrap();
         let actions = detect_cell_actions(&ir);
         let plot_ir = build_plot_ir(&ir, actions.plots[0]).unwrap();
         let Ir::Block { items, .. } = &plot_ir else {
